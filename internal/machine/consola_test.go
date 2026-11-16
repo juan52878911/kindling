@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // TestAbrirConsolaSobreviveATruncar prueba la razón de ser de O_APPEND: un
@@ -354,4 +355,32 @@ func TestConsolaNoSigueEnlacesPlantados(t *testing.T) {
 			t.Fatalf("leerCola devolvió el fichero del host: %q", b)
 		}
 	})
+}
+
+// R5: la salida del proxy de credenciales aparte (credproxy.log, una por
+// máquina en macOS) se rota como la consola, con sus permisos: una línea por
+// conexión rechazada la hacía crecer sin tope mientras el VMM viviera.
+func TestRotarConsolasRotaElLogDelProxy(t *testing.T) {
+	m := newTestManager(t)
+	id := "conproxy00000000000"
+	if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.addForTest(id)
+	logp := filepath.Join(m.dir(id), credproxy.SplitLog)
+	if err := os.WriteFile(logp, bytes.Repeat([]byte("rechazada\n"), int(consolaMaxBytes)/10+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.rotarConsolas()
+	fi, err := os.Stat(logp)
+	if err != nil || fi.Size() != 0 {
+		t.Fatalf("el log del proxy no se truncó: %v %v", fi, err)
+	}
+	r, err := os.Stat(logp + ".1")
+	if err != nil {
+		t.Fatalf("no quedó la cola del log del proxy: %v", err)
+	}
+	if r.Size() != consolaKeepBytes || r.Mode().Perm() != 0o600 {
+		t.Fatalf("cola del log del proxy: %d bytes, %v", r.Size(), r.Mode().Perm())
+	}
 }

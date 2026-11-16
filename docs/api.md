@@ -671,7 +671,9 @@ opcional:
 en la que exista sin ellas; van con `-label k=v` (repetible) en `kling sandbox fork`. Las
 claves siguen `^[a-z0-9][a-z0-9._-]{0,63}$`, como mucho 32 etiquetas de 256 bytes de
 valor, y `kind` y `kling.fork-of` están reservadas (`400`). Un cuerpo sin `labels` se
-comporta como siempre. Una máquina con credenciales del proxy se rechaza con `409`:
+comporta como siempre. `name` (`-name` en `kling sandbox fork`) da nombre a la copia,
+solo con `count` 1: con más, `400`; ocupado, `409` antes de pausar el original. Sin él, la
+copia se llama como el original con un sufijo al azar. Una máquina con credenciales del proxy se rechaza con `409`:
 arranca otra instancia con `run -from <plantilla>` en vez de ramificarla.
 
 ### `allow_exec` y `on_ttl` en `POST /machines`
@@ -1039,7 +1041,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 |---|---|---|
 | `GET /info` | 200 | — |
 | `GET /machines` | 200 | — |
-| `POST /machines` | 201 | `413`/`400` cuerpo; `400` etiquetas `kling.graph*`; `runStatus`; `409`/`429`/`503`/`507` de admisión. Con `publish`: `403` puerto < 1024 (inquilino), `409` ocupado, `501`, `400`; si no se puede publicar, la máquina se borra |
+| `POST /machines` | 201 | `413`/`400` cuerpo; `400` etiquetas `kling.graph*`; `runStatus`; `409`/`429`/`503`/`507` de admisión. Con `publish`: `403` inquilino (con authz publicar es de admin), `409` ocupado, `501`, `400`; si no se puede publicar, la máquina se borra |
 | `GET /machines/{ref}` | 200 | `404` |
 | `POST /machines/{ref}/freeze` · `thaw` · `pause` · `stop` | 200 | `cicloStatus`; admisión al despertar |
 | `POST /machines/{ref}/squeeze` | 200 | `cicloStatus`; `409` con `mem_shared` sin `force` |
@@ -1114,7 +1116,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `GET /events` | 200 NDJSON | `500` sin flusher |
 | `GET /metrics` · `GET /procstats` · `GET /debug/pprof/` | 200 | — |
 | `POST /cow/store/grow` | 200 | `413`/`400` cuerpo; `cicloStatus` (`400` tamaño que no vale); `501` sin almacén en esta plataforma |
-| `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` puerto < 1024 (inquilino); `publicarStatus` |
+| `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` inquilino (con authz publicar es de admin); `publicarStatus` |
 | `DELETE /machines/{ref}/publish` | 204 | `404` sin máquina o sin publicación; `400` `host` |
 | `GET /publish` | 200 | — |
 

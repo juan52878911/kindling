@@ -219,15 +219,31 @@ type Daemon struct {
 	// dos, como antes de v1.0. KLING_REQUIRE_SIGNED (1/0) lo sustituye. Se
 	// lee al arrancar el daemon.
 	RequireSigned string `json:"require_signed,omitempty"`
+
+	// RequireE2fsJail es daemon.require_e2fs_jail: "off" (vacío) u "on". Con
+	// on, e2fsck, resize2fs y debugfs no corren sin su jaula entera (en
+	// Linux, chroot con el daemon como root; en macOS, sandbox-exec): la
+	// orden falla en vez de seguir con menos encierro. Se lee al arrancar el
+	// daemon. Ver SECURITY.md.
+	RequireE2fsJail string `json:"require_e2fs_jail,omitempty"`
 }
 
 // ValidateRequireSigned comprueba daemon.require_signed.
 func ValidateRequireSigned(v string) error {
+	return validarOnOff("daemon.require_signed", v)
+}
+
+// ValidateRequireE2fsJail comprueba daemon.require_e2fs_jail.
+func ValidateRequireE2fsJail(v string) error {
+	return validarOnOff("daemon.require_e2fs_jail", v)
+}
+
+func validarOnOff(clave, v string) error {
 	switch v {
 	case "", "on", "off":
 		return nil
 	}
-	return fmt.Errorf("daemon.require_signed must be on or off, not %q", v)
+	return fmt.Errorf("%s must be on or off, not %q", clave, v)
 }
 
 // ParseIdleFreeze interpreta daemon.idle_freeze ("0" o una duración de Go de
@@ -815,6 +831,11 @@ func (c *Config) Set(key, value string) error {
 				return err
 			}
 			c.Daemon.RequireSigned = value
+		case "require_e2fs_jail":
+			if err := ValidateRequireE2fsJail(value); err != nil {
+				return err
+			}
+			c.Daemon.RequireE2fsJail = value
 		case "battery_pause_after_seconds":
 			n, err := atoi()
 			if err != nil {
@@ -966,6 +987,7 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.idle_freeze", c.Daemon.IdleFreeze},
 		{"daemon.memory_pressure", c.Daemon.MemoryPressure},
 		{"daemon.require_signed", c.Daemon.RequireSigned},
+		{"daemon.require_e2fs_jail", c.Daemon.RequireE2fsJail},
 	}
 }
 

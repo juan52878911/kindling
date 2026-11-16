@@ -369,7 +369,7 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 
 	if cfg.MMDS != nil {
-		l, err := gonet.ListenTCP(s, tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(cfg.MMDSAddr.As4()), Port: 80}, ipv4.ProtocolNumber)
+		l, err := n.escuchar(tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(cfg.MMDSAddr.As4()), Port: 80})
 		if err != nil {
 			n.Close()
 			return nil, fmt.Errorf("mmds listener: %w", err)
@@ -394,7 +394,7 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 		// invitado recibe un RST al momento. Es lo que se quiere, el SDK debe
 		// hablar http:// con el proxy, y fallar rápido lo dice antes que un
 		// plazo vencido.
-		l, err := gonet.ListenTCP(s, tcpip.FullAddress{NIC: nicID, Addr: gw, Port: 80}, ipv4.ProtocolNumber)
+		l, err := n.escuchar(tcpip.FullAddress{NIC: nicID, Addr: gw, Port: 80})
 		if err != nil {
 			n.Close()
 			return nil, fmt.Errorf("credential proxy listener: %w", err)
@@ -411,6 +411,100 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 	go n.rxLoop()
 	go n.txLoop()
 	return n, nil
+}
+
+// escuchar abre un listener propio de la pila (MMDS y proxy de credenciales
+// en el 80) cuyas conexiones ocupan plaza en tcpFlows como las de handleTCP:
+// estas no pasan por el forwarder, y sin la plaza cada una retenía goroutines,
+// buffers y, con el proxy aparte, un fd del VMM sin tope. Por encima de
+// MaxTCPFlows la conexión recién aceptada recibe un RST; la plaza se suelta
+// al cerrarla.
+func (n *Net) escuchar(addr tcpip.FullAddress) (net.Listener, error) {
+	var wq waiter.Queue
+	ep, e := n.stack.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if e != nil {
+		return nil, errors.New(e.String())
+	}
+	if e := ep.Bind(addr); e != nil {
+		ep.Close()
+		return nil, fmt.Errorf("bind %v:%d: %s", addr.Addr, addr.Port, e)
+	}
+	if e := ep.Listen(512); e != nil {
+		ep.Close()
+		return nil, fmt.Errorf("listen %v:%d: %s", addr.Addr, addr.Port, e)
+	}
+	return &escucha{n: n, ep: ep, wq: &wq, addr: &net.TCPAddr{IP: addr.Addr.AsSlice(), Port: int(addr.Port)},
+		cerrado: make(chan struct{})}, nil
+}
+
+// escucha es el net.Listener de escuchar.
+type escucha struct {
+	n       *Net
+	ep      tcpip.Endpoint
+	wq      *waiter.Queue
+	addr    net.Addr
+	once    sync.Once
+	cerrado chan struct{}
+}
+
+func (l *escucha) Accept() (net.Conn, error) {
+	entrada, avisos := waiter.NewChannelEntry(waiter.ReadableEvents)
+	l.wq.EventRegister(&entrada)
+	defer l.wq.EventUnregister(&entrada)
+	for {
+		select {
+		case <-l.cerrado:
+			return nil, net.ErrClosed
+		default:
+		}
+		cep, cwq, e := l.ep.Accept(nil)
+		if _, ok := e.(*tcpip.ErrWouldBlock); ok {
+			select {
+			case <-l.cerrado:
+				return nil, net.ErrClosed
+			case <-avisos:
+			}
+			continue
+		}
+		if e != nil {
+			return nil, &net.OpError{Op: "accept", Net: "tcp", Addr: l.addr, Err: errors.New(e.String())}
+		}
+		if !tomar(l.n.tcpFlows) {
+			cep.Abort() // por encima de MaxTCPFlows: RST
+			continue
+		}
+		return &conPlaza{conexionInvitado: conexionInvitado{TCPConn: gonet.NewTCPConn(cwq, cep), ep: cep}, sem: l.n.tcpFlows}, nil
+	}
+}
+
+func (l *escucha) Close() error {
+	l.once.Do(func() {
+		close(l.cerrado)
+		l.ep.Close()
+	})
+	return nil
+}
+
+func (l *escucha) Addr() net.Addr { return l.addr }
+
+// conPlaza es una conexión de escucha: suelta su plaza de tcpFlows una sola
+// vez, en el primer Close o Abort.
+type conPlaza struct {
+	conexionInvitado
+	sem   chan struct{}
+	libre sync.Once
+}
+
+func (c *conPlaza) soltar() { c.libre.Do(func() { <-c.sem }) }
+
+func (c *conPlaza) Close() error {
+	defer c.soltar()
+	return c.conexionInvitado.Close()
+}
+
+func (c *conPlaza) Abort() {
+	defer c.soltar()
+	c.conexionInvitado.Abort()
 }
 
 // desviar envuelve el listener del 80 de la pasarela: mientras el proxy

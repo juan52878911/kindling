@@ -94,11 +94,17 @@ void uart_flush(void) {
   pthread_mutex_unlock(&u_mu);
 }
 
+uint32_t uart_linea(void) { return u_intid; }
+
 static void u_irq(void) {
   uint8_t n = (u.ier & 0x02) && u.thr_pend;  // sin entrada: solo THRI
-  // Como vmmio_irq: nivel es lo que la línea tiene de verdad, y si el GIC no
-  // la cambió el siguiente acceso lo vuelve a intentar.
-  if (n != u.nivel && khv_spi(u_intid, n)) u.nivel = n;
+  // Como vmmio_irq: nivel es el que le toca a la línea; si el GIC no la
+  // cambió, khv_spi la reintenta sola (un 8250 que espera su THRI no vuelve a
+  // tocar la UART hasta que llega).
+  if (n != u.nivel) {
+    (void)khv_spi(u_intid, n);
+    u.nivel = n;
+  }
 }
 
 static void u_out(uint8_t c) {

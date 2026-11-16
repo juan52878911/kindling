@@ -28,6 +28,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
+	"time"
 )
 
 // ShellProto es el nombre del protocolo en la cabecera Upgrade. La versión va
@@ -85,6 +87,45 @@ func WriteFrame(w io.Writer, t byte, payload []byte) error {
 	}
 	_, err := w.Write(payload)
 	return err
+}
+
+// ConPlazo envuelve w para que cada escritura tenga plazo si w lo admite
+// (una conexión de red): un extremo que deja de leer no retiene para siempre
+// a quien le escribe, y con él la plaza de su shell. El primer fallo se
+// queda: las escrituras siguientes fallan sin esperar otro plazo entero. Sin
+// SetWriteDeadline (una tubería), w se devuelve tal cual. Es concurrente, así
+// que el plazo y la escritura van juntos bajo un cerrojo.
+func ConPlazo(w io.Writer, plazo time.Duration) io.Writer {
+	c, ok := w.(interface{ SetWriteDeadline(time.Time) error })
+	if !ok || plazo <= 0 {
+		return w
+	}
+	return &escritorConPlazo{w: w, c: c, plazo: plazo}
+}
+
+type escritorConPlazo struct {
+	mu    sync.Mutex
+	w     io.Writer
+	c     interface{ SetWriteDeadline(time.Time) error }
+	plazo time.Duration
+	err   error
+}
+
+func (e *escritorConPlazo) Write(p []byte) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.err != nil {
+		return 0, e.err
+	}
+	if err := e.c.SetWriteDeadline(time.Now().Add(e.plazo)); err != nil {
+		e.err = err
+		return 0, err
+	}
+	n, err := e.w.Write(p)
+	if err != nil {
+		e.err = err
+	}
+	return n, err
 }
 
 // ReadFrame lee una trama. El tope no es una cortesía: sin él, el otro extremo

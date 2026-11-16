@@ -128,6 +128,7 @@ func TestRouterEnrutaPorServicio(t *testing.T) {
 
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		rec := httptest.NewRecorder()
@@ -167,6 +168,7 @@ func TestRouterUnSoloHostNoCambiaNada(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp/solo",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
@@ -211,6 +213,7 @@ func TestRouterReintentaEnElSiguienteHostSi507(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp/compute",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
@@ -252,6 +255,7 @@ func TestRouterAllCombinaVariosHosts(t *testing.T) {
 	// 1) initialize: sesión nueva, instrucciones con ambos servicios.
 	req := httptest.NewRequest(http.MethodPost, "/mcp/_all",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -283,6 +287,7 @@ func TestRouterAllCombinaVariosHosts(t *testing.T) {
 			"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": json.RawMessage(params),
 		})
 		req := httptest.NewRequest(http.MethodPost, "/mcp/_all", strings.NewReader(string(body)))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(SessionHeader, sid)
 		rec := httptest.NewRecorder()
@@ -358,6 +363,7 @@ func TestRouterSesionPegajosaYSeOlvida(t *testing.T) {
 	h := r.Handler("")
 	pedir := func(metodo, sid string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(metodo, "/mcp/alfa", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		if sid != "" {
@@ -427,6 +433,7 @@ func TestEnlaceRecienCreadoFuncionaALaPrimera(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp/nuevo", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()

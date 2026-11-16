@@ -27,6 +27,7 @@ import (
 	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // consolaMaxBytes es el tamaño de firecracker.log a partir del cual el
@@ -130,6 +131,13 @@ func (m *Manager) rotarConsolas() {
 		if err := rotarConsola(dir); err != nil {
 			log.Printf("watch: couldn't rotate console log at %s: %v", dir, err)
 		}
+		// Y la salida del proxy de credenciales aparte (macOS, credproxy_vz.go),
+		// que vive lo que el VMM y escribe una línea por conexión rechazada: un
+		// invitado que reintenta sin parar la hacía crecer sin tope. La abre
+		// con O_APPEND, como el VMM su consola. En Linux no existe.
+		if err := rotarFichero(dir, credproxy.SplitLog); err != nil {
+			log.Printf("watch: couldn't rotate the credential proxy log at %s: %v", dir, err)
+		}
 	}
 }
 
@@ -140,8 +148,12 @@ func (m *Manager) rotarConsolas() {
 //
 // Sin log todavía (máquina recién creada, o sin consola en absoluto) no es un
 // error: simplemente no hay nada que rotar.
-func rotarConsola(dir string) error {
-	path := filepath.Join(dir, "firecracker.log")
+func rotarConsola(dir string) error { return rotarFichero(dir, "firecracker.log") }
+
+// rotarFichero es rotarConsola para el fichero nombre de dir, que alguien
+// tiene abierto con O_APPEND (ver abrirConsola).
+func rotarFichero(dir, nombre string) error {
+	path := filepath.Join(dir, nombre)
 	f, err := abrirConsolaExistente(path, os.O_RDWR)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -170,8 +182,8 @@ func rotarConsola(dir string) error {
 	if err != nil {
 		return fmt.Errorf("reading the tail before rotating %s: %w", path, err)
 	}
-	if err := escribirRotado(dir, buf); err != nil {
-		return fmt.Errorf("writing firecracker.log.1: %w", err)
+	if err := escribirRotado(dir, nombre, buf, fi.Mode().Perm()); err != nil {
+		return fmt.Errorf("writing %s.1: %w", nombre, err)
 	}
 	// Truncar EN SITIO, no borrar+recrear: el mismo descriptor que tiene abierto
 	// Firecracker sigue siendo válido, y con O_APPEND (ver abrirConsola) sus
@@ -183,24 +195,25 @@ func rotarConsola(dir string) error {
 	return nil
 }
 
-// escribirRotado deja buf en dir/firecracker.log.1 sin escribir a través de
-// lo que haya con ese nombre: un temporal nuevo (O_EXCL) y un rename, que
-// reemplaza el nombre aunque sea un enlace plantado por el VMM, en vez de
-// seguirlo y escribir la consola del invitado en un fichero del host.
-func escribirRotado(dir string, buf []byte) error {
-	tmp, err := os.CreateTemp(dir, ".firecracker.log.1-*")
+// escribirRotado deja buf en dir/<nombre>.1 sin escribir a través de lo que
+// haya con ese nombre: un temporal nuevo (O_EXCL) y un rename, que reemplaza
+// el nombre aunque sea un enlace plantado por el VMM, en vez de seguirlo y
+// escribir la consola del invitado en un fichero del host. Con los permisos
+// del original (el log del proxy es 0600).
+func escribirRotado(dir, nombre string, buf []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, "."+nombre+".1-*")
 	if err != nil {
 		return err
 	}
 	_, err = tmp.Write(buf)
 	if err == nil {
-		err = tmp.Chmod(0o644)
+		err = tmp.Chmod(perm)
 	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(tmp.Name(), filepath.Join(dir, "firecracker.log.1"))
+		err = os.Rename(tmp.Name(), filepath.Join(dir, nombre+".1"))
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())

@@ -182,3 +182,70 @@ func TestAgenteEscucha(t *testing.T) {
 		t.Fatalf("si=%v no=%v ??=%v", m.agenteEscucha(ctx, "si"), m.agenteEscucha(ctx, "no"), m.agenteEscucha(ctx, "??"))
 	}
 }
+
+// Una copia de un dorado (run -from, fork) cuyo agente falla el /resync no se
+// entrega: se reintenta una vez y, si vuelve a fallar, error. Antes se daba
+// por running con el reloj y el CSPRNG del dorado. Si el reintento sale bien,
+// sigue.
+func TestResyncCopiaNoEntregaSinResync(t *testing.T) {
+	var mu sync.Mutex
+	n, fallos := 0, 2
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		falla := n <= fallos
+		mu.Unlock()
+		if falla {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"skew_ms":0}`))
+	}))
+	capturarLog(t)
+	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now()}
+	if _, err := m.resyncCopia(context.Background(), id, snap); err == nil {
+		t.Fatal("resyncCopia entregó una copia cuyo agente no resincronizó")
+	}
+	mu.Lock()
+	if n != 2 {
+		t.Fatalf("el agente recibió %d intentos, quería 2 (uno y el reintento)", n)
+	}
+	n, fallos = 0, 1
+	mu.Unlock()
+	if r, err := m.resyncCopia(context.Background(), id, snap); err != nil || !r.ok {
+		t.Fatalf("con el reintento bien: ok=%v err=%v", r.ok, err)
+	}
+}
+
+// Una imagen sin agente no es un fallo: la copia se entrega.
+func TestResyncCopiaSinAgenteSeEntrega(t *testing.T) {
+	m := &Manager{byID: map[string]*api.Machine{
+		"x": {ID: "x", Name: "x", Image: "sin-agente", Forwards: map[string]string{"8080": dirSinNadie}},
+	}}
+	capturarLog(t)
+	if _, err := m.resyncCopia(context.Background(), "x", &api.Snapshot{Name: "d", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("sin agente: %v", err)
+	}
+}
+
+// Las claves de snapshot de resyncSinAgente caducadas se retiran al apuntar
+// otra: antes el mapa crecía con cada dorado (y cada fork) sin agente. Las de
+// thaw no se tocan.
+func TestRecordarSinAgenteRetiraLasCaducadas(t *testing.T) {
+	m := &Manager{}
+	vieja := claveSnapshot(&api.Snapshot{Name: "viejo", CreatedAt: time.Now()})
+	m.recordarSinAgente(vieja, time.Now().Add(-2*resyncSinAgenteTTL))
+	m.resyncSinAgente.Store(claveThaw("abc"), time.Time{})
+	m.recordarSinAgente(claveSnapshot(&api.Snapshot{Name: "nuevo", CreatedAt: time.Now()}), time.Now())
+	if _, ok := m.resyncSinAgente.Load(vieja); ok {
+		t.Fatal("la clave caducada sigue en resyncSinAgente")
+	}
+	if _, ok := m.resyncSinAgente.Load(claveThaw("abc")); !ok {
+		t.Fatal("se retiró la marca de un thaw")
+	}
+	n := 0
+	m.resyncSinAgente.Range(func(any, any) bool { n++; return true })
+	if n != 2 {
+		t.Fatalf("%d claves; quería 2 (la nueva y la del thaw)", n)
+	}
+}

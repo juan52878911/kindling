@@ -91,11 +91,14 @@ Inquilinos, con sus cuotas, se dan de alta por entorno antes de arrancar el
 gateway:
 
 ```sh
-export KLING_SANDBOX_TENANTS="ana:tok1:10:5,bob:tok2:5"   # nombre:token[:max sandboxes[:max shells]]
+export KLING_SANDBOX_TENANTS="ana:tok1:10:5,bob:tok2:5"   # nombre:token[:max sandboxes[:max shells[:max mem_mib[:max vcpus]]]]
 export KLING_SANDBOX_ADMINS="ana"                         # quién ve los hosts y las métricas de todos
 kling sbx gateway                                         # 127.0.0.1:8090, HTTP
 kling sbx gateway -listen 0.0.0.0:8090 -tls-cert gw.pem -tls-key gw.key   # hacia la red, HTTPS
 ```
+
+Un sandbox no puede pedir más `mem_mib` ni `vcpus` que el máximo de su inquilino; sin
+máximo propio rige el del gateway (`-max-mem-mib`, 4096 por defecto; `-max-vcpus`, 4).
 
 Los tokens van en cada petición, así que el gateway solo sirve HTTP en claro por
 loopback (el defecto es `127.0.0.1:8090`). Para escuchar en otra interfaz necesita

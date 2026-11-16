@@ -275,6 +275,7 @@ kling sandbox fork:  -H
 kling sandbox fork:  -json
 kling sandbox fork:  -label
 kling sandbox fork:  -n
+kling sandbox fork:  -name
 kling sandbox fork:  -on-ttl
 kling sandbox fork:  -q
 kling sandbox fork:  -skip-ready

@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,9 +33,7 @@ func vmmVivoDe(t *testing.T, m *Manager, id string) (*exec.Cmd, <-chan struct{})
 		t.Fatal(err)
 	}
 	sock := filepath.Join(m.dir(id), "fc.sock")
-	if err := os.WriteFile(sock, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	escucharComoVMM(t, sock)
 	cmd, fin := lanzarProcesoFalso(t, argSocketVMM, sock)
 	for i := 0; i < 400; i++ {
 		if m.liveVMs()[id] == cmd.Process.Pid {
@@ -45,6 +45,28 @@ func vmmVivoDe(t *testing.T, m *Manager, id string) (*exec.Cmd, <-chan struct{})
 	}
 	t.Skip("liveVMs/adopt no llegaron a reconocer el proceso de prueba")
 	return nil, nil
+}
+
+// escucharComoVMM deja a alguien escuchando en sock, como un VMM vivo en el
+// suyo: en Linux, vmmVivoDe da por muerto, sin escanear, el VMM de un socket
+// en el que nadie escucha. En macOS basta el fichero (y la ruta del temporal
+// no cabe en sun_path).
+func escucharComoVMM(t *testing.T, sock string) {
+	t.Helper()
+	_ = os.Remove(sock) // el de un VMM falso anterior de la misma prueba
+	// 108 es sun_path en Linux: con una ruta más larga nadie puede escuchar
+	// ahí, y vmmVivoDe, sin poder marcar, escanea; basta el fichero.
+	if runtime.GOOS != "linux" || len(sock) >= 108 {
+		if err := os.WriteFile(sock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
 }
 
 // La marca del VMM que dejó vivo un Freeze sobrevive a un reinicio del

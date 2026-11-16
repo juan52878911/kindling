@@ -121,6 +121,9 @@ func cfgDisco(off uint32) uint32 { return uint32(C.khv_prueba_cfg(C.uint32_t(off
 // sincronización (C.KHV_SINC_*).
 func modoDisco(ro bool, sinc int) { C.vblk_prueba_modo(0, C.bool(ro), C.int(sinc)) }
 
+// sincsDisco: las sincronizaciones con el SSD que mandaron los FLUSH.
+func sincsDisco() uint64 { return uint64(C.vblk_prueba_sincs()) }
+
 // Los modos de sincronización de khv.h, para las pruebas.
 const (
 	sincFull    = int(C.KHV_SINC_FULL)
@@ -200,6 +203,15 @@ func clonRAM(base, out string) int {
 	return int(C.khv_prueba_clon_ram(cb, co))
 }
 
+// clonVentana: lo que se ve en out justo tras el clon y antes de fijar su
+// modo (khv_prueba_clon_ventana): -ENOENT, un modo, o -errno de clonar_ram.
+func clonVentana(base, out string) int {
+	cb, co := C.CString(base), C.CString(out)
+	defer C.free(unsafe.Pointer(cb))
+	defer C.free(unsafe.Pointer(co))
+	return int(C.khv_prueba_clon_ventana(cb, co))
+}
+
 // esperarHasta: lo que dura khv_esperar_hasta sin aviso, y su resultado.
 func esperarHasta(d time.Duration) (time.Duration, int) {
 	var r C.int
@@ -207,17 +219,34 @@ func esperarHasta(d time.Duration) (time.Duration, int) {
 	return time.Duration(ns), int(r)
 }
 
-// irqNivelSinGIC: el nivel que deja vmmio_irq cuando el GIC no cambia la
-// línea (khv_prueba_irq_nivel).
-func irqNivelSinGIC() int { return int(C.khv_prueba_irq_nivel()) }
+// irqPendienteSinGIC: 1 si vmmio_irq deja su línea pendiente de reintento,
+// para subirla, cuando el GIC no la cambia (khv_prueba_irq_nivel).
+func irqPendienteSinGIC() int { return int(C.khv_prueba_irq_nivel()) }
 
-// uartNivelSinGIC: el nivel que deja la UART cuando el GIC no cambia su línea
-// (khv_prueba_uart_nivel).
-func uartNivelSinGIC() int { return int(C.khv_prueba_uart_nivel()) }
+// uartPendienteSinGIC: las líneas pendientes de reintento cuando el GIC no
+// cambia la de la UART (khv_prueba_uart_nivel).
+func uartPendienteSinGIC() int { return int(C.khv_prueba_uart_nivel()) }
+
+// spiReintento es khv_prueba_spi_reintento: 0 si una línea que un GIC de
+// mentira rechaza se sube sola en el reintento, sin otro acceso a la UART.
+func spiReintento() int { return int(C.khv_prueba_spi_reintento()) }
 
 // redMuerta: un poll que falla sin remedio termina el hilo de recepción de la
 // red, que queda marcada como muerta (khv_prueba_red_muerta).
 func redMuerta() int { return int(C.khv_prueba_red_muerta()) }
+
+// vsockSinRx es khv_vsock_prueba_sin_rx: las vueltas de vs_hilo en 200 ms
+// con datos del host y la cola 0 sin búferes, y lo que llega al publicar uno.
+func vsockSinRx() (vueltas uint, llego uint32, r int) {
+	var v C.unsigned
+	var l C.uint32_t
+	r = int(C.khv_vsock_prueba_sin_rx(&v, &l))
+	return uint(v), uint32(l), r
+}
+
+// vsockHostCierra es khv_vsock_prueba_host_cierra: 0 si el cierre de Go de
+// una conexión sin crédito se ve y libera su slot para un dial nuevo.
+func vsockHostCierra() int { return int(C.khv_vsock_prueba_host_cierra()) }
 
 // vsockTandaRx: una vuelta de bombear del vsock con el socket del host lleno
 // (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró, cuánto tuvo mu y

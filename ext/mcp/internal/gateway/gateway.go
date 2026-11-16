@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,13 @@ const GuestPort = api.GuestPort
 // con el límite que ya aplica el puente al leer una petición.
 const maxProxyBody = 8 << 20
 
+// maxDeleteBody y plazoDeleteAislada acotan la respuesta que se guarda del
+// DELETE de una sesión aislada: una respuesta a un DELETE es una línea.
+const (
+	maxDeleteBody      = 64 << 10
+	plazoDeleteAislada = 30 * time.Second
+)
+
 // Gateway enruta llamadas MCP a microVMs. La planificación —despertar, congelar
 // por inactividad, réplicas, precalentado, cuotas— es de pkg/scheduler; aquí
 // vive lo que es MCP: la cabecera de sesión, el agregador _all, el catálogo, la
@@ -56,6 +64,13 @@ type Gateway struct {
 	*scheduler.Scheduler
 
 	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
+
+	// MaxSesiones acota las sesiones que un tenant tiene acuñadas a la vez en
+	// este gateway: directas, aisladas y del agregador. 0 = defaultMaxSesiones.
+	// Cada una es estado que vive hasta su caducidad (y las directas, un hueco
+	// en el puente del invitado): sin tope, un solo token en bucle de
+	// initialize lo hace crecer sin medida.
+	MaxSesiones int
 
 	agg *aggregator // endpoint virtual que reúne a todos
 	mem *memory     // memoria de uso; nil si está desactivada
@@ -146,7 +161,17 @@ func (g *Gateway) Handler(token string) http.Handler {
 	// hay que poder ver cuando alguien sondea el puerto. AuthHandler resuelve
 	// el token a un tenant (el único = "default") y lo cuelga del contexto
 	// para que handleProxy pueda aplicar las cuotas.
-	return logging(g.AuthHandler(g.routes(), token))
+	return logging(conLoopback(g.Scheduler, g.AuthHandler(g.routes(), token), token))
+}
+
+// conLoopback: sin token (-no-auth, solo en loopback) el gateway solo atiende
+// peticiones dirigidas a loopback y de un origen de loopback; ver
+// scheduler.SoloLoopback.
+func conLoopback(s *scheduler.Scheduler, h http.Handler, token string) http.Handler {
+	if s.AuthDisabled(token) {
+		return scheduler.SoloLoopback(h)
+	}
+	return h
 }
 
 // routes construye el mux SIN autenticación ni registro.
@@ -484,11 +509,21 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// que su capa ya no existe. Por eso la respuesta del invitado (una
 		// línea) se guarda y se entrega después, en vez de dejar que el proxy
 		// la escriba y confiar en cuándo se vacía el búfer.
+		//
+		// Con tope y plazo: el invitado es hostil, y un cuerpo sin fin crecía en
+		// la memoria del gateway mientras retenía la máquina.
 		if r.Method == http.MethodDelete && g.IsIsolated(ext) {
-			rec := httptest.NewRecorder()
-			rt.ServeHTTP(&sidWriter{ResponseWriter: rec, ext: ext}, r)
+			rec := &grabadorAcotado{ResponseRecorder: httptest.NewRecorder(), max: maxDeleteBody}
+			ctxDel, cancelar := context.WithTimeout(r.Context(), plazoDeleteAislada)
+			rt.ServeHTTP(&sidWriter{ResponseWriter: rec, ext: ext}, r.WithContext(ctxDel))
+			cancelar()
 			g.ReleaseIsolated(r.Context(), ext)
 			g.Forget(ext)
+			if rec.excedido {
+				api.HTTPError(w, fmt.Sprintf("the guest answered DELETE with more than %d bytes; the session was closed anyway", maxDeleteBody),
+					http.StatusBadGateway)
+				return
+			}
 			for k, vs := range rec.Header() {
 				w.Header()[k] = vs
 			}
@@ -630,6 +665,16 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		return
 	}
 
+	// Solo un initialize abre sesión, como en el agregador. Cualquier otra
+	// petición sin sesión se sirve igual (un servidor sin estado no las usa),
+	// pero si el invitado devuelve un id no se fija: cada POST suelto dejaba una
+	// ruta y un dueño acuñados hasta su caducidad.
+	abre := esInitialize(r)
+	if abre && !g.hayHuecoSesion(tnt.Name()) {
+		escribirTopeSesiones(w, tnt.Name(), g.topeSesiones())
+		return
+	}
+
 	for try := 0; try < maxScaleOut; try++ {
 		var e *scheduler.Instance
 		var err error
@@ -681,7 +726,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		// handleProxy. Dos instancias que den el mismo id acaban en dos
 		// sesiones distintas, cada una con su microVM.
 		ext := ""
-		if guestSID := rec.Header().Get(SessionHeader); guestSID != "" {
+		if guestSID := rec.Header().Get(SessionHeader); guestSID != "" && abre {
 			var berr error
 			for i := 0; i < 3; i++ {
 				ext = scheduler.NewSessionKey()
@@ -965,6 +1010,63 @@ func buscarLink(ls []*mcp.Link, service string) *mcp.Link {
 		}
 	}
 	return nil
+}
+
+// defaultMaxSesiones es el tope de sesiones por tenant si no se fija otro.
+// Holgado para muchos agentes del mismo tenant a la vez.
+const defaultMaxSesiones = 256
+
+// errTopeSesiones: el tenant ya tiene MaxSesiones sesiones acuñadas.
+var errTopeSesiones = errors.New("too many open MCP sessions for this tenant; close some (DELETE) or let them expire")
+
+func (g *Gateway) topeSesiones() int {
+	if g.MaxSesiones > 0 {
+		return g.MaxSesiones
+	}
+	return defaultMaxSesiones
+}
+
+// sesionesDirectas cuenta las sesiones directas y aisladas vivas del tenant.
+// PeekRoute y no Route: contar no es usar, y no debe alargarles la vida.
+func (g *Gateway) sesionesDirectas(tenant string) int {
+	n := 0
+	g.duenos.Range(func(k, v any) bool {
+		if v.(string) == tenant && g.PeekRoute(k.(string)) != nil {
+			n++
+		}
+		return true
+	})
+	return n
+}
+
+// hayHuecoSesion dice si el tenant puede abrir otra sesión. Se mira antes de
+// pasarle el initialize al invitado, así que dos initialize a la vez pueden
+// pasar los dos con un hueco: el exceso lo acota la cuota de peticiones en
+// vuelo del tenant, no crece sin medida.
+func (g *Gateway) hayHuecoSesion(tenant string) bool {
+	return g.sesionesDirectas(tenant)+g.agg.deTenant(tenant) < g.topeSesiones()
+}
+
+func escribirTopeSesiones(w http.ResponseWriter, tenant string, tope int) {
+	api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota,
+		fmt.Sprintf("tenant %q already has %d MCP sessions open: %v", tenant, tope, errTopeSesiones))
+}
+
+// esInitialize dice si el cuerpo es un initialize de JSON-RPC (no un lote:
+// initialize no puede ir en uno).
+func esInitialize(r *http.Request) bool {
+	if r.GetBody == nil {
+		return false
+	}
+	b, err := r.GetBody()
+	if err != nil {
+		return false
+	}
+	defer b.Close()
+	var req struct {
+		Method string `json:"method"`
+	}
+	return json.NewDecoder(b).Decode(&req) == nil && req.Method == "initialize"
 }
 
 // fijarSesion fija la ruta de una sesión nueva y apunta qué tenant la abrió.

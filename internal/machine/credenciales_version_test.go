@@ -68,9 +68,15 @@ func TestAlmacenV0SeLeeYSeMigraConCopia(t *testing.T) {
 	if versionSellada(b) != versionAlmacen || !bytes.HasPrefix(b, []byte("KLCS\x01")) {
 		t.Fatalf("tras sellar no quedó en v1: %q", b[:min(8, len(b))])
 	}
+	// La copia sigue en v0 (la lee un kling ≤ v0.17) pero con el contenido
+	// de ahora (refrescarRespaldos): volver atrás no devuelve lo de antes.
 	copia, err := os.ReadFile(esquema.RutaRespaldo(ruta, 0))
-	if err != nil || !bytes.Equal(copia, original) {
-		t.Fatalf("la copia .v0.bak tiene que ser el almacén original: %v", err)
+	if err != nil || versionSellada(copia) != 0 || bytes.Equal(copia, original) {
+		t.Fatalf("la copia .v0.bak tiene que ser un v0 refrescado: %v", err)
+	}
+	var enCopia []credproxy.Credential
+	if err := m.abrir("bak", copia, "m1", &enCopia); err != nil || len(enCopia) != 2 {
+		t.Fatalf("copia v0: %+v, %v", enCopia, err)
 	}
 	if fi, _ := os.Stat(esquema.RutaRespaldo(ruta, 0)); fi.Mode().Perm() != 0o600 {
 		t.Errorf("la copia no es 0600: %v", fi.Mode().Perm())
@@ -186,8 +192,14 @@ func TestAlmacenSigV4EsV2(t *testing.T) {
 	if versionSellada(b) != versionAlmacenSigV4 || !bytes.HasPrefix(b, []byte("KLCS\x02")) {
 		t.Fatalf("con sigv4: %q", b[:min(8, len(b))])
 	}
-	if copia, err := os.ReadFile(esquema.RutaRespaldo(ruta, 1)); err != nil || !bytes.Equal(copia, v1) {
-		t.Fatalf("la copia .v1.bak tiene que ser el almacén v1: %v", err)
+	// La copia es un v1 con lo de ahora menos la sigv4 (refrescarRespaldos).
+	copia, err := os.ReadFile(esquema.RutaRespaldo(ruta, 1))
+	if err != nil || versionSellada(copia) != versionAlmacen {
+		t.Fatalf("la copia .v1.bak tiene que ser un v1: %v", err)
+	}
+	var enCopia []credproxy.Credential
+	if err := m.abrir("bak", copia, "m1", &enCopia); err != nil || len(enCopia) != 1 || enCopia[0].Kind == credproxy.KindSigV4 {
+		t.Fatalf("copia v1: %+v, %v", enCopia, err)
 	}
 	back, err := m.cargarCredenciales("m1")
 	if err != nil || len(back) != 2 || back[1].AccessKeyID != "AKIAREAL1234" || back[1].Region != "us-east-1" {
@@ -206,5 +218,50 @@ func TestAlmacenSigV4EsV2(t *testing.T) {
 	}
 	if _, err := os.Stat(esquema.RutaRespaldo(ruta, 1)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("la copia .v1.bak sigue ahí tras quitar las credenciales")
+	}
+}
+
+// Rotar o quitar una credencial reescribe también las copias .vN.bak: si no,
+// `kling upgrade -rollback` las devolvería a su nombre con la credencial de
+// antes. Lo que la versión de la copia no sabe representar (una sigv4 en un
+// v1) no entra en ella.
+func TestRotarReescribeLasCopiasDelAlmacen(t *testing.T) {
+	m := managerConClaveDePrueba(t)
+	ruta := m.credPath("m1")
+	vieja := credproxy.Credential{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: "sk_test_VIEJA"}
+	otra := credproxy.Credential{Env: "OTRA", Domain: "otra.example.com", Placeholder: "kling-cred-bb", Secret: "sk_test_RETIRADA"}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{vieja, otra}); err != nil {
+		t.Fatal(err)
+	}
+	// Una sigv4 sube el almacén a v2 y deja la copia .v1.bak.
+	s3 := credproxy.Credential{Env: "AWS_ACCESS_KEY_ID", Domain: "s3.example.com", Placeholder: "AKIDPLACEHOLDER", Secret: "sk_test_S3", Kind: credproxy.KindSigV4}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{vieja, otra, s3}); err != nil {
+		t.Fatal(err)
+	}
+	bak := esquema.RutaRespaldo(ruta, versionAlmacen)
+	if _, err := os.Stat(bak); err != nil {
+		t.Fatalf("falta la copia de la migración: %v", err)
+	}
+	// Rotar KEY y quitar OTRA.
+	nueva := vieja
+	nueva.Secret = "sk_test_NUEVA"
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{nueva, s3}); err != nil {
+		t.Fatal(err)
+	}
+	copia, err := os.ReadFile(bak)
+	if err != nil || versionSellada(copia) != versionAlmacen {
+		t.Fatalf("la copia tiene que seguir en v1: %v", err)
+	}
+	for _, viejo := range []string{"sk_test_VIEJA", "sk_test_RETIRADA"} {
+		if bytes.Contains(copia, []byte(viejo)) {
+			t.Fatal("la copia guarda un secreto en claro")
+		}
+	}
+	var enCopia []credproxy.Credential
+	if err := m.abrir(bak, copia, "m1", &enCopia); err != nil {
+		t.Fatal(err)
+	}
+	if len(enCopia) != 1 || enCopia[0].Secret != "sk_test_NUEVA" {
+		t.Fatalf("la copia .v1.bak tiene que ser lo de ahora sin la sigv4: %+v", enCopia)
 	}
 }

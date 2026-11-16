@@ -210,3 +210,21 @@ func TestLimitOpsLlevaLosDosCubos(t *testing.T) {
 		t.Fatalf("LimitOps = %s, quería %s", b, want)
 	}
 }
+
+// S10: las estadísticas del globo se leen con tope: un cuerpo enorme es un
+// error, no un búfer del tamaño que diga el VMM en el daemon.
+func TestBalloonStatsCuerpoConTope(t *testing.T) {
+	c, _, _ := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"target_pages":1,"relleno":"`)
+		trozo := strings.Repeat("a", 64<<10)
+		for range 256 { // 16 MiB
+			if _, err := io.WriteString(w, trozo); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `"}`)
+	})
+	if _, err := c.BalloonStats(context.Background()); err == nil {
+		t.Fatal("un cuerpo de 16 MiB se leyó entero")
+	}
+}

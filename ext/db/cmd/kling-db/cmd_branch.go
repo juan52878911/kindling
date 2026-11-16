@@ -12,7 +12,8 @@ package main
 // (-settle). docs/db.md tiene lo que cuesta cada caso, medido.
 //
 // Identidad. Una copia de rama se reconoce por sus etiquetas, no por su nombre:
-// sandbox fork no deja poner nombre. kling.db.repo es el hash del directorio
+// una reserva adoptada (cmd_branch_spare.go) conserva el suyo, y un kling
+// anterior a `sandbox fork -name` no deja ponerlo. kling.db.repo es el hash del directorio
 // git común del repo (el mismo en todos sus worktrees) y kling.db.branch la CLAVE de la rama (branchKey), no el nombre: un
 // nombre de rama es texto arbitrario (barras, mayúsculas, unicode) y no puede
 // ir tal cual a una etiqueta, a un nombre de máquina ni, desde luego, a argv o
@@ -141,8 +142,9 @@ func legacyRepoKey(toplevel string) string {
 	return hex.EncodeToString(h[:6])
 }
 
-// branchMachineName es el nombre con el que se crea la copia de una rama que
-// sale del golden (una que sale de un fork la nombra el daemon).
+// branchMachineName es el nombre con el que se crea la copia de una rama, del
+// golden o de un fork. Al ser el mismo para la misma rama, dos `kling db
+// branch` a la vez no dejan dos copias: la segunda choca con el nombre.
 func branchMachineName(repo, key string) string { return "db-" + repo[:6] + "-" + key }
 
 // ── git ──────────────────────────────────────────────────────────────────────
@@ -409,7 +411,7 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 		wasFrozen := thawed || parent.State == api.StateWarm || parent.State == api.StatePaused
 		fmt.Fprintf(a.stderr, "branch %s: forking the copy of %s...\n", branch, from)
 		end := a.tr.span("phase fork")
-		cs, err := a.forkWith(ctx, parent.ID, 1, owner, extra)
+		cs, err := a.forkWith(ctx, parent.ID, 1, owner, branchMachineName(ri.repo, key), extra)
 		end()
 		if wasFrozen && refreeze {
 			// fork descongeló al padre; una rama que no es la activa no gasta RAM.

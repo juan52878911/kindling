@@ -77,6 +77,8 @@ const forkMarca = "fork-of"
 type ForkOptions struct {
 	// Count copias; 0 es 1. Como mucho api.ForkMax.
 	Count int
+	// Name es el nombre de la copia (solo con Count 1); vacío, nombreCopia.
+	Name string
 	// TTLSeconds y OnTTL: 0 y "" heredan los del original.
 	TTLSeconds int
 	OnTTL      string
@@ -131,9 +133,26 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	if err := api.ValidateForkLabels(opt.Labels); err != nil {
 		return "", nil, fmt.Errorf("%w: %v", ErrFork, err)
 	}
+	if opt.Name != "" {
+		if n != 1 {
+			return "", nil, fmt.Errorf("%w: a name only works with count 1", ErrFork)
+		}
+		if !validName.MatchString(opt.Name) {
+			return "", nil, marcado(ErrInvalidName, "invalid machine name %q", opt.Name)
+		}
+	}
 	src, ok := m.Get(ref)
 	if !ok {
 		return "", nil, fmt.Errorf("%w: %q", ErrNoMachine, ref)
+	}
+	// Un nombre ocupado se dice antes de pausar y volcar el original. Es solo
+	// un filtro: quien lo reserva de verdad es la restauración (reservarNombre).
+	if opt.Name != "" {
+		soltar, err := m.reservarNombre(opt.Name)
+		if err != nil {
+			return "", nil, err
+		}
+		soltar()
 	}
 	if err := puedeRamificarse(src); err != nil {
 		return "", nil, err
@@ -197,6 +216,9 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	nombres := make([]string, n)
 	for i := range nombres {
 		nombres[i] = nombreCopia(src.Name)
+	}
+	if opt.Name != "" {
+		nombres[0] = opt.Name
 	}
 	req := func(i int) api.RunRequest {
 		return api.RunRequest{

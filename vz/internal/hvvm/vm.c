@@ -404,6 +404,7 @@ struct cpu {
   bool kick;
   bool parado;          // en punto_pausa (con mu)
   struct cpu_state st;  // destino del guardado / origen de la restauración
+  bool st_mal;          // el último guardado de st no pudo leer algún registro (con mu)
   uint64_t vtimer_offset;
   // Lo que tiene que sumar a su vtimer_offset al salir del punto de pausa (lo
   // que duró una pausa del núcleo), con mu. Ver khv_resume.
@@ -523,20 +524,37 @@ static void guardar_sysregs(struct cpu *c, struct cpu_state *s) {
   for (size_t i = 0; i < NSYS; i++) s->sys_ok[i] = hv_vcpu_get_sys_reg(c->id, SYSREGS[i], &s->sys[i]) == HV_SUCCESS;
 }
 
-static void guardar_cpu(struct cpu *c, struct cpu_state *s) {
-  for (int i = 0; i < 31; i++) hv_vcpu_get_reg(c->id, HV_REG_X0 + i, &s->x[i]);
-  hv_vcpu_get_reg(c->id, HV_REG_PC, &s->pc);
-  hv_vcpu_get_reg(c->id, HV_REG_CPSR, &s->cpsr);
-  hv_vcpu_get_reg(c->id, HV_REG_FPCR, &s->fpcr);
-  hv_vcpu_get_reg(c->id, HV_REG_FPSR, &s->fpsr);
-  for (int i = 0; i < 32; i++) hv_vcpu_get_simd_fp_reg(c->id, HV_SIMD_FP_REG_Q0 + i, &s->q[i]);
+// guardar_cpu deja en s el estado de c y devuelve cuántos registros sin
+// remedio no pudo leer: los generales, PC, CPSR, FP/SIMD y el timer virtual,
+// sin los que la restauración sería otra máquina. Los de sistema y del GIC
+// llevan su _ok (unos cuantos no existen en todos los Mac) y no cuentan.
+static int guardar_cpu(struct cpu *c, struct cpu_state *s) {
+  int mal = 0;
+#define G(x) (mal += (x) != HV_SUCCESS)
+  for (int i = 0; i < 31; i++) G(hv_vcpu_get_reg(c->id, HV_REG_X0 + i, &s->x[i]));
+  G(hv_vcpu_get_reg(c->id, HV_REG_PC, &s->pc));
+  G(hv_vcpu_get_reg(c->id, HV_REG_CPSR, &s->cpsr));
+  G(hv_vcpu_get_reg(c->id, HV_REG_FPCR, &s->fpcr));
+  G(hv_vcpu_get_reg(c->id, HV_REG_FPSR, &s->fpsr));
+  for (int i = 0; i < 32; i++) G(hv_vcpu_get_simd_fp_reg(c->id, HV_SIMD_FP_REG_Q0 + i, &s->q[i]));
   guardar_sysregs(c, s);
   for (size_t i = 0; i < NICC; i++) s->icc_ok[i] = hv_gic_get_icc_reg(c->id, ICCREGS[i], &s->icc[i]) == HV_SUCCESS;
-  hv_vcpu_get_vtimer_offset(c->id, &s->vtimer_offset);
+  G(hv_vcpu_get_vtimer_offset(c->id, &s->vtimer_offset));
   bool m = false;
-  hv_vcpu_get_vtimer_mask(c->id, &m);
+  G(hv_vcpu_get_vtimer_mask(c->id, &m));
+#undef G
   s->vtimer_masked = m;
   s->on = c->on;
+  return mal;
+}
+
+// khv_prueba_guardar_cpu: lo que guardar_cpu dice de un vCPU que no existe
+// (pruebas, sin VM): todos sus registros sin remedio, no 0.
+int khv_prueba_guardar_cpu(void) {
+  struct cpu c = {0};
+  c.id = (hv_vcpu_t)0x7fff;
+  static struct cpu_state s;
+  return guardar_cpu(&c, &s);
 }
 
 static void cargar_cpu(struct cpu *c) {
@@ -713,8 +731,10 @@ static void punto_pausa(struct cpu *c) {
   while (pausa_pedida && !parar) {
     if (!guardado && (pausa_bits & KHV_PAUSA_API)) {
       pthread_mutex_unlock(&mu);
-      guardar_cpu(c, &c->st);
+      int mal = guardar_cpu(c, &c->st);
+      if (mal) logf_("cpu%d: %d registers could not be read for the snapshot", c->idx, mal);
       pthread_mutex_lock(&mu);
+      c->st_mal = mal != 0;
       guardado = true;
       n_guardados++;
       pthread_cond_broadcast(&cv);
@@ -1084,17 +1104,21 @@ static void wfi(struct cpu *c) {
   // 2 ms con SMP o con EL2 (el kernel puede estar usando el timer de EL2,
   // CNTHP, que aquí no se mira), 1 s si no.
   uint64_t tope_ns = ncpus > 1 || anidada ? 2000000 : 1000000000;
+  bool por_tope = true;
+  __atomic_fetch_add(&khv_avisos[KHV_N_WFI], 1, __ATOMIC_RELAXED);
   if ((ctl & 1) && !(ctl & 2)) {
     uint64_t vence = cval + c->vtimer_offset;
     if (vence <= ahora) return;
     uint64_t ns = (uint64_t)((vence - ahora) * tb.numer / tb.denom);
-    if (ns < tope_ns) tope_ns = ns;
+    if (ns < tope_ns) tope_ns = ns, por_tope = false;
   }
   uint64_t fin = khv_ahora_ns() + tope_ns;
   pthread_mutex_lock(&mu);
-  if (!c->kick && !pausa_pedida && !parar) khv_esperar_hasta(&cv, &mu, fin);
+  int r = 0;
+  if (!c->kick && !pausa_pedida && !parar) r = khv_esperar_hasta(&cv, &mu, fin);
   c->kick = false;
   pthread_mutex_unlock(&mu);
+  if (r == ETIMEDOUT && por_tope) __atomic_fetch_add(&khv_avisos[KHV_N_WFI_TOPE], 1, __ATOMIC_RELAXED);
 }
 
 static void volcar(struct cpu *c, const char *por) {
@@ -1322,6 +1346,8 @@ static void *vcpu_hilo(void *arg) {
       khv_traza_hito(KHV_H_PRIMER_RUN);
     }
     VOK(hv_vcpu_run(c->id));
+    __atomic_fetch_add(&khv_avisos[KHV_N_SALIDAS], 1, __ATOMIC_RELAXED);
+    khv_spi_reintentar();  // una línea que el GIC rechazó (casi nunca: una carga atómica)
     // Con alguien trazando, lo que cuesta atender la salida (no el WFI, que
     // es esperar): un evento si pasa de KHV_SALIDA_CARA_NS.
     uint64_t t_salida = khv_traza_activa() ? mach_absolute_time() : 0;
@@ -1330,6 +1356,7 @@ static void *vcpu_hilo(void *arg) {
       case HV_EXIT_REASON_VTIMER_ACTIVATED:
         // Con el GIC de HVF el kernel inyecta el PPI 27; basta con desenmascarar.
         hv_vcpu_set_vtimer_mask(c->id, false);
+        __atomic_fetch_add(&khv_avisos[KHV_N_VTIMER], 1, __ATOMIC_RELAXED);
         qos_tic();
         break;
       case HV_EXIT_REASON_EXCEPTION: {
@@ -2061,7 +2088,7 @@ int khv_restore(const char *mem_path) {
   if (hay_globo) vballoon_reafirmar();
   for (int i = 0; i < nvfs; i++) vvfs_reafirmar(i);
   khv_traza_acaba(KHV_F_GIC, tr);
-  for (int i = 0; i < ncpus; i++) cpus[i].st = *hdr_cpu(&h, i);
+  for (int i = 0; i < ncpus; i++) cpus[i].st = *hdr_cpu(&h, i), cpus[i].st_mal = false;
   snap_t_pausa = h.t_pausa;
   // Queda en pausa hasta khv_resume: los PATCH de discos del núcleo ya
   // llegaron antes de crear la VM, pero el núcleo reanuda cuando quiere.
@@ -2243,22 +2270,45 @@ int khv_resume(unsigned bit) {
 // clonar_ram crea mem_out con los datos de base: un clon APFS si se puede y,
 // en otro volumen o sin clones, una copia. 0600 los dos: lleva toda la RAM
 // del invitado (secretos ya leídos incluidos), y el clon hereda el modo de su
-// base (un dorado 0644 daba una congelación 0644). Devuelve el fd, o -1 con
-// errno y sin dejar el fichero; *copiando dice si falló la copia.
+// base (un dorado 0644 daba una congelación 0644). Por eso el clon se hace en
+// un directorio 0700 al lado de mem_out (el mismo volumen), se pasa a 0600 y
+// solo entonces se mueve a su sitio: antes había un momento en el que mem_out
+// ya existía con el modo de la base. Devuelve el fd, o -1 con errno y sin
+// dejar el fichero; *copiando dice si falló la copia.
+static void (*prueba_tras_clon)(const char *mem_out);  // pruebas: justo tras el clon
+
 static int clonar_ram(int base, const char *mem_out, bool *copiando) {
   *copiando = false;
-  int fd;
-  if (fclonefileat(base, AT_FDCWD, mem_out, 0) == 0) {
-    fd = open(mem_out, O_RDWR);
-    if (fd >= 0 && fchmod(fd, 0600) == 0) return fd;
-  } else {
-    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) return -1;
-    if (fcopyfile(base, fd, NULL, COPYFILE_DATA) == 0) return fd;
-    *copiando = true;
+  char dir[PATH_MAX], tmp[PATH_MAX];
+  const char *barra = strrchr(mem_out, '/');
+  int ld = barra ? (int)(barra - mem_out) : 1;
+  const char *pd = barra ? mem_out : ".";
+  if (barra && ld == 0) pd = "/", ld = 1;
+  if (snprintf(dir, sizeof dir, "%.*s/.khv-clon-XXXXXX", ld, pd) < (int)sizeof dir && mkdtemp(dir)) {
+    snprintf(tmp, sizeof tmp, "%s/mem", dir);
+    if (fclonefileat(base, AT_FDCWD, tmp, 0) == 0) {
+      if (prueba_tras_clon) prueba_tras_clon(mem_out);
+      int fd = open(tmp, O_RDWR);
+      // RENAME_EXCL: como fclonefileat, no pisa un mem_out que ya exista.
+      if (fd >= 0 && fchmod(fd, 0600) == 0 && renamex_np(tmp, mem_out, RENAME_EXCL) == 0) {
+        rmdir(dir);
+        return fd;
+      }
+      int e = errno;
+      if (fd >= 0) close(fd);
+      unlink(tmp);
+      rmdir(dir);
+      errno = e;
+      return -1;
+    }
+    rmdir(dir);
   }
+  int fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) return -1;
+  if (fcopyfile(base, fd, NULL, COPYFILE_DATA) == 0) return fd;
+  *copiando = true;
   int e = errno;
-  if (fd >= 0) close(fd);
+  close(fd);
   unlink(mem_out);
   errno = e;
   return -1;
@@ -2280,6 +2330,22 @@ int khv_prueba_clon_ram(const char *base, const char *out) {
   return r;
 }
 
+// khv_prueba_clon_ventana: lo que alguien ve en out justo después del clon y
+// antes de que clonar_ram fije el modo: -ENOENT si aún no está, su modo si
+// ya está (debe ser 0600), o -errno de clonar_ram (pruebas).
+static int ventana_modo;
+static void mirar_ventana(const char *mem_out) {
+  struct stat st;
+  ventana_modo = stat(mem_out, &st) == 0 ? (int)(st.st_mode & 07777) : -errno;
+}
+int khv_prueba_clon_ventana(const char *base, const char *out) {
+  ventana_modo = 1;  // ni un modo ni un -errno: el gancho no corrió
+  prueba_tras_clon = mirar_ventana;
+  int r = khv_prueba_clon_ram(base, out);
+  prueba_tras_clon = NULL;
+  return r < 0 ? r : ventana_modo;
+}
+
 int khv_snapshot(const char *mem_out) {
   if (anidada) {
     fallo(ERR_SNAP_ANIDADA);
@@ -2294,9 +2360,18 @@ int khv_snapshot(const char *mem_out) {
   pthread_mutex_lock(&mu);
   // disp_quietos: una pausa solo del regulador no paró los dispositivos.
   bool en_pausa = liberada && pausa_pedida && n_pausados == ncpus && n_guardados == ncpus && disp_quietos;
+  int cpu_mal = -1;
+  for (int i = 0; en_pausa && i < ncpus && cpu_mal < 0; i++)
+    if (cpus[i].st_mal) cpu_mal = i;
   pthread_mutex_unlock(&mu);
   if (!en_pausa) {
     fallo("the VM must be paused to snapshot it");
+    goto fin;
+  }
+  // Un vCPU cuyo estado no se pudo leer entero daría un snapshot que restaura
+  // otra máquina (registros a cero o del guardado anterior): mejor sin él.
+  if (cpu_mal >= 0) {
+    fallo("the state of vCPU %d could not be read, not taking a snapshot of it", cpu_mal);
     goto fin;
   }
   uint64_t tr = khv_traza_empieza(KHV_F_SNAP_ESTADO);

@@ -32,6 +32,11 @@ import (
 // procesos del invitado.
 const maxShells = 8
 
+// shellEscritura es el plazo de cada escritura hacia quien abrió la shell (el
+// daemon): si deja de leer, la sesión se corta en vez de quedarse con una de
+// las maxShells plazas. Variable para los tests.
+var shellEscritura = 2 * time.Minute
+
 // hangupGrace es lo que se espera tras colgar (cerrar el maestro, que provoca
 // SIGHUP) antes de matar el grupo. Una shell bien educada sale sola en ese
 // tiempo; una que ignora SIGHUP no debe poder quedarse.
@@ -144,6 +149,10 @@ func handleShell(env []string, lim *slotLimiter, w http.ResponseWriter, r *http.
 // in trae las tramas de quien llama (puede llevar bytes ya leídos por el
 // servidor HTTP, de ahí el bufio) y out las recibe.
 func runShell(env []string, req api.ShellRequest, in io.Reader, out io.Writer) {
+	// Plazo por escritura (shellEscritura) si out es una conexión: quien deja
+	// de leer no retiene la plaza. Al vencer se cierra el maestro, la shell
+	// recibe SIGHUP y la sesión acaba como si hubiese colgado.
+	out = api.ConPlazo(out, shellEscritura)
 	var wmu sync.Mutex
 	escribir := func(t byte, p []byte) error {
 		wmu.Lock()
@@ -199,6 +208,7 @@ func runShell(env []string, req api.ShellRequest, in io.Reader, out io.Writer) {
 			n, err := master.Read(buf)
 			if n > 0 {
 				if werr := escribir(api.ShellData, buf[:n]); werr != nil {
+					master.Close()
 					return
 				}
 			}

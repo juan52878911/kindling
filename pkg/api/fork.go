@@ -29,6 +29,10 @@ const LabelForkOf = "kling.fork-of"
 type ForkRequest struct {
 	// Count: por defecto 1, como mucho ForkMax.
 	Count int `json:"count,omitempty"`
+	// Name da nombre a la copia; solo con Count 1. Vacío: el del original
+	// con un sufijo al azar. Un nombre ocupado es un 409 antes de pausar el
+	// original.
+	Name string `json:"name,omitempty"`
 	// TTLSeconds y OnTTL: por defecto, los del original. El reloj de cada copia
 	// empieza al crearla.
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`

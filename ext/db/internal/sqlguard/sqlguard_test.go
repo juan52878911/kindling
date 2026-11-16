@@ -21,6 +21,7 @@ func TestAceptaConsultas(t *testing.T) {
 		"SELECT start, \"end\", close FROM prices",
 		"SELECT * FROM t FOR SHAREd",
 		"SELECT current_setting('TimeZone')",
+		"SELECT 1_000, 0x1F, 0o17, 0b101, 1e10, 2.5E+3, 3., a[1:2] FROM t",
 	} {
 		if err := Validate(sql); err != nil {
 			t.Errorf("%q: %v", sql, err)
@@ -40,6 +41,10 @@ func TestRechazaBateriaAdversaria(t *testing.T) {
 		"DELETE FROM t",
 		"DROP TABLE t",
 		"TRUNCATE t",
+		"SELECT 1INTO t",
+		"SELECT 1.5INTO t",
+		"SELECT 1e5INTO t",
+		"SELECT 0x1FINTO t",
 		"ALTER ROLE app SUPERUSER",
 		"CREATE TABLE x (a int)",
 		"GRANT ALL ON t TO public",

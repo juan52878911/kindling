@@ -313,11 +313,7 @@ func (m *Manager) guardarSecretosGrafo(id string, secretos map[string]string) er
 	if err := os.MkdirAll(m.dirGrafos(), 0o700); err != nil {
 		return err
 	}
-	sellado, err := m.sellar(secretos, "graph:"+id)
-	if err != nil {
-		return err
-	}
-	return escribirSellado(m.rutaSecretosGrafo(id), sellado)
+	return m.guardarAlmacen(m.rutaSecretosGrafo(id), secretos, "graph:"+id)
 }
 
 // cargarSecretosGrafo descifra las claves del grafo id (nil sin fichero).
@@ -1000,7 +996,7 @@ func (m *Manager) entregarCredencialesExactas(ctx context.Context, id string, cr
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return err
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(cur.NetIndex, cur.ID), creds, m.credAuditPath(id), m.resolverCopia(id), cur.Egress); err != nil {
+	if err := registrarCredenciales(m.ctxCredenciales(ctx), c, knet.Plan(cur.NetIndex, cur.ID), creds, m.credAuditPath(id), m.resolverCopia(id), cur.Egress); err != nil {
 		return err
 	}
 	m.anotarCredenciales(id, creds)

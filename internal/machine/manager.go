@@ -222,6 +222,14 @@ type Manager struct {
 	// (K2): se pide en cada Commit y en cada runFrom, y el vmlinux no cambia
 	// entre un arranque del daemon y el siguiente. Ver kernelHash.
 	kernelSHA huellaKernel
+	// discosBase cachea, como kernelSHA, el digest de cada ext4 de imagen
+	// (ruta → huellaKernel) que los dorados llevan en image_digest y
+	// base_digest. Ver digestDiscoBase.
+	discosBase sync.Map
+	// vigiaOverlays despierta a vigilarOverlays cuando duerme sin máquinas
+	// en marcha: persist avisa en cada cambio. Ver canalVigiaOverlays.
+	vigiaOverlays     chan struct{}
+	vigiaOverlaysOnce sync.Once
 
 	// origen es con qué trabaja este daemon (versión de kling, VMM, macOS):
 	// se graba en cada dorado y se compara con el de los que ya hay. Lo fija
@@ -307,6 +315,11 @@ type Manager struct {
 	// direcciones buenas: las de después de arrancar tienen que coincidir
 	// (plataforma_vz.go, reservarReenvios).
 	reenviosPrevios sync.Map
+
+	// credsPrevias: en macOS, cómo fue la entrega de credenciales antes de
+	// que el invitado corriera, por id de máquina (entregaPrevia;
+	// plataforma_vz.go, credencialesAntesDeArrancar). La consume el thaw.
+	credsPrevias sync.Map
 
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
@@ -969,6 +982,11 @@ func (m *Manager) persist() uint64 {
 	case m.wake <- struct{}{}:
 	default:
 	}
+	// Y al vigilante de overlays, que duerme mientras no hay nada en marcha.
+	select {
+	case m.canalVigiaOverlays() <- struct{}{}:
+	default:
+	}
 	return gen
 }
 
@@ -1190,13 +1208,20 @@ const cierreOperacionesMax = 30 * time.Second
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
-		// Primero, que no empiece nada nuevo en segundo plano, y que los
-		// vigilantes acaben lo que tengan entre manos (con plazo, como las
-		// operaciones de abajo): antes seguían solos, y uno que terminaba
-		// tarde reescribía state.json después de Close (trasCierre).
-		m.cerrando.Store(true)
-		// Un solo plazo para las dos esperas: el apagado no tarda más que antes.
+		// Un solo plazo para todas las esperas: el apagado no tarda más que antes.
 		fin := time.Now().Add(cierreOperacionesMax)
+		// Antes de marcar el cierre, la preparación de un snapshot por imagen
+		// en curso: se cancela y se espera a que borre su máquina, que con el
+		// cierre marcado ya no podría (Remove lo rechaza). Sin esto su VMM
+		// sobrevivía al daemon como una máquina que no es de nadie.
+		if !m.pararPrepImagen(cierrePrepImagenMax) {
+			log.Printf("shutdown: the image snapshot preparation did not stop in %s; its %s* machine is removed when the daemon starts again", cierrePrepImagenMax, prefijoPrepImagen)
+		}
+		// Que no empiece nada nuevo en segundo plano, y que los vigilantes
+		// acaben lo que tengan entre manos (con plazo, como las operaciones de
+		// abajo): antes seguían solos, y uno que terminaba tarde reescribía
+		// state.json después de Close (trasCierre).
+		m.cerrando.Store(true)
 		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
@@ -1214,7 +1239,32 @@ func (m *Manager) Close() {
 		close(m.quit)
 		m.cerrarBroker()
 		m.persistWG.Wait()
+		m.avisarVMMQueSiguen()
 	})
+}
+
+// cierrePrepImagenMax es cuánto espera Close a la preparación de un snapshot
+// por imagen: cancelada, solo le queda parar y borrar su máquina.
+const cierrePrepImagenMax = 10 * time.Second
+
+// avisarVMMQueSiguen dice al cerrar cuántas máquinas siguen con su VMM vivo.
+// Es a propósito (el daemon siguiente con esta misma raíz las readopta, ver
+// internal/upgrade), pero nadie más las recoge: ni caducan (el TTL lo aplica
+// el daemon) ni las ve otro daemon con otra raíz. Un daemon privado o de
+// pruebas que se para para no volver tiene que pararlas antes (kling stop o
+// kling rm); este aviso es lo que le queda en el registro si no lo hizo.
+func (m *Manager) avisarVMMQueSiguen() {
+	m.mu.RLock()
+	n := 0
+	for _, mc := range m.byID {
+		if mc.PID > 0 && (mc.State == api.StateRunning || mc.State == api.StatePaused || mc.State == api.StateCreated) {
+			n++
+		}
+	}
+	m.mu.RUnlock()
+	if n > 0 {
+		log.Printf("shutdown: %d machine(s) keep their VMM running; the next daemon on %s readopts them. If no daemon will come back on this root, stop them first (kling stop or kling rm)", n, m.root)
+	}
 }
 
 // ── consultas ─────────────────────────────────────────────────────────────────
@@ -1284,6 +1334,10 @@ func (m *Manager) touchDisk(id string) int64 {
 // mayoría— era E/S sin ningún dato nuevo. Las que no corren se miden una vez
 // por cambio de estado (discoMedido), que es cuando su disco cambia: al
 // congelarse aparece el mem.file, al pararse deja de crecer.
+// trasMedirDiscos, si no es nil, corre en refreshDiskUsage entre medir (sin
+// cerrojo) y anotar. Solo para los tests.
+var trasMedirDiscos func()
+
 func (m *Manager) refreshDiskUsage() {
 	type medir struct {
 		id     string
@@ -1305,6 +1359,9 @@ func (m *Manager) refreshDiskUsage() {
 	sizes := make([]int64, len(cuales))
 	for i, c := range cuales {
 		sizes[i] = diskUsage(m.dir(c.id))
+	}
+	if trasMedirDiscos != nil {
+		trasMedirDiscos()
 	}
 
 	m.mu.Lock()
@@ -1873,6 +1930,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		EnvKeys:   api.MachineEnvKeys(env),
 		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
 		NetMiBps:  req.NetMiBps,
+		// El tope del overlay, con el disco recién hecho y antes de que lo
+		// toque ningún VMM (cow_vigilante.go).
+		OverlayMaxBytes: topeOverlayAlCrear(overlay, req.DiskMiB),
 	}
 	if comando != nil {
 		mc.Entrypoint, mc.Cmd = comando.Entrypoint, comando.Cmd
@@ -2327,6 +2387,8 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := m.redAntesDeArrancar(ctx, c, id); err != nil {
 		return pid, err
 	}
+	// Cómo fue su entrega de credenciales solo lo usa el thaw.
+	m.credsPrevias.Delete(id)
 	// Y las carpetas vivas por virtio-fs, si el VMM lo tiene (kling-hv).
 	m.carpetasAntesDeArrancar(ctx, c, id)
 	if err := c.Start(ctx); err != nil {
@@ -2845,7 +2907,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if allocatedBytes(memPath) > cacheTibiaMaxBytes {
 		dropCache(memPath)
 	} else {
-		precargar(memPath)
+		precargar(context.Background(), memPath)
 	}
 
 	size := allocatedBytes(memPath) + allocatedBytes(snapPath)
@@ -3650,9 +3712,16 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		memPath = full
 		crono.marcaMemoria(tm)
 	}
+	// La precarga de abajo, que se corta si el thaw falla (soltarFull y
+	// abortar): leer un volcado que ya nadie va a cargar solo quita disco al
+	// resto. Sin el ctx de la petición: tras un thaw que sale bien, la
+	// precarga sigue mientras el invitado despierta, aunque quien lo pidió ya
+	// tenga su respuesta.
+	ctxPrecarga, cortarPrecarga := context.WithCancel(context.WithoutCancel(ctx))
 	// El mem.full de este despertar, si algo falla antes de abortar (que lo
 	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.
 	soltarFull := func() {
+		cortarPrecarga()
 		if base != "" {
 			_ = os.Remove(filepath.Join(dir, memFull))
 			m.borrarMemoriaAlmacen(mc.ID)
@@ -3661,9 +3730,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
 	// invitado no toca todo al despertar, y leerla entera competiría con el
-	// resto del host por el disco.
+	// resto del host por el disco. Y solo si hay turno (precargasMax).
 	if allocatedBytes(memPath) <= precargaMaxBytes {
-		go precargar(memPath)
+		precargarEnFondo(ctxPrecarga, memPath)
 	}
 
 	// Puerta de arranque: descongelar es cargar un snapshot en KVM —mapear su
@@ -3738,6 +3807,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// enrutaba a una microVM vacía que no contesta nunca, y sweep() no lo
 	// detectaba porque el proceso existe de verdad.
 	abortar := func(err error) (*api.Machine, error) {
+		cortarPrecarga()
 		if pid > 0 {
 			// Esperando a que muera, como start.devolver (M3): sin esperar, un
 			// reintento inmediato veía el VMM moribundo en liveVMs, lo
@@ -3799,6 +3869,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return abortar(err)
 		}
 		crono.marca(&crono.p.SpawnMS)
+		// macOS: su proxy de credenciales, si tiene, a la vez que el VMM
+		// arranca (credproxy_vz.go). En Linux no hace nada.
+		m.precalentarCredproxy(mc.ID, pid)
 		c = fc.New(sock)
 		if err := m.waitSocket(ctx, c, mc.ID, pid); err != nil {
 			return abortar(err)
@@ -3811,6 +3884,15 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return abortar(err)
 	}
 	crono.marca(&crono.p.NetMS)
+	// Lo que de eso fue entregar las credenciales (macOS), en su fase. Si fue
+	// bien, después de cargar solo faltan sus marcadores en MMDS.
+	credsPrevia := false
+	if v, ok := m.credsPrevias.LoadAndDelete(mc.ID); ok {
+		e := v.(entregaPrevia)
+		credsPrevia = e.ok
+		crono.p.CredsMS += e.ms
+		crono.p.NetMS = max(crono.p.NetMS-e.ms, 0)
+	}
 	// El volcado deja de valer ANTES de cargarlo: en cuanto el invitado
 	// reanude, escribe en su disco. Antes se retiraba después y un fallo solo
 	// se avisaba: con el disco lleno el sello se borraba sin dejar la marca, y
@@ -3860,10 +3942,18 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// restaurar (POST /hooks), se lanza después, con las dos terminadas. Y la
 	// máquina no se da por running hasta que acaban las dos. Escribe en mc
 	// (CredentialAnyDatabase), que nadie más toca hasta esperarla.
+	//
+	// En macOS, si la entrega de antes de cargar fue bien, el VMM y su proxy
+	// ya tienen todo: solo faltan los marcadores (antes se repetía la entrega
+	// entera, DNS de los -upstream incluido).
 	credsHechas := make(chan struct{})
 	go func() {
 		defer close(credsHechas)
-		if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
+		entregar := m.reentregarCredenciales
+		if credsPrevia {
+			entregar = m.marcadoresCredenciales
+		}
+		if _, err := entregar(ctx, mc, c); err != nil {
 			log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
 		}
 	}()

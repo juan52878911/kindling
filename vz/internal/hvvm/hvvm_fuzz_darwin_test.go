@@ -275,23 +275,33 @@ func TestEsperarHastaCumplePlazo(t *testing.T) {
 	}
 }
 
-// Si hv_gic_set_spi no sube la línea, vmmio_irq no puede apuntarla como
-// alta: ningún aviso posterior la volvería a subir.
-func TestIrqNivelSoloSiElGICLoCambia(t *testing.T) {
-	if n := irqNivelSinGIC(); n != 0 {
-		t.Fatalf("hv_gic_set_spi failed (no VM) and the device still records the line as %d", n)
+// Si hv_gic_set_spi no sube la línea, no puede perderse: queda pendiente de
+// reintento (khv_spi) y no a la espera de otro aviso del dispositivo.
+func TestIrqPendienteSiElGICNoLaCambia(t *testing.T) {
+	if n := irqPendienteSinGIC(); n != 1 {
+		t.Fatal("hv_gic_set_spi failed (no VM) and the line was not left pending to raise")
 	}
 }
 
-// La UART tampoco puede dar por subida una línea que el GIC no subió, y cada
-// fallo del GIC queda contado (khv_spi), también al reafirmar tras restaurar.
-func TestUartNivelSoloSiElGICLoCambia(t *testing.T) {
+// Lo mismo con la UART, y cada fallo del GIC queda contado (khv_spi),
+// también al reafirmar tras restaurar.
+func TestUartPendienteSiElGICNoLaCambia(t *testing.T) {
 	antes := IRQFailures()
-	if n := uartNivelSinGIC(); n != 0 {
-		t.Fatalf("hv_gic_set_spi failed (no VM) and the UART still records the line as %d", n)
+	if n := uartPendienteSinGIC(); n != 1 {
+		t.Fatalf("hv_gic_set_spi failed (no VM): %d lines pending, want the UART's", n)
 	}
 	if IRQFailures() == antes {
 		t.Fatal("a failed hv_gic_set_spi from the UART was not counted")
+	}
+}
+
+// Un 8250 que espera su THRI no vuelve a tocar la UART hasta que llega: si
+// el GIC rechazó la línea, la sube el reintento de khv_spi (en la siguiente
+// salida de un vCPU), no un acceso que no va a venir. Y un nivel nuevo manda
+// sobre el pendiente.
+func TestSPIRechazadaSeReintentaSola(t *testing.T) {
+	if r := spiReintento(); r != 0 {
+		t.Fatalf("khv_prueba_spi_reintento failed check %d", r)
 	}
 }
 

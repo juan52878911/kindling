@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,26 +43,43 @@ func libDirDe(goos, root string) string {
 	return libDir()
 }
 
-// resolveFromHost convierte un from_host relativo en una ruta dentro de lib,
-// sin dejar que salga de él.
-func resolveFromHost(lib, rel string) (string, error) {
+// copiarDeLib deja en un temporal de dir una copia del from_host rel de lib y
+// devuelve su ruta y con qué borrarla. Se abre UNA vez, por os.Root (un
+// enlace simbólico de lib puede apuntar dentro de él, pero no llevar a un
+// fichero cualquiera del host, que acabaría copiado en la imagen), y lo que se
+// valida y se copia es ese mismo descriptor. Validar por ruta y luego abrirla
+// otra vez dejaba que el fichero cambiase entre las dos cosas.
+func copiarDeLib(lib, rel, dir string) (string, func(), error) {
 	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "..") || strings.ContainsRune(rel, 0) {
-		return "", fmt.Errorf("from_host must be a path relative to %s: %q", lib, rel)
+		return "", nil, fmt.Errorf("from_host must be a path relative to %s: %q", lib, rel)
 	}
-	p := filepath.Join(lib, filepath.Clean(rel))
-	// Por os.Root: un enlace simbólico de lib puede apuntar dentro de él,
-	// pero no llevar a un fichero cualquiera del host (que acabaría copiado
-	// en la imagen).
 	root, err := os.OpenRoot(lib)
 	if err != nil {
-		return "", fmt.Errorf("from_host: %w", err)
+		return "", nil, fmt.Errorf("from_host: %w", err)
 	}
 	defer root.Close()
-	st, err := root.Stat(filepath.Clean(rel))
-	if err != nil || !st.Mode().IsRegular() {
-		return "", fmt.Errorf("from_host %q is not a file in %s", rel, lib)
+	src, err := root.Open(filepath.Clean(rel))
+	if err != nil {
+		return "", nil, fmt.Errorf("from_host %q is not a file in %s", rel, lib)
 	}
-	return p, nil
+	defer src.Close()
+	if st, err := src.Stat(); err != nil || !st.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("from_host %q is not a file in %s", rel, lib)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, err
+	}
+	dst, err := os.CreateTemp(dir, "imagefile-")
+	if err != nil {
+		return "", nil, err
+	}
+	borrar := func() { os.Remove(dst.Name()) }
+	_, cerr := io.Copy(dst, src)
+	if err := errors.Join(cerr, dst.Close()); err != nil {
+		borrar()
+		return "", nil, fmt.Errorf("from_host %q: %w", rel, err)
+	}
+	return dst.Name(), borrar, nil
 }
 
 func parseMode(s string) (os.FileMode, error) {
@@ -171,11 +189,11 @@ func (s *Server) imageFileSource(req api.PutImageFileRequest) (string, func(), i
 	case req.FromHost != "" && req.ContentB64 != "":
 		return "", nada, http.StatusBadRequest, fmt.Errorf("use from_host or content_b64, not both")
 	case req.FromHost != "":
-		p, err := resolveFromHost(libDirDe(runtime.GOOS, s.root), req.FromHost)
+		p, borrar, err := copiarDeLib(libDirDe(runtime.GOOS, s.root), req.FromHost, filepath.Join(s.root, "build"))
 		if err != nil {
 			return "", nada, http.StatusBadRequest, err
 		}
-		return p, nada, 0, nil
+		return p, borrar, 0, nil
 	case req.ContentB64 != "":
 		b, err := base64.StdEncoding.DecodeString(req.ContentB64)
 		if err != nil {

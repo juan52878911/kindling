@@ -971,6 +971,20 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		fault(w, fmt.Errorf("saving the machine state: %w", err))
 		return
 	}
+	// Desde aquí el fichero de memoria existe: si algo de lo que sigue falla,
+	// no se queda sin su snapshot (el núcleo lo tomaría por un volcado a
+	// medias, y lleva la RAM entera del invitado). El temporal de un destino
+	// de fuera ya lo quita el defer de arriba; el publicado, este.
+	hecho, memPublicado := false, false
+	defer func() {
+		switch {
+		case hecho:
+		case pubMem == nil:
+			_ = os.Remove(memW)
+		case memPublicado:
+			_ = os.Remove(c.MemFilePath)
+		}
+	}()
 	// Lo que se sabe del agente viaja con el snapshot: si solo contesta por
 	// TCP, quien lo restaure no paga en cada despertar un connect de vsock
 	// fallido (vnet.Net.dialGuest).
@@ -991,7 +1005,7 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if fi, err := os.Stat(memW); err == nil {
 		size = fi.Size()
 	}
-	for _, pub := range []func() error{pubMem, pubSnap} {
+	for i, pub := range []func() error{pubMem, pubSnap} {
 		if pub == nil {
 			continue
 		}
@@ -999,7 +1013,9 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 			fault(w, fmt.Errorf("placing the snapshot: %w", err))
 			return
 		}
+		memPublicado = memPublicado || i == 0
 	}
+	hecho = true
 	s.d.Logf("snapshot created in %d ms (state %.1f MiB)", time.Since(t0).Milliseconds(), float64(size)/(1<<20))
 	noContent(w)
 }

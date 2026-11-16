@@ -71,6 +71,7 @@ static uint64_t paginas_sueltas;             // páginas del host soltadas ahora
 // informe de libres, tramos soltados y lo que costaron.
 static uint64_t c_informadas, c_tramos, c_ns, c_fallos;
 static uint64_t informe_fichas, informe_t;  // la cuota (informe_cobrar)
+static uint64_t informe_cuota = INFORME_CUOTA;  // por segundo; las pruebas la bajan
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 // Últimas estadísticas del invitado (VIRTIO_BALLOON_S_*, en bytes) y cuántas
 // veces han llegado: 0 = el driver no negoció la cola o aún no las dio.
@@ -121,8 +122,18 @@ static int soltar_tramo(uint64_t desde, uint64_t hasta) {
 // tramo y no en muchos. Si ram_soltar falla, las del tramo se quedan en el
 // globo sin soltar (sucias): no se reintenta en cada tanda. Con mu.
 static bool log_globo;  // KLING_HV_BALLOON_LOG=1: una línea por tanda (para medir)
+static bool informe_cobrar(uint64_t pags);
 
-static void vaciar_locked(void) {
+// Con cuota (lo que dispara el invitado al inflar), cada tramo se cobra de la
+// misma cuota que el informe de páginas libres y lo que no cabe se queda
+// pendiente: un invitado que infla páginas sueltas pedía hasta ~65 000
+// tramos (un hv_vm_unmap, un mmap y un hv_vm_map cada uno) en un notify,
+// bajo mu y en el hilo del vCPU, y hacía vencer la pausa. Lo pendiente lo
+// sueltan las llamadas del núcleo (estadísticas, objetivo, vaciar), sin cuota.
+static void vaciar_cuota(bool cuota);
+static void vaciar_locked(void) { vaciar_cuota(false); }
+
+static void vaciar_cuota(bool cuota) {
   if (!n_pend || !g_ram) return;
   uint64_t t0 = mach_absolute_time(), tramos0 = c_tramos, n0 = n_pend;
   uint64_t p = pend_min;
@@ -133,6 +144,12 @@ static void vaciar_locked(void) {
     }
     uint64_t a = p, b = p;  // [a, b): el tramo; se extiende por pend o suelta
     while (b < npaginas && (pend[b] || suelta[b])) b++;
+    if (cuota && !informe_cobrar(b - a)) {
+      pend_min = a;  // lo de [a, pend_max] sigue pendiente
+      if (log_globo)
+        khv_log("balloon: inflate over the quota, %llu pages left pending", (unsigned long long)n_pend);
+      return;
+    }
     bool ok = soltar_tramo(a, b) == 0;
     for (uint64_t q = a; q < b; q++) {
       if (!pend[q]) continue;
@@ -207,11 +224,20 @@ static void cola(int qi, bool inflar) {
   }
   // Inflando, se suelta al llegar al objetivo o al juntar UMBRAL_PEND; al
   // desinflar, lo que quede pendiente (el núcleo mide justo después).
-  if (n_pend && (!inflar || n_pend >= UMBRAL_PEND || n_inflados >= s.num_pages)) vaciar_locked();
+  if (n_pend && (!inflar || n_pend >= UMBRAL_PEND || n_inflados >= s.num_pages)) vaciar_cuota(inflar);
   if (hecho) {
     s.m.isr |= 1;
     irq();
   }
+}
+
+// khv_prueba_globo_cuota_poner fija la cuota por segundo y la repone
+// (pruebas); 0 vuelve a la de siempre.
+void khv_prueba_globo_cuota_poner(uint64_t pags) {
+  pthread_mutex_lock(&mu);
+  informe_cuota = pags ? pags : INFORME_CUOTA;
+  informe_t = 0;
+  pthread_mutex_unlock(&mu);
 }
 
 // informe_cobrar descuenta de la cuota del informe un tramo de pags páginas
@@ -220,11 +246,11 @@ static void cola(int qi, bool inflar) {
 static bool informe_cobrar(uint64_t pags) {
   uint64_t ahora = mach_absolute_time();
   if (informe_t == 0) {
-    informe_fichas = INFORME_CUOTA;
+    informe_fichas = informe_cuota;
   } else {
     uint64_t ns = abs_ns(ahora - informe_t);
-    informe_fichas = ns >= 1000000000ULL ? INFORME_CUOTA : informe_fichas + ns * INFORME_CUOTA / 1000000000ULL;
-    if (informe_fichas > INFORME_CUOTA) informe_fichas = INFORME_CUOTA;
+    informe_fichas = ns >= 1000000000ULL ? informe_cuota : informe_fichas + ns * informe_cuota / 1000000000ULL;
+    if (informe_fichas > informe_cuota) informe_fichas = informe_cuota;
   }
   informe_t = ahora;
   if (pags < INFORME_MIN_TRAMO) pags = INFORME_MIN_TRAMO;

@@ -180,6 +180,7 @@ var coreTree = []section{
   sandbox fork <sb> [-n N] [-ttl 10m]              branches a live one into N copies
       [-on-ttl remove|freeze] [-q] [-json]         (memory, processes and disk as of now;
       [-label k=v]... [-skip-ready]                -skip-ready: don't wait for them)
+      [-name N]                                    -name: the copy's name (only -n 1)
   sandbox rm [-f] <sb>...                          destroys them
 `},
 	}},

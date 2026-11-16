@@ -8,11 +8,30 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
 ### Fixed
 
+- Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
+- Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
+- kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.
+- kling-hv: the frozen RAM file is cloned in a private directory and moved into place already 0600, so it is never readable with the golden image's mode.
+- kling-hv: a snapshot that fails after writing the memory file no longer leaves that file behind.
+- kling-hv: an interrupt line the GIC rejects is retried on the next vCPU exit, instead of waiting for another access from a device the guest is no longer touching.
+- kling-hv: the vsock thread no longer spins at 100% when the host has data and the guest has no receive buffers.
+- kling-hv: a vsock connection the host closed while the guest gave it no credit gives up its slot, so 64 of them no longer leave the VM without exec.
+- kling-hv: a FLUSH to a read-only disk no longer issues `F_FULLFSYNC`.
+- kling-hv: releasing balloon pages the guest inflates is rate-limited like the free page report, so one notify can no longer hold the balloon lock long enough to make a pause time out.
+- Thaw: at most 4 memory preloads run at once, and a failed thaw stops its preload; in a storm of 16 thaws, preloads now read 256 MiB from disk instead of 1.4 GiB.
+- Daemon restart: re-adopting a paused VMM resumes it and checks its dump seal without holding the manager lock.
+- Daemon restart: a machine re-adopted in the middle of a thaw now gets the clock and entropy resync the thaw never sent.
+- Linux: thawing a warm machine no longer scans all of `/proc`; it checks the known PID and the VMM socket first (0.64 ms to 0.02 ms per thaw with ~110 processes).
+- `run -from` and fork: a copy whose guest agent fails the resync is retried once and then not handed over, instead of running with the snapshot's clock and random state.
+- The memory of snapshots known to have no guest agent drops expired entries instead of growing with every fork.
+- An extension that prints its manifest and exits 0 is no longer rejected (`WaitDelay expired`) because another process still held its output open, such as a child kling was starting at the same moment.
+- `kling db branch` names a branch copy forked from its parent like one started from the golden (`db-<repo>-<branch>`), so two runs at once can't leave two copies; with an older kling it falls back to the daemon's name.
 - Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
@@ -44,6 +63,20 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `install.sh --skip-kling`: a prerelease kling (1.0.0-rc.2) no longer meets an extension's `min_kling` 1.0.0.
 - On Linux, a failed probe of the e2fsprogs jail is retried after a minute instead of leaving e2fsck without a chroot until the daemon restarts.
 - The example operator Deployment runs as non-root with a read-only root filesystem, no capabilities and no privilege escalation, and its image's base images are pinned by digest.
+- A template is verified again on its next restore if one of its files changed while its integrity was being checked.
+- The signature migration at daemon start retries on the next start when a template's meta.json could not be read, instead of marking the host as migrated.
+- `kling volume rm` refuses (409) a volume that a stopped machine still has attached.
+- The overlay watcher no longer wakes every second when no machine is running.
+- rw shares: saving a file atomically (write a temporary file, rename it over the old one) gives the replaced file's bytes back to the quota, so editors, `git` and `npm` no longer end up in a false `ENOSPC`.
+- rw shares: creating a file that already exists without `O_EXCL` no longer changes its mode and owner.
+- Linux: each machine keeps at most 4096 open connections, so one guest can no longer fill the host's conntrack table; the daemon warns when `nf_conntrack_max` is too low for a few machines at that limit.
+- Linux: listing the host's addresses (three times per create, once under the network lock) takes one netlink dump instead of one per interface: 155 ms to 6.7 ms with 500 interfaces.
+- macOS: thawing a machine with credentials launches `kling-credproxy` while the VMM starts and no longer repeats the whole hand-over after loading; on an M4 the daemon's thaw goes from 47–49 to 41 ms (median), and its credential part has its own `creds` wake phase.
+- macOS: a thaw whose credentials can't be handed over before loading (an `-upstream` name that does not resolve, a missing `kling-credproxy`) no longer fails; the machine wakes up without them and the credential domains fail closed, as when the later hand-over fails.
+- Daemon shutdown cancels an image snapshot preparation and waits for it to remove its `kling-imgprep-*` machine, which used to survive with its VMM; it also logs how many machines keep their VMM running.
+- macOS: `credproxy.log` is rotated like the console log.
+- macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
+- Removing a template forgets its integrity verdict.
 
 ### Security
 
@@ -56,6 +89,39 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+- macOS: connections to MMDS and to the credential proxy on the gateway count toward the guest's 512 TCP flows; past that they get a RST instead of holding VMM memory without a limit.
+- macOS: DNS queries forwarded upstream carry a random transaction ID instead of the guest's, as on Linux.
+- Rotating or removing a credential also rewrites the credential store's `.vN.bak` copies, so `kling upgrade -rollback` no longer brings back the old one.
+- An interactive shell whose client stops reading is cut after 2 minutes, in the daemon and in the guest agent, instead of holding one of the guest's 8 shell slots.
+- `kling-phone view -open` hands the browser a private redirect file instead of putting the wall's secret URL in the opener's argv.
+- With an authz policy, publishing ports (`publish` on a new machine and `POST /machines/{ref}/publish`) is admin-only.
+- An image builder that leaves a background process holding its output, or hits the 15-minute limit, no longer holds the build locks until the daemon restarts: its whole process group is killed, and only the last MiB of its output is kept.
+- `GET /events` is capped at 256 streams (16 per tenant, 429 beyond) and cuts a client that stops reading after a minute.
+- With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
+- `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
+- macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
+
+### Changed
+
+- kling-hv: `KLING_HV_AVISOS=1` also logs vCPU exits, timer exits and trapped WFIs (measured on an M4: none trapped while idle, so the 2 ms WFI fallback never runs).
+- Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
+- A machine's overlay size cap is set when its disk is created, and a machine from an older daemon gets it from its disk size or its template instead of from what its overlay measures at the watcher's first look.
+- Image file uploads from the daemon's lib directory (`from_host`) copy the file opened once and checked, instead of checking a path and reopening it.
+- Live shares: the directory listings kept to report host changes are capped per session and shared between names of the same directory, so a guest can no longer grow the daemon's heap through a rw share.
+- Machines that mount the same host folder rw (graph `share` edges, or two `-share` of one directory) now spend one quota instead of one each.
+- The Firecracker balloon statistics are read with a 64 KiB limit.
+- Linux: only root, the daemon and whoever can use its socket can open connections from the host to a machine's guest agent (port 8080) or to the host side of its link; other local users get a refusal, and the agent is closed to forwarded traffic from outside the host.
+- Sandbox gateway: a sandbox can't ask for more `mem_mib` or `vcpus` than its tenant's limit (`KLING_SANDBOX_TENANTS` fields 5 and 6; otherwise `-max-mem-mib` 4096 and `-max-vcpus` 4).
+- `kling sbx` and kindling-operator no longer send their Bearer token along a redirect to another origin.
+- Sandbox gateway: concurrent creations can no longer exceed a tenant's `max_sandboxes` when one finishes while another is counting.
+- kindling-operator: a create whose answer is lost no longer leaves a second sandbox; each one carries the object's UID (`k8s-uid`) and is adopted, and deleting an object whose status was never written removes its sandbox.
+- kindling-operator: the projected ServiceAccount token is re-read every minute and after a 401, so a rotated token no longer means 401s until the pod restarts.
+- `kling db ask`: a number glued to a keyword (`1INTO`) is rejected instead of hiding the keyword from the filter.
+- MCP gateway: `/mcp/<service>` (and the multi-host router's `/mcp/_all`) only opens a session on `initialize`, and a tenant can hold at most 256 open sessions (429 beyond that).
+- MCP gateway with `-no-auth`: requests whose `Host` or `Origin` is not loopback get a 403, so a web page can't reach it through DNS rebinding or a cross-origin POST.
+- MCP gateway: the guest's answer to the DELETE of an isolated session is capped at 64 KiB and 30 s.
+- MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
+- rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

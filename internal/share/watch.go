@@ -47,6 +47,12 @@ var (
 	// maxDirSnapshot: un directorio con más entradas no se compara entrada a
 	// entrada (se avisa del directorio, no de cada hijo).
 	maxDirSnapshot = 20000
+	// maxSnapBytes acota lo que ocupan, sumadas, las fotos de directorio de
+	// una sesión (estimado con snapCost: unos 270 000 nombres cortos). Sin él,
+	// 4 096 rutas vigiladas de 20 000 entradas cada una eran gigas de heap del
+	// daemon. Pasado el tope un directorio se vigila sin foto: de sus cambios
+	// se avisa del directorio entero, no de cada hijo.
+	maxSnapBytes int64 = 16 << 20
 	// watchDebounce agrupa ráfagas (un editor que guarda escribe varias veces).
 	watchDebounce = 15 * time.Millisecond
 	// guestEcho: cuánto tiempo se considera eco un cambio en una ruta que tocó
@@ -110,8 +116,26 @@ type watchEntry struct {
 	rel  string
 	dir  bool
 	snap map[string]bool // dir: sus nombres; nil si no se tomó
-	fp   fingerprint     // fichero: su huella al vigilarlo o al último aviso
-	el   *list.Element
+	// cost es lo que snap cuenta en watcher.snapBytes; id, el directorio real
+	// de la foto (si snap no es nil y se supo).
+	cost  int64
+	id    Ident
+	hayID bool
+	fp    fingerprint // fichero: su huella al vigilarlo o al último aviso
+	el    *list.Element
+}
+
+// snapEntryCost es lo que se estima que ocupa en el heap cada nombre de una
+// foto además de sus bytes (cabecera de la cadena, hueco del mapa).
+const snapEntryCost = 48
+
+// snapCost estima lo que ocupa la foto m.
+func snapCost(m map[string]bool) int64 {
+	c := int64(0)
+	for n := range m {
+		c += int64(len(n)) + snapEntryCost
+	}
+	return c
 }
 
 // watcher es el de UNA sesión: muere con ella.
@@ -124,7 +148,13 @@ type watcher struct {
 	closed  bool
 	entries map[string]*watchEntry
 	lru     *list.List // *watchEntry; el más reciente delante
-	echo    map[string]time.Time
+	// snapBytes es lo que ocupan las fotos (snapCost), con tope maxSnapBytes;
+	// snapOf, qué entrada tiene la foto de cada directorio real: varios
+	// nombres del mismo directorio (enlaces dentro de la carpeta) comparten
+	// una sola foto, la del primero.
+	snapBytes int64
+	snapOf    map[Ident]*watchEntry
+	echo      map[string]time.Time
 	// echoSweep: última purga de echo por edad hecha desde touched.
 	echoSweep time.Time
 	pend      map[string]rawEvent
@@ -164,7 +194,8 @@ func (w *watcher) close() {
 		w.timer.Stop()
 	}
 	w.be.close()
-	w.entries, w.pend = nil, nil
+	w.entries, w.pend, w.snapOf = nil, nil, nil
+	w.snapBytes = 0
 }
 
 // note registra rel como vista por el invitado (y, si es nueva, la vigila).
@@ -195,16 +226,76 @@ func (w *watcher) note(rel string, dir bool) {
 		return
 	}
 	e := &watchEntry{rel: rel, dir: dir}
-	if dir {
-		e.snap = w.snapshot(rel)
-	} else {
+	if !dir {
 		e.fp = w.fingerprint(rel)
 	}
 	e.el = w.lru.PushFront(e)
 	w.entries[rel] = e
+	if !dir {
+		return
+	}
+	// La foto se lee sin el cerrojo (son hasta 20 000 nombres de disco): los
+	// eventos de la sesión no esperan a la lectura. Ya se vigila, así que lo
+	// que cambie mientras tanto llega como evento; si flush lo procesa antes
+	// de que esté la foto, avisa del directorio entero y la toma él.
+	w.mu.Unlock()
+	snap, id, ok := w.snapshot(rel, func(id Ident) bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.otraFotoLocked(e, id)
+	})
+	w.mu.Lock()
+	if !w.closed && w.entries[rel] == e && e.snap == nil {
+		w.setSnapLocked(e, snap, id, ok)
+	}
+}
+
+// setSnapLocked pone snap como foto de e, si cabe en el presupuesto de la
+// sesión y ninguna otra entrada tiene ya la de ese directorio; si no, e se
+// queda sin foto.
+func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, hayID bool) {
+	w.clearSnapLocked(e)
+	if snap == nil {
+		return
+	}
+	if hayID && w.otraFotoLocked(e, id) {
+		return
+	}
+	c := snapCost(snap)
+	if w.snapBytes+c > maxSnapBytes {
+		return
+	}
+	e.snap, e.cost, e.id, e.hayID = snap, c, id, hayID
+	w.snapBytes += c
+	if hayID {
+		if w.snapOf == nil {
+			w.snapOf = map[Ident]*watchEntry{}
+		}
+		w.snapOf[id] = e
+	}
+}
+
+// otraFotoLocked dice si otra entrada que no es e ya tiene la foto del
+// directorio id.
+func (w *watcher) otraFotoLocked(e *watchEntry, id Ident) bool {
+	o := w.snapOf[id]
+	return o != nil && o != e
+}
+
+// clearSnapLocked suelta la foto de e y devuelve su sitio al presupuesto.
+func (w *watcher) clearSnapLocked(e *watchEntry) {
+	if e.snap == nil {
+		return
+	}
+	w.snapBytes -= e.cost
+	if e.hayID && w.snapOf[e.id] == e {
+		delete(w.snapOf, e.id)
+	}
+	e.snap, e.cost, e.hayID = nil, 0, false
 }
 
 func (w *watcher) dropLocked(e *watchEntry) {
+	w.clearSnapLocked(e)
 	w.be.remove(e.rel)
 	w.lru.Remove(e.el)
 	delete(w.entries, e.rel)
@@ -255,22 +346,35 @@ func (w *watcher) fingerprint(rel string) fingerprint {
 	return fingerprintOf(fi)
 }
 
-// snapshot lee los nombres de un directorio (nil si no se puede o es enorme).
-func (w *watcher) snapshot(rel string) map[string]bool {
+// snapshot lee los nombres de un directorio (nil si no se puede o es enorme)
+// y dice cuál es el directorio real que leyó (rel puede pasar por enlaces). Si
+// skip dice que ese directorio ya tiene foto, no lee los nombres.
+func (w *watcher) snapshot(rel string, skip func(Ident) bool) (map[string]bool, Ident, bool) {
 	f, err := w.srv.root.Open(relPath(rel))
 	if err != nil {
-		return nil
+		return nil, Ident{}, false
 	}
 	defer f.Close()
+	var id Ident
+	ok := false
+	if fi, err := f.Stat(); err == nil {
+		if !fi.IsDir() {
+			return nil, Ident{}, false
+		}
+		id, ok = IdentOf(fi)
+		if ok && skip(id) {
+			return nil, Ident{}, false
+		}
+	}
 	names, err := f.Readdirnames(maxDirSnapshot + 1)
 	if (err != nil && !errors.Is(err, io.EOF)) || len(names) > maxDirSnapshot {
-		return nil
+		return nil, Ident{}, false
 	}
 	m := make(map[string]bool, len(names))
 	for _, n := range names {
 		m[n] = true
 	}
-	return m
+	return m, id, ok
 }
 
 // event lo llama el backend: se acumula y se procesa tras watchDebounce.
@@ -354,9 +458,15 @@ func (w *watcher) flush() {
 				add(proto.EventDelete, ev.rel)
 			}
 		case e.dir:
-			now := w.snapshot(ev.rel)
+			now, id, hayID := w.snapshot(ev.rel, func(id Ident) bool { return w.otraFotoLocked(e, id) })
 			if e.snap == nil || now == nil {
-				e.snap = now
+				// Sin foto con la que comparar (directorio enorme, presupuesto
+				// gastado, otro nombre del mismo directorio ya la tiene): se
+				// avisa del directorio, y el invitado relee su lista.
+				w.setSnapLocked(e, now, id, hayID)
+				if ev.rel != "" {
+					add(proto.EventModify, ev.rel)
+				}
 				continue
 			}
 			for n := range now {
@@ -373,7 +483,7 @@ func (w *watcher) flush() {
 					}
 				}
 			}
-			e.snap = now
+			w.setSnapLocked(e, now, id, hayID)
 		default:
 			e.fp = w.fingerprint(ev.rel)
 			add(proto.EventModify, ev.rel)

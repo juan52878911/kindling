@@ -584,12 +584,61 @@ type shareSup struct {
 	held map[string]bool
 	// drained: el daemon se apaga (drainShares) y no se lanza ninguna más.
 	drained bool
+	// cuotas son las cuotas de las carpetas rw vivas, por carpeta del host:
+	// las máquinas que montan rw la misma (los nodos de una arista share de un
+	// grafo, o dos -share del mismo directorio) gastan de una sola, no de una
+	// cada una.
+	cuotas map[string]*cuotaComun
+}
+
+// cuotaComun es la cuota de una carpeta y cuántas carpetas vivas la usan.
+type cuotaComun struct {
+	q    *hostshare.Quota
+	refs int
+}
+
+// cuotaLocked devuelve la cuota de la carpeta src, creándola con los topes
+// lim si nadie la usa. Empieza (o sube a) lo más que haya guardado cualquiera
+// de las máquinas que la montan: cada una guarda el total de la carpeta. Con
+// sup.mu tomado.
+func (sup *shareSup) cuotaLocked(src string, lim hostshare.Limits, bytes, files int64) *hostshare.Quota {
+	if sup.cuotas == nil {
+		sup.cuotas = map[string]*cuotaComun{}
+	}
+	c := sup.cuotas[src]
+	if c == nil {
+		c = &cuotaComun{q: hostshare.NewQuota(lim)}
+		c.q.SetUsage(bytes, files)
+		sup.cuotas[src] = c
+	} else {
+		c.q.RaiseUsage(bytes, files)
+	}
+	c.refs++
+	return c.q
+}
+
+// soltarCuotas suelta las cuotas de las carpetas de run (su ejecución acabó).
+// Una segunda llamada no hace nada.
+func (sup *shareSup) soltarCuotas(run *shareRun) {
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	for _, src := range run.cuotas {
+		if c := sup.cuotas[src]; c != nil {
+			if c.refs--; c.refs <= 0 {
+				delete(sup.cuotas, src)
+			}
+		}
+	}
+	run.cuotas = nil
 }
 
 type shareRun struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	tags   []*shareTag
+	// cuotas son las carpetas cuya cuota común usa (shareSup.cuotas): se
+	// sueltan al acabar.
+	cuotas []string
 	// done se cierra cuando todas sus goroutines han terminado (la máquina dejó
 	// de correr, o un error permanente). Una ejecución terminada se puede
 	// sustituir por otra.
@@ -716,8 +765,9 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		}
 		t := &shareTag{tag: tag, status: "detached", first: make(chan struct{})}
 		if s.Mode == share.ModeRW {
-			t.quota = hostshare.NewQuota(lim)
-			t.quota.SetUsage(s.UsedBytes, s.UsedFiles)
+			src := filepath.Clean(s.Source)
+			t.quota = sup.cuotaLocked(src, lim, s.UsedBytes, s.UsedFiles)
+			run.cuotas = append(run.cuotas, src)
 		}
 		run.tags = append(run.tags, t)
 		run.wg.Add(1)
@@ -726,7 +776,11 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 			m.shareLoop(ctx, run.drain, id, s, t)
 		}(s)
 	}
-	go func() { run.wg.Wait(); close(run.done) }()
+	go func() {
+		run.wg.Wait()
+		sup.soltarCuotas(run)
+		close(run.done)
+	}()
 	if hayCuota(run) {
 		go m.puntosControlCuota(id, run, cadaPuntoControlCuota)
 	}
@@ -797,6 +851,7 @@ func (m *Manager) drainSharesOf(id string) {
 	}
 	run.cancel()
 	run.wg.Wait()
+	sup.soltarCuotas(run)
 	m.guardarUsoShares(id, run)
 }
 
@@ -813,6 +868,7 @@ func (m *Manager) stopShares(id string) {
 	}
 	run.cancel()
 	run.wg.Wait()
+	sup.soltarCuotas(run)
 	m.guardarUsoShares(id, run)
 }
 

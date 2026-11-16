@@ -13,9 +13,12 @@ import (
 	"errors"
 	"log"
 	"math/rand"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/juan52878911/kindling/ext/sandbox/internal/frontal"
 )
 
 // DefaultResync es cada cuánto se refresca el estado de cada sandbox desde el
@@ -303,7 +306,17 @@ func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 	}
 
 	if cur.Status.ID == "" {
-		out, err := c.Frontal.Create(ctx, cur.Spec)
+		// Antes de crear, se busca uno ya creado para este objeto: un Create
+		// cuya respuesta se perdió, o un status que no llegó a escribirse.
+		out, err := c.adoptar(ctx, &cur)
+		if err != nil {
+			c.Log.Printf("operator: %s/%s: looking for its sandbox: %v", ns, name, err)
+			c.setMessage(ctx, &cur, err.Error())
+			return
+		}
+		if out == nil {
+			out, err = c.Frontal.Create(ctx, cur.Spec, cur.Metadata.UID)
+		}
 		if err != nil {
 			c.Log.Printf("operator: %s/%s: creating sandbox: %v", ns, name, err)
 			c.setMessage(ctx, &cur, err.Error())
@@ -398,6 +411,22 @@ func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox) {
 			return
 		}
 	}
+	// Y los que lleven su UID sin estar en el status (un Create cuya respuesta
+	// se perdió): sin esto, un objeto borrado antes de escribir su status
+	// soltaba el finalizer y dejaba el sandbox vivo hasta el abandono.
+	if uid := cur.Metadata.UID; uid != "" {
+		sbs, err := c.Frontal.ByUID(ctx, uid)
+		if err != nil {
+			c.Log.Printf("operator: %s/%s: looking for its sandboxes: %v", ns, name, err)
+			return
+		}
+		for _, sb := range sbs {
+			if err := c.Frontal.Delete(ctx, sb.ID); err != nil {
+				c.Log.Printf("operator: %s/%s: deleting sandbox %s: %v", ns, name, sb.ID, err)
+				return
+			}
+		}
+	}
 	fin := removeFinalizer(cur.Metadata.Finalizers)
 	updated, err := c.Kube.PatchFinalizers(ctx, ns, name, fin)
 	if err != nil {
@@ -408,6 +437,28 @@ func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox) {
 	cur.Metadata.ResourceVersion = updated.Metadata.ResourceVersion
 	c.remember(cur)
 	c.Log.Printf("operator: %s/%s: cleaned up sandbox %s", ns, name, cur.Status.ID)
+}
+
+// adoptar busca en el frontal el sandbox ya creado para cur (por su UID). Si
+// hay más de uno (duplicados de un operador anterior), se queda el primero y
+// borra el resto. nil sin error: no hay ninguno, hay que crearlo.
+func (c *Controller) adoptar(ctx context.Context, cur *Sandbox) (*frontal.Sandbox, error) {
+	uid := cur.Metadata.UID
+	if uid == "" {
+		return nil, nil
+	}
+	sbs, err := c.Frontal.ByUID(ctx, uid)
+	if err != nil || len(sbs) == 0 {
+		return nil, err
+	}
+	sort.Slice(sbs, func(i, j int) bool { return sbs[i].ID < sbs[j].ID })
+	for _, sobra := range sbs[1:] {
+		if err := c.Frontal.Delete(ctx, sobra.ID); err != nil {
+			c.Log.Printf("operator: %s/%s: deleting duplicate sandbox %s: %v", cur.Metadata.Namespace, cur.Metadata.Name, sobra.ID, err)
+		}
+	}
+	c.Log.Printf("operator: %s/%s: adopting sandbox %s", cur.Metadata.Namespace, cur.Metadata.Name, sbs[0].ID)
+	return &sbs[0], nil
 }
 
 func (c *Controller) setMessage(ctx context.Context, cur *Sandbox, msg string) {

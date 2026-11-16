@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -413,7 +414,12 @@ func (c *catalog) all(ctx context.Context, services []string) ([]Tool, map[strin
 // como una respuesta mas (un error HTTP). Igual que el proxy de los enlaces
 // externos, que con httputil.ReverseProxy tampoco sigue ninguna.
 var httpc = &http.Client{
-	Transport:     &http.Transport{ResponseHeaderTimeout: 5 * time.Minute},
+	// Con plazo de conexión: un invitado que no acepta no debe retener la
+	// llamada hasta ResponseHeaderTimeout.
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 5 * time.Minute,
+	},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 

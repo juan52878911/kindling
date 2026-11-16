@@ -317,16 +317,64 @@ func (m *Manager) quitarHold(id string) {
 // el disco gana unos GiB, que es lo más que se le escapa.
 const vigiaOverlaysCada = time.Second
 
+// vigiaOverlaysReposo es cuánto duerme vigilarOverlays, como mucho, sin
+// ninguna máquina en marcha: lo despierta persist (canalVigiaOverlays) en
+// cuanto cambia algo. El plazo es solo un respaldo por si una transición a
+// running no pasase por persist.
+const vigiaOverlaysReposo = time.Minute
+
+// canalVigiaOverlays es el aviso de persist a vigilarOverlays (buffer 1: los
+// avisos que llegan juntos se funden).
+func (m *Manager) canalVigiaOverlays() chan struct{} {
+	m.vigiaOverlaysOnce.Do(func() { m.vigiaOverlays = make(chan struct{}, 1) })
+	return m.vigiaOverlays
+}
+
 // vigilarOverlays es el vigilante de los overlays sin almacén (ver arriba).
+// Con máquinas en marcha mira cada vigiaOverlaysCada; sin ninguna (un host en
+// reposo) duerme hasta que persist avisa de un cambio, en vez de despertar
+// cada segundo para nada (R6).
 func (m *Manager) vigilarOverlays(ctx context.Context) {
+	aviso := m.canalVigiaOverlays()
 	for {
+		// Con máquinas en marcha, el ritmo de siempre: los avisos no cuentan
+		// (un canal nil no está listo nunca), o una ráfaga de persist
+		// aplazaría la vuelta sin fin.
+		espera, despertar := vigiaOverlaysCada, (chan struct{})(nil)
+		if !m.hayQueVigilarOverlays() {
+			espera, despertar = vigiaOverlaysReposo, aviso
+		}
+		t := time.NewTimer(espera)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
-		case <-time.After(vigiaOverlaysCada):
-			m.vueltaVigiaOverlays()
+		case <-despertar:
+			t.Stop()
+		case <-t.C:
+		}
+		m.vueltaVigiaOverlays()
+		if trasVueltaVigiaOverlays != nil {
+			trasVueltaVigiaOverlays()
 		}
 	}
+}
+
+// trasVueltaVigiaOverlays, si no es nil, corre tras cada vuelta del bucle de
+// vigilarOverlays. Solo para los tests.
+var trasVueltaVigiaOverlays func()
+
+// hayQueVigilarOverlays dice si hay alguna máquina en marcha o pausada (las
+// que mira vueltaVigiaOverlays).
+func (m *Manager) hayQueVigilarOverlays() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, mc := range m.byID {
+		if mc.State == api.StateRunning || mc.State == api.StatePaused {
+			return true
+		}
+	}
+	return false
 }
 
 // vueltaVigiaOverlays es una vuelta de vigilarOverlays: para las máquinas en
@@ -406,22 +454,41 @@ func topeOverlayDe(mc *api.Machine) int64 {
 }
 
 // logicoOverlay es el tamaño lógico del disco escribible de mc.
-func logicoOverlay(mc *api.Machine) int64 {
-	mib := mc.DiskMiB
+func logicoOverlay(mc *api.Machine) int64 { return logicoDeMiB(mc.DiskMiB) }
+
+func logicoDeMiB(mib int) int64 {
 	if mib <= 0 {
 		mib = defaultOverlayMiB
 	}
 	return int64(mib) << 20
 }
 
-// apuntarTopeOverlay fija y persiste el tope del overlay de id, que mide mide
-// la primera vez que el vigilante lo ve. Si ya es mayor que su disco (un disco
-// que vino así de un snapshot, o lo que creciera con un daemon anterior), el
-// tope sale de lo que mide: no se para lo que ya estaba, pero tampoco crece
-// más. Como queda apuntado, eso pasa una sola vez: lo que el invitado alargue
-// el fichero antes de un vistazo posterior (tras un thaw, una reanudación o un
-// reinicio del daemon) ya no le sube el tope. Devuelve el tope (0 si la
-// máquina ya no está).
+// medirOverlay es lo que ocupa el fichero ruta: su tamaño o sus bloques, lo
+// mayor. 0 si no está.
+func medirOverlay(ruta string) int64 {
+	fi, err := os.Stat(ruta)
+	if err != nil {
+		return 0
+	}
+	return max(fi.Size(), allocatedBytes(ruta))
+}
+
+// topeOverlayAlCrear es el tope de un overlay recién creado (Run) o copiado
+// de un dorado (runFrom), antes de que lo abra ningún VMM: lo de su disco
+// lógico más el margen o, si la copia ya es mayor, lo que mide. Medirlo aquí
+// es fiable; en el primer vistazo del vigilante, con el invitado ya en
+// marcha, no (M1).
+func topeOverlayAlCrear(ruta string, diskMiB int) int64 {
+	return cuotaInstancia(max(logicoDeMiB(diskMiB), medirOverlay(ruta)))
+}
+
+// apuntarTopeOverlay fija y persiste el tope del overlay de id la primera vez
+// que el vigilante lo ve. Solo les pasa a las máquinas creadas por un daemon
+// anterior a apuntarlo al crear el disco (topeOverlayAlCrear): el tope sale
+// de su disco lógico o del overlay de su dorado, no de lo que mide ahora, que
+// su VMM ya pudo alargar. Si su dorado ya no está, sí de lo que mide (mide):
+// no se para lo que ya estaba, pero tampoco crece más. Como queda apuntado,
+// eso pasa una sola vez. Devuelve el tope (0 si la máquina ya no está).
 func (m *Manager) apuntarTopeOverlay(id, name string, mide int64) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -434,7 +501,24 @@ func (m *Manager) apuntarTopeOverlay(id, name string, mide int64) int64 {
 	}
 	logico := logicoOverlay(mc)
 	tope := cuotaInstancia(logico)
-	if mide > tope {
+	// Lo que mide ahora lo pudo alargar ya su VMM: no vale de línea base. La
+	// de fiar es lo que pudo traer al crearse, la copia del overlay de su
+	// dorado (que no toca ningún invitado). Solo si ese dorado ya no está se
+	// adopta lo que mide, como antes, para no parar lo que ya era así.
+	origen := mc.From
+	if origen == "" {
+		origen = mc.ImageSnapshot
+	}
+	base, deFiar := logico, true
+	if origen != "" {
+		var dorado int64
+		if validName.MatchString(origen) {
+			dorado = medirOverlay(filepath.Join(m.snapDir(origen), "overlay.ext4"))
+		}
+		base, deFiar = max(base, dorado), dorado > 0
+	}
+	tope = max(tope, cuotaInstancia(base))
+	if mide > tope && !deFiar {
 		log.Printf("%s: its disk file is already %d MiB, more than its %d MiB disk; it may not grow past %d MiB",
 			name, mide>>20, logico>>20, cuotaInstancia(mide)>>20)
 		tope = cuotaInstancia(mide)

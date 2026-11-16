@@ -54,15 +54,24 @@ type aggregator struct {
 	snapMu   sync.RWMutex
 	snapOf   map[string]string
 	stateful map[string]bool
-
-	// initLocks serializa la creación de sesión por servicio.
-	initLocks sync.Map // servicio -> *sync.Mutex
 }
 
-// serviceLock devuelve el candado de creación de sesión de un servicio.
-func (a *aggregator) serviceLock(service string) *sync.Mutex {
-	v, _ := a.initLocks.LoadOrStore(service, &sync.Mutex{})
-	return v.(*sync.Mutex)
+// sessionLock devuelve el candado de creación de sesión de la conversación s
+// con un servicio: N llamadas concurrentes de la MISMA conversación no abren N
+// sesiones en el invitado, y las de otras conversaciones no esperan por ella.
+// Vive en la conversación, así que se va con ella.
+func (a *aggregator) sessionLock(s *aggSession, service string) *sync.Mutex {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if s.initLocks == nil {
+		s.initLocks = map[string]*sync.Mutex{}
+	}
+	l := s.initLocks[service]
+	if l == nil {
+		l = &sync.Mutex{}
+		s.initLocks[service] = l
+	}
+	return l
 }
 
 type aggSession struct {
@@ -80,7 +89,10 @@ type aggSession struct {
 	// aisladas son los servicios aislados en los que esta conversación ya
 	// tiene (o tuvo) su microVM. Se toca con a.mu.
 	aisladas map[string]bool
-	lastUse  time.Time
+	// initLocks: candados de creación de sesión por servicio (sessionLock).
+	// Se tocan con a.mu.
+	initLocks map[string]*sync.Mutex
+	lastUse   time.Time
 
 	// lastQuery es la última búsqueda de find_tools: sirve para atribuir el
 	// acierto a la herramienta que acabe usándose.
@@ -147,6 +159,10 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	s, created, err := g.agg.session(ctx, r)
 	if errors.Is(err, errSesionDesconocida) {
 		api.HTTPError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, errTopeSesiones) {
+		escribirTopeSesiones(w, tnt.Name(), g.topeSesiones())
 		return
 	}
 	if err != nil {
@@ -649,12 +665,25 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	// cliente de la nueva, porque réplicas restauradas del mismo snapshot
 	// llegaron a repartir ids idénticos. Con la máquina en la clave, una
 	// instancia nueva siempre recibe un initialize propio.
+	//
+	// El candado es de la conversación y el servicio, no del servicio entero:
+	// con uno por servicio, un initialize lento (node en frío, un invitado que
+	// no contesta) paraba todas las llamadas a ese servicio de todas las
+	// conversaciones y tenants, aunque ya tuvieran su sesión. Y una
+	// conversación que ya tiene sesión ni lo toma.
 	bkey := t.Service + "\x00" + e.MachineID()
-	initLock := a.serviceLock(t.Service)
-	initLock.Lock()
+	initLock := a.sessionLock(s, t.Service)
 	a.mu.Lock()
 	sid := s.backing[bkey]
 	a.mu.Unlock()
+	bloqueado := false
+	if sid == "" {
+		initLock.Lock()
+		bloqueado = true
+		a.mu.Lock()
+		sid = s.backing[bkey]
+		a.mu.Unlock()
+	}
 	if sid == "" {
 		newSid, ierr := mcpInit(ctx, base)
 		if errors.Is(ierr, errSessionLimit) && !aislado {
@@ -687,7 +716,9 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		s.backing[bkey] = sid
 		a.mu.Unlock()
 	}
-	initLock.Unlock()
+	if bloqueado {
+		initLock.Unlock()
+	}
 	dLock := time.Since(tEnsure) - dEnsure
 	tCall := time.Now()
 
@@ -816,10 +847,35 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 		id: newSessionID(), tenant: tenant, services: services, mode: m,
 		backing: map[string]string{}, lastUse: time.Now(),
 	}
+	// Las directas se cuentan fuera de a.mu (duenos tiene su propio cerrojo);
+	// las del agregador, dentro, junto con el alta: dos initialize a la vez no
+	// comparten el último hueco.
+	directas := a.gw.sesionesDirectas(tenant)
 	a.mu.Lock()
+	if directas+a.deTenantLocked(tenant) >= a.gw.topeSesiones() {
+		a.mu.Unlock()
+		return nil, false, errTopeSesiones
+	}
 	a.sessions[s.id] = s
 	a.mu.Unlock()
 	return s, true, nil
+}
+
+// deTenant cuenta las conversaciones del agregador abiertas por el tenant.
+func (a *aggregator) deTenant(tenant string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.deTenantLocked(tenant)
+}
+
+func (a *aggregator) deTenantLocked(tenant string) int {
+	n := 0
+	for _, s := range a.sessions {
+		if s.tenant == tenant {
+			n++
+		}
+	}
+	return n
 }
 
 // backedOn cuenta las conversaciones del agregador con una sesión abierta en el
@@ -949,7 +1005,7 @@ func (a *aggregator) isStateful(ctx context.Context, service string) bool {
 func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *mcp.Link, t *Tool, args json.RawMessage) (any, *rpcFault) {
 	base := strings.TrimSuffix(l.URL, "/mcp")
 
-	lock := a.serviceLock(t.Service)
+	lock := a.sessionLock(s, t.Service)
 	lock.Lock()
 	a.mu.Lock()
 	sid := s.backing[t.Service]

@@ -193,7 +193,7 @@ func TestCredproxyAparte(t *testing.T) {
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba"},
 		{Env: "PG", Domain: "db.example.com", Placeholder: "kling-cred-cc", Secret: "pw-clave-de-prueba", Kind: credproxy.KindPostgres, User: "app", Database: "app"},
 	}
-	if err := registrarCredencialesPlataforma(ctx, c, nil, creds, m.credAuditPath(id), nil, "allowlist"); err != nil {
+	if err := registrarCredencialesPlataforma(m.ctxCredenciales(ctx), c, nil, creds, m.credAuditPath(id), nil, "allowlist"); err != nil {
 		t.Fatal(err)
 	}
 	ls := llamadas(t, logPath)
@@ -205,9 +205,9 @@ func TestCredproxyAparte(t *testing.T) {
 		t.Fatalf("the VMM was not pointed at the proxy: %q", ls)
 	}
 	cp := lineasCon(ls, "CP ")
-	// Dos GET /kling/info: el de la espera tras lanzarlo (que conteste, no
-	// solo que acepte) y el de sus tipos de credencial.
-	want := []string{"CP START", "CP GET /kling/info", "CP GET /kling/info", "CP PUT /kling/network egress=allowlist", "CP PUT /kling/credentials n=2 api.example.com+secret db.example.com+secret"}
+	// Un solo GET /kling/info: el de la espera tras lanzarlo (que conteste, no
+	// solo que acepte), que ya trae sus tipos de credencial. Antes se repetía.
+	want := []string{"CP START", "CP GET /kling/info", "CP PUT /kling/network egress=allowlist", "CP PUT /kling/credentials n=2 api.example.com+secret db.example.com+secret"}
 	if len(cp) < len(want) {
 		t.Fatalf("proxy calls: %q", cp)
 	}
@@ -223,7 +223,7 @@ func TestCredproxyAparte(t *testing.T) {
 		t.Fatalf("proxy directory: %v %v", fi, err)
 	}
 	// Otra entrega: el mismo proxy, sin lanzar otro.
-	if err := registrarCredencialesPlataforma(ctx, c, nil, creds[:1], m.credAuditPath(id), nil, "allowlist"); err != nil {
+	if err := registrarCredencialesPlataforma(m.ctxCredenciales(ctx), c, nil, creds[:1], m.credAuditPath(id), nil, "allowlist"); err != nil {
 		t.Fatal(err)
 	}
 	ls = llamadas(t, logPath)
@@ -243,25 +243,51 @@ func TestCredproxyAparte(t *testing.T) {
 
 // Un proxy que no contesta a este daemon (lo lanzó uno anterior desde otra
 // ruta, tras una actualización) se cambia por uno nuevo al entregar.
+//
+// El que no contesta lo lanza la prueba y espera a que escuche: antes lo
+// lanzaba una primera entrega con plazoCredproxy a 500 ms, y bajo carga (con
+// -race, varias pruebas a la vez) el binario de test relanzado tardaba más en
+// escuchar. Esa entrega lo mataba antes de que llegara a escuchar (un START
+// de menos), o la segunda, con el mismo plazo, se rendía con el proxy bueno
+// aún arrancando ("it did not answer"). Y con el suyo muerto, la segunda no
+// cambiaba nada: solo lanzaba otro.
 func TestCredproxyQueNoContestaSeCambia(t *testing.T) {
 	t.Setenv(envFakeVZKinds, "http,http-places,"+credproxy.CapSplit)
 	credproxyJuntoAlVMM(t)
 	m, logPath := managerVZ(t)
 	id := "ab11bb22cc33dd44"
-	arrancarVZ(t, m, id, "allowlist")
+	vmm := arrancarVZ(t, m, id, "allowlist")
 	creds := []credproxy.Credential{{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba"}}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// El que no contesta se espera hasta plazoCredproxy antes de matarlo.
-	prev := plazoCredproxy
-	plazoCredproxy = 500 * time.Millisecond
-	t.Cleanup(func() { plazoCredproxy = prev })
-	t.Setenv(envFakeCPRechaza, "1")
-	if err := registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, creds, m.credAuditPath(id), nil, "allowlist"); err == nil {
-		t.Fatal("a proxy that does not answer took the credentials")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
+	cpdir := filepath.Dir(m.credAuditPath(id))
+	if err := prepararDirCredproxy(cpdir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envFakeCPRechaza, "1")
+	viejo, err := lanzarCredproxy(filepath.Join(filepath.Dir(exe), credproxy.SplitBinary), cpdir, vmm, exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { matarYEsperar(viejo) })
 	os.Unsetenv(envFakeCPRechaza)
-	if err := registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, creds, m.credAuditPath(id), nil, "allowlist"); err != nil {
+	for len(lineasCon(llamadas(t, logPath), "CP START")) == 0 {
+		if ctx.Err() != nil {
+			t.Fatal("the proxy that does not answer never listened")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Cierra cada conexión en el acto, y entonces LOCAL_PEERPID ya no dice
+	// quién era: el daemon lo encuentra por su línea de órdenes. Antes, si
+	// perdía esa carrera (bajo carga), lanzaba otro y este seguía vivo.
+	if got := credproxiesDeDir(cpdir, filepath.Join(filepath.Dir(exe), credproxy.SplitBinary)); len(got) != 1 || got[0] != viejo {
+		t.Fatalf("credproxiesDeDir: %v, want [%d]", got, viejo)
+	}
+	if err := registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, creds, m.credAuditPath(id), nil, "allowlist"); err != nil {
 		t.Fatal(err)
 	}
 	ls := llamadas(t, logPath)
@@ -270,6 +296,13 @@ func TestCredproxyQueNoContestaSeCambia(t *testing.T) {
 	}
 	if len(lineasCon(ls, "CP PUT /kling/credentials n=1 api.example.com+secret")) != 1 {
 		t.Fatalf("the new proxy did not get the credentials: %q", ls)
+	}
+	// Recibió SIGKILL; bajo carga, su Wait (que lo recoge) puede tardar en
+	// correr, y hasta entonces kill(pid, 0) lo da por vivo.
+	for limite := time.Now().Add(10 * time.Second); syscall.Kill(viejo, 0) == nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(limite) {
+			t.Fatalf("the proxy that did not answer (pid %d) is still alive", viejo)
+		}
 	}
 }
 
@@ -283,7 +316,7 @@ func TestBrokerReconoceAlCredproxy(t *testing.T) {
 	vmm := arrancarVZ(t, m, id, "allowlist")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+	if err := registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba"},
 	}, m.credAuditPath(id), nil, "allowlist"); err != nil {
 		t.Fatal(err)
@@ -335,7 +368,7 @@ func TestCredproxyAjenoNoRecibeLasClaves(t *testing.T) {
 	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+	err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba"},
 	}, m.credAuditPath(id), nil, "allowlist")
 	if err == nil || !strings.Contains(err.Error(), "held by another program") {
@@ -361,7 +394,7 @@ func TestCredproxyNoConVMMAnterior(t *testing.T) {
 	arrancarVZ(t, m, id, "allowlist")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+	if err := registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba"},
 	}, m.credAuditPath(id), nil, "allowlist"); err != nil {
 		t.Fatal(err)

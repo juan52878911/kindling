@@ -2,6 +2,7 @@ package net
 
 import (
 	stdnet "net"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -62,12 +63,17 @@ func TestInvitadoNoAlcanzaLasIPsDelHost(t *testing.T) {
 	}
 }
 
-// Un reload del cortafuegos que vacía INPUT tras SetupHost: el siguiente
-// Setup las repone en orden. Con las reglas en su sitio, un solo -C y nada más.
+// Un reload del cortafuegos que vacía INPUT u OUTPUT tras SetupHost: el
+// siguiente Setup las repone en orden. Con las reglas en su sitio, dos -C (el
+// DROP de INPUT y el salto de OUTPUT) y nada más.
 func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 	f := &iptablesFalso{}
 	oldC, oldE := comprobarRegla, ejecutar
-	t.Cleanup(func() { comprobarRegla, ejecutar = oldC, oldE; inputMontado.Store(false) })
+	t.Cleanup(func() {
+		comprobarRegla, ejecutar = oldC, oldE
+		inputMontado.Store(false)
+		accesoMontado.Store(nil)
+	})
 	comprobaciones := 0
 	comprobarRegla = func(args []string) bool { comprobaciones++; return f.comprobar(args) }
 	ejecutar = f.ejecutar
@@ -79,15 +85,21 @@ func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 	if err := setupHostInput(); err != nil {
 		t.Fatal(err)
 	}
+	acceso := AccesoAgente{UIDs: []int{1000}, GIDs: []int{1000}}
+	if err := setupAcceso(acceso, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatal(err)
+	}
+	accesoMontado.Store(&acceso)
 	inputMontado.Store(true)
+	accesoAntes := slices.Clone(f.otras[cadenaAcceso])
 	var quiere []string
 	for _, r := range HostInputRules() {
 		quiere = append(quiere, strings.Join(r[4:], " "))
 	}
 
 	comprobaciones = 0
-	if err := asegurarHostInput(); err != nil || comprobaciones != 1 {
-		t.Fatalf("con las reglas puestas: err %v, %d -C, quería 1", err, comprobaciones)
+	if err := asegurarHostInput(); err != nil || comprobaciones != 2 {
+		t.Fatalf("con las reglas puestas: err %v, %d -C, quería 2", err, comprobaciones)
 	}
 
 	f.input = []string{"-p tcp --dport 22 -j ACCEPT"} // lo que deja el reload
@@ -97,5 +109,16 @@ func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 	quiere = append(quiere, "-p tcp --dport 22 -j ACCEPT")
 	if !slices.Equal(f.input, quiere) {
 		t.Fatalf("INPUT tras reponer =\n%s\nquería\n%s", strings.Join(f.input, "\n"), strings.Join(quiere, "\n"))
+	}
+
+	// Un firewalld --reload vacía todo: OUTPUT y la cadena propia también.
+	f.otras = nil
+	if err := asegurarHostInput(); err != nil {
+		t.Fatal(err)
+	}
+	_, _, salto := reglasAcceso(acceso, os.Geteuid(), os.Getegid())
+	if !f.comprobar(sinPosicion(salto, "-C")) || !slices.Equal(f.otras[cadenaAcceso], accesoAntes) {
+		t.Fatalf("OUTPUT tras reponer = %v, %s = %v; quería el salto y %v",
+			f.otras["OUTPUT"], cadenaAcceso, f.otras[cadenaAcceso], accesoAntes)
 	}
 }

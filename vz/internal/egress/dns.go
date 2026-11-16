@@ -7,6 +7,7 @@ package egress
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -417,8 +418,13 @@ func exchange(ctx context.Context, upstream string, query []byte, viaTCP bool) (
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	salida, propio, err := conTxidPropio(query)
+	if err != nil {
+		return nil, err
+	}
+	var resp []byte
 	if !viaTCP {
-		if _, err := c.Write(query); err != nil {
+		if _, err := c.Write(salida); err != nil {
 			return nil, err
 		}
 		buf := make([]byte, 4096)
@@ -426,12 +432,47 @@ func exchange(ctx context.Context, upstream string, query []byte, viaTCP bool) (
 		if err != nil {
 			return nil, err
 		}
-		return buf[:n], nil
+		resp = buf[:n]
+	} else {
+		if err := WriteTCPMsg(c, salida); err != nil {
+			return nil, err
+		}
+		if resp, err = ReadTCPMsg(c); err != nil {
+			return nil, err
+		}
 	}
-	if err := WriteTCPMsg(c, query); err != nil {
-		return nil, err
+	return devolverTxid(resp, query, propio)
+}
+
+// errTxidAjeno: la respuesta del upstream no trae el TXID que pusimos nosotros.
+var errTxidAjeno = errors.New("dns: response does not carry our txid")
+
+// conTxidPropio copia query con un TXID nuevo sacado de crypto/rand, como el
+// resolver de Linux (internal/net/dnsresolver.go). El TXID del invitado no
+// sale del Mac: si se reenviara tal cual, el invitado conocería el TXID de
+// cada consulta al upstream, y una respuesta falsa con él sembraría el
+// IPSet de la allowlist.
+func conTxidPropio(query []byte) ([]byte, uint16, error) {
+	if len(query) < 12 {
+		return nil, 0, errors.New("dns: query too short")
 	}
-	return ReadTCPMsg(c)
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, 0, err
+	}
+	salida := append([]byte(nil), query...)
+	copy(salida[0:2], b[:])
+	return salida, binary.BigEndian.Uint16(b[:]), nil
+}
+
+// devolverTxid comprueba que resp trae el TXID propio y le vuelve a poner el
+// del invitado, para que ResponseMatches y el invitado vean el suyo.
+func devolverTxid(resp, query []byte, propio uint16) ([]byte, error) {
+	if len(resp) < 12 || binary.BigEndian.Uint16(resp[0:2]) != propio {
+		return nil, errTxidAjeno
+	}
+	copy(resp[0:2], query[0:2])
+	return resp, nil
 }
 
 // WriteTCPMsg escribe un mensaje DNS con el prefijo de longitud de TCP.

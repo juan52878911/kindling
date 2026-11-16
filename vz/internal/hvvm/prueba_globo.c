@@ -132,3 +132,50 @@ int khv_prueba_globo_cuota(int n, uint64_t out[2]) {
   w(0x070, 0);
   return 0;
 }
+
+// khv_prueba_globo_inflado (F8): con la cuota bajada a 4 tramos mínimos, un
+// invitado infla 32 páginas del host sueltas (una sí, una no) en un notify.
+// out[0] son los tramos que pidió soltar ese notify (como mucho 4: el resto
+// queda pendiente) y out[1] los que suelta después el núcleo al vaciar (el
+// resto, sin cuota). Devuelve 0, o -1 si no hay RAM.
+void khv_prueba_globo_cuota_poner(uint64_t pags);
+int khv_prueba_globo_inflado(uint64_t out[2]) {
+  if (!g_ram) {
+    uint8_t *ram = mmap(NULL, G_RAM, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) return -1;
+    g_ram = ram;
+    g_ram_size = G_RAM;
+  }
+  if (g_ram_size < G_RAM || vballoon_init(60, false) != 0) return -1;
+  memset(g_ram, 0, 0x10000);
+  w(0x070, 0);
+  w(0x070, 1 | 2);
+  w(0x024, 0);
+  w(0x020, 0);
+  w(0x070, 1 | 2 | 8);
+  cola(0, 0x0000, 8);
+  cola(1, 0x3000, 8);
+  w(0x070, 1 | 2 | 4 | 8);
+  khv_prueba_globo_cuota_poner(4 * ((2ULL << 20) / PAGINA));
+  // Las páginas pares de [512 KiB, 1 MiB): 16 páginas de 4 marcos.
+  uint32_t *pfns = (uint32_t *)(g_ram + 0x9000);
+  int n = 0;
+  const uint64_t mpp = PAGINA / 4096, mitad = G_RAM / 2 / PAGINA, npag = G_RAM / PAGINA;
+  for (uint64_t p = mitad; p < npag; p += 2)
+    for (uint64_t k = 0; k < mpp; k++) pfns[n++] = (uint32_t)((RAM_BASE + (p * mpp + k) * 4096) >> 12);
+  vballoon_objetivo((uint32_t)n);
+  uint64_t c[KHV_BALLOON_NCUENTAS];
+  khv_balloon_cuentas(c);
+  uint64_t t0 = c[2];
+  desc(0x0000, 0, RAM_BASE + 0x9000, (uint32_t)n * 4, 0, 0);
+  ofrecer(0, 0x0000, 0);
+  khv_balloon_cuentas(c);
+  out[0] = c[2] - t0;
+  t0 = c[2];
+  vballoon_vaciar();
+  khv_balloon_cuentas(c);
+  out[1] = c[2] - t0;
+  khv_prueba_globo_cuota_poner(0);
+  w(0x070, 0);
+  return 0;
+}

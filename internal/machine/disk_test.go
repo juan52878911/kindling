@@ -75,19 +75,45 @@ func TestTouchDiskDevuelveYGuarda(t *testing.T) {
 	}
 }
 
-// Una máquina que desaparece del mapa mientras se cuenta no debe romper nada.
+// Una máquina que desaparece del mapa mientras se cuenta no debe romper nada:
+// ni se anota su medida en una entrada que ya no está, ni se queda en
+// discoMedido, y la que sigue se anota igual. Se borra justo entre medir y
+// anotar (trasMedirDiscos), que es la ventana que importa.
 func TestRefreshDiskUsageToleraQueDesaparezca(t *testing.T) {
 	m := newTestManager(t)
 	m.mu.Lock()
-	m.byID["fugaz"] = &api.Machine{ID: "fugaz", Name: "fugaz"}
+	m.byID["fugaz"] = &api.Machine{ID: "fugaz", Name: "fugaz", State: api.StateStopped}
+	m.byID["queda"] = &api.Machine{ID: "queda", Name: "queda", State: api.StateStopped}
 	m.mu.Unlock()
+	writeMachineFile(t, m, "fugaz", "overlay.ext4", 64<<10)
+	writeMachineFile(t, m, "queda", "overlay.ext4", 64<<10)
 
-	go func() {
+	// Primero se mide sin más (fugaz queda en discoMedido); en la segunda
+	// vuelta desaparece a medias, una vez medida (una nueva, que no estaba)
+	// y otra ya anotada (fugaz).
+	m.refreshDiskUsage()
+	m.mu.Lock()
+	m.byID["nueva"] = &api.Machine{ID: "nueva", Name: "nueva", State: api.StateStopped}
+	m.mu.Unlock()
+	trasMedirDiscos = func() {
 		m.mu.Lock()
 		delete(m.byID, "fugaz")
+		delete(m.byID, "nueva")
 		m.mu.Unlock()
-	}()
-	m.refreshDiskUsage() // no debe entrar en pánico
+	}
+	t.Cleanup(func() { trasMedirDiscos = nil })
+	m.refreshDiskUsage()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, id := range []string{"fugaz", "nueva"} {
+		if _, ok := m.discoMedido[id]; ok {
+			t.Errorf("%s desapareció y se quedó en discoMedido", id)
+		}
+	}
+	if _, ok := m.discoMedido["queda"]; !ok || m.byID["queda"].DiskBytes == 0 {
+		t.Errorf("la que sigue no se anotó: medido=%v, DiskBytes=%d", ok, m.byID["queda"].DiskBytes)
+	}
 }
 
 // La plantilla se construye en un .tmp y se renombra. Si existiera a medias con

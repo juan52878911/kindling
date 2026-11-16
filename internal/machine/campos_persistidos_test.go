@@ -115,10 +115,11 @@ var clasesCampos = map[string]claseCampo{
 		"freezes never depend on the snapshot (no diff freeze)"},
 	"state.json api.Machine overlay_max_bytes": {porque: "an older kling never reads it; the next daemon that lacks it takes the cap " +
 		"from the disk size, or from the file as it is then, as before"},
-	"state.json api.Machine published": {porque: "never persisted with the machine: the daemon fills it in responses; publish.json keeps the ports"},
-	"state.json api.PortPublish guest": {porque: "only inside published (see above)"},
-	"state.json api.PortPublish host":  {porque: "only inside published (see above)"},
-	"state.json api.PortPublish proto": {porque: "only inside published (see above)"},
+	"state.json api.WakePhases creds_ms": {porque: "a measurement of the last wake, for kling inspect; the next wake writes it again"},
+	"state.json api.Machine published":   {porque: "never persisted with the machine: the daemon fills it in responses; publish.json keeps the ports"},
+	"state.json api.PortPublish guest":   {porque: "only inside published (see above)"},
+	"state.json api.PortPublish host":    {porque: "only inside published (see above)"},
+	"state.json api.PortPublish proto":   {porque: "only inside published (see above)"},
 	// v1.1: el 4 los protege (versionEstadoPuentes).
 	"state.json api.Machine host_ports": {efecto: true, version: 4, porque: "a thaw or start would lose the bridge to the host service"},
 	"state.json api.HostPort host":      {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
@@ -138,6 +139,9 @@ var clasesCampos = map[string]claseCampo{
 	// B2: el 3 llega con la firma v2, que lo cubre; un kling anterior no la
 	// entendería y daría el dorado por manipulado.
 	"meta.json api.Snapshot mem_digest": {efecto: true, version: 3, porque: "covered by the v2 signature an older kling can't check"},
+	// M13: el disco de solo lectura del dorado, también dentro de la firma.
+	"meta.json api.Snapshot image_digest": {efecto: true, version: 4, porque: "covered by the v2 signature an older kling would compute without it"},
+	"meta.json api.Snapshot base_digest":  {efecto: true, version: 4, porque: "covered by the v2 signature an older kling would compute without it"},
 	// El modo de sincronización de un volumen (api.VolumeAttachment.Sync).
 	"meta.json api.VolumeAttachment sync": {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
 	"state.json api.VolumeAttachment sync": {porque: "an older kling and its kling-hv have no sync modes at all; " +

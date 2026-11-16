@@ -29,6 +29,8 @@ type call struct {
 // run -from, sandbox fork, exec (pg_isready y el psql de la rotación), thaw,
 // rm y SetLabels. Apunta cada llamada.
 type fakeKling struct {
+	// sinForkName imita un kling anterior a `sandbox fork -name`.
+	sinForkName bool
 	// imports son las referencias de `image import` (kling db up sin
 	// plantilla la construye desde una).
 	imports   []string
@@ -331,6 +333,16 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			return fail("only a running machine can be forked")
 		}
 		n, _ := strconv.Atoi(args[indexOf(args, "-n")+1])
+		name := ""
+		if i := indexOf(args, "-name"); i >= 0 {
+			if f.sinForkName {
+				return fail("flag provided but not defined: -name")
+			}
+			name = args[i+1]
+			if f.find(name) != nil {
+				return fail("machine name is taken: %q", name)
+			}
+		}
 		res := api.ForkResult{Snapshot: "fork-x"}
 		for j := 0; j < n; j++ {
 			l := clone(src.Labels)
@@ -342,7 +354,7 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 					}
 				}
 			}
-			mc := f.newMachine("", l)
+			mc := f.newMachine(name, l)
 			f.verifier[mc.ID] = f.verifier[src.ID]
 			f.roRoles[mc.ID] = append([]string(nil), f.roRoles[src.ID]...)
 			res.Sandboxes = append(res.Sandboxes, mc)

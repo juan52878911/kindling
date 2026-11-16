@@ -117,7 +117,12 @@ máquinas (Linux):
   cortan por encima de 300/s (`hashlimit`, módulo `xt_hashlimit`); en cualquier modo, una
   máquina abre como mucho 1000 conexiones nuevas por segundo en total (ráfaga 2000), y su
   netns acorta los plazos de conntrack de UDP sin respuesta y de `SYN_SENT` (10 y 30 s),
-  para que un invitado no llene la tabla de conntrack del host.
+  para que un invitado no llene la tabla de conntrack del host. El ritmo no acota el
+  total (una conexión establecida y abandonada vive días en conntrack), así que además
+  cada máquina tiene a la vez como mucho 4096 conexiones (`connlimit`, módulo
+  `xt_connlimit`). El host rastrea los mismos flujos con sus plazos por defecto: en el
+  peor caso una máquina deja unas 16 000 entradas en su tabla, y el daemon avisa al
+  arrancar si `nf_conntrack_max` baja de 65 536.
 - Los servicios del lado host (resolver de la allowlist, proxies de credenciales, de
   Postgres y MySQL, aristas de grafo) solo se alcanzan por el veth de **esa** máquina
   (`-m addrtype --limit-iface-in`): desde el netns de otra, no.
@@ -689,6 +694,24 @@ daemon se niega a crear un sandbox desde él. El daemon no se fía del flujo del
 agente: recorta la salida a los topes y valida cada evento. Los sandboxes nacen sin
 red y se destruyen al vencer su TTL.
 
+**Quién llega al agente desde el host (Linux).** El agente no autentica: da por host
+lo que le llega por su ruta por defecto, y en Linux cualquier proceso del host alcanza
+la IP de cada máquina (`172.30.X.2`). Sin más, un usuario local sin acceso al socket
+ejecutaba como root en cualquier máquina con `allow_exec`, sin pasar por el daemon ni
+por su autorización. Por eso el daemon pone en el `OUTPUT` del host la cadena
+`KL-ACCESO` (`internal/net/firewall.go`, `reglasAcceso`): hacia `172.30.0.0/16` solo
+abren conexión al agente (8080) y al lado host de los veth (`172.30.X.1`: resolver,
+proxies de credenciales y de aristas de grafo) root, el uid y el gid del daemon y el
+usuario y el grupo a los que cede el socket (`-socket-user` o `SUDO_UID`), que ya
+mandan sobre el daemon. Cualquier otro recibe un rechazo. Los puertos de servicio de
+cada máquina (`kling db`, `kling.ports`) siguen abiertos a todo el host, como dice
+[`docs/db.md`](docs/db.md): ahí la frontera es la clave de cada servicio. Desde fuera
+del host (un vecino de la LAN que enrute `172.30.0.0/16`, un contenedor con red
+puente) el agente y el lado host de los veth se descartan en `FORWARD` e `INPUT`. Con
+dos daemons en un host, la cadena es de los dos: cada uno añade sus permisos y ninguno
+la vacía. Un `firewalld --reload` que la borre se repone en el siguiente arranque de
+máquina, como las reglas de `INPUT`.
+
 Los **grafos precalentados** del frontal de sandboxes (`ext/sandbox`, #57) se reparten
 entre inquilinos con las mismas reglas que las máquinas precalentadas: un grafo es de un
 inquilino solo si TODAS sus máquinas llevan su etiqueta `tenant` (y el `kling.graph` de
@@ -915,7 +938,10 @@ cambia:
   IPC sin chroot; la prueba se repite pasado un minuto, así que un fallo pasajero no deja el daemon
   sin chroot hasta reiniciarlo. nobody es un uid compartido: mientras dura la revisión, otro proceso
   del host que corra como nobody y llegue a la ruta del disco podría abrirlo (un uid propio para
-  e2fsck está pendiente). Sin root, con el usuario del daemon y el tope de memoria. En macOS, con el usuario
+  e2fsck está pendiente). Sin root, con el usuario del daemon y el tope de memoria. Con
+  `kling config set daemon.require_e2fs_jail on` (por defecto off) no se sigue con menos: sin la
+  jaula entera (sin chroot, sin root o, en macOS, sin `sandbox-exec`) la orden falla y `kling
+  doctor` dice `blocked`. En macOS, con el usuario
   del daemon dentro de un perfil de `sandbox-exec` que no deja red ni leer más que el sistema y
   Homebrew, ni escribir más que su descriptor; macOS no aplica RLIMIT_AS, así que ahí no hay tope de
   memoria. Sin `sandbox-exec` se avisa, `kling doctor` lo dice y, con el daemon como root, se niega

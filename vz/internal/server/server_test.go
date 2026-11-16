@@ -370,6 +370,39 @@ func TestSnapshotAnidadaSeNiega(t *testing.T) {
 	r.mustFail("PUT", "/snapshot/create", `{"snapshot_path":"/a","mem_file_path":"/b"}`, "nested-virtualization")
 }
 
+// Si el snapshot falla después de volcar la memoria (aquí, al escribir el
+// fichero del snapshot), el mem.file no se queda solo: el núcleo lo tomaría
+// por un volcado a medias, y lleva la RAM entera del invitado. Lo mismo con
+// un destino de fuera cuya segunda publicación falla.
+func TestSnapshotFallidoNoDejaMemFile(t *testing.T) {
+	r := newRig(t)
+	dir := t.TempDir()
+	r.configure(dir)
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	r.must("PATCH", "/vm", `{"state":"Paused"}`)
+	mem := filepath.Join(dir, "mem.file")
+	snap := filepath.Join(dir, "no-such-dir", "snap.file")
+	r.mustFail("PUT", "/snapshot/create", `{"snapshot_path":"`+snap+`","mem_file_path":"`+mem+`"}`, "writing the snapshot file")
+	if _, err := os.Stat(mem); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mem.file left behind after a failed snapshot: %v", err)
+	}
+
+	fuera := t.TempDir()
+	r.srv.d.Destino = func(p string) (string, func() error, error) {
+		tmp := filepath.Join(dir, ".tmp-"+filepath.Base(p))
+		return tmp, func() error {
+			if filepath.Base(p) == "snap.file" {
+				return errors.New("custodio: no")
+			}
+			return os.Rename(tmp, p)
+		}, nil
+	}
+	r.mustFail("PUT", "/snapshot/create", `{"snapshot_path":"`+fuera+`/snap.file","mem_file_path":"`+fuera+`/mem.file"}`, "custodio: no")
+	if ents, _ := os.ReadDir(fuera); len(ents) != 0 {
+		t.Fatalf("published files left behind after a failed snapshot: %v", ents)
+	}
+}
+
 func TestCommitSnapshotSequence(t *testing.T) {
 	r := newRig(t)
 	dir := t.TempDir()

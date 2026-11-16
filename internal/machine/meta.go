@@ -49,7 +49,13 @@ import (
 // v3: la firma v2 (firma.go, B2), que cubre también etiquetas, topes, nombres
 // del entorno y mem_digest. Un kling anterior no la entiende: la daría por
 // manipulada. Igual que con la v2, se niega antes diciendo la versión.
-const metaSchema = 3
+//
+// v4: image_digest y base_digest (disco_base.go), dentro de la firma v2. Un
+// kling anterior no los metería en el HMAC y daría el dorado por manipulado:
+// se niega antes diciendo la versión. Un v3 se lee igual (sin ellos no se
+// comprueba la imagen) y sube a v4 con meta.json.v3.bak al reescribirse; su
+// firma no cambia, porque los campos vacíos no entran en lo firmado.
+const metaSchema = 4
 
 // ErrDoradoObsoleto es que el dorado se hizo con un VMM que el de ahora no
 // sabe restaurar: hay que rehacerlo.

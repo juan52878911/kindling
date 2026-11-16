@@ -2,8 +2,12 @@ package vnet
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
+	"net/http"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,4 +88,86 @@ func TestConexionesDNSTCPAcotadas(t *testing.T) {
 	if despues-antes > 3*MaxDNSTCPConns+50 {
 		t.Fatalf("300 conexiones al 53 dejaron %d goroutines más", despues-antes)
 	}
+}
+
+// splitRetenedor es un reenvío al proxy aparte que retiene cada conexión
+// hasta que el invitado la cierra o se cierra la pila.
+type splitRetenedor struct{ vistas atomic.Int32 }
+
+func (f *splitRetenedor) Activo() bool { return true }
+func (f *splitRetenedor) DB() bool     { return false }
+func (f *splitRetenedor) Forward(ctx context.Context, c net.Conn, _ int) {
+	defer c.Close()
+	f.vistas.Add(1)
+	go func() { <-ctx.Done(); c.Close() }()
+	_, _ = io.Copy(io.Discard, c)
+}
+
+// reseteada dice si c recibió un RST (y no un plazo vencido) al leer.
+func reseteada(c net.Conn) bool {
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err := c.Read(make([]byte, 1))
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// Las conexiones al 80 de la pasarela (proxy de credenciales, aquí el aparte)
+// no pasan por handleTCP, pero ocupan plaza en MaxTCPFlows igual: la de más
+// recibe un RST, y cerrar una deja sitio a otra.
+func TestPasarelaOchentaAcotada(t *testing.T) {
+	sp := &splitRetenedor{}
+	r := newRigCon(t, "", http.NotFoundHandler(), sp)
+	dst := GatewayIP.String() + ":80"
+	conns := abrirHasta(t, r, dst, MaxTCPFlows, func() int { return int(sp.vistas.Load()) })
+	if !reseteada(marcar(t, r, dst)) {
+		t.Fatalf("la conexión %d al 80 de la pasarela no recibió RST", MaxTCPFlows+1)
+	}
+	conns[0].Close()
+	esperar(t, func() bool { return len(r.n.tcpFlows) < MaxTCPFlows })
+	marcar(t, r, dst)
+	esperar(t, func() bool { return int(sp.vistas.Load()) == MaxTCPFlows+1 })
+}
+
+// Lo mismo con el MMDS: un invitado con muchas conexiones abiertas y mudas no
+// retiene más de MaxTCPFlows.
+func TestMMDSAcotado(t *testing.T) {
+	r := newRig(t, "")
+	dst := r.n.cfg.MMDSAddr.String() + ":80"
+	abrirHasta(t, r, dst, MaxTCPFlows, func() int { return len(r.n.tcpFlows) })
+	if !reseteada(marcar(t, r, dst)) {
+		t.Fatalf("la conexión %d al MMDS no recibió RST", MaxTCPFlows+1)
+	}
+}
+
+func marcar(t *testing.T, r *rig, dst string) net.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := r.g.dialTCP(ctx, dst)
+	if err != nil {
+		t.Fatalf("%s: %v", dst, err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// abrirHasta abre n conexiones a dst y espera a que visto() llegue a n.
+func abrirHasta(t *testing.T, r *rig, dst string, n int, visto func() int) []net.Conn {
+	t.Helper()
+	var conns []net.Conn
+	for i := 0; i < n; i++ {
+		conns = append(conns, marcar(t, r, dst))
+	}
+	esperar(t, func() bool { return visto() >= n })
+	return conns
+}
+
+func esperar(t *testing.T, ok func() bool) {
+	t.Helper()
+	for fin := time.Now().Add(5 * time.Second); time.Now().Before(fin); time.Sleep(10 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatal("plazo vencido esperando la condición")
 }

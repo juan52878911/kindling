@@ -13,12 +13,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -165,18 +163,6 @@ func (m *Manager) vmmVivoDe(id string, pistas ...int) int {
 		return m.liveVMs()[id]
 	}
 	return 0
-}
-
-// nadieEscuchaEn dice si es seguro que en el socket unix sock no escucha
-// nadie: no existe o rechaza la conexión. Un error de otro tipo no lo
-// asegura (false).
-func nadieEscuchaEn(sock string) bool {
-	c, err := net.DialTimeout("unix", sock, 100*time.Millisecond)
-	if err == nil {
-		c.Close()
-		return false
-	}
-	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // adopt comprueba que el PID apuntado sigue siendo el VMM de esta máquina: los

@@ -31,6 +31,12 @@ import (
 // se fue sin cerrar (un SSH muerto) sin depender de que el invitado hable.
 const shellPing = 30 * time.Second
 
+// shellEscritura es el plazo de cada escritura al cliente: uno que deja de
+// leer (un terminal parado, un proceso colgado) no retiene la sesión ni la
+// plaza de shell del invitado. Es generoso porque una pausa de quien mira la
+// salida no debe cortarle. Variable para los tests.
+var shellEscritura = 2 * time.Minute
+
 func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), api.ShellProto) {
 		fail(w, http.StatusUpgradeRequired, fmt.Errorf("this endpoint speaks %s; ask for it with Upgrade", api.ShellProto))
@@ -124,7 +130,12 @@ func openGuestShell(ctx context.Context, base string, req api.ShellRequest) (io.
 }
 
 // relayShell pasa tramas entre el cliente y el invitado hasta que uno cuelga.
+//
+// Las escrituras al cliente tienen plazo (shellEscritura) si toClient es una
+// conexión: al vencer, el relé acaba y quien lo llamó cierra las dos puntas,
+// lo que suelta la plaza del invitado.
 func relayShell(ctx context.Context, fromClient io.Reader, toClient io.Writer, guest io.ReadWriteCloser) {
+	toClient = api.ConPlazo(toClient, shellEscritura)
 	var mu sync.Mutex
 	alCliente := func(t byte, p []byte) error {
 		mu.Lock()
