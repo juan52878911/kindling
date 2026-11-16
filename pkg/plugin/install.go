@@ -291,16 +291,11 @@ func Install(ctx context.Context, o InstallOptions) (*Installed, error) {
 		mainURL = src.baseURL + asset
 	}
 
-	body, sum, err := src.fetch(ctx, asset, o.File, o.SHA256)
-	if err != nil {
-		return nil, err
-	}
-
 	if err := os.MkdirAll(o.Dir, 0o755); err != nil {
 		return nil, err
 	}
 	final := filepath.Join(o.Dir, "kling-"+o.Name)
-	tmp, err := writeTemp(o.Dir, ".kling-"+o.Name, body)
+	tmp, sum, err := src.fetch(ctx, asset, o.File, o.SHA256, o.Dir, ".kling-"+o.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -340,13 +335,9 @@ func Install(ctx context.Context, o InstallOptions) (*Installed, error) {
 				return nil, fmt.Errorf("%s needs %s next to it: not found in %s", o.Name, cname, src.baseDir)
 			}
 		}
-		cbody, _, err := src.fetch(ctx, assetName(cname, o.GOOS, o.GOARCH), local, "")
+		ctmp, _, err := src.fetch(ctx, assetName(cname, o.GOOS, o.GOARCH), local, "", o.Dir, "."+cname)
 		if err != nil {
 			return nil, fmt.Errorf("companion %s: %w", cname, err)
-		}
-		ctmp, err := writeTemp(o.Dir, "."+cname, cbody)
-		if err != nil {
-			return nil, err
 		}
 		cleanup = append(cleanup, ctmp)
 		comps = append(comps, pending{ctmp, filepath.Join(o.Dir, cname)})
@@ -401,24 +392,38 @@ func firstExisting(paths ...string) string {
 	return ""
 }
 
-// fetch lee un asset (de la URL base o, si local no está vacío, de disco) y
-// lo verifica: contra want si se dio, y contra SHA256SUMS si lo lista. Un
-// asset remoto que no se puede verificar de ninguna de las dos formas no se
-// acepta; uno local sí, porque ya está en la máquina de quien lo instala.
-func (s *source) fetch(ctx context.Context, asset, local, want string) ([]byte, string, error) {
-	var body []byte
-	var err error
+// fetch copia un asset (de la URL base o, si local no está vacío, de disco)
+// a un temporal oculto de dir y lo verifica: contra want si se dio, y contra
+// SHA256SUMS si lo lista. Devuelve la ruta del temporal (ejecutable) y su
+// sha256; si falla, no deja temporal. Un asset remoto que no se puede
+// verificar de ninguna de las dos formas no se acepta; uno local sí, porque
+// ya está en la máquina de quien lo instala. El asset va a disco según llega
+// y no a memoria: puede tener hasta maxAssetBytes.
+func (s *source) fetch(ctx context.Context, asset, local, want, dir, prefix string) (tmp, got string, err error) {
+	var rc io.ReadCloser
+	what := local
 	if local != "" {
-		body, err = readFileLimited(local, maxAssetBytes)
+		rc, err = os.Open(local)
 	} else {
-		body, err = s.get(ctx, s.baseURL+asset, maxAssetBytes)
+		rc, what, err = s.open(ctx, s.baseURL+asset)
 	}
 	if err != nil {
-		return nil, "", err
+		return "", "", err
 	}
-	h := sha256.Sum256(body)
-	got := hex.EncodeToString(h[:])
+	tmp, got, err = writeTemp(dir, prefix, rc, maxAssetBytes, what)
+	rc.Close()
+	if err != nil {
+		return "", "", err
+	}
+	if err := s.verify(ctx, asset, local, want, got); err != nil {
+		os.Remove(tmp)
+		return "", "", err
+	}
+	return tmp, got, nil
+}
 
+// verify es la comprobación de fetch sobre el sha256 ya calculado.
+func (s *source) verify(ctx context.Context, asset, local, want, got string) error {
 	sums, sumsErr := s.loadSums(ctx)
 	listed, inSums := sums[asset]
 	if local != "" && !inSums {
@@ -428,18 +433,18 @@ func (s *source) fetch(ctx context.Context, asset, local, want string) ([]byte, 
 	switch {
 	case local != "" && sumsErr != nil:
 		// El SHA256SUMS de al lado está pero no se lee o su firma no vale.
-		return nil, "", fmt.Errorf("%s: %v", asset, sumsErr)
+		return fmt.Errorf("%s: %v", asset, sumsErr)
 	case want != "" && got != want:
-		return nil, "", fmt.Errorf("%s: sha256 mismatch: got %s, want %s", asset, got, want)
+		return fmt.Errorf("%s: sha256 mismatch: got %s, want %s", asset, got, want)
 	case inSums && got != listed:
-		return nil, "", fmt.Errorf("%s: sha256 mismatch with SHA256SUMS: got %s, listed %s", asset, got, listed)
+		return fmt.Errorf("%s: sha256 mismatch with SHA256SUMS: got %s, listed %s", asset, got, listed)
 	case want == "" && !inSums && local == "":
 		if sumsErr != nil {
-			return nil, "", fmt.Errorf("%s: cannot verify it: %v (pass -sha256 to check it by hand)", asset, sumsErr)
+			return fmt.Errorf("%s: cannot verify it: %v (pass -sha256 to check it by hand)", asset, sumsErr)
 		}
-		return nil, "", fmt.Errorf("%s: not listed in SHA256SUMS, refusing to install it unverified", asset)
+		return fmt.Errorf("%s: not listed in SHA256SUMS, refusing to install it unverified", asset)
 	}
-	return body, got, nil
+	return nil
 }
 
 // loadSums baja (o lee) SHA256SUMS una sola vez. Que falte en remoto es un
@@ -538,29 +543,40 @@ func ParseSums(b []byte) map[string]string {
 }
 
 func (s *source) get(ctx context.Context, u string, limit int64) ([]byte, error) {
-	pu, err := url.Parse(u)
+	body, what, err := s.open(ctx, u)
 	if err != nil {
 		return nil, err
 	}
+	defer body.Close()
+	return readLimited(body, limit, what)
+}
+
+// open hace el GET de u y devuelve el cuerpo de una respuesta 200 y la URL
+// sin credenciales, para los errores.
+func (s *source) open(ctx context.Context, u string) (io.ReadCloser, string, error) {
+	pu, err := url.Parse(u)
+	if err != nil {
+		return nil, "", err
+	}
 	if err := s.o.checkScheme(pu); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("GET %s: %s: %w", pu.Redacted(), resp.Status, errNotFound)
+		return nil, "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", pu.Redacted(), resp.Status)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, "", fmt.Errorf("GET %s: %s: %w", pu.Redacted(), resp.Status, errNotFound)
+		}
+		return nil, "", fmt.Errorf("GET %s: %s", pu.Redacted(), resp.Status)
 	}
-	return readLimited(resp.Body, limit, pu.Redacted())
+	return resp.Body, pu.Redacted(), nil
 }
 
 func readFileLimited(p string, limit int64) ([]byte, error) {
@@ -585,28 +601,36 @@ func readLimited(r io.Reader, limit int64, what string) ([]byte, error) {
 	return b, nil
 }
 
-// writeTemp escribe body en un fichero oculto de dir (el descubrimiento no
-// mira lo que no empieza por "kling-") con permiso de ejecución.
-func writeTemp(dir, prefix string, body []byte) (string, error) {
+// writeTemp copia r (hasta limit bytes; más es un error, no un corte) a un
+// fichero oculto de dir (el descubrimiento no mira lo que no empieza por
+// "kling-") con permiso de ejecución, y devuelve su ruta y su sha256.
+func writeTemp(dir, prefix string, r io.Reader, limit int64, what string) (string, string, error) {
 	f, err := os.CreateTemp(dir, prefix+".tmp-*")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	name := f.Name()
-	if _, err := f.Write(body); err != nil {
+	fail := func(err error) (string, string, error) {
 		f.Close()
 		os.Remove(name)
-		return "", err
+		return "", "", err
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, limit+1))
+	if err != nil {
+		return fail(err)
+	}
+	if n > limit {
+		return fail(fmt.Errorf("%s is larger than %d MiB", what, limit>>20))
+	}
+	if err := f.Chmod(0o755); err != nil {
+		return fail(err)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(name)
-		return "", err
+		return "", "", err
 	}
-	if err := os.Chmod(name, 0o755); err != nil {
-		os.Remove(name)
-		return "", err
-	}
-	return name, nil
+	return name, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Remove quita la extensión name de dir: el binario, su kling-<n>.json y los
