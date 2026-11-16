@@ -367,6 +367,8 @@ type Server struct {
 	// agente ya contestó (bajo agentesMu): ver agenteVisto.
 	agentesMu     sync.Mutex
 	agentesVistos map[string]string
+	// vueloGuest son los bytes de /guest en vuelo (vuelo.go).
+	vueloGuest cupo
 	// sondearAgente es cómo se espera al agente (nil = waitAgent; los tests
 	// ponen uno que cuenta).
 	sondearAgente func(context.Context, *api.Machine) error
@@ -1642,8 +1644,24 @@ func (s *Server) tomarEventosInquilino(t string) (func(), bool) {
 // CLI conectado por SSH no tiene ruta hasta ellas, y sondearlas directamente se
 // queda colgado hasta agotar el plazo. El daemon sí está en la red buena.
 func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
+	// Los cuerpos de ida y vuelta cuentan contra el presupuesto de /guest
+	// según se leen (vuelo.go): la petición, antes de llegar al invitado, así
+	// que lo que no cabe no ha llegado a ejecutarse.
+	clave, _ := inquilinoDe(r)
+	res := s.reservaGuest(clave)
+	defer res.soltar()
+	cuerpo, err := res.lectorCerrable(r.Body, min(r.ContentLength, guestRequestMaxBody+1))
+	if err != nil {
+		failSinSitio(w, err)
+		return
+	}
+	r.Body = cuerpo
 	var req api.GuestRequest
 	if err := decodeJSONCon(w, r, &req, guestRequestMaxBody); err != nil {
+		if errors.Is(err, errGuestSinSitio) {
+			failSinSitio(w, err)
+			return
+		}
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
@@ -1675,7 +1693,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	esperar := func(ctx context.Context, timeout time.Duration) error {
 		return s.esperarPuerto(ctx, mc, port, timeout)
 	}
-	out, code, err := proxyGuest(r.Context(), addr, req, esperar)
+	out, code, err := proxyGuestCon(r.Context(), addr, req, esperar, res)
 	if err != nil {
 		s.failGuest(w, r, code, err, addr, port, mc.Name)
 		return
@@ -1691,6 +1709,14 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 // dirección no basta en macOS, donde el reenvío acepta siempre (esperarPuerto).
 func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 	esperar func(context.Context, time.Duration) error) (api.GuestResponse, int, error) {
+	return proxyGuestCon(ctx, addr, req, esperar, nil)
+}
+
+// proxyGuestCon es proxyGuest contando la respuesta en res (nil = sin contar).
+// Si no cabe, la llamada YA llegó al invitado: el error lo dice, para que
+// nadie la repita creyendo que no se hizo.
+func proxyGuestCon(ctx context.Context, addr string, req api.GuestRequest,
+	esperar func(context.Context, time.Duration) error, res *reservaGuest) (api.GuestResponse, int, error) {
 	// El daemon no añade nada de ningún protocolo: ruta, cabeceras de ida y
 	// cuáles devolver las decide quien llama.
 	path := req.Path
@@ -1748,7 +1774,15 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 	// wrapGuestBodyCon (D-01) acota, además, el PROGRESO: un cuerpo que gotea
 	// un byte cada minuto no debe poder tener esto leyendo para siempre. Con
 	// guestProxyIdleTimeout y no guestProgressTimeout: ver su comentario.
-	body, err := api.LeerCuerpo(wrapGuestBodyCon(resp.Body, guestProxyIdleTimeout), maxBody)
+	cuerpo, err := res.lector(wrapGuestBodyCon(resp.Body, guestProxyIdleTimeout), min(resp.ContentLength, maxBody+1))
+	var body []byte
+	if err == nil {
+		body, err = api.LeerCuerpo(cuerpo, maxBody)
+	}
+	if errors.Is(err, errGuestSinSitio) {
+		return api.GuestResponse{}, http.StatusBadGateway,
+			fmt.Errorf("the guest answered (status %d), but its response does not fit: %w", resp.StatusCode, err)
+	}
 	if err != nil {
 		return api.GuestResponse{}, http.StatusBadGateway, err
 	}
