@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -189,30 +190,35 @@ func (o *opsContadas) Remove(context.Context, string) error { return nil }
 func TestEntornoAFichero(t *testing.T) {
 	s := &servicioCompose{nodo: "db", imagen: "postgres:17", user: "-e", entry: []string{"-e"},
 		env: [][2]string{{"DB_PASS", "s3cr #et"}, {"DSN", "a=b: c"}, {"VACIA", ""}}, cmd: []string{"-e", "X=1"}}
-	argv, err := shellWords(strings.TrimPrefix(ordenImport(s, "dev"), "kling "))
+	argv, limpiar, err := argvKling(ordenImport(s, "dev"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sin, lineas, ok := entornoAFichero(argv)
-	if !ok {
-		t.Fatal("no lo sacó")
-	}
-	for _, a := range sin {
+	for _, a := range argv {
 		if strings.Contains(a, "s3cr") || strings.Contains(a, "a=b") {
-			t.Fatalf("el secreto sigue en argv: %q", sin)
+			t.Fatalf("el secreto sigue en argv: %q", argv)
 		}
 	}
-	// -user y -entrypoint conservan su valor ("-e"), y lo de detrás de --, también.
-	if !slices.Equal(sin[len(sin)-3:], []string{"--", "-e", "X=1"}) || slices.Index(sin, "-user") < 0 || sin[slices.Index(sin, "-user")+1] != "-e" {
-		t.Fatalf("argv = %q", sin)
+	// -user y -entrypoint conservan su valor ("-e"), y lo de detrás de --,
+	// también; el -env-file va antes del --.
+	k := slices.Index(argv, "-env-file")
+	if k < 0 || !slices.Equal(argv[k+2:], []string{"--", "-e", "X=1"}) || argv[slices.Index(argv, "-user")+1] != "-e" {
+		t.Fatalf("argv = %q", argv)
 	}
-	fichero := []byte(strings.Join(lineas, "\n") + "\n")
-	got, err := resolveEnv(nil, []string{"f"}, nil, func(string) ([]byte, error) { return fichero, nil })
+	fichero := argv[k+1]
+	if fi, err := os.Stat(fichero); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("fichero de entorno: %v %v", fi, err)
+	}
+	got, err := resolveEnv(nil, []string{fichero}, nil, os.ReadFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got, []string{"DB_PASS=s3cr #et", "DSN=a=b: c", "VACIA="}) {
 		t.Fatalf("entorno = %q", got)
+	}
+	limpiar()
+	if _, err := os.Stat(fichero); !os.IsNotExist(err) {
+		t.Fatalf("el fichero sigue: %v", err)
 	}
 	// Lo que el fichero cambiaría (espacio al final, un salto) se queda en argv.
 	for _, v := range []string{"fin ", "a\nb"} {

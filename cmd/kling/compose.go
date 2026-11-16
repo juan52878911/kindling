@@ -234,34 +234,47 @@ type importCompose struct {
 // lineaKling corre una línea de t.Antes con este mismo binario y devuelve su
 // salida combinada. Una variable para los tests.
 var lineaKling = func(ctx context.Context, host, l string) (string, error) {
-	argv, err := shellWords(strings.TrimPrefix(l, "kling "))
+	argv, limpiar, err := argvKling(l)
 	if err != nil {
 		return "", err
 	}
-	// El entorno del servicio (contraseñas, a menudo) va en un -env-file y no
-	// en la línea de órdenes, que ve cualquiera con ps.
-	if sin, lineas, ok := entornoAFichero(argv); ok {
-		f, err := os.CreateTemp("", "kling-compose-env-*")
-		if err != nil {
-			return "", err
-		}
-		defer os.Remove(f.Name())
-		_, err = f.WriteString(strings.Join(lineas, "\n") + "\n")
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return "", err
-		}
-		argv = sin
-		fin := slices.Index(argv, "--")
-		if fin < 0 {
-			fin = len(argv)
-		}
-		argv = slices.Insert(argv, fin, "-env-file", f.Name())
-	}
+	defer limpiar()
 	out, err := selfCmd(ctx, host, argv...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// argvKling parte una línea de t.Antes en los argumentos de kling. El
+// entorno del servicio (contraseñas, a menudo) va en un -env-file temporal
+// (0600) y no en la línea de órdenes, que ve cualquiera con ps; limpiar lo
+// borra.
+func argvKling(l string) (argv []string, limpiar func(), err error) {
+	limpiar = func() {}
+	argv, err = shellWords(strings.TrimPrefix(l, "kling "))
+	if err != nil {
+		return nil, limpiar, err
+	}
+	sin, lineas, ok := entornoAFichero(argv)
+	if !ok {
+		return argv, limpiar, nil
+	}
+	f, err := os.CreateTemp("", "kling-compose-env-*")
+	if err != nil {
+		return nil, limpiar, err
+	}
+	limpiar = func() { os.Remove(f.Name()) }
+	_, err = f.WriteString(strings.Join(lineas, "\n") + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		limpiar()
+		return nil, func() {}, err
+	}
+	fin := slices.Index(sin, "--")
+	if fin < 0 {
+		fin = len(sin)
+	}
+	return slices.Insert(sin, fin, "-env-file", f.Name()), limpiar, nil
 }
 
 // banderasConValor son las de ordenImportCon que llevan un valor detrás.
