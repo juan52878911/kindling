@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -127,6 +128,11 @@ func TestLeerTenantsConAdmins(t *testing.T) {
 	if ts[0].MaxMemMiB != 2048 || ts[0].MaxVCPUs != 2 || ts[1].MaxMemMiB != 0 || ts[1].MaxVCPUs != 8 {
 		t.Fatalf("limits: %+v", ts)
 	}
+	// El 7.º es la suma de mem_mib viva del tenant.
+	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:10:5:2048:2:8192")
+	if ts, err = leerTenants(); err != nil || ts[0].MaxMemTotalMiB != 8192 {
+		t.Fatalf("total limit: %+v %v", ts, err)
+	}
 	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:10:5:mucho")
 	if _, err := leerTenants(); err == nil {
 		t.Fatal("expected an error for a bad max_mem_mib")
@@ -136,5 +142,17 @@ func TestLeerTenantsConAdmins(t *testing.T) {
 	t.Setenv("KLING_SANDBOX_ADMINS", "opss")
 	if _, err := leerTenants(); err == nil {
 		t.Fatal("expected an error for an unknown admin")
+	}
+}
+
+// El servidor del gateway acota las cabeceras (plazo y tamaño) y lo que vive
+// una conexión keep-alive callada.
+func TestServidorHTTPConPlazosYTopes(t *testing.T) {
+	s := servidorHTTP(http.NotFoundHandler())
+	if s.ReadHeaderTimeout <= 0 || s.IdleTimeout <= 0 || s.MaxHeaderBytes <= 0 || s.MaxHeaderBytes > 1<<20 {
+		t.Fatalf("server without limits: header %s, idle %s, max header %d", s.ReadHeaderTimeout, s.IdleTimeout, s.MaxHeaderBytes)
+	}
+	if s.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout %s would cut shells and long execs", s.WriteTimeout)
 	}
 }

@@ -79,6 +79,12 @@ type Tenant struct {
 	// MaxSandboxes sea 1.
 	MaxMemMiB int
 	MaxVCPUs  int
+	// MaxMemTotalMiB acota la suma de mem_mib de todos los sandboxes vivos del
+	// tenant, contando el tamaño EFECTIVO (el del snapshot de la plantilla
+	// cuando la petición no dice nada). 0 = el del frontal
+	// (Opciones.MaxMemTotalMiB). Sin él, el tope por sandbox no impide que un
+	// token llene la RAM del host con muchos sandboxes medianos.
+	MaxMemTotalMiB int
 	// Admin ve lo que es del operador y no de un tenant: /v1/hosts (los
 	// endpoints de los daemons) y las métricas de TODOS los tenants. Sin él,
 	// /v1/hosts es un 403 y /v1/metrics solo enseña las series del que llama.
@@ -101,6 +107,9 @@ type Opciones struct {
 	// MaxVCPUsPorDefecto.
 	MaxMemMiB int
 	MaxVCPUs  int
+	// MaxMemTotalMiB es la suma máxima de mem_mib vivos por tenant para los que
+	// no traen la suya. 0 = MaxMemTotalMiBPorDefecto.
+	MaxMemTotalMiB int
 
 	// Abandono es cuánto puede llevar un sandbox sin usarse antes de que la
 	// limpieza lo borre. Es el segundo plazo, distinto del TTL: el TTL lo
@@ -171,7 +180,14 @@ var nombreValido = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 const (
 	MaxMemMiBPorDefecto = 4096
 	MaxVCPUsPorDefecto  = 4
+	// MaxMemTotalMiBPorDefecto es la suma de mem_mib vivos que puede tener un
+	// tenant: cuatro sandboxes del máximo, o muchos más pequeños.
+	MaxMemTotalMiBPorDefecto = 4 * MaxMemMiBPorDefecto
 )
+
+// minToken es la longitud mínima de un token de tenant. Uno corto se adivina
+// probando, y el frontal es lo que se expone a la red.
+const minToken = 16
 
 // Nuevo construye el frontal. Falla si no hay ningún tenant con token: este
 // servidor se expone a la red y sin token sería el daemon a pelo.
@@ -184,17 +200,20 @@ func Nuevo(o Opciones) (*Servidor, error) {
 			return nil, fmt.Errorf("host name %q is not valid (letters, digits, '.', '_', '-')", h.Nombre)
 		}
 	}
-	if o.MaxMemMiB < 0 || o.MaxVCPUs < 0 {
+	if o.MaxMemMiB < 0 || o.MaxVCPUs < 0 || o.MaxMemTotalMiB < 0 {
 		return nil, errors.New("default mem_mib and vcpus limits can't be negative")
 	}
-	maxMem, maxCPU := o.MaxMemMiB, o.MaxVCPUs
+	maxMem, maxCPU, maxTotal := o.MaxMemMiB, o.MaxVCPUs, o.MaxMemTotalMiB
+	if maxTotal == 0 {
+		maxTotal = MaxMemTotalMiBPorDefecto
+	}
 	if maxMem == 0 {
 		maxMem = MaxMemMiBPorDefecto
 	}
 	if maxCPU == 0 {
 		maxCPU = MaxVCPUsPorDefecto
 	}
-	vistos := map[string]bool{}
+	vistos, tokens := map[string]bool{}, map[string]string{}
 	var tenants []Tenant
 	for _, t := range o.Tenants {
 		if !nombreValido.MatchString(t.Nombre) {
@@ -209,7 +228,16 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		if t.Token == "" {
 			return nil, fmt.Errorf("tenant %q has an empty token", t.Nombre)
 		}
-		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 {
+		if len(t.Token) < minToken {
+			return nil, fmt.Errorf("tenant %q: its token is %d characters; the minimum is %d", t.Nombre, len(t.Token), minToken)
+		}
+		// Dos tenants con el mismo token: auth se queda con el último que
+		// coincide, y el otro tenant actúa como este sin saberlo.
+		if otro, ok := tokens[t.Token]; ok {
+			return nil, fmt.Errorf("tenants %q and %q share a token", otro, t.Nombre)
+		}
+		tokens[t.Token] = t.Nombre
+		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 || t.MaxMemTotalMiB < 0 {
 			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
 		}
 		if t.MaxMemMiB == 0 {
@@ -217,6 +245,9 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		}
 		if t.MaxVCPUs == 0 {
 			t.MaxVCPUs = maxCPU
+		}
+		if t.MaxMemTotalMiB == 0 {
+			t.MaxMemTotalMiB = maxTotal
 		}
 		tenants = append(tenants, t)
 	}
@@ -326,7 +357,9 @@ func tenantDe(r *http.Request) *Tenant {
 // ---- rutas sueltas
 
 func (s *Servidor) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hosts": len(s.reg.Todos())})
+	// Sin token (es la sonda de vida), así que no dice nada más que "vivo":
+	// cuántos hosts hay detrás es del operador.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleHosts enseña los daemons de detrás con sus endpoints: rutas de

@@ -77,6 +77,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: `credproxy.log` is rotated like the console log.
 - macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
 - Removing a template forgets its integrity verdict.
+- Sandbox gateway: idle keep-alive connections are closed after 2 minutes and request headers are capped at 64 KiB.
+- Sandbox pool: prewarmed sandboxes carry their snapshot version; after `sbx template rebuild` the old ones are removed instead of handed out, `sbx template rm` removes the free ones first, and one failing template no longer stops the refill of the others.
 
 ### Security
 
@@ -100,6 +102,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 - macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
+- Sandbox gateway: the per-sandbox memory limit checks the effective size (the template snapshot when `mem_mib` is 0), and a tenant's live sandboxes have a total memory limit (`-max-mem-total-mib`, 7th field of `KLING_SANDBOX_TENANTS`, 16384 MiB by default).
+- Sandbox gateway: tenant tokens must be at least 16 characters and unique across tenants; `/v1/health` no longer reports the host count.
 
 ### Changed
 

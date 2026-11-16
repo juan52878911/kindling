@@ -69,6 +69,12 @@ type daemonPool struct {
 	vivas    []*api.Machine
 	creadas  int
 	borradas []string
+	// snaps, si no es nil, sustituye al snapshot sbx-ts por defecto; falla
+	// hace fallar la creación desde esos snapshots; pedidas guarda cada
+	// creación aceptada.
+	snaps   []*api.Snapshot
+	falla   map[string]bool
+	pedidas []api.SandboxRequest
 }
 
 func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool, string) {
@@ -87,6 +93,12 @@ func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool
 	receta, _ := json.Marshal(map[string]any{"template": plantilla.Plantilla{Nombre: "ts", Imagen: "toolchain", Pool: pool}})
 	m := http.NewServeMux()
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, _ *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.snaps != nil {
+			json.NewEncoder(w).Encode(d.snaps)
+			return
+		}
 		json.NewEncoder(w).Encode([]*api.Snapshot{{Name: "sbx-ts",
 			Annotations: map[string]json.RawMessage{plantilla.AnotacionReceta: receta}}})
 	})
@@ -95,10 +107,18 @@ func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool
 		defer d.mu.Unlock()
 		json.NewEncoder(w).Encode(d.vivas)
 	})
-	m.HandleFunc("POST /sandboxes", func(w http.ResponseWriter, _ *http.Request) {
+	m.HandleFunc("POST /sandboxes", func(w http.ResponseWriter, r *http.Request) {
+		var req api.SandboxRequest
+		json.NewDecoder(r.Body).Decode(&req)
 		d.mu.Lock()
 		defer d.mu.Unlock()
+		if d.falla[req.From] {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(api.Error{Message: "boom"})
+			return
+		}
 		d.creadas++
+		d.pedidas = append(d.pedidas, req)
 		json.NewEncoder(w).Encode(&api.Machine{ID: "nueva0123456789", State: api.StateRunning})
 	})
 	m.HandleFunc("DELETE /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
@@ -141,5 +161,51 @@ func TestVueltaCuentaSoloLasReclamables(t *testing.T) {
 	Nuevo(hosts.Nuevo(map[string]string{"h1": sock}), time.Hour, log.New(io.Discard, "", 0)).Vuelta(context.Background())
 	if d.creadas != 0 || len(d.borradas) != 0 {
 		t.Errorf("a frozen prewarmed one: created %d, removed %v", d.creadas, d.borradas)
+	}
+}
+
+// snapPool es el snapshot de la plantilla nombre con pool y guardado en hecho.
+func snapPool(nombre string, pool int, hecho time.Time) *api.Snapshot {
+	receta, _ := json.Marshal(map[string]any{"template": plantilla.Plantilla{Nombre: nombre, Imagen: "toolchain", Pool: pool}})
+	return &api.Snapshot{Name: plantilla.SnapshotDe(nombre), CreatedAt: hecho,
+		Annotations: map[string]json.RawMessage{plantilla.AnotacionReceta: receta}}
+}
+
+// Tras un rebuild (mismo nombre, otro snapshot) las precalentadas sin dueño de
+// antes se borran y se fabrican del snapshot nuevo, con su versión puesta; las
+// de una plantilla que ya no existe se borran sin reponer.
+func TestVueltaBorraPrecalentadasViejasYHuerfanas(t *testing.T) {
+	ahora := time.Now().UTC()
+	sn := snapPool("ts", 1, ahora)
+	vieja := precalentada("vieja0123456789", api.StateRunning)
+	vieja.Labels[plantilla.LabelVersion] = plantilla.VersionDe(&api.Snapshot{CreatedAt: ahora.Add(-time.Hour)})
+	huerfana := precalentada("huerfana1234567", api.StateWarm)
+	huerfana.Labels[LabelTemplate] = "borrada"
+	deTenant := precalentada("tenant012345678", api.StateRunning)
+	deTenant.Labels[LabelTenant] = "ana"
+	d, sock := nuevoDaemonPool(t, 0, vieja, huerfana, deTenant)
+	d.snaps = []*api.Snapshot{sn}
+	Nuevo(hosts.Nuevo(map[string]string{"h1": sock}), time.Hour, log.New(io.Discard, "", 0)).Vuelta(context.Background())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.borradas) != 2 || d.borradas[0] != "vieja0123456789" || d.borradas[1] != "huerfana1234567" {
+		t.Errorf("removed %v, want the stale and the orphaned one (not the tenant's)", d.borradas)
+	}
+	if d.creadas != 1 || d.pedidas[0].Labels[plantilla.LabelVersion] != plantilla.VersionDe(sn) {
+		t.Errorf("created %d (%+v), want one labeled with version %s", d.creadas, d.pedidas, plantilla.VersionDe(sn))
+	}
+}
+
+// Que una plantilla no se pueda fabricar no deja sin fondo a las demás del host.
+func TestVueltaSigueTrasUnFalloDeOtraPlantilla(t *testing.T) {
+	ahora := time.Now().UTC()
+	d, sock := nuevoDaemonPool(t, 0)
+	d.snaps = []*api.Snapshot{snapPool("rota", 1, ahora), snapPool("buena", 1, ahora)}
+	d.falla = map[string]bool{"sbx-rota": true}
+	Nuevo(hosts.Nuevo(map[string]string{"h1": sock}), time.Hour, log.New(io.Discard, "", 0)).Vuelta(context.Background())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.creadas != 1 || d.pedidas[0].From != "sbx-buena" {
+		t.Errorf("created %d (%+v), want the prewarmed of sbx-buena", d.creadas, d.pedidas)
 	}
 }

@@ -9,7 +9,13 @@
 // sin que nadie recuerde a mano qué se hizo.
 package plantilla
 
-import "time"
+import (
+	"context"
+	"strconv"
+	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
+)
 
 // Plantilla es la receta.
 type Plantilla struct {
@@ -71,3 +77,44 @@ func SnapshotDe(nombre string) string { return "sbx-" + nombre }
 // que se construyó. Sirve para saber si hay que reconstruir y para poder
 // hacerlo sin que nadie recuerde nada.
 const AnotacionReceta = "sandbox.template"
+
+// LabelVersion es la etiqueta de una precalentada con la versión del snapshot
+// del que salió (VersionDe). Un rebuild reemplaza el snapshot con el mismo
+// nombre, y sin ella el frontal seguía entregando precalentadas con el
+// contenido anterior. Va en el espacio reservado kling.: un cliente no la pone.
+const LabelVersion = "kling.sandbox.snap"
+
+// VersionDe identifica el contenido de un snapshot: cuándo se guardó. Vacío si
+// el daemon no lo dice.
+func VersionDe(sn *api.Snapshot) string {
+	if sn == nil || sn.CreatedAt.IsZero() {
+		return ""
+	}
+	return strconv.FormatInt(sn.CreatedAt.UnixNano(), 10)
+}
+
+// BorrarPrecalentadas borra del host las precalentadas SIN DUEÑO de la
+// plantilla nombre (las del fondo: kind=sandbox, template=nombre, sin tenant y
+// del frontal). Las de un tenant siguen hasta que las suelte. El daemon no deja
+// borrar un snapshot con instancias vivas, así que sin esto `template rm` se
+// negaba mientras hubiera fondo, y el fondo seguía ahí para siempre.
+// etiquetaTenant es la del dueño que pone el frontal al reclamar.
+const etiquetaTenant = "tenant"
+
+func BorrarPrecalentadas(ctx context.Context, c *api.Client, nombre string) (int, error) {
+	ms, err := c.Sandboxes(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, mc := range ms {
+		if mc.Labels[EtiquetaPlantilla] != nombre || mc.Labels[etiquetaTenant] != "" || !DelFrontal(mc.Labels) {
+			continue
+		}
+		if err := c.Remove(ctx, mc.ID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
