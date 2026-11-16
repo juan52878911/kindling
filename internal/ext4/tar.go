@@ -130,6 +130,14 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 			}
 			n = NewDir(0, 0, 0, time.Time{})
 		case tar.TypeReg:
+			// Un fichero disperso declara un tamaño que el tar no trae
+			// (archive/tar pone ceros en los huecos): unos bytes de capa
+			// serían GiB de disco. Como internal/oci, no se admiten.
+			for k := range h.PAXRecords {
+				if strings.HasPrefix(k, "GNU.sparse.") {
+					return fmt.Errorf("%s: sparse files are not supported", full)
+				}
+			}
 			n = &Node{Mode: ModeReg, Size: h.Size}
 			if o.Keep != nil && h.Size <= maxKeep && o.Keep(full, h.Size) {
 				b, err := io.ReadAll(tr)
