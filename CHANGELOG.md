@@ -80,6 +80,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling compose: `up` no longer removes a machine of another project whose name collides (project `a` service `b-web` vs project `a-b` service `web`), and `up` and `down -v` refuse to go on when names collide.
 - Graph health checks wait at least 100 ms between attempts, so a tiny `start_interval_ms` no longer floods the guest with execs.
 - kling compose: a healthcheck over the daemon limits (Docker allows `retries: 120`) is capped with a warning instead of failing the whole compose.
+- kling compose up: images are imported before the running project is removed, so a failed pull leaves it up; only images that need `-replace` wait until after.
+- kling compose up: at most 8 imports and 4 template machines at a time, and the first failure stops the rest.
 
 ### Security
 
@@ -104,6 +106,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 - macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
 - kling compose: variables are interpolated after parsing, per value, so a value with ` #`, `: ` or a newline no longer gets cut or adds keys; `image:` must be an image reference.
+- kling compose up: service environment values reach `kling image import` through a temporary `-env-file` instead of its command line.
 
 ### Changed
 

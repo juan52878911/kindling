@@ -42,6 +42,33 @@ type vistaProyecto struct {
 	info *api.Info
 }
 
+// enParaleloHastaFallo es enParalelo con un contexto que se cancela en el
+// primer error: lo que está corriendo se corta, lo que falta no empieza, y
+// vuelve ese primer error.
+func enParaleloHastaFallo(ctx context.Context, n, k int, f func(ctx context.Context, i int) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	var primero error
+	enParalelo(n, k, func(i int) {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := f(ctx, i); err != nil {
+			mu.Lock()
+			if primero == nil {
+				primero = err
+				cancel()
+			}
+			mu.Unlock()
+		}
+	})
+	if primero == nil {
+		primero = ctx.Err()
+	}
+	return primero
+}
+
 // verProyecto pregunta en paralelo lo de vistaProyecto. Un 404 del grafo no
 // es error (g queda nil).
 func verProyecto(ctx context.Context, c *api.Client, proyecto string, conInfo bool) (*vistaProyecto, error) {

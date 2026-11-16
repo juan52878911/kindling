@@ -40,7 +40,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -304,7 +303,13 @@ func esperarOrden(ctx context.Context, ops plantillaOps, ref string, argv []stri
 	}
 }
 
-// prepararPlantillas prepara en paralelo las que faltan.
+// paraleloPlantillas: cuántas máquinas de preparación a la vez. Cada una
+// arranca con su memoria y a CPU entera; todas a la vez, con 20 o 30
+// servicios, se comían la memoria del Mac (jetsam).
+const paraleloPlantillas = 4
+
+// prepararPlantillas prepara las que faltan, paraleloPlantillas a la vez; el
+// primer fallo corta las demás (el up ya no va a seguir).
 func prepararPlantillas(ctx context.Context, ops plantillaOps, proyecto string, ps []*plantillaCompose, log io.Writer) error {
 	var mu sync.Mutex
 	logf := func(f string, a ...any) {
@@ -312,86 +317,111 @@ func prepararPlantillas(ctx context.Context, ops plantillaOps, proyecto string, 
 		fmt.Fprintf(log, f+"\n", a...)
 		mu.Unlock()
 	}
-	var wg sync.WaitGroup
-	errs := make([]error, len(ps))
-	for i, p := range ps {
-		if p.nombre == "" || p.existe {
-			continue
+	var faltan []*plantillaCompose
+	for _, p := range ps {
+		if p.nombre != "" && !p.existe {
+			faltan = append(faltan, p)
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = prepararPlantilla(ctx, ops, proyecto, p, logf)
-		}()
 	}
-	wg.Wait()
-	return errors.Join(errs...)
+	return enParaleloHastaFallo(ctx, len(faltan), paraleloPlantillas, func(ctx context.Context, i int) error {
+		return prepararPlantilla(ctx, ops, proyecto, faltan[i], logf)
+	})
 }
 
-// prepararCompose deja listo lo que el grafo de t necesita: los volúmenes,
-// las imágenes que falten o hayan cambiado y las plantillas que falten, y
-// reescribe t.Grafo con los nodos que salen de plantilla. Las plantillas que
-// ya no valen se borran.
-func prepararCompose(ctx context.Context, c *api.Client, host string, t *traduccionCompose, fresh bool) error {
+// preparacionCompose es lo que compose up prepara para el grafo de t, en dos
+// tiempos: antes (importarAntes) lo que no toca el proyecto que pueda estar
+// levantado, y terminar, ya sin él.
+type preparacionCompose struct {
+	t          *traduccionCompose
+	c          *api.Client
+	ps         []*plantillaCompose
+	snaps      []*api.Snapshot
+	vols       []string
+	imports    []importCompose
+	pendientes []importCompose
+	run        func(context.Context, string) (string, error)
+}
+
+// planCompose decide qué falta: los volúmenes, las imágenes que falten o
+// hayan cambiado y las plantillas que falten.
+func planCompose(ctx context.Context, c *api.Client, host string, t *traduccionCompose, fresh bool) (*preparacionCompose, error) {
 	info, err := c.Info(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	snaps, err := c.Snapshots(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var ps []*plantillaCompose
+	p := &preparacionCompose{t: t, c: c, snaps: snaps, vols: volumenesDe(t),
+		run: func(ctx context.Context, l string) (string, error) { return lineaKling(ctx, host, l) }}
+	for i, v := range p.vols {
+		p.vols[i] = "kling volume create " + v
+	}
 	t.saludTCP = !slices.Contains(info.Capabilities, api.CapabilityGraphHealth)
 	if slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
-		ps = planPlantillas(t, snaps, daemonDeInfo(info), fresh)
+		p.ps = planPlantillas(t, snaps, daemonDeInfo(info), fresh)
 	} else {
 		// Sin entorno en la máquina, el de siempre: horneado y en frío.
 		fmt.Fprintf(os.Stderr, "warning: the daemon (%s) does not take a machine environment: no warm templates; update it\n", info.Version)
 		for _, s := range t.vivos {
-			ps = append(ps, &plantillaCompose{s: s})
+			p.ps = append(p.ps, &plantillaCompose{s: s})
 		}
 	}
-	borrar := func(nombres []string) {
-		for _, n := range nombres {
-			_ = c.RemoveSnapshot(context.WithoutCancel(ctx), n)
-		}
-	}
-	var vols []string
-	for _, l := range t.Antes {
-		if strings.HasPrefix(l, "kling volume create ") {
-			vols = append(vols, l)
-		}
-	}
-	var imports []importCompose
-	for _, p := range ps {
-		if p.existe {
+	for _, pl := range p.ps {
+		if pl.existe {
 			continue
 		}
-		frio := p.nombre == ""
-		hornear := frio || !p.cmdMaquina
-		nodo := p.s.nodo
-		imports = append(imports, importCompose{
-			linea:      ordenImportCon(p.s, t.Proyect, frio, hornear, false),
-			conReplace: ordenImportCon(p.s, t.Proyect, frio, hornear, true),
+		frio := pl.nombre == ""
+		hornear := frio || !pl.cmdMaquina
+		nodo := pl.s.nodo
+		p.imports = append(p.imports, importCompose{
+			linea:      ordenImportCon(pl.s, t.Proyect, frio, hornear, false),
+			conReplace: ordenImportCon(pl.s, t.Proyect, frio, hornear, true),
 			// Con -fresh, -replace siempre: la receta igual no ve un agente
 			// nuevo (el de un kling actualizado), y -fresh es para eso.
 			yaReplace: fresh,
 			// La imagen cambia: las plantillas que salieron de ella, fuera.
-			antesDeReplace: func() { borrar(viejasDe(snaps, t.Proyect, nodo, "")) },
+			antesDeReplace: func() { p.borrar(ctx, viejasDe(snaps, t.Proyect, nodo, "")) },
 		})
 	}
-	if err := runSetup(ctx, host, vols, imports); err != nil {
+	return p, nil
+}
+
+func (p *preparacionCompose) borrar(ctx context.Context, nombres []string) {
+	for _, n := range nombres {
+		_ = p.c.RemoveSnapshot(context.WithoutCancel(ctx), n)
+	}
+}
+
+// importarAntes crea los volúmenes y corre los imports que no reemplazan
+// nada (importarSinReemplazar): un fallo aquí deja el proyecto levantado
+// como estaba.
+func (p *preparacionCompose) importarAntes(ctx context.Context) error {
+	if err := crearVolumenes(ctx, p.run, p.vols); err != nil {
 		return err
 	}
-	if err := prepararPlantillas(ctx, c, t.Proyect, ps, os.Stderr); err != nil {
+	var err error
+	p.pendientes, err = importarSinReemplazar(ctx, p.run, p.imports)
+	return err
+}
+
+// terminar, ya sin el proyecto anterior: los imports con -replace, las
+// plantillas que faltan, y t.Grafo reescrito con los nodos que salen de
+// plantilla. Las plantillas que ya no valen se borran.
+func (p *preparacionCompose) terminar(ctx context.Context) error {
+	if err := importarReemplazando(ctx, p.run, p.pendientes); err != nil {
 		return err
 	}
+	if err := prepararPlantillas(ctx, p.c, p.t.Proyect, p.ps, os.Stderr); err != nil {
+		return err
+	}
+	t := p.t
 	t.desde = map[string]string{}
-	for _, p := range ps {
-		if p.nombre != "" {
-			t.desde[p.s.nodo] = p.nombre
-			borrar(viejasDe(snaps, t.Proyect, p.s.nodo, p.nombre))
+	for _, pl := range p.ps {
+		if pl.nombre != "" {
+			t.desde[pl.s.nodo] = pl.nombre
+			p.borrar(ctx, viejasDe(p.snaps, t.Proyect, pl.s.nodo, pl.nombre))
 		}
 	}
 	t.Grafo = grafoDeCompose(t, t.Proyect, t.vivos, t.por, func(string, ...any) {})
