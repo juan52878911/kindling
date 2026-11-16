@@ -604,3 +604,22 @@ func TestCheckRunnable(t *testing.T) {
 		t.Fatalf("no command and no shell accepted: %v", err)
 	}
 }
+
+// Dos ficheros de 2^62 bytes desbordaban la suma del tope de lo
+// descomprimido, que quedaba negativa y lo pasaba.
+func TestCabeEnTopesOverflow(t *testing.T) {
+	tree := ext4.NewDir(0o755, 0, 0, time.Unix(0, 0))
+	tree.SetChild("a", &ext4.Node{Mode: ext4.ModeReg, Size: 1 << 62})
+	tree.SetChild("b", &ext4.Node{Mode: ext4.ModeReg, Size: 1 << 62})
+	if _, _, ok := cabeEnTopes(tree, 10, 1<<30); ok {
+		t.Fatal("2 × 2^62 bytes fit in 1 GiB")
+	}
+	small := ext4.NewDir(0o755, 0, 0, time.Unix(0, 0))
+	small.SetChild("a", &ext4.Node{Mode: ext4.ModeReg, Size: 1 << 20})
+	if files, bytes, ok := cabeEnTopes(small, 10, 1<<30); !ok || files != 2 || bytes != 1<<20 {
+		t.Fatalf("small tree: %d files, %d bytes, ok %v", files, bytes, ok)
+	}
+	if _, _, ok := cabeEnTopes(small, 1, 1<<30); ok {
+		t.Fatal("2 entries fit in a 1-file limit")
+	}
+}

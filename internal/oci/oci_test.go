@@ -195,6 +195,41 @@ func TestPullMaxBytes(t *testing.T) {
 	}
 }
 
+// Tamaños declarados que desbordan la suma (2^62 + 2^62 < 0) no pasan el
+// tope, y un manifiesto con más capas de la cuenta tampoco; en los dos casos
+// sin pedir un solo blob (ni la config ni las capas existen en el registro:
+// pedirlas daría otro error).
+func TestPullRejectsHugeLayerSizes(t *testing.T) {
+	r := ocitest.New()
+	defer r.Close()
+	cfg := "sha256:" + strings.Repeat("b", 64)
+	capa := func(size int64) map[string]any {
+		return map[string]any{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"digest": "sha256:" + strings.Repeat("a", 64), "size": size}
+	}
+	manifest := func(layers []map[string]any) string {
+		m, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+			"config": map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cfg, "size": 37},
+			"layers": layers})
+		return r.Put(m, "application/vnd.oci.image.manifest.v1+json")
+	}
+	muchas := make([]map[string]any, 1025)
+	for i := range muchas {
+		muchas[i] = capa(1)
+	}
+	for _, c := range []struct {
+		name, man, want string
+	}{
+		{"overflow", manifest([]map[string]any{capa(1 << 62), capa(1 << 62)}), "limit"},
+		{"layers", manifest(muchas), "layers"},
+	} {
+		cl := &oci.Client{Cache: t.TempDir(), MaxBytes: 1 << 20, Log: io.Discard}
+		if _, err := cl.Pull(context.Background(), r.Host()+"/x/y", c.man, "arm64"); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+	}
+}
+
 // Un blob de configuración se lee entero a memoria: sin tamaño declarado, o
 // con uno enorme, no se baja.
 func TestPullRejectsConfigSize(t *testing.T) {
