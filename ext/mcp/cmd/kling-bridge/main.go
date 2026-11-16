@@ -348,7 +348,7 @@ type bridge struct {
 	// vive; bmu los protege. Ver browser.go.
 	browser *browserSpec
 	bmu     sync.Mutex
-	bproc   *exec.Cmd
+	bproc   *hijoVigilado
 
 	// Modo proxy HTTP (ver proxy.go). service es el marcador (nil = modo stdio);
 	// proxy reversa hacia el hijo ÚNICO y compartido; proxyChild es ese hijo y
@@ -357,7 +357,14 @@ type bridge struct {
 	service    *serviceSpec
 	proxy      *httputil.ReverseProxy
 	pmu        sync.Mutex
-	proxyChild *exec.Cmd
+	proxyChild *hijoVigilado
+	// proxyEnv es la huella del entorno con que se lanzó proxyChild (MMDS
+	// incluido) y proxyStopped dice que el apagado lo paró a propósito; ambos
+	// bajo pmu. proxyRestart serializa los relanzamientos (ver
+	// ensureProxyChild).
+	proxyEnv     string
+	proxyStopped bool
+	proxyRestart sync.Mutex
 
 	mu        sync.Mutex
 	sessions  map[string]*session

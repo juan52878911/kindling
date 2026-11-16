@@ -57,20 +57,26 @@ func TestProxySeenRefrescoNoDesaloja(t *testing.T) {
 	}
 }
 
-// matarYEsperar recoge al hijo: sin el Wait quedaría zombi fuera de la microVM.
-func TestMatarYEsperarRecogeAlHijo(t *testing.T) {
-	cmd := exec.Command("sleep", "60")
-	enSuPropioGrupo(cmd)
-	if err := cmd.Start(); err != nil {
+// matar recoge al hijo vigilado: sin el Wait quedaría zombi fuera de la microVM.
+func TestMatarRecogeAlHijoVigilado(t *testing.T) {
+	h, err := lanzarVigilado(exec.Command("sleep", "60"), "test")
+	if err != nil {
 		t.Skipf("sin sleep: %v", err)
 	}
+	if !h.vivo() {
+		t.Fatal("recién lanzado ya sale muerto")
+	}
 	t0 := time.Now()
-	matarYEsperar(cmd)
-	if cmd.ProcessState == nil {
+	h.matar()
+	if h.vivo() || h.cmd.ProcessState == nil {
 		t.Fatal("el hijo no se recogió")
 	}
 	if d := time.Since(t0); d > esperaHijoProxy {
 		t.Errorf("tardó %s en recogerlo", d)
 	}
-	matarYEsperar(nil)
+	var nulo *hijoVigilado
+	nulo.matar()
+	if nulo.vivo() {
+		t.Error("un hijo nil no puede estar vivo")
+	}
 }

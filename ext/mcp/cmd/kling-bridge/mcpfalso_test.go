@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 )
@@ -20,7 +21,19 @@ import (
 // puente— y solo contesta la llamada cuando le llega la respuesta.
 const envMCPFalso = "KLING_BRIDGE_MCP_FALSO"
 
+// envHTTPFalso convierte el binario en un servidor HTTP mínimo que escucha en
+// esa dirección y contesta "<pid> <SECRETO_FALSO>": hace de servidor MCP HTTP
+// del modo proxy y de Chromium compartido, para ver si se relanzan y con qué
+// entorno.
+const envHTTPFalso = "KLING_BRIDGE_HTTP_FALSO"
+
 func TestMain(m *testing.M) {
+	if addr := os.Getenv(envHTTPFalso); addr != "" {
+		_ = http.ListenAndServe(addr, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, "%d %s", os.Getpid(), os.Getenv("SECRETO_FALSO"))
+		}))
+		os.Exit(1)
+	}
 	if os.Getenv(envMCPFalso) == "1" {
 		servidorMCPFalso()
 		os.Exit(0)
