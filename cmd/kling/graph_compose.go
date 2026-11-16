@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -115,6 +116,38 @@ func interpolarCompose(src string, lookup func(string) (string, bool), aviso fun
 	var errs []error
 	out := interpolarComposeRec(src, lookup, aviso, &errs)
 	return out, errors.Join(errs...)
+}
+
+// interpolarArbol interpola los escalares de texto de v (lo que sale de
+// parseYAML), no las claves: un valor sustituido sigue siendo un solo
+// escalar, sin más YAML que leer.
+func interpolarArbol(v any, lookup func(string) (string, bool), aviso func(string), errs *[]error) any {
+	switch x := v.(type) {
+	case string:
+		return interpolarComposeRec(x, lookup, aviso, errs)
+	case map[string]any:
+		for _, k := range clavesOrd(x) {
+			x[k] = interpolarArbol(x[k], lookup, aviso, errs)
+		}
+	case []any:
+		for i := range x {
+			x[i] = interpolarArbol(x[i], lookup, aviso, errs)
+		}
+	}
+	return v
+}
+
+// esVerdad lee un booleano del compose: true, o el texto "true" que deja una
+// variable interpolada (${RO:-true}).
+func esVerdad(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		b, _ := escalarPlano(x).(bool)
+		return b
+	}
+	return false
 }
 
 func interpolarComposeRec(src string, lookup func(string) (string, bool), aviso func(string), errs *[]error) string {
@@ -312,13 +345,18 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 	t := &traduccionCompose{base: base, Publica: map[string][]api.PortPublish{}}
 	avisa := func(f string, a ...any) { t.Avisos = append(t.Avisos, "warning: "+fmt.Sprintf(f, a...)) }
 
-	texto, err := interpolarCompose(string(datos), lookup, func(s string) { avisa("%s", s) })
-	if err != nil {
-		return t, err
-	}
-	raiz, err := parseYAML([]byte(texto))
+	// Primero se parsea y después se interpola cada escalar, como Docker
+	// Compose: interpolado sobre el texto, un valor con " #" se cortaba (el
+	// resto era un comentario) y uno con ": " o un salto de línea metía
+	// claves que el fichero no tenía.
+	raiz, err := parseYAML(datos)
 	if err != nil {
 		return nil, err
+	}
+	var errsI []error
+	raiz = interpolarArbol(raiz, lookup, func(s string) { avisa("%s", s) }, &errsI)
+	if err := errors.Join(errsI...); err != nil {
+		return t, err
 	}
 	top, ok := raiz.(map[string]any)
 	if !ok {
@@ -402,6 +440,13 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 		}
 		usados[s.nodo] = n
 		t.servicio(s, def, proyecto, declarados, avisa)
+		// La referencia va tal cual a kling image import: tiene que ser una
+		// referencia de imagen (y no, por ejemplo, algo que empiece por "-").
+		if !s.skip {
+			if _, err := oci.ParseImageRef(s.imagen); err != nil {
+				return t, fmt.Errorf("service %s: image: %w", n, err)
+			}
+		}
 		for _, r := range s.redes {
 			if !redes[r] {
 				avisa("service %s: networks: %s is not declared at the top level; used as is", n, r)
@@ -868,7 +913,7 @@ func (t *traduccionCompose) volumes(s *servicioCompose, v any, decl map[string]s
 		case map[string]any:
 			typ := fmt.Sprint(x["type"])
 			src, dst = fmt.Sprint(x["source"]), fmt.Sprint(x["target"])
-			ro, _ = x["read_only"].(bool)
+			ro = esVerdad(x["read_only"])
 			desc = src + ":" + dst
 			if typ != "volume" {
 				avisa("%svolumes: %s: type %s is not supported (only named volumes)", pre, desc, typ)
@@ -959,7 +1004,7 @@ func (t *traduccionCompose) healthcheck(s *servicioCompose, v any, pre string, a
 				s.salud = nil
 			}
 		case "disable":
-			if b, _ := m[k].(bool); b {
+			if esVerdad(m[k]) {
 				desactivado = true
 			}
 		case "interval", "timeout", "start_period", "start_interval":

@@ -100,6 +100,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 - macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
+- kling compose: variables are interpolated after parsing, per value, so a value with ` #`, `: ` or a newline no longer gets cut or adds keys; `image:` must be an image reference.
 
 ### Changed
 
