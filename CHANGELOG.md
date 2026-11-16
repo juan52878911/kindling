@@ -127,6 +127,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: the guest's answer to the DELETE of an isolated session is capped at 64 KiB and 30 s.
 - MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
 - rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
+- Machines with shares started through the API (gateway, sandbox) get at least 256 MiB/s of network, as `kling run -share` already did.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
