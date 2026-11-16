@@ -585,15 +585,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 	}
 	dTree := time.Since(tTree)
-	var files, bytes int64
-	_ = tree.Walk(func(_ string, n *ext4.Node) error {
-		files++
-		if n.IsReg() {
-			bytes += n.Size
-		}
-		return nil
-	})
-	if files > ociMaxFiles || bytes > int64(maxMB)<<23 {
+	if files, bytes, ok := cabeEnTopes(tree, ociMaxFiles, int64(maxMB)<<23); !ok {
 		return fmt.Errorf("image unpacks to %d files and %d MiB, over the limits (%d files, %d MiB)", files, bytes>>20, ociMaxFiles, maxMB*8)
 	}
 	var slimArgs []imagen.ArgsSlim
@@ -1168,4 +1160,26 @@ func checkRunnable(hasSh bool) error {
 		return nil
 	}
 	return errors.New("the image has no ENTRYPOINT or CMD and no shell, so there is nothing to run: give the command after --, or -entrypoint")
+}
+
+// cabeEnTopes cuenta los ficheros y los bytes del árbol y dice si caben en
+// los topes. Para en cuanto se pasa de alguno, y compara antes de sumar:
+// con tamaños enormes la suma desbordaba y quedaba por debajo del tope.
+func cabeEnTopes(tree *ext4.Node, maxFiles, maxBytes int64) (files, bytes int64, ok bool) {
+	errTope := errors.New("over")
+	err := tree.Walk(func(_ string, n *ext4.Node) error {
+		files++
+		if files > maxFiles {
+			return errTope
+		}
+		if n.IsReg() {
+			if n.Size > maxBytes-bytes {
+				bytes = maxBytes + 1
+				return errTope
+			}
+			bytes += n.Size
+		}
+		return nil
+	})
+	return files, bytes, err == nil
 }

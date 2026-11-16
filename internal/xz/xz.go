@@ -22,6 +22,11 @@ import (
 	"io"
 )
 
+// MaxDict es el diccionario más grande que se acepta. La ventana se reserva
+// entera al abrir cada bloque, así que es el tope de memoria del
+// descompresor: 64 MiB es lo que usa xz -9 (dpkg-deb y Debian usan -6, 8 MiB).
+const MaxDict = 64 << 20
+
 var (
 	errFormat = errors.New("xz: invalid format")
 	crc64Tab  = crc64.MakeTable(crc64.ECMA)
@@ -33,6 +38,9 @@ type Reader struct {
 	check byte
 	block *blockReader
 	done  bool
+	// win es el búfer de la ventana del último bloque: el siguiente lo
+	// reutiliza en vez de reservar otro.
+	win []byte
 }
 
 // NewReader lee la cabecera del flujo.
@@ -84,6 +92,7 @@ func (x *Reader) Read(p []byte) (int, error) {
 			if err := x.block.finish(); err != nil {
 				return n, err
 			}
+			x.win = x.block.dec.win.buf
 			x.block = nil
 			if n > 0 {
 				return n, nil
@@ -174,14 +183,19 @@ func (x *Reader) newBlock(first byte) (*blockReader, error) {
 		if err != nil {
 			return nil, err
 		}
-		props := make([]byte, psize)
-		if _, err := io.ReadFull(br, props); err != nil {
-			return nil, err
-		}
+		// Se valida antes de leer: psize sale de un varint de 63 bits y
+		// reservar con él un búfer es un pánico o un OOM.
 		if id != 0x21 || i != nf-1 || psize != 1 {
 			return nil, fmt.Errorf("xz: unsupported filter %#x (only LZMA2)", id)
 		}
-		b := props[0] & 0x3F
+		prop, err := br.ReadByte()
+		if err != nil {
+			return nil, errFormat
+		}
+		if prop&0xC0 != 0 {
+			return nil, errFormat
+		}
+		b := prop & 0x3F
 		if b > 40 {
 			return nil, errFormat
 		}
@@ -201,10 +215,10 @@ func (x *Reader) newBlock(first byte) (*blockReader, error) {
 		hh = sha256.New()
 	}
 	cr := &countReader{r: x.r}
-	if dict > 1<<28 {
-		return nil, fmt.Errorf("xz: dictionary of %d bytes is too large", dict)
+	if dict > MaxDict {
+		return nil, fmt.Errorf("xz: dictionary of %d bytes is too large (max %d)", dict, MaxDict)
 	}
-	return &blockReader{x: x, dec: newLZMA2(cr, int(dict)), h: hh, comp: cr}, nil
+	return &blockReader{x: x, dec: newLZMA2(cr, int(dict), x.win), h: hh, comp: cr}, nil
 }
 
 func (b *blockReader) Read(p []byte) (int, error) {

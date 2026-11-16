@@ -57,6 +57,27 @@ var reSnapshot = lazyre.New(`^[0-9]{8}T[0-9]{6}Z$`)
 // maxIndex es el tope de un Packages.xz (el de trixie/main son ~10 MiB).
 const maxIndex = 128 << 20
 
+// maxIndexUnpacked es el tope del índice ya descomprimido (el de trixie/main
+// son ~70 MiB): el .xz llega sin firma y no puede dictar cuánta memoria se
+// usa. Es una variable para las pruebas.
+var maxIndexUnpacked int64 = 1 << 30
+
+// tooBig va detrás de un io.LimitReader: si al agotarse el tope aún quedan
+// datos, es un error y no un índice cortado.
+type tooBig struct {
+	r   io.Reader
+	max int64
+}
+
+func (t tooBig) Read([]byte) (int, error) {
+	var b [1]byte
+	n, err := io.ReadFull(t.r, b[:])
+	if n > 0 {
+		return 0, fmt.Errorf("index larger than %d MiB once decompressed", t.max>>20)
+	}
+	return 0, err // io.EOF, o el error del descompresor
+}
+
 // Resolve resuelve want contra los índices del snapshot de d, sin lo que ya
 // está instalado en la base (su status). Los índices se guardan en la caché
 // (un snapshot no cambia).
@@ -96,7 +117,10 @@ func (d Debs) Resolve(ctx context.Context, arch string, status []byte, want []st
 		}
 		var r io.Reader = bytes.NewReader(raw)
 		if strings.HasSuffix(src.URL, ".xz") {
-			r, err = xz.NewReader(r)
+			var xr io.Reader
+			if xr, err = xz.NewReader(r); err == nil {
+				r = io.MultiReader(io.LimitReader(xr, maxIndexUnpacked), tooBig{xr, maxIndexUnpacked})
+			}
 		}
 		if err == nil {
 			err = ix.Add(r, src.Base)
