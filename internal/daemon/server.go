@@ -362,6 +362,14 @@ type Server struct {
 	muestra   api.ProcStats
 	muestraEn time.Time
 	muestrear func() api.ProcStats
+
+	// agentesVistos es, por máquina, la firma de la vida de VMM en la que su
+	// agente ya contestó (bajo agentesMu): ver agenteVisto.
+	agentesMu     sync.Mutex
+	agentesVistos map[string]string
+	// sondearAgente es cómo se espera al agente (nil = waitAgent; los tests
+	// ponen uno que cuenta).
+	sondearAgente func(context.Context, *api.Machine) error
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de

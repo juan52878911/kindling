@@ -105,6 +105,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- exec, shell and file calls probe the guest agent once per VMM lifetime instead of on every call (a loopback connect is ~45 µs; the check that replaces it, ~40 ns); a failed call to the agent makes the next one probe again.
 - `/metrics` reuses a sample for 1 s, and concurrent scrapes share one (50 parallel scrapes: 50 samples before, 1 now).
 - kling-hv: `KLING_HV_AVISOS=1` also logs vCPU exits, timer exits and trapped WFIs (measured on an M4: none trapped while idle, so the 2 ms WFI fallback never runs).
 - Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
