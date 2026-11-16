@@ -98,7 +98,7 @@ y las órdenes previas (`-script`, y también como comentario en la cabecera del
 | `ports`, `expose` | `ports` del nodo (el puerto del contenedor; publicar en el host no existe y se avisa) |
 | red del proyecto | como en Docker Compose, cada servicio alcanza a todos los demás: una arista `link` de cada nodo a cada puerto de cada otro (un nodo alcanza un nodo por puerto: si dos exponen el mismo, gana el de `depends_on` o el que nombra el entorno). `networks:` lo restringe a los que comparten red; `network_mode: none`, a ninguno. Si un servicio pasaría de 64 aristas, a ese solo le quedan las de `depends_on` y las del entorno, con aviso |
 | `depends_on` | una arista `depends`; `condition: service_healthy` con `healthcheck` le pone `health` (el `test` de verdad, dentro del destino, que lleva `allow_exec`) |
-| `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period` y `start_interval` van a la `health` de la arista (con un daemon sin `graph-health`, `compose up` vuelve a la sonda TCP del puerto, con aviso) |
+| `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period` y `start_interval` van a la `health` de la arista, con los topes del daemon (un `retries` de más de 100 se queda en 100, con aviso) (con un daemon sin `graph-health`, `compose up` vuelve a la sonda TCP del puerto, con aviso) |
 | volúmenes con nombre | `kling volume create <grafo>-V` y `volumes` del nodo (`:ro` incluido) |
 | `mem_limit`, `cpus`, `deploy.resources.limits` | `mem_mib`, `vcpus` |
 
@@ -234,7 +234,7 @@ el orden de todo el grafo:
 Con **`health`** (`{test: [pg_isready, -U, app], interval_ms: 5000, retries: 10}`),
 además, el `test` se ejecuta **dentro** del destino (que necesita `allow_exec: true`)
 hasta que acaba con 0: el `condition: service_healthy` de Docker Compose. Se intenta
-cada `start_interval_ms` (200 ms por defecto), no cada `interval_ms`: lo que se espera
+cada `start_interval_ms` (200 ms por defecto, nunca menos de 100), no cada `interval_ms`: lo que se espera
 es el primer pase. Cada intento dura como mucho `timeout_seconds` (30), y el destino
 está enfermo —y `up` falla— si no pasó en `start_period_seconds + retries × interval`
 (por defecto 3 × 30 s, cuando Docker lo declararía `unhealthy`).
