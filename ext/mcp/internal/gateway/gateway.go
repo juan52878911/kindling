@@ -531,9 +531,15 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(rec.Body.Bytes())
 			return
 		}
-		rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r)
-		// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
-		if r.Method == http.MethodDelete {
+		cw := &codigoVisto{ResponseWriter: &sidWriter{ResponseWriter: w, ext: ext}, code: http.StatusOK}
+		rt.ServeHTTP(cw, r)
+		// DELETE cierra la sesión: se olvida la ruta para no acumularlas. Un
+		// 404 del puente a un POST de /mcp dice lo mismo desde el otro lado
+		// (la sesión ya no existe allí: cosechada, o su servidor murió): la
+		// ruta se olvida también, o seguía contando como sesión de la
+		// instancia y forzaba réplicas para sesiones que no existen.
+		if r.Method == http.MethodDelete ||
+			(r.Method == http.MethodPost && r.URL.Path == "/mcp" && cw.code == http.StatusNotFound) {
 			g.Forget(ext)
 		}
 		return

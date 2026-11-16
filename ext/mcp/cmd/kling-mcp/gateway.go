@@ -75,6 +75,7 @@ func cmdGateway(args []string) error {
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
 	sessionTTL := fs.Duration("session-ttl", 0, "an isolated session (mcp isolation session) unused this long is closed and its microVM destroyed (default 30m)")
 	maxReplicas := fs.Int("max-replicas", defaultMaxReplicas, "max instances per service when scaling out for parallel sessions (0 = unlimited; extra sessions get 503)")
+	maxSessions := fs.Int("max-sessions", 0, "max MCP sessions a tenant has open at once (direct, isolated and _all); without named tokens every client is the \"default\" tenant and they share it (0 = 256)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate (PEM) to serve HTTPS; required to listen outside loopback")
 	tlsKey := fs.String("tls-key", "", "private key (PEM) of -tls-cert")
 	insecure := fs.Bool("insecure-listen", false, "allow plain HTTP on a non-loopback address (tokens travel in the clear)")
@@ -97,6 +98,9 @@ func cmdGateway(args []string) error {
 	// cuántos segundos de CPU consume /debug/pprof/profile.
 	if *maxReplicas < 0 {
 		return fmt.Errorf("-max-replicas must be >= 0 (0 = unlimited), got %d", *maxReplicas)
+	}
+	if *maxSessions < 0 {
+		return fmt.Errorf("-max-sessions must be >= 0 (0 = default), got %d", *maxSessions)
 	}
 	if *pausedMiB < -1 {
 		return fmt.Errorf("-paused-mib must be >= -1 (0 = always freeze, -1 = derived from host memory), got %d", *pausedMiB)
@@ -183,6 +187,7 @@ func cmdGateway(args []string) error {
 		gw.PausedMiB = *pausedMiB
 		gw.PausedFor = *pausedFor
 		gw.MaxReplicas = *maxReplicas
+		gw.MaxSesiones = *maxSessions
 		gw.SessionTTL = *sessionTTL
 		if len(tenants) > 0 {
 			gw.SetTenants(tenants)
@@ -223,6 +228,7 @@ func cmdGateway(args []string) error {
 	} else {
 		router := gateway.NewRouter(routerHosts)
 		router.PprofEnabled = *pprofOn
+		router.MaxSesiones = *maxSessions
 		go router.Reap(ctx)
 		handler = router.Handler(token)
 	}
