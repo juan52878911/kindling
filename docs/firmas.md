@@ -28,6 +28,7 @@ tenga `gh`.
 | `-from-dir` sin firma | aviso | **error**, salvo `-insecure` (aviso, solo sha256) |
 | `-from-dir` con firma inválida o de otra clave | **error** | **error**, también con `-insecure` |
 | `install.sh` sin `minisign` instalado | aviso, solo sha256 | **error**, salvo `KLING_INSECURE_NO_MINISIGN=1` (aviso, solo sha256) |
+| `install.sh` sin `--tag`, si la «latest» es una 0.x | como desde v1.0.0 | — |
 
 «Desde v1.0.0» cuenta dos cosas (`upgrade.FirmaObligatoriaDesde`): la versión de
 la release que se baja (un `-rc` de la 1.0 ya cuenta) y la del kling que la baja.
@@ -46,7 +47,9 @@ error. Los e2e de upgrade (`scripts/94-e2e-upgrade.sh` y
 de una compilación local. No hay clave de prueba inyectable: una que se
 pudiera inyectar en un binario de release sería una puerta trasera.
 En `install.sh` cuenta solo la versión que se instala: no hay un kling
-previo que mirar. `KLING_INSECURE_NO_MINISIGN=1` es para un host donde no se
+previo que mirar. Una 0.x sin firma solo se instala pidiéndola con `--tag` (o
+`KLING_VERSION`): si llega como «latest», se trata como una 1.x, porque una
+vuelta atrás a una release sin firma no la pidió nadie. `KLING_INSECURE_NO_MINISIGN=1` es para un host donde no se
 puede instalar minisign: sin la firma, el sha256 solo prueba que la descarga
 coincide con el `SHA256SUMS` que vino del mismo sitio.
 

@@ -15,7 +15,8 @@
 #     `minisign`, comprueba antes la firma de SHA256SUMS con las claves de
 #     KLING_RELEASE_PUBKEYS (docs/firmas.md). Sin minisign: antes de v1.0.0,
 #     solo sha256 y un aviso; desde v1.0.0 (un -rc incluido), error salvo
-#     KLING_INSECURE_NO_MINISIGN=1.
+#     KLING_INSECURE_NO_MINISIGN=1. Una 0.x sin firma solo se instala
+#     pidiéndola con --tag: como «latest» se trata como una 1.x.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
 #   - --with mcp,sandbox baja además esas extensiones de LA MISMA
@@ -66,9 +67,17 @@ set -u
 # variables que aún no hemos inicializado devuelven false (1), y con `set -e`
 # eso abortaría el script. Manejamos los errores a mano con `||`/`if`.
 
+# Todo el script va dentro de main y la única orden de nivel superior es la
+# última línea: si la descarga del script se corta a medias, la shell no llega
+# a ver el `main "$@"` y no ejecuta nada.
+main() {
+
 REPO="${KLING_REPO:-juan52878911/kindling}"
 PREFIX="${KLING_PREFIX:-${HOME}/.local/bin}"
 TAG=""
+# TAG_LATEST=1 cuando la etiqueta sale de /releases/latest y no de --tag o
+# KLING_VERSION: entonces la firma se exige aunque sea una 0.x.
+TAG_LATEST=0
 DRY_RUN=0
 WITH="${KLING_WITH:-}"
 PLUGIN_DIR=""
@@ -82,7 +91,8 @@ FORCE=0
 # comprueba un test (docs/firmas.md).
 KLING_RELEASE_PUBKEYS="RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN"
 # Desde esta versión mayor una release sin firma se rechaza:
-# upgrade.FirmaObligatoriaDesde (v1.0.0).
+# upgrade.FirmaObligatoriaDesde (v1.0.0). Una 0.x sin firma solo se instala
+# pidiéndola con --tag (o KLING_VERSION): nunca por llegar como «latest».
 SIGNED_FROM_MAJOR=1
 
 usage() {
@@ -212,8 +222,9 @@ resolve_tag() {
     # GitHub redirige /latest a la release estable más reciente
     LATEST_URL="https://github.com/${REPO}/releases/latest"
     if command -v curl >/dev/null 2>&1; then
-        TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$LATEST_URL" | sed 's|.*/||')
+        TAG=$(curl -fsSL --proto '=https' --proto-redir '=https' -o /dev/null -w '%{url_effective}' "$LATEST_URL" | sed 's|.*/||')
     fi
+    TAG_LATEST=1
     if [ -z "$TAG" ] || [ "$TAG" = "latest" ]; then
         echo "No pude resolver la última release. Pasa --tag vX.Y.Z." >&2
         exit 1
@@ -253,7 +264,7 @@ fetch() {
     URL="$1"
     DEST="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 -o "$DEST" "$URL"
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$DEST" "$URL"
     elif command -v wget >/dev/null 2>&1; then
         wget -q --tries=3 -O "$DEST" "$URL"
     else
@@ -339,19 +350,25 @@ get() {
 # KLING_RELEASE_PUBKEYS con minisign, y que se firmó para esta etiqueta (el
 # tag: del comentario de confianza; si no, el SHA256SUMS firmado de otra
 # release valdría para colar sus binarios). Sin firma: error desde
-# SIGNED_FROM_MAJOR, aviso antes. Sin minisign, igual: error desde
-# SIGNED_FROM_MAJOR (como `kling upgrade`, que no instala sin firma
-# comprobada), salvo KLING_INSECURE_NO_MINISIGN=1; antes, aviso y solo sha256.
+# SIGNED_FROM_MAJOR; antes, aviso solo si la 0.x se pidió con --tag (una que
+# llega como «latest» o una etiqueta que no se entiende exigen la firma).
+# Sin minisign, igual: error desde SIGNED_FROM_MAJOR (como `kling upgrade`,
+# que no instala sin firma comprobada), salvo KLING_INSECURE_NO_MINISIGN=1; antes, aviso y solo sha256.
 verify_sums_signature() {
     TAG_MAJOR="$(printf '%s' "${TAG#v}" | cut -d. -f1)"
     REQUIRED=0
     case "$TAG_MAJOR" in
-        ''|*[!0-9]*) ;;
+        ''|*[!0-9]*) REQUIRED=1 ;;
         *) [ "$TAG_MAJOR" -ge "$SIGNED_FROM_MAJOR" ] && REQUIRED=1 ;;
     esac
+    if [ "$TAG_LATEST" = "1" ] && [ "$REQUIRED" = "0" ]; then
+        # Una 0.x como «latest» es una vuelta atrás que nadie pidió.
+        REQUIRED=1
+        NOT_SIGNED_HINT=" (es la «latest»: una 0.x sin firma solo la instalo pedida con --tag)"
+    fi
     if ! fetch "$BASE/SHA256SUMS.minisig" "$WORK/SHA256SUMS.minisig" 2>/dev/null; then
         rm -f "$WORK/SHA256SUMS.minisig"
-        [ "$REQUIRED" = "1" ] && fail "la release $TAG no trae SHA256SUMS.minisig: desde v${SIGNED_FROM_MAJOR}.0.0 van firmadas (docs/firmas.md)"
+        [ "$REQUIRED" = "1" ] && fail "la release $TAG no trae SHA256SUMS.minisig: desde v${SIGNED_FROM_MAJOR}.0.0 van firmadas${NOT_SIGNED_HINT:-} (docs/firmas.md)"
         warn "la release $TAG no trae SHA256SUMS.minisig: verifico solo por sha256 (docs/firmas.md)"
         return 0
     fi
@@ -621,3 +638,6 @@ EOF
 fi
 
 ok "listo"
+}
+
+main "$@"
