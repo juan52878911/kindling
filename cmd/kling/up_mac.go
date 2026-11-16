@@ -410,6 +410,7 @@ func bajarImagenesMac(ctx context.Context, f *upgrade.Fuente, etiqueta, root, ar
 		if err := descomprimirImagen(bajados[im.asset], filepath.Join(dir, im.destino), im.max); err != nil {
 			return fmt.Errorf("%s: %w", im.asset, err)
 		}
+		marcarRelease(dir, im.destino, etiqueta) // para el aviso de doctor
 		fmt.Fprintf(out, "             "+uiMarks().ok+" %s\n", filepath.Join(dir, im.destino))
 	}
 	return nil

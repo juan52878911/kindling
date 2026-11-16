@@ -23,6 +23,8 @@ const tagInstall = "v1.0.0"
 
 // releaseFalsa describe la release que sirve el curl falso.
 type releaseFalsa struct {
+	tag          string // la etiqueta de la release; vacía, tagInstall
+	latest       bool   // sin --tag: install.sh la resuelve por /releases/latest
 	tagFirmado   string // el tag: del comentario de confianza de la firma
 	sinFirma     bool   // sin SHA256SUMS.minisig
 	sumaAlterada bool   // SHA256SUMS cambiado (con su binario) después de firmar
@@ -69,7 +71,11 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 	home := filepath.Join(raiz, "home")
 	falsos := filepath.Join(raiz, "bin")
 	datos := filepath.Join(raiz, "release")
-	dirTag := filepath.Join(datos, tagInstall)
+	tagRel := r.tag
+	if tagRel == "" {
+		tagRel = tagInstall
+	}
+	dirTag := filepath.Join(datos, tagRel)
 	for _, d := range []string{home, falsos, dirTag} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -78,7 +84,7 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 
 	// Los binarios de la release: scripts que dicen su versión.
 	binarios := map[string]string{
-		"kling-" + plat:        "#!/bin/sh\necho 'kling " + tagInstall + "'\n",
+		"kling-" + plat:        "#!/bin/sh\necho 'kling " + tagRel + "'\n",
 		"kling-mcp-" + plat:    "#!/bin/sh\n[ \"$1\" = --kling-manifest ] && echo '{\"name\":\"mcp\",\"min_kling\": \"" + r.minKling + "\"}'\nexit 0\n",
 		"kling-bridge-" + plat: "#!/bin/sh\nexit 0\n",
 	}
@@ -110,7 +116,7 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 	if !r.sinFirma {
 		tag := r.tagFirmado
 		if tag == "" {
-			tag = tagInstall
+			tag = tagRel
 		}
 		// Línea 1: el sha256 del SHA256SUMS firmado; línea 2: el comentario
 		// de confianza con sus campos separados por tabuladores.
@@ -119,16 +125,24 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 	}
 
 	// curl falso: -o DESTINO URL, sirve releases/download/<tag>/<nombre>.
+	// Se niega a bajar nada sin --proto y --proto-redir '=https': install.sh
+	// no puede caer a http ni seguir una redirección a otro protocolo.
 	escribir(t, filepath.Join(falsos, "curl"), `#!/bin/sh
-dest=""; url=""
+dest=""; url=""; proto=""; redir=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) dest="$2"; shift 2 ;;
+        --proto) proto="$2"; shift 2 ;;
+        --proto-redir) redir="$2"; shift 2 ;;
         -w|--retry) shift 2 ;;
         -*) shift ;;
         *) url="$1"; shift ;;
     esac
 done
+[ "$proto" = "=https" ] && [ "$redir" = "=https" ] || { echo "curl sin --proto/--proto-redir =https" >&2; exit 98; }
+case "$url" in
+    */releases/latest) [ "$dest" = /dev/null ] || exit 2; echo "${url%/latest}/tag/`+tagRel+`"; exit 0 ;;
+esac
 f="`+datos+`/${url##*/releases/download/}"
 [ -f "$f" ] || exit 22
 cp "$f" "$dest"
@@ -159,8 +173,11 @@ echo "Trusted comment: $(sed -n 2p "$x")"
 		prefijo: filepath.Join(home, ".local", "bin"),
 		plugins: filepath.Join(home, "plugins"),
 	}
-	todos := append([]string{filepath.Join("install.sh"), "--tag", tagInstall,
-		"--prefix", res.prefijo, "--plugin-dir", res.plugins, "--no-rc"}, args...)
+	todos := []string{filepath.Join("install.sh")}
+	if !r.latest {
+		todos = append(todos, "--tag", tagRel)
+	}
+	todos = append(append(todos, "--prefix", res.prefijo, "--plugin-dir", res.plugins, "--no-rc"), args...)
 	cmd := exec.Command("/bin/sh", todos...)
 	cmd.Env = []string{"HOME=" + home, "PATH=" + falsos + ":/usr/bin:/bin", "LC_ALL=C"}
 	out, err := cmd.CombinedOutput()
@@ -239,6 +256,65 @@ func TestInstallMinKlingConPrerelease(t *testing.T) {
 			if r.ok != c.ok || instalada != c.ok {
 				t.Fatalf("kling %s con min_kling %s: salió ok=%v, instalada=%v; esperaba %v:\n%s",
 					c.tiene, c.min, r.ok, instalada, c.ok, r.salida)
+			}
+		})
+	}
+}
+
+// Una 0.x sin firma se instala solo si se pide con --tag (docs/firmas.md);
+// la que llega como «latest» se rechaza, y con firma se instala igual.
+func TestInstallCeroXSinFirmaSoloConTag(t *testing.T) {
+	casos := []struct {
+		nombre string
+		rel    releaseFalsa
+		ok     bool
+		motivo string
+	}{
+		{"0.x pedida con --tag", releaseFalsa{tag: "v0.20.1", sinFirma: true}, true, "verifico solo por sha256"},
+		{"0.x sin firma como latest", releaseFalsa{tag: "v0.20.1", sinFirma: true, latest: true}, false, "pedida con --tag"},
+		{"0.x firmada como latest", releaseFalsa{tag: "v0.20.1", latest: true}, true, "firma de SHA256SUMS"},
+		{"1.x firmada como latest", releaseFalsa{latest: true}, true, "firma de SHA256SUMS"},
+		{"1.x sin firma como latest", releaseFalsa{sinFirma: true, latest: true}, false, "no trae SHA256SUMS.minisig"},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			r := correrInstall(t, c.rel)
+			instalado := existe(filepath.Join(r.prefijo, "kling"))
+			if r.ok != c.ok || instalado != c.ok {
+				t.Fatalf("salió ok=%v, instalado=%v; esperaba %v:\n%s", r.ok, instalado, c.ok, r.salida)
+			}
+			if !strings.Contains(r.salida, c.motivo) {
+				t.Fatalf("la salida no dice %q:\n%s", c.motivo, r.salida)
+			}
+		})
+	}
+}
+
+// Con todo dentro de main, un script cortado a medias (una descarga que se
+// corta) no ejecuta nada: ni imprime los pasos ni crea el HOME.
+func TestInstallCortadoNoEjecutaNada(t *testing.T) {
+	b, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fin := strings.LastIndex(string(b), "\nmain \"$@\"")
+	if fin < 0 {
+		t.Fatal("install.sh no acaba llamando a main")
+	}
+	for _, corte := range []int{len(b) / 4, len(b) / 2, len(b) * 3 / 4, fin + 1} {
+		t.Run(fmt.Sprint(corte), func(t *testing.T) {
+			raiz := t.TempDir()
+			cortado := filepath.Join(raiz, "install.sh")
+			// Corta en un salto de línea, como una descarga parada entre paquetes.
+			c := strings.LastIndex(string(b[:corte]), "\n") + 1
+			escribir(t, cortado, string(b[:c]), 0o755)
+			home := filepath.Join(raiz, "home")
+			cmd := exec.Command("/bin/sh", cortado, "--dry-run", "--tag", tagInstall)
+			cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+			out, _ := cmd.CombinedOutput()
+			if strings.Contains(string(out), "plataforma:") || strings.Contains(string(out), "(dry-run)") ||
+				(c == fin+1 && len(out) > 0) {
+				t.Fatalf("cortado en el byte %d, el script hizo algo:\n%s", c, out)
 			}
 		})
 	}

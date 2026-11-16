@@ -10,12 +10,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/buildver"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -73,6 +76,10 @@ type doctorInput struct {
 	// bridge es el LaunchAgent com.kindling.bridge (nil si no hay): un
 	// programa que ya no existe lo tumba en cada arranque.
 	bridge *servicioPuente
+	// imagesDir y imagesRelease: en un Mac con daemon local, root/images y la
+	// release de la que `kling up` bajó cada imagen (imagenesDeRelease).
+	imagesDir     string
+	imagesRelease map[string]string
 }
 
 func cmdDoctor(args []string) error {
@@ -129,6 +136,10 @@ func cmdDoctor(args []string) error {
 
 	in.socket = sondearSocket(endpoint)
 	in.bridge = sondearServicioPuente()
+	if runtime.GOOS == "darwin" && in.socket != nil {
+		in.imagesDir = filepath.Join(config.Or(os.Getenv("KLING_ROOT"), transport.DefaultRoot()), "images")
+		in.imagesRelease = imagenesDeRelease(in.imagesDir)
+	}
 	checks := doctorChecks(in)
 	if *asJSON {
 		checks = append(deRuntime, checks...)
@@ -192,6 +203,9 @@ func doctorChecks(in doctorInput) []doctorCheck {
 	}
 	out = append(out, d)
 	if c, ok := checkSocket(in.socket); ok {
+		out = append(out, c)
+	}
+	if c, ok := checkImagenesRelease(in.imagesRelease, in.cliVersion, in.imagesDir); ok {
 		out = append(out, c)
 	}
 

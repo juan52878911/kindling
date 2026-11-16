@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- macOS: `kling doctor` warns when the kernel or `min.ext4` that `kling up` downloaded come from another release, since `kling up` never replaces them.
 - `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
@@ -81,6 +82,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
+- Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - macOS: the credential proxy runs in its own sandboxed, hardened-runtime process per machine (`kling-credproxy`, installed next to `kling-vz`), so the real keys are no longer in the process that runs the guest's network stack; with an older `kling-vz` or `kling-hv` the daemon keeps the previous model (#80).
 - With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
 - With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
