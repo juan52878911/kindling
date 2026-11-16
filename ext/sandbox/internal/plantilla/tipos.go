@@ -93,14 +93,14 @@ func VersionDe(sn *api.Snapshot) string {
 	return strconv.FormatInt(sn.CreatedAt.UnixNano(), 10)
 }
 
+// etiquetaTenant es la del dueño que pone el frontal al reclamar.
+const etiquetaTenant = "tenant"
+
 // BorrarPrecalentadas borra del host las precalentadas SIN DUEÑO de la
 // plantilla nombre (las del fondo: kind=sandbox, template=nombre, sin tenant y
 // del frontal). Las de un tenant siguen hasta que las suelte. El daemon no deja
 // borrar un snapshot con instancias vivas, así que sin esto `template rm` se
 // negaba mientras hubiera fondo, y el fondo seguía ahí para siempre.
-// etiquetaTenant es la del dueño que pone el frontal al reclamar.
-const etiquetaTenant = "tenant"
-
 func BorrarPrecalentadas(ctx context.Context, c *api.Client, nombre string) (int, error) {
 	ms, err := c.Sandboxes(ctx)
 	if err != nil {

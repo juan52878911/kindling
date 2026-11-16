@@ -80,7 +80,8 @@ de la sesión, se borra: lo que hizo una conversación en su teléfono no lo her
 `-phone P` da el mismo teléfono a todas las sesiones. `-max-sessions` (4) acota las
 sesiones abiertas a la vez, y con ellas los teléfonos; un `initialize` de más recibe 503.
 Un teléfono que no se pudo borrar se reintenta en cada vuelta, y al arrancar el servidor
-borra los que dejó con dueño una ejecución anterior en su misma dirección.
+borra los que dejó con dueño una ejecución anterior en su misma dirección (con
+`-listen` de puerto 0 la dirección cambia y no los encuentra).
 
 Por qué así y no `kling-phoned` sirviendo MCP en el invitado e importado con `kling mcp
 import -isolation session`: el gateway habla MCP solo con el 8080 del invitado (el

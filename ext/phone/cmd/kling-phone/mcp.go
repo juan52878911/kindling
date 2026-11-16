@@ -628,6 +628,15 @@ func (s *mcpServer) shutdown(ctx context.Context) {
 	for _, sess := range all {
 		s.release(ctx, sess, "server stopping")
 	}
+	s.mu.Lock()
+	pend := s.pendientes
+	s.pendientes = nil
+	s.mu.Unlock()
+	for _, m := range pend {
+		if err := s.a.rm(ctx, m); err != nil {
+			log.Printf("removing %s (left by a closed session): %v; the next start on this address removes it", m.Name, err)
+		}
+	}
 }
 
 func cmdMCP(args []string) error {
@@ -668,7 +677,8 @@ func cmdMCP(args []string) error {
 		return err
 	}
 	// Con la dirección ya tomada, lo que quedó con su marca es de un servidor
-	// anterior aquí mismo.
+	// anterior aquí mismo. Con puerto 0 la dirección cambia en cada arranque y
+	// el barrido no encuentra nada de antes.
 	a.mcpKey = ln.Addr().String()
 	s.barrerHuerfanos(ctx)
 	srv := &http.Server{Handler: s.handler(path), ReadHeaderTimeout: 10 * time.Second}

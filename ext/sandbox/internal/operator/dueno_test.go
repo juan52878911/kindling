@@ -143,3 +143,26 @@ func TestDeploymentRecreate(t *testing.T) {
 		t.Fatal("deploy/deployment.yaml has no strategy Recreate")
 	}
 }
+
+// Un "no está" de la foto de la pasada no se cree: un sandbox creado después
+// (por el camino del watch) se adopta en vez de duplicarse.
+func TestVistaViejaNoDuplica(t *testing.T) {
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	v, err := ctrl.tomarVista(testCtx(t)) // la foto, antes de que exista
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr.sandboxes["host1/sbx-w"] = &frontal.Sandbox{ID: "host1/sbx-w", Host: "host1", State: api.StateRunning,
+		Labels: map[string]string{LabelK8sUID: "uid-w"}}
+	sb := newTestSandbox("default", "w")
+	sb.Metadata.UID = "uid-w"
+	sb.Metadata.Finalizers = []string{CleanupFinalizer}
+	k8s.seed(sb)
+	ctrl.remember(&sb)
+	ctrl.reconcileCon(testCtx(t), &sb, v)
+	if fr.createdCount() != 0 || fr.vivos() != 1 {
+		t.Fatalf("a stale view created a duplicate: %d created, %d alive", fr.createdCount(), fr.vivos())
+	}
+}

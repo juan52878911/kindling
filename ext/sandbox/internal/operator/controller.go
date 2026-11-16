@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"sort"
 	"strconv"
 	"sync"
@@ -268,30 +267,28 @@ func (c *Controller) tomarVista(ctx context.Context) (*vistaFrontal, error) {
 	return v, nil
 }
 
-// errHostSinContestar es que el sandbox no está en una lista parcial: puede
-// vivir en un host que no contestó.
-var errHostSinContestar = errors.New("frontal: its host did not answer the list")
-
-// ver trae el sandbox id: de la vista si la hay, si no del frontal.
+// ver trae el sandbox id: de la vista si está en ella, si no del frontal. Un
+// "no está" de la vista no se cree: la foto es del principio de la pasada, y
+// el camino del watch pudo crearlo después (o estar en un host que no
+// contestó). Se confirma con su GET, que es lo raro.
 func (c *Controller) ver(ctx context.Context, v *vistaFrontal, id string) (*frontal.Sandbox, error) {
-	if v == nil {
-		return c.Frontal.Get(ctx, id)
+	if v != nil {
+		if sb, ok := v.porID[id]; ok {
+			return &sb, nil
+		}
 	}
-	if sb, ok := v.porID[id]; ok {
-		return &sb, nil
-	}
-	if v.completa {
-		return nil, &frontalError{Code: http.StatusNotFound, Message: "no sandbox " + id}
-	}
-	return nil, errHostSinContestar
+	return c.Frontal.Get(ctx, id)
 }
 
 // deUID son los sandboxes etiquetados con uid, y si la lista estaba completa.
+// Como en ver, un "ninguno" de la vista se confirma con una lista nueva.
 func (c *Controller) deUID(ctx context.Context, v *vistaFrontal, uid string) ([]frontal.Sandbox, bool, error) {
-	if v == nil {
-		return c.Frontal.ByUID(ctx, uid)
+	if v != nil {
+		if sbs := conUID(v.todos, uid); len(sbs) > 0 {
+			return sbs, v.completa, nil
+		}
 	}
-	return conUID(v.todos, uid), v.completa, nil
+	return c.Frontal.ByUID(ctx, uid)
 }
 
 // esDe dice si sb es el sandbox que este operador creó para cur: lleva su UID.
@@ -549,9 +546,11 @@ func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox, v *vis
 	}
 	// Y los que lleven su UID sin estar en el status (un Create cuya respuesta
 	// se perdió): sin esto, un objeto borrado antes de escribir su status
-	// soltaba el finalizer y dejaba el sandbox vivo hasta el abandono.
+	// soltaba el finalizer y dejaba el sandbox vivo hasta el abandono. Con una
+	// lista nueva y no la de la pasada: antes de soltar el finalizer, nada que
+	// se haya creado después de la foto puede quedarse fuera.
 	if uid := cur.Metadata.UID; uid != "" {
-		sbs, completa, err := c.deUID(ctx, v, uid)
+		sbs, completa, err := c.deUID(ctx, nil, uid)
 		if err != nil {
 			c.Log.Printf("operator: %s/%s: looking for its sandboxes: %v", ns, name, err)
 			return
