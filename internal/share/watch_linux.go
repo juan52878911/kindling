@@ -19,6 +19,11 @@ import (
 	"unsafe"
 )
 
+// watchesPorSesion es el tope de rutas vigiladas de una sesión. Las
+// vigilancias de inotify no salen de un fondo del daemon (como watchFDs en
+// macOS) sino de fs.inotify.max_user_watches.
+const watchesPorSesion = 4096
+
 // Presupuesto de instancias de inotify de todo el daemon. Hay una por sesión,
 // y el kernel no las cuenta por proceso sino por uid
 // (fs.inotify.max_user_instances, 128 por defecto): sin tope, unas decenas de
@@ -26,11 +31,6 @@ import (
 // si el daemon es root). Pasado el tope, la sesión vigila por sondeo
 // (pollBackend), como el presupuesto watchFDs de macOS pero sin quedarse sin
 // avisos.
-// watchesPorSesion es el tope de rutas vigiladas de una sesión. Las
-// vigilancias de inotify no salen de un fondo del daemon (como watchFDs en
-// macOS) sino de fs.inotify.max_user_watches.
-const watchesPorSesion = 4096
-
 var inotifyBudget struct {
 	sync.Mutex
 	used, max int // max 0: aún sin calcular (maxInotifyInstances)
