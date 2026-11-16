@@ -1,9 +1,56 @@
 package main
 
 import (
+	"context"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
+
+// F3: el servicio b-web del proyecto a y el web del proyecto a-b se llaman
+// los dos a-b-web. El up de a no borra la máquina de a-b como huérfana, y se
+// niega a seguir (reemplazaría su imagen); down -v no borra un volumen que
+// monta una máquina de otro proyecto.
+func TestProyectosQueColisionan(t *testing.T) {
+	src := "services:\n  b-web:\n    image: nginx\n    volumes: [\"b-data:/d\"]\nvolumes:\n  b-data:\n"
+	tr, err := traducirCompose([]byte(src), "a", true, sinEntorno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ajena := &api.Machine{ID: "x1", Name: "a-b-web", State: api.StateFailed,
+		Labels: map[string]string{api.LabelGraph: "g2", labelComposeProject: "a-b"}}
+	var mu sync.Mutex
+	var borradas []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		borradas = append(borradas, r.PathValue("ref"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := fakeDaemon(t, mux)
+	quitarHuerfanasDe(context.Background(), c, tr, []*api.Machine{ajena})
+	if len(borradas) != 0 {
+		t.Fatalf("borró la de otro proyecto: %v", borradas)
+	}
+	if err := colisionDe(tr, []*api.Machine{ajena}, false); err == nil || !strings.Contains(err.Error(), "a-b-web") {
+		t.Fatalf("up: %v", err)
+	}
+	conVol := &api.Machine{ID: "x2", Name: "a-b-otra", Labels: map[string]string{labelComposeProject: "a-b"},
+		Volumes: []api.VolumeAttachment{{Name: "a-b-data", Mount: "/d"}}}
+	if err := colisionDe(tr, []*api.Machine{conVol}, true); err == nil || !strings.Contains(err.Error(), "volume a-b-data") {
+		t.Fatalf("down -v: %v", err)
+	}
+	// Las suyas y las que no son de compose, no.
+	mia := &api.Machine{Name: "a-b-web", Labels: map[string]string{labelComposeProject: "a"}}
+	suelta := &api.Machine{Name: "a-b-web"}
+	if err := colisionDe(tr, []*api.Machine{mia, suelta}, false); err != nil {
+		t.Fatalf("las suyas: %v", err)
+	}
+}
 
 // S12: la interpolación va por escalar, después de parsear. Un valor con
 // " #", ": " o un salto de línea llega entero a su variable y no añade

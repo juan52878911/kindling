@@ -22,7 +22,7 @@ func TestQuitarHuerfanas(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /machines", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]*api.Machine{
-			{ID: "a1", Name: "dev-db", State: api.StateFailed, Labels: map[string]string{api.LabelGraph: "viejo"}},
+			{ID: "a1", Name: "dev-db", State: api.StateFailed, Labels: map[string]string{api.LabelGraph: "viejo", labelComposeProject: "dev"}},
 			{ID: "b2", Name: "dev-app"},
 			{ID: "c3", Name: "otro-db", Labels: map[string]string{api.LabelGraph: "x"}},
 			{ID: "d4", Name: "dev-app-1a2b3c-prep", Labels: map[string]string{labelComposeProject: "dev"}},

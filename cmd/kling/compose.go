@@ -360,6 +360,9 @@ func composeUp(g globalesCompose, args []string) error {
 	if err := v.dueno(t.Proyect, abs); err != nil {
 		return err
 	}
+	if err := colisionDe(t, v.ms, false); err != nil {
+		return err
+	}
 	info := v.info
 	publicaDaemon := slices.Contains(info.Capabilities, api.CapabilityPublish)
 	if *detach && !publicaDaemon {
@@ -581,7 +584,9 @@ func quitarHuerfanasDe(ctx context.Context, c *api.Client, t *traduccionCompose,
 		nombres[t.Proyect+"-"+s.nodo] = true
 	}
 	for _, m := range ms {
-		huerfana := nombres[m.Name] && m.Labels[api.LabelGraph] != ""
+		// Con la etiqueta del proyecto: el nombre solo no basta (el servicio
+		// b-web del proyecto a y el web del proyecto a-b son los dos a-b-web).
+		huerfana := nombres[m.Name] && m.Labels[api.LabelGraph] != "" && m.Labels[labelComposeProject] == t.Proyect
 		if m.Labels[labelComposeProject] == t.Proyect && strings.HasSuffix(m.Name, "-prep") {
 			huerfana = true
 		}
@@ -590,6 +595,55 @@ func quitarHuerfanasDe(ctx context.Context, c *api.Client, t *traduccionCompose,
 			_ = c.Remove(ctx, m.ID)
 		}
 	}
+}
+
+// volumenesDe son los volúmenes de kling del proyecto de t.
+func volumenesDe(t *traduccionCompose) []string {
+	var out []string
+	for _, l := range t.Antes {
+		if v, ok := strings.CutPrefix(l, "kling volume create "); ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// colisionDe se niega a seguir si una máquina de OTRO proyecto de compose
+// se llama como una del de t o monta uno de sus volúmenes: los nombres son
+// <proyecto>-<servicio>, y el servicio b-web del proyecto a y el web del
+// proyecto a-b dan los dos a-b-web (máquina e imagen). Seguir borraría o
+// reemplazaría lo del otro. Con soloVolumenes, solo los volúmenes (down -v).
+func colisionDe(t *traduccionCompose, ms []*api.Machine, soloVolumenes bool) error {
+	nombres := map[string]bool{}
+	if !soloVolumenes {
+		for _, s := range t.vivos {
+			nombres[t.Proyect+"-"+s.nodo] = true
+		}
+	}
+	vols := map[string]bool{}
+	for _, v := range volumenesDe(t) {
+		vols[v] = true
+	}
+	for _, m := range ms {
+		otro := m.Labels[labelComposeProject]
+		if otro == "" || otro == t.Proyect {
+			continue
+		}
+		que := ""
+		if nombres[m.Name] {
+			que = "machine and image " + m.Name
+		}
+		for _, va := range m.Volumes {
+			if que == "" && vols[va.Name] {
+				que = "volume " + va.Name
+			}
+		}
+		if que != "" {
+			return &errWithHint{err: fmt.Errorf("projects %s and %s both name %s", t.Proyect, otro, que),
+				hint: "give this project another name with -p"}
+		}
+	}
+	return nil
 }
 
 func composeDown(g globalesCompose, args []string) error {
@@ -622,11 +676,10 @@ func composeDown(g globalesCompose, args []string) error {
 		if t == nil {
 			return errors.New("-v needs the compose file (to know its volumes): run it where the compose is, or with -f")
 		}
-		for _, l := range t.Antes {
-			v, ok := strings.CutPrefix(l, "kling volume create ")
-			if !ok {
-				continue
-			}
+		if err := colisionDe(t, v.ms, true); err != nil {
+			return err
+		}
+		for _, v := range volumenesDe(t) {
 			if err := c.RemoveVolume(ctx, v); err != nil {
 				var se *api.StatusError
 				if errors.As(err, &se) && se.Code == 404 {
