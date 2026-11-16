@@ -79,3 +79,42 @@ func TestVigilanciaPorSondeo(t *testing.T) {
 		t.Fatalf("pushes %v, want %v", got, want)
 	}
 }
+
+// Por sondeo, un directorio sin foto (presupuesto agotado) solo avisa cuando
+// cambia: antes avisaba en cada repaso, cada pollInterval y para siempre.
+func TestSondeoSinFotoSoloAvisaSiCambia(t *testing.T) {
+	oldPoll, oldSnap := pollInterval, maxSnapBytes
+	pollInterval, maxSnapBytes = 20*time.Millisecond, 0
+	defer func() { pollInterval, maxSnapBytes = oldPoll, oldSnap }()
+
+	dir := t.TempDir()
+	must(t, os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+	must(t, os.WriteFile(filepath.Join(dir, "sub", "a"), nil, 0o644))
+	srv, err := Open(dir, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	r := &recogedor{t: t}
+	w := &watcher{srv: srv, push: r.push, entries: map[string]*watchEntry{}, lru: list.New(),
+		echo: map[string]time.Time{}, pend: map[string]rawEvent{}, polling: true}
+	w.be = newPollBackend(w.event)
+	defer w.close()
+	w.note("sub", true)
+	w.mu.Lock()
+	sinFoto := w.entries["sub"] != nil && w.entries["sub"].snap == nil
+	w.mu.Unlock()
+	if !sinFoto {
+		t.Fatal("sub should be watched without a snapshot")
+	}
+
+	// Diez repasos sin tocar nada: ningún aviso.
+	if got := r.espera(1, 10*pollInterval); len(got) != 0 {
+		t.Fatalf("unchanged directory pushes %v, want none", got)
+	}
+	// Un nombre nuevo sí se avisa (del directorio, que no tiene foto).
+	must(t, os.WriteFile(filepath.Join(dir, "sub", "b"), nil, 0o644))
+	if got := r.espera(1, 2*time.Second); len(got) == 0 || got[0] != "M sub" {
+		t.Fatalf("after a new name pushes %v, want [M sub]", got)
+	}
+}

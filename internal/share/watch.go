@@ -121,8 +121,10 @@ type watchEntry struct {
 	cost  int64
 	id    Ident
 	hayID bool
-	fp    fingerprint // fichero: su huella al vigilarlo o al último aviso
-	el    *list.Element
+	// fp es su huella al vigilarlo o al último aviso; en un directorio sin
+	// foto, lo único con lo que el repaso sabe si cambió su lista.
+	fp fingerprint
+	el *list.Element
 }
 
 // snapEntryCost es lo que se estima que ocupa en el heap cada nombre de una
@@ -225,10 +227,7 @@ func (w *watcher) note(rel string, dir bool) {
 		}
 		return
 	}
-	e := &watchEntry{rel: rel, dir: dir}
-	if !dir {
-		e.fp = w.fingerprint(rel)
-	}
+	e := &watchEntry{rel: rel, dir: dir, fp: w.fingerprint(rel)}
 	e.el = w.lru.PushFront(e)
 	w.entries[rel] = e
 	if !dir {
@@ -458,6 +457,9 @@ func (w *watcher) flush() {
 				add(proto.EventDelete, ev.rel)
 			}
 		case e.dir:
+			// La huella antes que la foto: lo que cambie entre medias se ve
+			// en el repaso siguiente.
+			e.fp = w.fingerprint(ev.rel)
 			now, id, hayID := w.snapshot(ev.rel, func(id Ident) bool { return w.otraFotoLocked(e, id) })
 			if e.snap == nil || now == nil {
 				// Sin foto con la que comparar (directorio enorme, presupuesto
@@ -511,6 +513,10 @@ func (w *watcher) resyncLocked(pend map[string]rawEvent) {
 		switch {
 		case err != nil || fi.IsDir() != e.dir:
 			pend[r] = rawEvent{rel: r, dir: e.dir, gone: true}
+		case e.dir && e.snap == nil && fingerprintOf(fi) == e.fp:
+			// Sin foto, flush avisaría del directorio entero: por sondeo, cada
+			// pollInterval y para siempre (vite o nodemon recompilando en
+			// bucle). Si su fecha y su tamaño no cambiaron, su lista tampoco.
 		case e.dir:
 			pend[r] = rawEvent{rel: r, dir: true}
 		case fingerprintOf(fi) != e.fp:
