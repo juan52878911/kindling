@@ -2,6 +2,9 @@ package net
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	stdnet "net"
@@ -191,7 +194,7 @@ func forwardCierre() []string {
 	return []string{"-A", "FORWARD", "-i", TapName, "-j", "DROP"}
 }
 
-// applyIPv6Barrier cierra el paso a IPv6 dentro del namespace, en allowlist,
+// La barrera IPv6 cierra el paso a IPv6 dentro del namespace, en allowlist,
 // internet Y none: el filtrado de este fichero (ipset, iptables) es solo
 // IPv4, así que sin esto un invitado con salida v6 real (si algún día el host
 // reenvía v6, a diferencia de lo medido hoy en el lab) se saltaría el
@@ -199,37 +202,66 @@ func forwardCierre() []string {
 // salida que ningún DROP de aquí cubre. Dos capas independientes, ninguna
 // necesita que la otra exista:
 //
-//  1. sysctl disable_ipv6=1 en tap0, en el veth del namespace y en "all"/
-//     "default": la interfaz del invitado no adquiere ninguna dirección v6
-//     (ni siquiera link-local) y el kernel del namespace no la enruta. Es la
-//     barrera real: no depende de que ip6tables esté instalado.
-//  2. ip6tables FORWARD DROP para lo que entre por tap0: cinturón además de
-//     tirantes, para el caso de una interfaz futura que se sumara al
-//     namespace sin pasar por el paso 1. Si ip6tables no está instalado (no
-//     es una dependencia dura de kindling hoy) se avisa por log y se sigue
-//     sin fallar: la capa 1 ya cierra el hueco que importa.
+//  1. sysctlsIPv6: disable_ipv6=1 en tap0, en el veth del namespace y en
+//     "all"/"default": la interfaz del invitado no adquiere ninguna dirección
+//     v6 (ni siquiera link-local) y el kernel del namespace no la enruta. Es
+//     la barrera real: no depende de que ip6tables esté instalado. Va en el
+//     mismo sysctl que el resto del netns (aplicarSysctls).
+//  2. applyIPv6Barrier: ip6tables FORWARD DROP para lo que entre por tap0:
+//     cinturón además de tirantes, para el caso de una interfaz futura que se
+//     sumara al namespace sin pasar por el paso 1. Si ip6tables no está
+//     instalado (no es una dependencia dura de kindling hoy) se avisa por log
+//     y se sigue sin fallar: la capa 1 ya cierra el hueco que importa.
 //
 // Complementa, no sustituye, a ipv6.disable=1 en la línea de arranque del
 // invitado (net.go/BootArg): esa apaga el módulo v6 DENTRO del invitado, pero
 // solo en un arranque en frío —un snapshot dorado ya congelado no la relee—.
 // Esta barrera vive en el namespace del HOST y cubre también esos snapshots.
-func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
-	for _, iface := range []string{"all", "default", TapName, n.NSIf} {
-		clave := fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", iface)
-		if err := ns("sysctl", "-w", clave); err != nil {
-			// No es fatal: si el namespace no tiene /proc/sys/net/ipv6 (kernel
-			// compilado sin IPv6, por ejemplo) no hay nada que apagar y la capa
-			// 2 sigue siendo la barrera. Pero si sysctl SÍ existe y falla por
-			// otra razón, conviene que quede en el log del daemon.
-			log.Printf("net: aviso, no se pudo aplicar %s en %s: %v", clave, n.NS, err)
-		}
+func sysctlsIPv6(nsIf string) []string {
+	var s []string
+	for _, iface := range []string{"all", "default", TapName, nsIf} {
+		s = append(s, fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", iface))
 	}
+	return s
+}
 
+// applyIPv6Barrier es la capa 2 de la barrera IPv6 (ver sysctlsIPv6).
+func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
 	if _, err := exec.LookPath("ip6tables"); err != nil {
 		log.Printf("net: ip6tables no está instalado; %s queda solo con la barrera de sysctl para IPv6", n.NS)
 		return nil
 	}
 	return ns("ip6tables", "-A", "FORWARD", "-i", TapName, "-j", "DROP")
+}
+
+// sysctlsImprescindibles son los del netns sin los que la máquina no tiene red
+// que valga: el reenvío, y el ARP del tap0 reintentando cada 50 ms en vez de
+// cada 1 s (ver Setup). ip_forward va antes que sysctlsNetns, porque
+// reescribe accept_redirects.
+func sysctlsImprescindibles() []string {
+	return []string{"net.ipv4.ip_forward=1", "net.ipv4.neigh." + TapName + ".retrans_time_ms=50"}
+}
+
+// aplicarSysctls pone todos los sysctl del netns de una máquina en UN proceso:
+// los imprescindibles, el endurecimiento (sysctlsNetns) y la capa 1 de la
+// barrera IPv6 (sysctlsIPv6). Eran seis (un sh y cinco sysctl).
+//
+// sysctl aplica las demás claves aunque una falle (un kernel sin conntrack
+// cargado no tiene net.netfilter, uno sin IPv6 no tiene net.ipv6), así que un
+// fallo solo es fatal si es de un imprescindible: para saberlo se repiten
+// esos solos. Lo demás queda en el log y la máquina arranca con lo que se
+// pudo, como antes.
+func aplicarSysctls(ns func(...string) error, nsName, nsIf string) error {
+	claves := append(append(sysctlsImprescindibles(), sysctlsNetns(nsIf)...), sysctlsIPv6(nsIf)...)
+	err := ns(append([]string{"sysctl", "-q", "-w"}, claves...)...)
+	if err == nil {
+		return nil
+	}
+	if err := ns(append([]string{"sysctl", "-q", "-w"}, sysctlsImprescindibles()...)...); err != nil {
+		return err
+	}
+	log.Printf("net: WARNING: some sysctls failed in %s: %v", nsName, err)
+	return nil
 }
 
 // egressRules son las reglas de salida de none e internet como argumentos de
@@ -737,6 +769,14 @@ var privada172SinHostSubnet = []string{
 // FORWARD son DROP, así que su orden no importa y añadir una nueva con -A en
 // un host que ya tenía las viejas no deja ninguna detrás de un ACCEPT nuestro.
 //
+//   - El agente (8080) desde fuera del host: un vecino de la LAN que enrute
+//     HostSubnet por aquí, un contenedor con red puente u otra máquina. No lo
+//     abre nadie legítimo; el daemon y el CLI llegan desde el propio host, por
+//     OUTPUT, y eso lo decide reglasAcceso. Va en mangle PREROUTING y al
+//     principio, no en FORWARD: ahí Docker (DOCKER-USER y DOCKER-FORWARD, que
+//     reinserta arriba cada vez que arranca), ufw o libvirt aceptan antes que
+//     cualquier -A nuestro, y un ACCEPT de FORWARD termina el recorrido de esa
+//     cadena. Lo que se tira en PREROUTING ya no llega a FORWARD.
 //   - Nada de un veth de kindling a otro: el host no reenvía entre namespaces
 //     (los enlaces de los grafos van por proxies en INPUT, ver enlaces_fc.go).
 //   - Lo que entre por un veth con origen fuera de HostSubnet es falsificado
@@ -751,11 +791,6 @@ func HostEgressRules(bridge string) [][]string {
 		{"iptables", "-A", "FORWARD", "-i", "vh-+", "-o", "vh-+", "-j", "DROP"},
 		{"iptables", "-A", "FORWARD", "-i", "vh-+", "!", "-s", HostSubnet, "-j", "DROP"},
 		{"iptables", "-A", "FORWARD", "-i", "vh-+", "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
-		// El agente desde fuera del host (un vecino de la LAN que enrute
-		// HostSubnet por aquí, un contenedor con red puente): no lo abre nadie
-		// legítimo, solo el daemon desde el propio host (ver reglasAcceso).
-		{"iptables", "-A", "FORWARD", "!", "-i", "vh-+", "-o", "vh-+", "-p", "tcp", "--dport", strconv.Itoa(puertoAgente),
-			"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"},
 	}
 	for _, cidr := range blocked {
 		destinos := []string{cidr}
@@ -770,8 +805,54 @@ func HostEgressRules(bridge string) [][]string {
 	}
 	rules = append(rules,
 		[]string{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", HostSubnet, "!", "-d", HostSubnet, "-j", "MASQUERADE"},
+		reglaAgenteDesdeFuera(),
 	)
 	return rules
+}
+
+// reglaAgenteDesdeFuera es la del agente en mangle PREROUTING (ver
+// HostEgressRules). Sin conntrack: lo que no es NEW tampoco tiene por qué
+// llegar de fuera al 8080 de una máquina.
+func reglaAgenteDesdeFuera() []string {
+	return []string{"iptables", "-t", "mangle", "-I", "PREROUTING", "1", "-d", HostSubnet,
+		"-p", "tcp", "--dport", strconv.Itoa(puertoAgente), "-j", "DROP"}
+}
+
+// centinelaForward es la última DROP de FORWARD de HostEgressRules: si un
+// reload del cortafuegos vació FORWARD, falta.
+func centinelaForward() []string {
+	var ultima []string
+	for _, r := range HostEgressRules("") {
+		if slices.Contains(r, "FORWARD") {
+			ultima = r
+		}
+	}
+	return ultima
+}
+
+// paraComprobar convierte una regla con -A o -I (con posición) en su -C.
+func paraComprobar(r []string) []string {
+	if slices.Contains(r, "-I") {
+		return sinPosicion(r, "-C")
+	}
+	return aComprobar(r)
+}
+
+// montarEgresoHost instala las HostEgressRules que falten.
+func montarEgresoHost() error {
+	for _, r := range HostEgressRules("") {
+		esta, err := comprobarEstado(paraComprobar(r))
+		if err != nil {
+			return err
+		}
+		if esta {
+			continue
+		}
+		if err := ejecutar(r...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // linkBasePortRango y linkMaxPortsRango son el rango de los proxies de enlace
@@ -796,8 +877,23 @@ const cadenaAcceso = "KL-ACCESO"
 // AccesoAgente son, además del propio daemon (su uid y su gid efectivos), los
 // usuarios y grupos que pueden abrir conexiones al agente de las máquinas
 // desde el host: los del socket del daemon cuando se cede (socketOwner).
+//
+// Dueno identifica al daemon que los pide (su raíz): sus permisos llevan una
+// etiqueta propia en cadenaAcceso, y así puede quitar los que ya no da (el
+// socket pasó a otro usuario) sin tocar los de otro daemon del mismo host.
+// Vacío, sin etiqueta y sin limpieza (lo de antes).
 type AccesoAgente struct {
 	UIDs, GIDs []int
+	Dueno      string
+}
+
+// etiqueta es el comentario que marca los permisos de a en cadenaAcceso.
+func (a AccesoAgente) etiqueta() string {
+	if a.Dueno == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(a.Dueno))
+	return "kling:" + hex.EncodeToString(h[:6])
 }
 
 // reglasAcceso son las reglas de cadenaAcceso y el salto a ella desde OUTPUT.
@@ -823,6 +919,10 @@ type AccesoAgente struct {
 //     direcciones del propio host en HostSubnet (los lados host de los veth),
 //     no: REJECT.
 //
+// El gid 0 nunca: con el daemon como root su egid es 0, y un permiso para el
+// gid 0 con --suppl-groups abría el agente a cualquier usuario del grupo root
+// (que no es root). root ya entra por su uid.
+//
 // Las respuestas no se tocan (solo --ctstate NEW): un servicio del host que
 // contesta a un invitado no abre una conexión nueva.
 func reglasAcceso(a AccesoAgente, euid, egid int) (permisos, cierre [][]string, salto []string) {
@@ -830,13 +930,20 @@ func reglasAcceso(a AccesoAgente, euid, egid int) (permisos, cierre [][]string, 
 	gids := append([]int{egid}, a.GIDs...)
 	slices.Sort(uids)
 	slices.Sort(gids)
+	var marca []string
+	if e := a.etiqueta(); e != "" {
+		marca = []string{"-m", "comment", "--comment", e}
+	}
 	for _, u := range slices.Compact(uids) {
-		permisos = append(permisos, []string{"iptables", "-I", cadenaAcceso, "1",
-			"-m", "owner", "--uid-owner", strconv.Itoa(u), "-j", "RETURN"})
+		r := []string{"iptables", "-I", cadenaAcceso, "1", "-m", "owner", "--uid-owner", strconv.Itoa(u)}
+		permisos = append(permisos, append(append(r, marca...), "-j", "RETURN"))
 	}
 	for _, g := range slices.Compact(gids) {
-		permisos = append(permisos, []string{"iptables", "-I", cadenaAcceso, "1",
-			"-m", "owner", "--gid-owner", strconv.Itoa(g), "--suppl-groups", "-j", "RETURN"})
+		if g == 0 {
+			continue
+		}
+		r := []string{"iptables", "-I", cadenaAcceso, "1", "-m", "owner", "--gid-owner", strconv.Itoa(g), "--suppl-groups"}
+		permisos = append(permisos, append(append(r, marca...), "-j", "RETURN"))
 	}
 	// REJECT con su ICMP por defecto y no tcp-reset: en OUTPUT el RST sale
 	// hacia la máquina en vez de volver al socket local, y el connect esperaba
@@ -851,35 +958,114 @@ func reglasAcceso(a AccesoAgente, euid, egid int) (permisos, cierre [][]string, 
 	return permisos, cierre, salto
 }
 
-// setupAcceso monta reglasAcceso sin quitar nada: en un host con dos daemons
-// (uno de systemd y otro privado, cada uno con el dueño de su socket) la
-// cadena es de los dos, así que cada uno añade lo suyo si falta y ninguno la
-// vacía. Los permisos van con -I 1, delante de los REJECT.
+// permisoGrupoRootViejo es el permiso que versiones anteriores daban al gid 0
+// con el daemon como root (ver reglasAcceso): setupAcceso lo quita.
+var permisoGrupoRootViejo = []string{"iptables", "-D", cadenaAcceso, "-m", "owner", "--gid-owner", "0", "--suppl-groups", "-j", "RETURN"}
+
+// sinSuppl es la regla sin --suppl-groups.
+func sinSuppl(r []string) []string {
+	return slices.DeleteFunc(slices.Clone(r), func(x string) bool { return x == "--suppl-groups" })
+}
+
+// setupAcceso monta reglasAcceso sin vaciar la cadena: en un host con dos
+// daemons (uno de systemd y otro privado, cada uno con el dueño de su socket)
+// es de los dos, así que cada uno añade lo suyo si falta y solo quita lo suyo
+// que sobra (lo de su etiqueta, ver AccesoAgente.Dueno).
+//
+// Cierra antes de abrir: primero los REJECT (en una cadena a la que aún no
+// salta nadie no cambian nada), luego los permisos con -I 1, delante de los
+// REJECT, y el salto el último. Si un permiso no entra, el salto se pone
+// igual y se devuelve el error: quien no tiene permiso se queda fuera, nunca
+// al revés. Con un iptables sin --suppl-groups (anterior a la 1.8.3) el
+// permiso de cada grupo vale solo para su grupo primario.
 func setupAcceso(a AccesoAgente, euid, egid int) error {
 	permisos, cierre, salto := reglasAcceso(a, euid, egid)
-	if !comprobarRegla([]string{"iptables", "-n", "-L", cadenaAcceso}) {
+	existe, err := comprobarEstado([]string{"iptables", "-n", "-L", cadenaAcceso})
+	if err != nil {
+		return err
+	}
+	if !existe {
 		if err := ejecutar("iptables", "-N", cadenaAcceso); err != nil {
 			return err
 		}
 	}
-	for _, r := range permisos {
-		if !comprobarRegla(sinPosicion(r, "-C")) {
-			if err := ejecutar(r...); err != nil {
-				return err
-			}
-		}
-	}
 	for _, r := range cierre {
-		if !comprobarRegla(aComprobar(r)) {
-			if err := ejecutar(r...); err != nil {
-				return err
-			}
+		if err := ponerSiFalta(r); err != nil {
+			return err
 		}
 	}
-	if !comprobarRegla(sinPosicion(salto, "-C")) {
-		return ejecutar(salto...)
+	var errs []error
+	for _, r := range permisos {
+		err := ponerSiFalta(r)
+		if err == nil || !slices.Contains(r, "--suppl-groups") {
+			errs = append(errs, err)
+			continue
+		}
+		if err2 := ponerSiFalta(sinSuppl(r)); err2 != nil {
+			errs = append(errs, fmt.Errorf("%w; without --suppl-groups: %v", err, err2))
+			continue
+		}
+		log.Printf("net: WARNING: iptables without --suppl-groups (%v): only processes whose primary group is %s reach the machines' agent",
+			err, valorOpcion(r, "--gid-owner"))
 	}
-	return nil
+	for comprobarRegla(sinPosicion(permisoGrupoRootViejo, "-C")) {
+		if ejecutar(permisoGrupoRootViejo...) != nil {
+			break
+		}
+	}
+	errs = append(errs, podarAcceso(a, permisos), ponerSiFalta(salto))
+	return errors.Join(errs...)
+}
+
+// ponerSiFalta ejecuta r (-A o -I) si su -C dice que no está.
+func ponerSiFalta(r []string) error {
+	esta, err := comprobarEstado(paraComprobar(r))
+	if err != nil || esta {
+		return err
+	}
+	return ejecutar(r...)
+}
+
+// podarAcceso quita de cadenaAcceso los permisos con la etiqueta de a que ya
+// no están en permisos: los de un dueño anterior del socket.
+func podarAcceso(a AccesoAgente, permisos [][]string) error {
+	e := a.etiqueta()
+	if e == "" {
+		return nil
+	}
+	lineas, err := listarCadena(cadenaAcceso)
+	if err != nil {
+		return err
+	}
+	vigentes := map[string]bool{}
+	for _, r := range permisos {
+		for _, v := range [][]string{r, sinSuppl(r)} {
+			vigentes[strings.Join(sinPosicion(v, "-D")[3:], " ")] = true
+		}
+	}
+	var errs []error
+	for _, l := range lineas {
+		f := strings.Fields(l)
+		for i := range f {
+			f[i] = strings.Trim(f[i], `"`)
+		}
+		if len(f) < 3 || f[0] != "-A" || f[1] != cadenaAcceso || valorOpcion(f, "--comment") != e {
+			continue
+		}
+		if !vigentes[strings.Join(f[2:], " ")] {
+			errs = append(errs, ejecutar(append([]string{"iptables", "-D", cadenaAcceso}, f[2:]...)...))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// listarCadena devuelve `iptables -S cadena`, una regla por línea.
+var listarCadena = func(cadena string) ([]string, error) {
+	out, err := exec.Command("iptables", "-w", esperaXtables, "-S", cadena).Output()
+	if err != nil {
+		return nil, fmt.Errorf("iptables -S %s: %w", cadena, err)
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n"), nil
 }
 
 // aComprobar es la regla con -A convertida en -C.
@@ -975,29 +1161,22 @@ func sinPosicion(r []string, accion string) []string {
 // SetupHost prepara el host una sola vez: reenvío y reglas de barrera.
 // acceso son los usuarios y grupos que, además del daemon, pueden abrir
 // conexiones al agente de las máquinas (reglasAcceso).
+//
+// Si algo falla sigue con lo demás (cada barrera que entra cierra algo) y
+// devuelve el error. Mientras no haya entrado todo, Setup no monta la red de
+// ninguna máquina: lo reintenta antes de cada una (asegurarHostInput) y, si
+// sigue fallando, la máquina no arranca. Antes el daemon seguía con un
+// WARNING y las máquinas salían con el host abierto.
 func SetupHost(acceso AccesoAgente) error {
-	if err := run("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"); err != nil {
-		return err
-	}
-	for _, r := range HostEgressRules("") {
-		// -C comprueba si la regla ya existe, para no duplicarla en cada arranque.
-		check := append([]string{}, r...)
-		for i, a := range check {
-			if a == "-A" {
-				check[i] = "-C"
-			}
-		}
-		if exec_ok(check) {
-			continue
-		}
-		if err := run(r...); err != nil {
-			return err
-		}
-	}
-	if err := setupHostInput(); err != nil {
-		return err
-	}
-	if err := setupAcceso(acceso, os.Geteuid(), os.Getegid()); err != nil {
+	accesoPedido.Store(&acceso)
+	err := errors.Join(
+		activarReenvio(),
+		montarEgresoHost(),
+		setupHostInput(),
+		setupAcceso(acceso, os.Geteuid(), os.Getegid()),
+	)
+	if err != nil {
+		inputMontado.Store(false)
 		return err
 	}
 	accesoMontado.Store(&acceso)
@@ -1010,50 +1189,119 @@ func SetupHost(acceso AccesoAgente) error {
 	return nil
 }
 
+// activarReenvio enciende ip_forward en el host. Sustituible en tests.
+var activarReenvio = func() error {
+	return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644)
+}
+
+// ErrHostSinBarreras: SetupHost no ha podido montar las reglas del host, y
+// sin ellas ninguna máquina recibe red.
+var ErrHostSinBarreras = errors.New("the host firewall rules for the machines are not installed")
+
+// accesoPedido es el AccesoAgente con el que se llamó a SetupHost, haya ido
+// bien o no: con él se reintenta.
+var accesoPedido atomic.Pointer[AccesoAgente]
+
 // accesoMontado es el AccesoAgente con el que SetupHost montó reglasAcceso,
 // para reponerlas igual (asegurarHostInput).
 var accesoMontado atomic.Pointer[AccesoAgente]
 
-// inputMontado dice que SetupHost puso las reglas INPUT: desde entonces, cada
-// Setup comprueba que siguen ahí (asegurarHostInput).
+// inputMontado dice que SetupHost puso todas las reglas del host: desde
+// entonces, cada Setup comprueba que siguen ahí (asegurarHostInput).
 var inputMontado atomic.Bool
 
 // inputMu evita que dos Setup a la vez repongan las reglas los dos.
 var inputMu sync.Mutex
 
-// asegurarHostInput repone HostInputRules si un `ufw reload` o un `firewalld
-// --reload` las borró después de SetupHost: sin ellas, un invitado con salida
-// llega a los servicios del host por su IP pública. Comprueba solo el DROP
-// final, con un `iptables -C` (un proceso por montaje): un reload que vacía
-// INPUT se lo lleva, y si falta se reinstala el juego entero en orden.
+// centinelas son, como -C, las reglas del host cuya falta delata un reload
+// del cortafuegos (`ufw reload`, `firewalld --reload`), una por juego: el
+// DROP final de INPUT, el salto de OUTPUT a cadenaAcceso, el REJECT del
+// agente dentro de esa cadena, la última DROP de FORWARD y la del agente en
+// mangle.
+func centinelas(acceso AccesoAgente) [][]string {
+	reglas := HostInputRules()
+	_, cierre, salto := reglasAcceso(acceso, os.Geteuid(), os.Getegid())
+	return [][]string{
+		paraComprobar(reglas[len(reglas)-1]),
+		paraComprobar(salto),
+		paraComprobar(cierre[0]),
+		paraComprobar(centinelaForward()),
+		paraComprobar(reglaAgenteDesdeFuera()),
+	}
+}
+
+// asegurarHostInput repone las reglas del host si un reload del cortafuegos
+// las borró después de SetupHost: sin ellas, un invitado con salida llega a
+// los servicios del host por su IP pública, y un contenedor o un usuario
+// local, al agente. Mira un centinela por juego (centinelas), los cinco -C a
+// la vez, y reinstala el juego al que le falta el suyo.
+//
+// Si SetupHost no llegó a montarlo todo, lo reintenta; si tampoco puede,
+// devuelve el error y Setup no monta la red.
 func asegurarHostInput() error {
 	if !inputMontado.Load() {
-		return nil // SetupHost no corrió (o falló): no hay nada que reponer
+		inputMu.Lock()
+		defer inputMu.Unlock()
+		if inputMontado.Load() {
+			return nil
+		}
+		a := accesoPedido.Load()
+		if a == nil {
+			return ErrHostSinBarreras
+		}
+		if err := SetupHost(*a); err != nil {
+			return fmt.Errorf("%w: %v", ErrHostSinBarreras, err)
+		}
+		log.Printf("net: the host firewall rules for the machines are now installed")
+		return nil
 	}
-	reglas := HostInputRules()
-	drop := sinPosicion(reglas[len(reglas)-1], "-C")
 	acceso := AccesoAgente{}
 	if a := accesoMontado.Load(); a != nil {
 		acceso = *a
 	}
-	_, _, salto := reglasAcceso(acceso, os.Geteuid(), os.Getegid())
-	salto = sinPosicion(salto, "-C")
-	if comprobarRegla(drop) && comprobarRegla(salto) {
+	estan, err := comprobarALaVez(centinelas(acceso))
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(estan, false) {
 		return nil
 	}
 	inputMu.Lock()
 	defer inputMu.Unlock()
-	if !comprobarRegla(drop) {
+	if !estan[0] {
 		log.Printf("net: the host INPUT rules for the machines are gone (a firewall reload?); reinstalling them")
 		if err := setupHostInput(); err != nil {
 			return err
 		}
 	}
-	if !comprobarRegla(salto) {
+	if !estan[1] || !estan[2] {
 		log.Printf("net: the host OUTPUT rules for the machines are gone (a firewall reload?); reinstalling them")
-		return setupAcceso(acceso, os.Geteuid(), os.Getegid())
+		if err := setupAcceso(acceso, os.Geteuid(), os.Getegid()); err != nil {
+			return err
+		}
+	}
+	if !estan[3] || !estan[4] {
+		log.Printf("net: the host FORWARD rules for the machines are gone (a firewall reload?); reinstalling them")
+		return montarEgresoHost()
 	}
 	return nil
+}
+
+// comprobarALaVez lanza los -C en paralelo: son procesos independientes que
+// solo leen, y así cuestan lo que el más lento y no la suma.
+func comprobarALaVez(reglas [][]string) ([]bool, error) {
+	estan := make([]bool, len(reglas))
+	errs := make([]error, len(reglas))
+	var wg sync.WaitGroup
+	for i, r := range reglas {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			estan[i], errs[i] = comprobarEstado(r)
+		}()
+	}
+	wg.Wait()
+	return estan, errors.Join(errs...)
 }
 
 // setupHostInput instala HostInputRules al principio de INPUT, delante de lo
@@ -1101,8 +1349,14 @@ func setupHostInput() error {
 	return nil
 }
 
-// comprobarRegla es exec_ok detrás de una variable, para los tests.
-var comprobarRegla = exec_ok
+// comprobarEstado es comprobarIptables detrás de una variable, para los tests.
+var comprobarEstado = comprobarIptables
+
+// comprobarRegla dice si la regla está; un error cuenta como que no.
+func comprobarRegla(args []string) bool {
+	ok, _ := comprobarEstado(args)
+	return ok
+}
 
 // reglasEnlaceSobrantes recibe lo que lista `iptables -S` en el netns (nat
 // PREROUTING y FORWARD) y devuelve, listas para pasar a iptables, las -D de las

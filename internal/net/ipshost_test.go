@@ -1,10 +1,12 @@
 package net
 
 import (
+	"errors"
 	stdnet "net"
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -63,43 +65,29 @@ func TestInvitadoNoAlcanzaLasIPsDelHost(t *testing.T) {
 	}
 }
 
-// Un reload del cortafuegos que vacía INPUT u OUTPUT tras SetupHost: el
-// siguiente Setup las repone en orden. Con las reglas en su sitio, dos -C (el
-// DROP de INPUT y el salto de OUTPUT) y nada más.
+// Un reload del cortafuegos que vacía INPUT, OUTPUT o FORWARD tras SetupHost:
+// el siguiente Setup repone lo que falta, en orden. Con las reglas en su
+// sitio, cinco -C (un centinela por juego) y nada más.
 func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 	f := &iptablesFalso{}
-	oldC, oldE := comprobarRegla, ejecutar
-	t.Cleanup(func() {
-		comprobarRegla, ejecutar = oldC, oldE
-		inputMontado.Store(false)
-		accesoMontado.Store(nil)
-	})
-	comprobaciones := 0
-	comprobarRegla = func(args []string) bool { comprobaciones++; return f.comprobar(args) }
-	ejecutar = f.ejecutar
+	usarIptablesFalso(t, f)
+	var comprobaciones atomic.Int32
+	comprobarEstado = func(args []string) (bool, error) { comprobaciones.Add(1); return f.estado(args) }
 
-	inputMontado.Store(false)
-	if err := asegurarHostInput(); err != nil || len(f.input) != 0 || comprobaciones != 0 {
-		t.Fatalf("sin SetupHost no debe tocar nada: err %v, INPUT %v, %d -C", err, f.input, comprobaciones)
-	}
-	if err := setupHostInput(); err != nil {
-		t.Fatal(err)
-	}
 	acceso := AccesoAgente{UIDs: []int{1000}, GIDs: []int{1000}}
-	if err := setupAcceso(acceso, os.Geteuid(), os.Getegid()); err != nil {
+	if err := SetupHost(acceso); err != nil {
 		t.Fatal(err)
 	}
-	accesoMontado.Store(&acceso)
-	inputMontado.Store(true)
 	accesoAntes := slices.Clone(f.otras[cadenaAcceso])
+	forwardAntes := slices.Clone(f.otras["FORWARD"])
 	var quiere []string
 	for _, r := range HostInputRules() {
 		quiere = append(quiere, strings.Join(r[4:], " "))
 	}
 
-	comprobaciones = 0
-	if err := asegurarHostInput(); err != nil || comprobaciones != 2 {
-		t.Fatalf("con las reglas puestas: err %v, %d -C, quería 2", err, comprobaciones)
+	comprobaciones.Store(0)
+	if err := asegurarHostInput(); err != nil || comprobaciones.Load() != 5 {
+		t.Fatalf("con las reglas puestas: err %v, %d -C, quería 5", err, comprobaciones.Load())
 	}
 
 	f.input = []string{"-p tcp --dport 22 -j ACCEPT"} // lo que deja el reload
@@ -111,7 +99,8 @@ func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 		t.Fatalf("INPUT tras reponer =\n%s\nquería\n%s", strings.Join(f.input, "\n"), strings.Join(quiere, "\n"))
 	}
 
-	// Un firewalld --reload vacía todo: OUTPUT y la cadena propia también.
+	// Un firewalld --reload vacía todo: OUTPUT, FORWARD, mangle y la cadena
+	// propia también.
 	f.otras = nil
 	if err := asegurarHostInput(); err != nil {
 		t.Fatal(err)
@@ -120,5 +109,38 @@ func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 	if !f.comprobar(sinPosicion(salto, "-C")) || !slices.Equal(f.otras[cadenaAcceso], accesoAntes) {
 		t.Fatalf("OUTPUT tras reponer = %v, %s = %v; quería el salto y %v",
 			f.otras["OUTPUT"], cadenaAcceso, f.otras[cadenaAcceso], accesoAntes)
+	}
+	if !slices.Equal(f.otras["FORWARD"], forwardAntes) || !f.comprobar(paraComprobar(reglaAgenteDesdeFuera())) {
+		t.Fatalf("FORWARD tras reponer = %v (quería %v), mangle = %v", f.otras["FORWARD"], forwardAntes, f.otras["mangle/PREROUTING"])
+	}
+
+	// Solo los REJECT de la cadena borrados (alguien la vació a mano): sin
+	// ellos, el salto sigue y la cadena no cierra nada.
+	f.otras[cadenaAcceso] = nil
+	if err := asegurarHostInput(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.otras[cadenaAcceso], accesoAntes) {
+		t.Fatalf("%s tras reponer = %v, quería %v", cadenaAcceso, f.otras[cadenaAcceso], accesoAntes)
+	}
+}
+
+// S13: un -C que falla por otra cosa que «no está» (el cerrojo de xtables, por
+// ejemplo) no se lee como que falta: Setup falla y no se reinstala nada.
+func TestAsegurarHostInputNoConfundeUnFalloConUnaFalta(t *testing.T) {
+	f := &iptablesFalso{}
+	usarIptablesFalso(t, f)
+	if err := SetupHost(AccesoAgente{}); err != nil {
+		t.Fatal(err)
+	}
+	antes := slices.Clone(f.input)
+	comprobarEstado = func([]string) (bool, error) { return false, errors.New("xtables lock") }
+	var ejecutados [][]string
+	ejecutar = func(args ...string) error { ejecutados = append(ejecutados, args); return nil }
+	if err := asegurarHostInput(); err == nil {
+		t.Fatal("asegurarHostInput = nil con los -C fallando")
+	}
+	if len(ejecutados) != 0 || !slices.Equal(f.input, antes) {
+		t.Fatalf("reinstaló con los -C fallando: %v", ejecutados)
 	}
 }

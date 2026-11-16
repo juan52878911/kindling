@@ -47,7 +47,9 @@ func (s *Server) comprobarHost() {
 	if err := knet.Available(); err != nil {
 		log.Printf("WARNING: network unavailable (%v): microVMs will boot without connectivity", err)
 	} else if err := knet.SetupHost(s.accesoAgente()); err != nil {
-		log.Printf("WARNING: couldn't install the host barrier rules: %v", err)
+		// Fallo cerrado: sin estas reglas net.Setup no monta la red de ninguna
+		// máquina; lo reintenta en cada arranque (asegurarHostInput).
+		log.Printf("ERROR: couldn't install the host firewall rules: %v; microVMs will not start until they can be installed (retried on every start)", err)
 	} else if aviso := avisoForward(knet.LeerFiltro); aviso != "" {
 		log.Print(aviso)
 	}
@@ -57,9 +59,11 @@ func (s *Server) comprobarHost() {
 // agente de las máquinas (net.reglasAcceso): al dueño del socket cuando se
 // cede, que puede pedir lo mismo por el socket.
 func (s *Server) accesoAgente() knet.AccesoAgente {
-	uid, gid, ceder := s.socketOwner()
-	if !ceder {
-		return knet.AccesoAgente{}
+	// Dueno: los permisos de este daemon llevan su etiqueta, y así quita los
+	// que ya no da (el socket pasó a otro usuario o dejó de cederse).
+	a := knet.AccesoAgente{Dueno: s.root}
+	if uid, gid, ceder := s.socketOwner(); ceder {
+		a.UIDs, a.GIDs = []int{uid}, []int{gid}
 	}
-	return knet.AccesoAgente{UIDs: []int{uid}, GIDs: []int{gid}}
+	return a
 }
