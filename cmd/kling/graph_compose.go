@@ -1034,6 +1034,28 @@ func (t *traduccionCompose) healthcheck(s *servicioCompose, v any, pre string, a
 			avisa("%shealthcheck %s: not supported", pre, k)
 		}
 	}
+	acotarSalud(&s.saludT, pre, avisa)
+}
+
+// acotarSalud lleva los tiempos de un healthcheck a los topes del daemon
+// (api.GraphHealthMax*), con un aviso: Docker acepta retries: 120, y el
+// daemon rechazaría el grafo entero.
+func acotarSalud(h *api.GraphHealth, pre string, avisa func(string, ...any)) {
+	tope := func(v *int, lim int, que, unidad string) {
+		if *v > lim {
+			avisa("%shealthcheck %s: %d%s is over the limit; using %d%s", pre, que, *v, unidad, lim, unidad)
+			*v = lim
+		}
+	}
+	tope(&h.Retries, api.GraphHealthMaxRetries, "retries", "")
+	tope(&h.TimeoutSeconds, api.GraphHealthMaxTimeoutSeconds, "timeout", "s")
+	tope(&h.StartPeriodSeconds, api.GraphHealthMaxStartPeriodSeconds, "start_period", "s")
+	tope(&h.IntervalMS, api.GraphHealthMaxIntervalMS, "interval", "ms")
+	tope(&h.StartIntervalMS, api.GraphHealthMaxIntervalMS, "start_interval", "ms")
+	if minimo := int(api.GraphHealthMinStartInterval.Milliseconds()); h.StartIntervalMS > 0 && h.StartIntervalMS < minimo {
+		avisa("%shealthcheck start_interval: %dms is under the minimum; using %dms", pre, h.StartIntervalMS, minimo)
+		h.StartIntervalMS = minimo
+	}
 }
 
 func (t *traduccionCompose) deploy(s *servicioCompose, v any, pre string, avisa func(string, ...any)) {

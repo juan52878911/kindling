@@ -248,8 +248,10 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 	argv := saludArgv(s.salud)
 	// El plazo del healthcheck (start_period + retries × interval), y nunca
 	// menos que el de siempre: la primera vez hay initdb y se espera a ella.
+	// Ni más que lo que esperaría el daemon (api.GraphHealthMaxWait).
 	intervalo, plazo, reintentos, arranque, _ := s.saludT.Tiempos()
-	limite, que := max(plantillaListo, arranque+time.Duration(reintentos)*intervalo), "healthcheck"
+	limite := min(arranque+time.Duration(reintentos)*intervalo, api.GraphHealthMaxWait)
+	limite, que := max(plantillaListo, limite), "healthcheck"
 	if espera {
 		argv, limite, que, plazo = []string{"true"}, plantillaAgente, "guest agent", 30*time.Second
 	}

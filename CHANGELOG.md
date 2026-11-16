@@ -78,6 +78,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
 - Removing a template forgets its integrity verdict.
 - kling compose: `up` no longer removes a machine of another project whose name collides (project `a` service `b-web` vs project `a-b` service `web`), and `up` and `down -v` refuse to go on when names collide.
+- Graph health checks wait at least 100 ms between attempts, so a tiny `start_interval_ms` no longer floods the guest with execs.
+- kling compose: a healthcheck over the daemon limits (Docker allows `retries: 120`) is capped with a warning instead of failing the whole compose.
 
 ### Security
 

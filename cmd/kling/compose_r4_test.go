@@ -52,6 +52,40 @@ func TestProyectosQueColisionan(t *testing.T) {
 	}
 }
 
+// F4/F12: un healthcheck que Docker acepta (retries: 120, start_interval:
+// 1ms) se traduce con los topes del daemon y un aviso, en vez de dejar un
+// grafo que el daemon rechaza.
+func TestSaludAcotada(t *testing.T) {
+	src := `services:
+  db:
+    image: postgres:17
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      retries: 120
+      timeout: 20m
+      start_interval: 1ms
+  app:
+    image: nginx
+    depends_on:
+      db:
+        condition: service_healthy
+`
+	tr, err := traducirCompose([]byte(src), "dev", false, sinEntorno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := tr.por["db"].saludT
+	if h.Retries != api.GraphHealthMaxRetries || h.TimeoutSeconds != api.GraphHealthMaxTimeoutSeconds || h.StartIntervalMS != 100 {
+		t.Errorf("salud = %+v", h)
+	}
+	avisos := strings.Join(tr.Avisos, "\n")
+	for _, w := range []string{"retries: 120 is over the limit; using 100", "timeout: 1200s", "start_interval: 1ms is under the minimum"} {
+		if !strings.Contains(avisos, w) {
+			t.Errorf("falta el aviso %q en:\n%s", w, avisos)
+		}
+	}
+}
+
 // S12: la interpolación va por escalar, después de parsear. Un valor con
 // " #", ": " o un salto de línea llega entero a su variable y no añade
 // claves; ni en un valor sin comillas.
