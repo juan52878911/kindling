@@ -100,9 +100,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 - macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
+- The `.xz` decoder (Debian indexes and `.deb` packages) no longer panics on malformed filter properties or out-of-window distances, caps the dictionary at 64 MiB and allocates the window as it fills; a decompressed `Packages.xz` is capped at 1 GiB.
+- OCI pulls reject manifests with more than 1024 layers or whose declared layer sizes overflow the size limit, before downloading any blob; the unpacked-size check in the oci builder no longer overflows either.
+- Image layers with sparse files (`GNU.sparse.*`) are rejected when building the ext4 tree, as the reader of local `docker save` and OCI layout archives already did.
 
 ### Changed
 
+- `kling plugin install` streams the asset to disk while hashing it instead of holding it (up to 512 MiB) in memory.
 - kling-hv: `KLING_HV_AVISOS=1` also logs vCPU exits, timer exits and trapped WFIs (measured on an M4: none trapped while idle, so the 2 ms WFI fallback never runs).
 - Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
 - A machine's overlay size cap is set when its disk is created, and a machine from an older daemon gets it from its disk size or its template instead of from what its overlay measures at the watcher's first look.
