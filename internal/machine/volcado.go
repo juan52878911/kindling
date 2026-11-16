@@ -91,7 +91,10 @@ type sello struct {
 // Las dos operaciones de disco de las marcas, como variables para que un test
 // simule un disco lleno (ENOSPC) sin llenar ninguno.
 var (
-	renombrarMarca = durable.Renombrar
+	// Mover y no Renombrar (P2): las marcas se escriben durables
+	// (escribirMarca), así que lo único que falta al moverlas es el rename y
+	// el fsync del directorio.
+	renombrarMarca = durable.Mover
 	escribirMarca  = durable.Escribir
 )
 

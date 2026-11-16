@@ -125,7 +125,7 @@ func TestCommitDeForkMarcaAntesDelMeta(t *testing.T) {
 		}
 	})
 
-	if _, err := m.commit(context.Background(), id, name, false, nil, false, true, false); err != nil {
+	if _, err := m.commit(context.Background(), id, name, false, nil, false, true, agenteSinSondear); err != nil {
 		t.Fatalf("commit de fork: %v", err)
 	}
 	marca, err := os.Stat(filepath.Join(dir, forkMarca))

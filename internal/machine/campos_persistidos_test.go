@@ -142,6 +142,7 @@ var clasesCampos = map[string]claseCampo{
 	// M13: el disco de solo lectura del dorado, también dentro de la firma.
 	"meta.json api.Snapshot image_digest": {efecto: true, version: 4, porque: "covered by the v2 signature an older kling would compute without it"},
 	"meta.json api.Snapshot base_digest":  {efecto: true, version: 4, porque: "covered by the v2 signature an older kling would compute without it"},
+	"meta.json api.Snapshot con_agente":   {efecto: true, version: 5, porque: "covered by the v3 signature; an older kling would deliver a copy whose agent did not answer"},
 	// El modo de sincronización de un volumen (api.VolumeAttachment.Sync).
 	"meta.json api.VolumeAttachment sync": {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
 	"state.json api.VolumeAttachment sync": {porque: "an older kling and its kling-hv have no sync modes at all; " +

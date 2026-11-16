@@ -29,6 +29,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `POST /machines/{ref}/guest` has a memory budget for bodies in flight (1 GiB, and a per-tenant share): calls that don't fit get 429 before reaching the guest instead of running the daemon out of memory (8 parallel 100 MiB calls: 1.6-3.1 GiB of heap before, 0.7 GiB now).
 - The daemon socket caps connections (4096 in total and, with an authz policy, 1024 per non-admin uid; extra ones get a 429), and a tenant can hold at most 64 exec, shell or file calls at once.
 - `GET /events`: a tenant's stream is filtered before its buffer, so other tenants' activity no longer makes it drop its own events; with an authz policy, admins can't hold the last 64 streams.
+- `run -from`: a copy whose agent does not resync is removed instead of left failed with its name, so retrying with the same `-name` works.
+- Thaw: credentials are handed over without the request context (with a deadline and one retry), so a client that leaves no longer wakes the machine without its credential proxy.
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
 - Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
 - kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.
@@ -123,6 +125,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: a root daemon no longer lets members of group 0 reach the machines' agent, and drops its own stale permissions from `KL-ACCESO` when the socket owner changes.
 - The pre-warmed pool labels (`kling.pool`, `kling.pool.ready`) are rejected in fork and graph nodes too, and on restart the daemon only re-adopts pool copies restored from that template with no owner.
 - With an authz policy, a tenant's graph can't carry daemon-set fields (`id`, `fork_of`, ...), and a graph name taken by someone else gets a neutral 409.
+- After a daemon restart, a template copy caught before its resync is stopped and marked failed instead of being re-adopted as running with the template's clock and random state.
+- Template copies are no longer delivered without a resync when the agent resets the connection: only a refused connection counts as "no agent", and templates saved with the agent listening (`con_agente`) never skip it.
+- Template signature v3 also covers `sin_agente`, `con_agente` and `share_wait` (`meta.json` schema 5; older klings refuse these templates). At start the daemon re-signs v1/v2 templates, adding the image digests older ones lacked, and then rejects v2 metas put back from a backup.
 - macOS: the credential proxy runs in its own sandboxed, hardened-runtime process per machine (`kling-credproxy`, installed next to `kling-vz`), so the real keys are no longer in the process that runs the guest's network stack; with an older `kling-vz` or `kling-hv` the daemon keeps the previous model (#80).
 - With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
 - With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
@@ -160,6 +165,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling plugin install` streams the asset to disk while hashing it instead of holding it (up to 512 MiB) in memory.
 - exec, shell and file calls probe the guest agent once per VMM lifetime instead of on every call (a loopback connect is ~45 µs; the check that replaces it, ~40 ns); a failed call to the agent makes the next one probe again.
 - `/metrics` reuses a sample for 1 s, and concurrent scrapes share one (50 parallel scrapes: 50 samples before, 1 now).
+- Thaw and `run -from` release the launch gate once the snapshot is loaded instead of after the resync (gate held 294 -> 36 ms per thaw with a 200 ms resync).
+- Thaw retires the memory dump seal while the VMM spawns, with one fsync fewer (5.4 -> 3.9 ms on an M4, now overlapped).
+- Concurrent `run -from` hash a golden image once, and the daemon precomputes golden image digests at start (8 cold copies over 256 MiB: 164 -> 22 ms).
+- `state.json` is serialized per machine and in parallel (1000 machines: 1.4 -> 0.7 ms per write, same bytes).
+- The watcher scans for orphan directories, and `volume rm` deletes the file, outside the global lock (lock held 3.7 ms -> 0.2 us with 1000 templates).
 - kling-hv: `KLING_HV_AVISOS=1` also logs vCPU exits, timer exits and trapped WFIs (measured on an M4: none trapped while idle, so the 2 ms WFI fallback never runs).
 - Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
 - A machine's overlay size cap is set when its disk is created, and a machine from an older daemon gets it from its disk size or its template instead of from what its overlay measures at the watcher's first look.

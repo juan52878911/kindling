@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
@@ -361,13 +362,23 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 	if !reVolume.MatchString(name) {
 		return marcado(ErrInvalidName, "invalid volume name %q", name)
 	}
-	// La comprobacion y el borrado van bajo el MISMO cerrojo. Mirar primero y
+	// La comprobacion y la retirada van bajo el MISMO cerrojo. Mirar primero y
 	// borrar despues dejaba una ventana en la que una microVM podia empezar a
 	// usar el volumen justo en medio, y borrar el fichero bajo una que lo tiene
 	// montado le corrompe el sistema de ficheros sin un solo error.
 	//
-	// El os.Remove es un unlink: cuesta lo mismo que la comprobacion, asi que
-	// sostener el cerrojo aqui no bloquea nada apreciable.
+	// Bajo el cerrojo solo se APARTA (un rename a la papelera); borrarlo,
+	// que en un volumen de GiB (y sus snapshots) es liberar todos sus
+	// bloques, va después, sin él (P9): antes, ps, run y thaw esperaban al
+	// disco. Ya fuera de volumes/, nadie puede volver a montarlo.
+	var aBorrar []string
+	defer func() {
+		for _, p := range aBorrar {
+			if err := borrarApartado(p); err != nil {
+				log.Printf("volume rm %s: couldn't delete %s (vaciarPapelera retries): %v", name, filepath.Base(p), err)
+			}
+		}
+	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -394,9 +405,12 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 			"volume %q has %d snapshot(s): remove them first (kling volume rm %s@<snapshot>)\n"+
 				"or remove everything with:  kling volume rm -snapshots %s", name, n, name, name)}
 	}
-	errVol := os.Remove(m.volumePath(name))
+	apartado, errVol := m.aLaPapelera(m.volumePath(name), "vol-"+name)
 	if errVol != nil && !os.IsNotExist(errVol) {
 		return errVol
+	}
+	if apartado != "" {
+		aBorrar = append(aBorrar, apartado)
 	}
 	sinSnaps := true
 	if conSnapshots {
@@ -404,8 +418,12 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 		// no puede salirse de volumes/snapshots/.
 		if _, err := os.Lstat(m.volSnapsDir(name)); err == nil {
 			sinSnaps = false
-			if err := os.RemoveAll(m.volSnapsDir(name)); err != nil {
+			apartado, err := m.aLaPapelera(m.volSnapsDir(name), "volsnaps-"+name)
+			if err != nil {
 				return err
+			}
+			if apartado != "" {
+				aBorrar = append(aBorrar, apartado)
 			}
 		}
 	}
@@ -413,6 +431,33 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 		return &api.StatusError{Code: http.StatusNotFound, Message: fmt.Sprintf("volume %q not found", name)}
 	}
 	return nil
+}
+
+// borrarApartado borra lo que RemoveVolume apartó; una variable para las
+// pruebas.
+var borrarApartado = os.RemoveAll
+
+// aLaPapelera aparta ruta a la papelera de machines/ con un nombre que
+// empieza por prefijo, y devuelve dónde quedó, para que quien llama la borre
+// sin m.mu (y, si el daemon muere antes, vaciarPapelera). Si la papelera está
+// en otro sistema de ficheros (EXDEV), la borra aquí, como antes, y devuelve
+// "". Un ruta que no existe da su ErrNotExist.
+func (m *Manager) aLaPapelera(ruta, prefijo string) (string, error) {
+	if _, err := os.Lstat(ruta); err != nil {
+		return "", err
+	}
+	papelera := filepath.Join(m.root, "machines", papeleraDir)
+	destino := filepath.Join(papelera, fmt.Sprintf("%s-%d", prefijo, time.Now().UnixNano()))
+	err := os.MkdirAll(papelera, 0o700)
+	if err == nil {
+		if err = os.Rename(ruta, destino); err == nil {
+			return destino, nil
+		}
+	}
+	if !errors.Is(err, syscall.EXDEV) {
+		return "", err
+	}
+	return "", os.RemoveAll(ruta)
 }
 
 // paradasConVolumenLocked son las máquinas paradas (o fallidas) que llevan el
