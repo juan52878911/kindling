@@ -79,6 +79,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Removing a template forgets its integrity verdict.
 - Shares: a FIFO on the host where a directory is expected no longer hangs listing, renaming or watching it, nor stopping or freezing the machine.
 - Shares: when watching by polling, a directory without a snapshot is reported only when it changes, not every 2 s.
+- Shares on Linux: two names of the same file are both watched; unwatching one no longer silences the other.
 
 ### Security
 

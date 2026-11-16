@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,10 +95,13 @@ type inBackend struct {
 	byRel  map[string]*inWatch
 }
 
+// inWatch es una vigilancia del kernel. Varios nombres del mismo inodo (un
+// enlace duro, o un directorio al que se llega por un enlace) comparten wd:
+// rels son todos, y la vigilancia se quita al soltar el último.
 type inWatch struct {
-	wd  int32
-	rel string
-	dir bool
+	wd   int32
+	rels []string
+	dir  bool
 }
 
 func newWatchBackend(root *os.Root, emit func(rawEvent)) (watchBackend, error) {
@@ -146,12 +150,13 @@ func (b *inBackend) add(rel string, dir bool) error {
 		}
 		return err
 	}
-	w := &inWatch{wd: int32(wd), rel: rel, dir: dir}
-	if old := b.byWD[w.wd]; old != nil {
-		// El mismo inodo con dos nombres (un enlace duro): manda el último.
-		delete(b.byRel, old.rel)
+	w := b.byWD[int32(wd)]
+	if w == nil {
+		w = &inWatch{wd: int32(wd), dir: dir}
+		b.byWD[w.wd] = w
 	}
-	b.byWD[w.wd], b.byRel[rel] = w, w
+	w.rels = append(w.rels, rel)
+	b.byRel[rel] = w
 	return nil
 }
 
@@ -163,6 +168,10 @@ func (b *inBackend) remove(rel string) {
 		return
 	}
 	delete(b.byRel, rel)
+	w.rels = slices.DeleteFunc(w.rels, func(r string) bool { return r == rel })
+	if len(w.rels) > 0 {
+		return
+	}
 	delete(b.byWD, w.wd)
 	_, _ = syscall.InotifyRmWatch(b.fd, uint32(w.wd))
 }
@@ -211,12 +220,16 @@ func (b *inBackend) loop() {
 			}
 			if ev.Mask&syscall.IN_IGNORED != 0 {
 				delete(b.byWD, w.wd)
-				delete(b.byRel, w.rel)
-				out = append(out, rawEvent{rel: w.rel, dir: w.dir, gone: true})
+				for _, r := range w.rels {
+					delete(b.byRel, r)
+					out = append(out, rawEvent{rel: r, dir: w.dir, gone: true})
+				}
 				continue
 			}
 			gone := ev.Mask&(syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF) != 0
-			out = append(out, rawEvent{rel: w.rel, dir: w.dir, gone: gone})
+			for _, r := range w.rels {
+				out = append(out, rawEvent{rel: r, dir: w.dir, gone: gone})
+			}
 		}
 		b.mu.Unlock()
 		for _, e := range out {
