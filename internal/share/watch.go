@@ -350,7 +350,7 @@ func (w *watcher) fingerprint(rel string) fingerprint {
 // y dice cuál es el directorio real que leyó (rel puede pasar por enlaces). Si
 // skip dice que ese directorio ya tiene foto, no lee los nombres.
 func (w *watcher) snapshot(rel string, skip func(Ident) bool) (map[string]bool, Ident, bool) {
-	f, err := w.srv.root.Open(relPath(rel))
+	f, err := openDir(w.srv.root, relPath(rel))
 	if err != nil {
 		return nil, Ident{}, false
 	}

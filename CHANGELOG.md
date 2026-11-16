@@ -77,6 +77,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: `credproxy.log` is rotated like the console log.
 - macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
 - Removing a template forgets its integrity verdict.
+- Shares: a FIFO on the host where a directory is expected no longer hangs listing, renaming or watching it, nor stopping or freezing the machine.
 
 ### Security
 
