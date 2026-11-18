@@ -549,6 +549,24 @@ func (m *Manager) reanudarFondos() {
 		return
 	}
 
+	// La copia hereda las etiquetas del dorado (kling.owner incluida si lo
+	// creó un inquilino), así que el dueño que le toca es el del dorado.
+	// loadSnapshot toma m.mu: los dueños se leen antes de recorrer byID.
+	m.mu.RLock()
+	plantillas := map[string]bool{}
+	for _, mc := range m.byID {
+		if p := mc.Labels[api.LabelPool]; p != "" {
+			plantillas[p] = true
+		}
+	}
+	m.mu.RUnlock()
+	duenoDorado := map[string]string{}
+	for p := range plantillas {
+		if s, err := m.loadSnapshot(p); err == nil {
+			duenoDorado[p] = s.Labels[api.LabelOwner]
+		}
+	}
+
 	m.mu.RLock()
 	vivas := map[string][]string{}
 	var muertas []string
@@ -561,9 +579,10 @@ func (m *Manager) reanudarFondos() {
 		// que llegara por un camino que no la rechazara convertiría la
 		// máquina de un inquilino en una copia que se entrega al siguiente
 		// que pida la plantilla. Una copia de verdad la crea crearParaFondo:
-		// restaurada de esa plantilla y sin dueño. Lo demás ni se adopta ni
-		// se retira (no es del fondo, y borrarla sería perder algo ajeno).
-		if mc.From != plantilla || mc.Labels[api.LabelOwner] != "" {
+		// restaurada de esa plantilla y con el dueño del dorado (ninguno si
+		// el dorado no lo tiene). Lo demás ni se adopta ni se retira (no es
+		// del fondo, y borrarla sería perder algo ajeno).
+		if mc.From != plantilla || mc.Labels[api.LabelOwner] != duenoDorado[plantilla] {
 			continue
 		}
 		if mc.State == api.StateRunning && mc.Labels[api.LabelPoolReady] == "1" && tam[plantilla] > 0 {
