@@ -433,7 +433,13 @@ type session struct {
 	// llamada va por uno de ellos, como pide Streamable HTTP; si no hay ninguno,
 	// por notes (el GET SSE de la sesión). Bajo mu.
 	flujos []chan json.RawMessage
-	closed bool
+	// capCliente son las capacidades que el cliente declaró en su initialize
+	// (sampling, elicitation, roots...); nil si no se ha visto el initialize.
+	// Una petición del servidor que necesita una que el cliente no declaró se
+	// contesta aquí con un error: el agregador del gateway (/mcp/_all) declara
+	// {} y no contesta ninguna, y el servidor se quedaba esperando. Bajo mu.
+	capCliente map[string]bool
+	closed     bool
 	// done se cierra al terminar la sesión. Es la señal para el flujo SSE, y
 	// sustituye a cerrar notes: un canal que solo se cierra no puede provocar
 	// el pánico de "send on closed channel" en el readLoop.
@@ -525,6 +531,17 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 	if created {
 		w.Header().Set(SessionHeader, s.id)
+	}
+	if isInit {
+		// Antes de pasarle el initialize al servidor: no debe pedir nada al
+		// cliente hasta tenerlo, y para entonces ya se sabe qué puede contestar.
+		var ini struct {
+			Params struct {
+				Capabilities map[string]json.RawMessage `json:"capabilities"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal(body, &ini)
+		s.fijarCapacidades(ini.Params.Capabilities)
 	}
 
 	// La sesión quedó contada como en uso por esta petición: se suelta al
@@ -950,6 +967,7 @@ func (s *session) readLoop(stdout io.Reader) {
 			continue
 		}
 		raw := json.RawMessage(append([]byte(nil), line...))
+		raw = sinRetornos(raw)
 
 		var probe struct {
 			ID     json.RawMessage `json:"id"`
@@ -963,7 +981,7 @@ func (s *session) readLoop(stdout io.Reader) {
 		// cliente en vuelo —los dos lados numeran desde 1—, se entregaba como la
 		// respuesta de esa llamada y la respuesta de verdad se perdía.
 		if probe.Method != "" {
-			s.deliverServerMessage(raw, probe.ID)
+			s.deliverServerMessage(raw, probe.ID, probe.Method)
 			continue
 		}
 
@@ -1047,9 +1065,18 @@ func (s *session) send(msg []byte) error {
 // numeran por separado, y la respuesta del cliente vuelve con ese mismo id.
 //
 // Sin flujo POST, o si es una notificación, va a notes (el GET SSE).
-func (s *session) deliverServerMessage(raw, id json.RawMessage) {
+//
+// Una petición que necesita una capacidad que el cliente no declaró en su
+// initialize no se le entrega: se contesta al servidor con «method not found»,
+// que es lo que haría un cliente que la conoce y no la ofrece.
+func (s *session) deliverServerMessage(raw, id json.RawMessage, method string) {
 	if len(id) > 0 && string(id) != "null" {
 		s.mu.Lock()
+		if c := capacidadDe(method); c != "" && s.capCliente != nil && !s.capCliente[c] {
+			s.mu.Unlock()
+			s.rechazar(id, -32601, "kling-bridge: the client did not declare the "+c+" capability")
+			return
+		}
 		if len(s.flujos) > 0 {
 			select {
 			case s.flujos[0] <- raw:
@@ -1080,14 +1107,64 @@ func (s *session) toNotes(raw json.RawMessage) {
 	if json.Unmarshal(raw, &m) != nil || len(m.ID) == 0 || string(m.ID) == "null" {
 		return
 	}
+	s.rechazar(m.ID, -32603, "kling-bridge: the client has no open stream to receive this request")
+}
+
+// rechazar contesta al servidor una petición suya con un error JSON-RPC. En su
+// goroutine: send puede bloquear si el servidor no lee su stdin, y el readLoop
+// no debe pararse nunca.
+func (s *session) rechazar(id json.RawMessage, code int, msg string) {
 	rechazo, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": m.ID,
-		"error": map[string]any{"code": -32603,
-			"message": "kling-bridge: the client has no open stream to receive this request"},
+		"jsonrpc": "2.0", "id": id,
+		"error": map[string]any{"code": code, "message": msg},
 	})
-	// En su goroutine: send puede bloquear si el servidor no lee su stdin, y el
-	// readLoop no debe pararse nunca.
 	go func() { _ = s.send(rechazo) }()
+}
+
+// fijarCapacidades guarda las capacidades del initialize del cliente. Sin el
+// campo (un initialize que no sigue la especificación) no se sabe qué ofrece,
+// y todo se le entrega como antes.
+func (s *session) fijarCapacidades(caps map[string]json.RawMessage) {
+	if caps == nil {
+		return
+	}
+	c := make(map[string]bool, len(caps))
+	for k, v := range caps {
+		c[k] = string(v) != "null"
+	}
+	s.mu.Lock()
+	s.capCliente = c
+	s.mu.Unlock()
+}
+
+// capacidadDe dice qué capacidad del cliente necesita una petición del
+// servidor; "" si no depende de ninguna (ping, o un método que no conocemos).
+func capacidadDe(method string) string {
+	switch {
+	case strings.HasPrefix(method, "sampling/"):
+		return "sampling"
+	case strings.HasPrefix(method, "elicitation/"):
+		return "elicitation"
+	case strings.HasPrefix(method, "roots/"):
+		return "roots"
+	}
+	return ""
+}
+
+// sinRetornos quita los CR de un mensaje del servidor. El JSON los admite como
+// espacio entre elementos, pero en SSE un CR suelto termina la línea: el resto
+// del mensaje llegaba al cliente como otro campo y el evento quedaba partido.
+// Compactar los quita sin tocar el contenido; si no es JSON válido, se cambian
+// por espacios.
+func sinRetornos(raw json.RawMessage) json.RawMessage {
+	if bytes.IndexByte(raw, '\r') < 0 {
+		return raw
+	}
+	var c bytes.Buffer
+	if json.Compact(&c, raw) == nil {
+		return c.Bytes()
+	}
+	return bytes.ReplaceAll(raw, []byte{'\r'}, []byte{' '})
 }
 
 // quitarFlujo retira un flujo de la sesión y devuelve lo que quedara en él. Tras

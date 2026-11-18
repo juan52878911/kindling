@@ -182,7 +182,7 @@ func TestPeticionDelServidorSinOyenteSeRechaza(t *testing.T) {
 	s.pending[`"srv-1"`] = ch
 	s.mu.Unlock()
 	s.deliverServerMessage(json.RawMessage(`{"jsonrpc":"2.0","id":"srv-1","method":"roots/list"}`),
-		json.RawMessage(`"srv-1"`))
+		json.RawMessage(`"srv-1"`), "roots/list")
 	select {
 	case m := <-ch:
 		if !strings.Contains(string(m), `"error"`) {
