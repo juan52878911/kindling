@@ -248,7 +248,7 @@ const (
 	salidaDaemonViejo    = 3   // el daemon habla un API más viejo (api.ErrDaemonTooOld)
 	salidaDoradoObsoleto = 4   // la plantilla es de otro VMM o versión: rehacerla
 	salidaAgenteSinCap   = 5   // al agente de la imagen le falta una capacidad pedida
-	salidaInterrumpido   = 130 // Ctrl-C o SIGTERM (128 + SIGINT, como una shell)
+	salidaInterrumpido   = 130 // Ctrl-C, SIGTERM, SIGHUP o SIGPIPE (128 + SIGINT, como una shell)
 )
 
 // codigoDeSalida es el código con el que sale el CLI tras err. exec, shell y
@@ -373,11 +373,17 @@ func egressForRun(fs *flag.FlagSet, from, egress, allow string, cfg *config.Conf
 // hostOf resuelve a qué daemon hablar.
 func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
+// senalesDeCorte son las que cancelan el contexto de ctxWithSignals.
+var senalesDeCorte = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE}
+
 func ctxWithSignals() (context.Context, context.CancelFunc) {
 	// signal.NotifyContext, apuntando que llegó la señal (codigoDeSalida).
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	// SIGHUP (se cierra la terminal) y SIGPIPE (`kling try … | head -1`)
+	// también: sin ellas el proceso muere sin pasar por los defer que retiran
+	// las máquinas temporales.
+	signal.Notify(ch, senalesDeCorte...)
 	go func() {
 		select {
 		case <-ch:

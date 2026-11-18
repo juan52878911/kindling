@@ -21,11 +21,15 @@ type warmFake struct {
 	run       api.RunRequest
 	commit    api.CommitRequest
 	removeCtx []error
+	runErr    error
 }
 
 func (f *warmFake) Run(_ context.Context, r api.RunRequest) (*api.Machine, error) {
 	f.calls = append(f.calls, "run")
 	f.run = r
+	if f.runErr != nil {
+		return nil, f.runErr
+	}
 	ready := f.ready
 	if ready == "" {
 		ready = api.ReadyYes
@@ -131,4 +135,23 @@ type cancelOnExec struct {
 func (c *cancelOnExec) Exec(ctx context.Context, ref string, r api.ExecRequest, on func(string, []byte) error) (*api.ExecResult, error) {
 	c.cancel()
 	return nil, ctx.Err()
+}
+
+// F11: un Run cortado (Ctrl-C mientras espera a "listo") puede haber creado la
+// máquina: se retira igual. Un nombre ya cogido es de otro: no se toca.
+func TestWarmUpRetiraSiRunSeCorta(t *testing.T) {
+	f := &warmFake{runErr: context.Canceled}
+	if _, err := warmUp(context.Background(), f, testWarmSpec(), &bytes.Buffer{}, func(string, ...any) {}); err == nil {
+		t.Fatal("quería error")
+	}
+	if !slices.Equal(f.calls, []string{"run", "rm:pgv-warm"}) {
+		t.Fatalf("calls = %v", f.calls)
+	}
+	f = &warmFake{runErr: &api.StatusError{Code: 409, ErrorCode: api.CodeNameTaken, Message: "taken"}}
+	if _, err := warmUp(context.Background(), f, testWarmSpec(), &bytes.Buffer{}, func(string, ...any) {}); err == nil {
+		t.Fatal("quería error")
+	}
+	if !slices.Equal(f.calls, []string{"run"}) {
+		t.Fatalf("con el nombre cogido, calls = %v", f.calls)
+	}
 }
