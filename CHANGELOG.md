@@ -108,6 +108,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Sandbox pool: prewarmed sandboxes carry their snapshot version; after `sbx template rebuild` the old ones are removed instead of handed out, `sbx template rm` removes the free ones first, and one failing template no longer stops the refill of the others.
 - Kubernetes operator: a resync pass makes one sandbox list request instead of one request per object, and objects lock one by one instead of all together.
 - Kubernetes operator: with a host down, deleting an object whose sandbox is already resolved no longer stays in Terminating; the example Deployment uses `strategy: Recreate`.
+- macOS: the 256 MiB budget for a VM's TCP buffers now holds: each connection's buffers are set on its endpoint and shrunk as connections arrive (512 live connections: 740 MiB before, 256 MiB now).
+- kling-hv: CPU spent by the process while the VM is throttled no longer keeps it throttled; after each pause the VM runs at least one slice.
 - Kubernetes operator: with a host down, a resync pass asks that host once instead of one request (and one list) per object.
 - `kling phone mcp`: at most `-max-sessions` (4) sessions at a time; a request without a session reads at most 64 KiB; a phone that could not be removed is retried, a spare whose resume fails is removed, and on start the server removes the phones a previous run on the same address left behind.
 - kling-hv: the vsock thread no longer spins at 100% when a control packet is waiting for a receive buffer and another connection has data.

@@ -26,6 +26,11 @@ type simulado struct {
 	fallar  bool // Freeze(true) falla
 	// fallarSoltar: cuántos Freeze(false) seguidos fallan desde ya.
 	fallarSoltar int
+	// fondoPct es trabajo del proceso que no para con la VM (en % de un
+	// núcleo): el de kling-hv, que frena solo las vCPU y cobra el proceso
+	// entero. invitado es la CPU de las vCPU, sin el fondo.
+	fondoPct int
+	invitado time.Duration
 }
 
 func nuevoSimulado(carga int) *simulado {
@@ -42,7 +47,9 @@ func (m *simulado) dormir(d time.Duration) {
 	m.mu.Lock()
 	if !m.parado {
 		m.cpu += d * time.Duration(m.carga)
+		m.invitado += d * time.Duration(m.carga)
 	}
+	m.cpu += d * time.Duration(m.fondoPct) / 100
 	m.t = m.t.Add(d)
 	m.mu.Unlock()
 	runtime.Gosched()
@@ -258,6 +265,31 @@ func TestReguladorConRelojFalso(t *testing.T) {
 	}
 	if out.ThrottledMS < 7000 { // 2 núcleos a 50 %: parada 3/4 del tiempo
 		t.Fatalf("throttled_ms = %d tras 10 s, quería ~7500", out.ThrottledMS)
+	}
+}
+
+// R8: en kling-hv el freno para solo las vCPU pero se cobra el proceso
+// entero. Con un trabajo del host sostenido por encima del techo (un `kling
+// cp` grande a cpu_pct 10) el cubo no se llenaba nunca y la VM no corría: lo
+// gastado con ella parada no se cobra, y tras cada parada corre una tajada.
+func TestReguladorConTrabajoDelHostSigueCorriendo(t *testing.T) {
+	m := nuevoSimulado(1)
+	m.fondoPct = 15
+	r := rigSimulado(t, 1, m, true, nil)
+	r.must("PUT", "/kling/cpu", `{"pct":10}`)
+	t0 := m.ahora()
+	m.hasta(t, t0.Add(500*time.Millisecond)) // que se gaste la ráfaga inicial
+	m.mu.Lock()
+	t1, i1 := m.t, m.invitado
+	m.mu.Unlock()
+	m.hasta(t, t1.Add(10*time.Second))
+	m.mu.Lock()
+	t2, i2 := m.t, m.invitado
+	m.mu.Unlock()
+	frac := 100 * float64(i2-i1) / float64(t2.Sub(t1))
+	t.Logf("vCPUs ran %.1f %% of the time with 15 %% of host work and pct 10", frac)
+	if frac < 5 {
+		t.Fatalf("the vCPUs ran %.1f %% of the time under pct 10 with host work: the VM starves", frac)
 	}
 }
 
