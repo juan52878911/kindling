@@ -115,6 +115,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: stale `.khv-clon-*` directories left by a killed snapshot (each holding a full copy of guest RAM) are removed by the next snapshot.
 - macOS networking: the netstack TCP buffers of a VM share a 256 MiB budget (512 open connections could hold up to 7 GiB of host memory), and DNS answers over 4 KiB are not cached.
 - kling-hv: the CPU cap charges the whole process, not only the vCPU threads, so disk, network and vsock work count too (cpu_pct=10 with a direct-I/O read loop: 45% to 12% of a core).
+- Stop and remove ask the guest to stop its service before cutting its live shared folders, so what the service writes on shutdown reaches the host.
+- Stop, freeze and remove wait at most 5 s for live shared folders to close, so a host folder on a hung NFS or SMB mount no longer hangs them.
 
 ### Security
 
