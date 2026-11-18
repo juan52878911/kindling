@@ -26,6 +26,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP bridge: a server request for a capability the client didn't declare (sampling, elicitation, roots) gets an error from the bridge at once instead of waiting for the timeout; carriage returns no longer split an SSE event.
 - MCP gateway: a conversation pinned to a machine that died moves to another one on the next call (the daemon is asked at most every 15 s), instead of failing every `tools/call` for minutes; a call returns the real error.
 - MCP gateway: when a bridge answers 404 for an isolated session, its machine is destroyed too; re-initializing an expired session on a full instance drops it so the next call can use a replica.
+- Daemon `/guest`: small calls (up to 1 MiB) have their own memory budget, so large calls held by a slow guest no longer turn every call into a 429; a decoded request keeps only what stays in memory.
+- Daemon socket: the last 64 connections are kept for admins, so tenants filling the connection limit no longer lock the admin out.
+- Guest agent `GET /files`: only regular files are served; a FIFO no longer hangs the call and a device is no longer streamed with a wrong length.
+- Daemon `/metrics`: a hung sample no longer blocks every scrape; they wait up to 5 s and get the previous sample.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -130,6 +134,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - `kling ai serve -listen … -no-auth` refuses (403) requests whose `Host` or `Origin` is not loopback, and every `POST` must be `application/json` (415).
 - MCP gateway: the "types repaired" log line no longer includes the tool's arguments, only its name and size.
+- `POST /graphs/{ref}/snapshot`: a template name already in use gives a neutral 409 that no longer confirms another tenant's template or how to remove it.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.

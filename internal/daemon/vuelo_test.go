@@ -110,11 +110,11 @@ func TestGuestPresupuestoRespuesta(t *testing.T) {
 // presupuesto agotado, no acababa ninguna.
 func TestGuestPresupuestoDeclarado(t *testing.T) {
 	s, _ := testServer(t)
-	topesGuest(t, 7<<20, 0) // caben dos de 1 MiB (3 MiB de memoria cada una), no tres
+	topesGuest(t, 13<<20, 0) // caben dos de 2 MiB (6 MiB de memoria cada una), no tres
 	var res [3]*reservaGuest
 	for i := range res {
 		res[i] = s.reservaGuest("")
-		_, err := res[i].lector(strings.NewReader(""), 1<<20)
+		_, err := res[i].lector(strings.NewReader(""), 2<<20)
 		if (err == nil) != (i < 2) {
 			t.Fatalf("lector %d: %v", i, err)
 		}
@@ -197,5 +197,79 @@ func TestCupoPorInquilino(t *testing.T) {
 	}
 	if !c.tomar("", 5, 10, 6) {
 		t.Fatal("el admin no cabe con sitio libre")
+	}
+}
+
+// R2 (ronda 5): la reserva de una llamada dura lo que tarde el invitado, y
+// dos inquilinos con una llamada grande cada uno ante un invitado lento
+// llenaban el presupuesto: desde ahí, 429 para todos, también para las
+// llamadas de pocos KiB y para el admin. Las pequeñas van ahora por un carril
+// aparte que las grandes no tocan.
+func TestGuestCarrilDeLasPequenas(t *testing.T) {
+	s, _ := testServer(t)
+	topesGuest(t, 12<<20, 6<<20)
+	for _, q := range []string{"a", "b"} {
+		r := s.reservaGuest(q)
+		if err := r.tomar(6 << 20); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(r.soltar)
+	}
+	// Otra grande no cabe...
+	if rr := llamadaGuest(t, s, "c", 2<<20); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("grande con el presupuesto lleno: %d %s", rr.Code, rr.Body)
+	}
+	// ...pero las pequeñas de cualquiera, sí.
+	for _, q := range []string{"c", "", "a"} {
+		if rr := llamadaGuest(t, s, q, 1<<10); rr.Code != http.StatusNotFound {
+			t.Fatalf("pequeña de %q con el presupuesto general lleno: %d %s", q, rr.Code, rr.Body)
+		}
+	}
+	if total, _ := s.vueloGuestPeq.enUso(""); total != 0 {
+		t.Fatalf("quedaron %d bytes apartados en el carril", total)
+	}
+	// Una que empieza pequeña y crece pasa entera al general (aquí lleno: no
+	// cabe) y sigue donde estaba; al soltar no deja nada en el carril.
+	r := s.reservaGuest("c")
+	if err := r.tomar(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.tomar(guestPequena); err == nil {
+		t.Fatal("al crecer tenía que pasar al general, que está lleno")
+	}
+	if err := r.tomar(1 << 10); err != nil {
+		t.Fatal(err)
+	}
+	r.soltar()
+	if pt, _ := s.vueloGuestPeq.enUso(""); pt != 0 {
+		t.Fatalf("carril tras soltar: %d", pt)
+	}
+}
+
+// R2 (ronda 5): decodificada la petición, solo sigue en memoria su cadena;
+// lo que se apartó por el búfer del decodificador se devuelve en vez de
+// retenerlo mientras el invitado contesta.
+func TestGuestPeticionLeidaDevuelveElDecodificador(t *testing.T) {
+	s, _ := testServer(t)
+	topesGuest(t, 64<<20, 0)
+	const n = 4 << 20
+	res := s.reservaGuest("")
+	rd, err := res.lector(strings.NewReader(strings.Repeat("x", n)), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(rd); err != nil {
+		t.Fatal(err)
+	}
+	if total, _ := s.vueloGuest.enUso(""); total != factorMemoriaGuest*n {
+		t.Fatalf("leída: %d apartados", total)
+	}
+	res.peticionLeida()
+	if total, _ := s.vueloGuest.enUso(""); total != n {
+		t.Fatalf("decodificada: %d apartados; quería %d", total, n)
+	}
+	res.soltar()
+	if total, _ := s.vueloGuest.enUso(""); total != 0 {
+		t.Fatalf("quedaron %d", total)
 	}
 }

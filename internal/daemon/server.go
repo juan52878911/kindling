@@ -359,20 +359,24 @@ type Server struct {
 	dueñoEventosUna sync.Once
 
 	// muestra es la última muestra de /metrics y cuándo se tomó (bajo
-	// muestraMu): ver muestraMetrics. muestrear es de dónde sale (nil =
+	// muestraMu): ver muestraMetrics. muestraEnCurso se cierra al acabar la
+	// que se está tomando (nil = ninguna). muestrear es de dónde sale (nil =
 	// mgr.ProcStats; los tests ponen una que cuenta).
-	muestraMu sync.Mutex
-	muestra   api.ProcStats
-	muestraEn time.Time
-	muestrear func() api.ProcStats
+	muestraMu      sync.Mutex
+	muestra        api.ProcStats
+	muestraEn      time.Time
+	muestraEnCurso chan struct{}
+	muestrear      func() api.ProcStats
 
 	// agentesVistos es, por máquina, la firma de la vida de VMM en la que su
 	// agente ya contestó (bajo agentesMu): ver agenteVisto.
 	agentesMu     sync.Mutex
 	agentesVistos map[string]string
-	// vueloGuest son los bytes de /guest en vuelo, y sesionesGuest los
-	// exec, shell y ficheros abiertos por inquilino (vuelo.go).
+	// vueloGuest son los bytes de /guest en vuelo (vueloGuestPeq, los de las
+	// llamadas pequeñas), y sesionesGuest los exec, shell y ficheros abiertos
+	// por inquilino (vuelo.go).
 	vueloGuest    cupo
+	vueloGuestPeq cupo
 	sesionesGuest cupo
 	// sondearAgente es cómo se espera al agente (nil = waitAgent; los tests
 	// ponen uno que cuenta).
@@ -1693,6 +1697,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
+	res.peticionLeida()
 	mc, ok := s.mgr.Get(r.PathValue("ref"))
 	if !ok {
 		fail(w, http.StatusNotFound, errors.New("that machine doesn't exist"))
