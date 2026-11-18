@@ -17,7 +17,8 @@ func usarBarrerasFalsas(t *testing.T, f func() error) {
 }
 
 // S2: el vigilante revisa las barreras del host en cada vuelta si hay alguna
-// red montada, y no lanza nada sin ninguna. Antes solo las revisaba Setup:
+// red en pie (montada por este daemon o de una máquina readoptada), y no
+// lanza nada sin ninguna. Antes solo las revisaba Setup:
 // tras un reload del cortafuegos, las máquinas vivas seguían sin ellas
 // hasta que otra montara su red.
 func TestElVigilanteReponeLasBarrerasDelHost(t *testing.T) {
@@ -30,10 +31,17 @@ func TestElVigilanteReponeLasBarrerasDelHost(t *testing.T) {
 	if llamadas != 0 {
 		t.Fatalf("sin redes montadas: %d comprobaciones, quería 0", llamadas)
 	}
-	m.redMontada.Store("aa11bb22cc33dd44", struct{}{})
+	// Una readoptada tras reiniciar el daemon: running, sin redMontada.
+	m.byID["bb22cc33dd44ee55"] = &api.Machine{ID: "bb22cc33dd44ee55", State: api.StateRunning}
 	m.vueltaVigilante(context.Background())
 	if llamadas != 1 {
-		t.Fatalf("con una red montada: %d comprobaciones, quería 1", llamadas)
+		t.Fatalf("con una máquina readoptada: %d comprobaciones, quería 1", llamadas)
+	}
+	delete(m.byID, "bb22cc33dd44ee55")
+	m.redMontada.Store("aa11bb22cc33dd44", struct{}{})
+	m.vueltaVigilante(context.Background())
+	if llamadas != 2 {
+		t.Fatalf("con una red montada: %d comprobaciones, quería 2", llamadas)
 	}
 }
 

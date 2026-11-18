@@ -1095,6 +1095,10 @@ func ponerPrimera(r []string) error {
 
 // esPrimera dice si r (un -I CADENA 1, con su -t si no es filter) es la
 // primera regla de su cadena, según `iptables -S`.
+//
+// Parte cada línea por espacios: r no puede llevar argumentos con espacios
+// (un --comment "a b"), o nunca saldría igual y ponerPrimera la movería en
+// cada vuelta del vigilante.
 func esPrimera(r []string) (bool, error) {
 	tabla, cadena, espec := partirRegla(r)
 	lineas, err := listarTabla(tabla, cadena)

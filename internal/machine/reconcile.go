@@ -990,11 +990,23 @@ var asegurarBarrerasHost = knet.AsegurarHost
 var errBarrerasHost atomic.Pointer[string]
 
 // vigilarBarrerasHost comprueba (y repone) las reglas del host si este daemon
-// tiene alguna red montada: sin ninguna, no hay a quién proteger y no se
-// lanza ningún iptables. Un fallo se dice una vez, y su arreglo también.
+// tiene alguna red en pie: una que montó él (redMontada) o la de una máquina
+// running o pausada, que tras reiniciar el daemon es readoptada y no está en
+// redMontada. Sin ninguna, no hay a quién proteger y no se lanza ningún
+// iptables. Un fallo se dice una vez, y su arreglo también.
 func (m *Manager) vigilarBarrerasHost() {
 	hay := false
 	m.redMontada.Range(func(any, any) bool { hay = true; return false })
+	if !hay {
+		m.mu.RLock()
+		for _, mc := range m.byID {
+			if mc.State == api.StateRunning || mc.State == api.StatePaused {
+				hay = true
+				break
+			}
+		}
+		m.mu.RUnlock()
+	}
 	if !hay {
 		return
 	}
