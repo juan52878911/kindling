@@ -64,7 +64,7 @@ En TCP, solo con `-listen` explícito y con token:
 
 ```sh
 kling ai serve -listen 0.0.0.0:8090   # genera ~/.config/kling/ai.token (0600) si no existe
-curl -H "Authorization: Bearer $(cat ~/.config/kling/ai.token)" \
+curl -H "Authorization: Bearer $(cat ~/.config/kling/ai.token)" -H 'Content-Type: application/json' \
      -d '{"task":"commit-type","text":"bump deps"}' http://host:8090/v1/classify
 ```
 

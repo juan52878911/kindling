@@ -777,6 +777,9 @@ func (p *Publicador) servirUDP(mq *maquina, pt *puerto) {
 				flujos[viejo].c.Close()
 				delete(flujos, viejo)
 			}
+			// La hora antes de entrar en el mapa: con ultimo a 0, otra llegada
+			// que desalojara lo elegiría como el más ocioso.
+			f.ultimo.Store(time.Now().UnixNano())
 			flujos[k] = f
 			mu.Unlock()
 			mq.abrirConexion(p.ahora())
