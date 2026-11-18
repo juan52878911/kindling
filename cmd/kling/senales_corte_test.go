@@ -65,3 +65,42 @@ func TestCtxWithSignalsCortaConSalidaRota(t *testing.T) {
 		t.Fatalf("con la salida rota, el proceso no canceló su contexto: %v", err)
 	}
 }
+
+// El daemon no se apaga porque un cliente cuelgue: con SIGPIPE en su
+// signal.Notify, Go le entregaba la señal de cualquier socket roto (no solo de
+// la salida estándar) y el daemon se cerraba como con un SIGTERM. Pasó en el
+// e2e de Linux (sección 6, carpetas compartidas); un exec cortado a media
+// salida basta. Aquí, un EPIPE en un socket que no es la salida estándar no
+// corta su contexto; SIGTERM sí. (Es en Linux donde falla sin el arreglo: en
+// macOS ese write no llega al canal.)
+func TestDaemonSigueTrasUnSocketRoto(t *testing.T) {
+	defer interrumpido.Store(false)
+	interrumpido.Store(false)
+	ctx, stop := ctxDelDaemon()
+	defer stop()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(fds[0])
+	syscall.Close(fds[1]) // el cliente cuelga
+	if _, err := syscall.Write(fds[0], []byte("respuesta")); err != syscall.EPIPE {
+		t.Fatalf("la escritura en el socket roto dio %v, no EPIPE", err)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("un socket roto (SIGPIPE) apagó el daemon")
+	case <-time.After(500 * time.Millisecond):
+	}
+	if interrumpido.Load() {
+		t.Fatal("un socket roto contó como interrupción")
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGTERM no paró el daemon")
+	}
+}
