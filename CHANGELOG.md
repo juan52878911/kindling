@@ -216,6 +216,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `pkg/api`: `CreateVolumeRequest` gains `Labels` (a map), so the struct is no longer comparable with `==`; set fields by name as before.
 - Compose project and service names over 24 characters end in a short hash instead of being cut, so two long names no longer become the same project; a project an older kling started is still found by `down` and `up`.
 - MCP gateway `/mcp/_all`: up to 16 idle connections per guest (was 2), so concurrent tool calls stop redialing, and tool results are written without being re-encoded.
 - Linux: setting up a machine's network runs 11 processes instead of 23 (`ip -batch`, one `sysctl`, no teardown when there is nothing): 46 to 20 ms in the lab.
