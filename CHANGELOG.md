@@ -16,6 +16,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Warm pools: after a daemon restart, the copies of a template with an owner are readopted instead of left running orphaned while new ones are created.
+- `kling save`: a template is marked as having no guest agent only when the probe is refused, not on a timeout; forks and graphs whose agent already answered are marked as having one, and saving without an agent now warns.
+- Daemon restart: a VMM that never started a guest is no longer readopted as running (a cut thaw keeps its machine warm), and a snapshot copy that failed before being handed out is not readopted either.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
