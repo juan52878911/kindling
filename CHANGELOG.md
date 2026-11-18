@@ -119,6 +119,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
+- `install.sh`: wget is only used with `--https-only`, and a download cut inside the last line no longer runs the installer without its arguments.
+- The daemon only takes a process as a machine's VMM if it belongs to the daemon's user or the service user: a matching command line from another user is no longer adopted or killed.
+- The VMM cgroup caps swap at a quarter of `memory.max`, instead of letting a VMM put as much again in swap.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
 - Linux: if the host firewall rules can't be installed (for example an iptables without `--suppl-groups`), machines don't get a network until they are; the daemon retries before each start instead of carrying on with a warning. Without `--suppl-groups`, only the primary group is allowed.
