@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/units"
@@ -432,11 +433,7 @@ func mcpImport(args []string) error {
 	fmt.Printf("\n%q imported with %d tool(s):\n", service, len(tools))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	for _, t := range tools {
-		d := t.Description
-		if len(d) > 68 {
-			d = d[:67] + "…"
-		}
-		fmt.Fprintf(tw, "  %s\t%s\n", t.Name, d)
+		fmt.Fprintf(tw, "  %s\t%s\n", saneado.Linea(t.Name), columna(t.Description, 68))
 	}
 	_ = tw.Flush()
 
@@ -846,11 +843,7 @@ func mcpLink(args []string) error {
 
 	fmt.Printf("\n%q available in the aggregator with %d tool(s):\n", l.Name, len(l.Tools))
 	for _, t := range l.Tools {
-		d := t.Description
-		if len(d) > 66 {
-			d = d[:65] + "…"
-		}
-		fmt.Printf("  %-28s %s\n", t.Name, d)
+		fmt.Printf("  %-28s %s\n", saneado.Linea(t.Name), columna(t.Description, 66))
 	}
 	fmt.Printf("\nIt doesn't run in a microVM: it's routed to wherever it already lives.\n")
 	return nil
@@ -942,6 +935,28 @@ func guestPost(ctx context.Context, c *api.Client, ref string) poster {
 	}
 }
 
+// nombreServidor compone "nombre vVERSIÓN" del serverInfo para enseñarlo. Lo
+// manda el servidor MCP, así que sale saneado: es solo para la terminal.
+func nombreServidor(nombre, version string) string {
+	if nombre == "" {
+		return "MCP server"
+	}
+	if version != "" {
+		nombre += " v" + version
+	}
+	return saneado.Linea(nombre)
+}
+
+// columna prepara un texto del servidor MCP (una descripción) para una fila de
+// la terminal: saneado y cortado a max caracteres, sin partir uno UTF-8.
+func columna(s string, max int) string {
+	s = saneado.Linea(s)
+	if r := []rune(s); len(r) > max {
+		return string(r[:max-1]) + "…"
+	}
+	return s
+}
+
 // introspectAt hace el handshake MCP contra una URL alcanzable desde aquí.
 func introspectAt(ctx context.Context, url string) (string, []mcp.ToolSpec, error) {
 	return introspectWith(directPost(ctx, url))
@@ -976,12 +991,7 @@ func introspectConSesion(post poster) (string, string, []mcp.ToolSpec, error) {
 	}
 	_ = json.Unmarshal(mcp.MCPPayload(raw), &initRes)
 
-	name := initRes.Result.ServerInfo.Name
-	if name == "" {
-		name = "MCP server"
-	} else if v := initRes.Result.ServerInfo.Version; v != "" {
-		name += " v" + v
-	}
+	name := nombreServidor(initRes.Result.ServerInfo.Name, initRes.Result.ServerInfo.Version)
 
 	// Muchos servidores esperan la notificación `initialized` antes de responder
 	// a nada más. Es parte del handshake y omitirla deja a algunos colgados.
