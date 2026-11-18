@@ -16,6 +16,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS: `kling doctor` also warns about a kernel or `min.ext4` with no release mark (downloaded before marks existed) instead of saying nothing.
 - `kling cp` from a machine to a file fails when closing the file fails (a full disk or a network folder) instead of exiting 0 with a short file.
 - `kling graph audit` exits non-zero when some node's log couldn't be read (it still prints the rest), and `kling doctor` fails when it couldn't list templates or images instead of skipping those checks.
 - An interrupted `kling exec` exits with 130, like every other command, instead of 1.
