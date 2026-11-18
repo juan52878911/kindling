@@ -158,7 +158,7 @@ func imagesImport(args []string) error {
 			return fmt.Errorf("invalid environment entry %q: use KEY=value, one line", k)
 		}
 	}
-	ctx, stop := ctxWithSignals()
+	ctx, stop := ctxWithSignalsTuberia()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 	if *arch != "" || *emulate {

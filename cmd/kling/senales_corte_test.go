@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"syscall"
@@ -38,7 +39,7 @@ func TestCtxWithSignalsCortaConHUP(t *testing.T) {
 // defer. Corre en un subproceso: el propio binario del test.
 func TestCtxWithSignalsCortaConSalidaRota(t *testing.T) {
 	if os.Getenv("KLING_TEST_SALIDA_ROTA") == "1" {
-		ctx, stop := ctxWithSignals()
+		ctx, stop := ctxWithSignalsTuberia()
 		defer stop()
 		_, _ = os.Stdout.Write([]byte("x\n"))
 		select {
@@ -74,9 +75,20 @@ func TestCtxWithSignalsCortaConSalidaRota(t *testing.T) {
 // corta su contexto; SIGTERM sí. (Es en Linux donde falla sin el arreglo: en
 // macOS ese write no llega al canal.)
 func TestDaemonSigueTrasUnSocketRoto(t *testing.T) {
+	sigueTrasUnSocketRoto(t, ctxDelDaemon)
+}
+
+// Igual para el contexto de cualquier comando (run -p, port-forward reenvían
+// sockets): solo try e image import -warm piden además SIGPIPE.
+func TestComandoSigueTrasUnSocketRoto(t *testing.T) {
+	sigueTrasUnSocketRoto(t, ctxWithSignals)
+}
+
+func sigueTrasUnSocketRoto(t *testing.T, nuevo func() (context.Context, context.CancelFunc)) {
+	t.Helper()
 	defer interrumpido.Store(false)
 	interrumpido.Store(false)
-	ctx, stop := ctxDelDaemon()
+	ctx, stop := nuevo()
 	defer stop()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
