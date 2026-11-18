@@ -69,8 +69,11 @@ func TestCgroupConTechoDeMemoriaYProcesos(t *testing.T) {
 		if string(mem) != quiero {
 			t.Errorf("memory.max=%q, quería %s (RAM + margen del VMM)", mem, quiero)
 		}
-		if string(swap) != quiero {
-			t.Errorf("memory.swap.max=%q, quería %s: memory.max no acota el swap", swap, quiero)
+		// El swap va aparte de memory.max: con el mismo techo, el VMM ocupaba
+		// el doble de lo declarado entre RAM y swap.
+		quieroSwap := strconv.Itoa((1024 + margenMemoriaVMM(1024)) << 20 / 4)
+		if string(swap) != quieroSwap {
+			t.Errorf("memory.swap.max=%q, quería %s (un cuarto de memory.max)", swap, quieroSwap)
 		}
 		if string(pids) != strconv.Itoa(pidsMaxVMM) {
 			t.Errorf("pids.max=%q", pids)
@@ -150,7 +153,7 @@ func TestCgroupUnTechoFallidoNoSeLlevaLosDemas(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "memory.max") {
 		t.Errorf("err = %v: no cuenta el memory.max que falló", err)
 	}
-	quiero := strconv.Itoa((512 + margenMemoriaVMM(512)) << 20)
+	quiero := strconv.Itoa((512 + margenMemoriaVMM(512)) << 20 / 4)
 	if swap, _ := os.ReadFile(filepath.Join(dir, "memory.swap.max")); string(swap) != quiero {
 		t.Errorf("memory.swap.max=%q, quería %s", swap, quiero)
 	}

@@ -266,7 +266,11 @@ fetch() {
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$DEST" "$URL"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q --tries=3 -O "$DEST" "$URL"
+        # --https-only es el --proto-redir de wget: una redirección no puede
+        # llevar la descarga a http. Un wget sin la opción (busybox) no vale.
+        wget --help 2>&1 | grep -q -- '--https-only' \
+            || fail "este wget no tiene --https-only: instala curl"
+        wget -q --https-only --tries=3 -O "$DEST" "$URL"
     else
         fail "ni curl ni wget disponibles"
     fi
@@ -640,4 +644,6 @@ fi
 ok "listo"
 }
 
-main "$@"
+# Entre llaves: la shell lee el grupo entero antes de ejecutarlo, así que un
+# corte a mitad de esta línea (tras `main`, sin los argumentos) no corre nada.
+{ main "$@"; }

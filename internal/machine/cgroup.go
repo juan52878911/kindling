@@ -85,6 +85,12 @@ func margenMemoriaVMM(memMiB int) int {
 	return 64 + memMiB/16
 }
 
+// swapMaxVMM es el memory.swap.max de un VMM con memory.max de memMax bytes:
+// la cuarta parte, para que RAM más swap no pase de 1,25 veces el techo.
+func swapMaxVMM(memMax int64) int64 {
+	return memMax / 4
+}
+
 // memoriaCgroup es la RAM máxima del invitado de mc, la que acota su cgroup:
 // el techo si arrancó con globo para crecer (MemMaxMiB), su memoria si no.
 func memoriaCgroup(mc *api.Machine) int {
@@ -112,11 +118,13 @@ func (m *Manager) escribirLimitesMemoria(dir string, memMiB int) error {
 			errs = append(errs, fmt.Errorf("could not set memory.max: %w", err))
 		}
 		// memory.max no cuenta el swap: en un host con swap, un VMM
-		// comprometido pasaría del techo mandando lo demás al swap. El
-		// mismo techo para el swap deja que el host le saque páginas como
-		// a cualquiera bajo presión, pero acotado. Sin contabilidad de
-		// swap en el kernel el fichero no existe y no hay nada que acotar.
-		if err := escribirSiExiste(filepath.Join(dir, "memory.swap.max"), lim); err != nil {
+		// comprometido pasaría del techo mandando lo demás al swap. Con el
+		// mismo techo para el swap ocupaba el doble de lo declarado; con un
+		// cuarto, el host aún le saca páginas bajo presión y el total queda
+		// en 1,25 veces. Sin contabilidad de swap en el kernel el fichero no
+		// existe y no hay nada que acotar.
+		swap := strconv.FormatInt(swapMaxVMM(int64(memMiB+margenMemoriaVMM(memMiB))<<20), 10)
+		if err := escribirSiExiste(filepath.Join(dir, "memory.swap.max"), swap); err != nil {
 			errs = append(errs, fmt.Errorf("could not set memory.swap.max: %w", err))
 		}
 	}

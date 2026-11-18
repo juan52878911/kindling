@@ -135,6 +135,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Sandbox pool: prewarmed sandboxes carry their snapshot version; after `sbx template rebuild` the old ones are removed instead of handed out, `sbx template rm` removes the free ones first, and one failing template no longer stops the refill of the others.
 - Kubernetes operator: a resync pass makes one sandbox list request instead of one request per object, and objects lock one by one instead of all together.
 - Kubernetes operator: with a host down, deleting an object whose sandbox is already resolved no longer stays in Terminating; the example Deployment uses `strategy: Recreate`.
+- macOS: the 256 MiB budget for a VM's TCP buffers now holds: each connection's buffers are set on its endpoint and shrunk as connections arrive (512 live connections: 740 MiB before, 256 MiB now).
+- kling-hv: CPU spent by the process while the VM is throttled no longer keeps it throttled; after each pause the VM runs at least one slice.
+- Kubernetes operator: with a host down, a resync pass asks that host once instead of one request (and one list) per object.
 - `kling phone mcp`: at most `-max-sessions` (4) sessions at a time; a request without a session reads at most 64 KiB; a phone that could not be removed is retried, a spare whose resume fails is removed, and on start the server removes the phones a previous run on the same address left behind.
 - kling-hv: the vsock thread no longer spins at 100% when a control packet is waiting for a receive buffer and another connection has data.
 - kling-hv: a FLUSH with no writes since the previous one no longer issues `F_FULLFSYNC` (300 of them: about 1.2 s to 2.5 ms on the host).
@@ -163,6 +166,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `ssh://` hosts: the destination goes after `--` and one starting with `-` is refused, so it can't be read as an ssh option (`KLING_HOST`, contexts, `kling up`).
 - Go client (`pkg/api`): machine, volume, snapshot and image names are escaped in request paths, and the client doesn't follow redirects, so a name with `/` or `..` can't reach another route with the caller's token.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
+- `install.sh`: wget is only used with `--https-only`, and a download cut inside the last line no longer runs the installer without its arguments.
+- The daemon only takes a process as a machine's VMM if it belongs to the daemon's user or the service user: a matching command line from another user is no longer adopted or killed.
+- The VMM cgroup caps swap at a quarter of `memory.max`, instead of letting a VMM put as much again in swap.
+- Sandbox gateway: the tenant total memory limit counts a sandbox without `mem_mib` as the daemon's 256 MiB and counts graphs, and fails closed when a host that answers its health check can't list.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
 - Linux: if the host firewall rules can't be installed (for example an iptables without `--suppl-groups`), machines don't get a network until they are; the daemon retries before each start instead of carrying on with a warning. Without `--suppl-groups`, only the primary group is allowed.

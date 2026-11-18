@@ -5,9 +5,15 @@ package machine
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // En Linux, vmmVivoDe ya no escanea /proc en cada thaw: con el socket rancio
@@ -64,5 +70,55 @@ func TestVMMVivoDeNoEscaneaProcConElSocketRancio(t *testing.T) {
 	}
 	if n := escaneosProc.Load() - antes; n != 0 {
 		t.Fatalf("vmmVivoDe escaneó /proc %d veces teniendo el PID como pista", n)
+	}
+}
+
+// Un proceso de otro usuario con la línea de órdenes de un VMM no es el VMM:
+// ni liveVMs lo cuenta, ni vmmVivoDe lo toma como pista, ni adopt lo adopta.
+// La línea la escribe quien lanza el proceso; el dueño, no.
+func TestLiveVMsNoSeFiaDeLaLineaDeOtroUsuario(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("hace falta root para lanzar un proceso como otro usuario")
+	}
+	m := newTestManager(t)
+	id := "f1f1000000000002"
+	if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(m.dir(id), "fc.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Mismo proceso falso que lanzarProcesoFalso, pero como nobody.
+	cmd := exec.Command("/bin/sh", "-c", "read -r _", "x", argSocketVMM, sock)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no pude lanzar el proceso como nobody: %v", err)
+	}
+	t.Cleanup(func() { stdin.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	pid := cmd.Process.Pid
+	// Que el exec haya terminado y /proc muestre ya la línea nueva.
+	for i := 0; i < 400; i++ {
+		if b, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline"); strings.Contains(string(b), sock) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := m.liveVMs()[id]; got != 0 {
+		t.Errorf("liveVMs()[%s] = %d: tomó por VMM un proceso de nobody", id, got)
+	}
+	if got := m.vmmVivoDe(id, pid); got != 0 {
+		t.Errorf("vmmVivoDe = %d: tomó por VMM un proceso de nobody", got)
+	}
+	if _, ok := m.adopt(&api.Machine{ID: id, PID: pid}); ok {
+		t.Error("adopt adoptó un proceso de nobody")
 	}
 }

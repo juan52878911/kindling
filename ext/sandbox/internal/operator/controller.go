@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -253,6 +254,31 @@ type vistaFrontal struct {
 	todos    []frontal.Sandbox
 	porID    map[string]frontal.Sandbox
 	completa bool // contestaron todos los hosts
+
+	// caidos son los hosts cuyo GET ya falló en esta pasada, con su error.
+	// Con un host caído, cada objeto suyo hacía su GET en serie (plazo
+	// incluido): uno basta para saber que no contesta hasta la próxima.
+	mu     sync.Mutex
+	caidos map[string]error
+}
+
+// caido es el error con que el host de id ya falló en esta pasada, o nil.
+func (v *vistaFrontal) caido(id string) error {
+	host, _, _ := strings.Cut(id, "/")
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.caidos[host]
+}
+
+// apuntarCaido recuerda que el GET de id falló con err (no un 404).
+func (v *vistaFrontal) apuntarCaido(id string, err error) {
+	host, _, _ := strings.Cut(id, "/")
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.caidos == nil {
+		v.caidos = map[string]error{}
+	}
+	v.caidos[host] = err
 }
 
 func (c *Controller) tomarVista(ctx context.Context) (*vistaFrontal, error) {
@@ -271,20 +297,36 @@ func (c *Controller) tomarVista(ctx context.Context) (*vistaFrontal, error) {
 // "no está" de la vista no se cree: la foto es del principio de la pasada, y
 // el camino del watch pudo crearlo después (o estar en un host que no
 // contestó). Se confirma con su GET, que es lo raro.
+//
+// En una pasada, un GET que falla (y no es un 404) marca su host: los demás
+// objetos de ese host reciben el mismo error sin preguntar.
 func (c *Controller) ver(ctx context.Context, v *vistaFrontal, id string) (*frontal.Sandbox, error) {
-	if v != nil {
-		if sb, ok := v.porID[id]; ok {
-			return &sb, nil
+	if v == nil {
+		return c.Frontal.Get(ctx, id)
+	}
+	if sb, ok := v.porID[id]; ok {
+		return &sb, nil
+	}
+	if err := v.caido(id); err != nil {
+		return nil, err
+	}
+	sb, err := c.Frontal.Get(ctx, id)
+	if err != nil && !IsFrontalNotFound(err) {
+		if _, errRuta := rutaSandbox(id); errRuta == nil {
+			v.apuntarCaido(id, err)
 		}
 	}
-	return c.Frontal.Get(ctx, id)
+	return sb, err
 }
 
 // deUID son los sandboxes etiquetados con uid, y si la lista estaba completa.
 // Como en ver, un "ninguno" de la vista se confirma con una lista nueva.
 func (c *Controller) deUID(ctx context.Context, v *vistaFrontal, uid string) ([]frontal.Sandbox, bool, error) {
 	if v != nil {
-		if sbs := conUID(v.todos, uid); len(sbs) > 0 {
+		if sbs := conUID(v.todos, uid); len(sbs) > 0 || !v.completa {
+			// Con la foto parcial, otra lista lo sería también (el host que
+			// no contestó sigue sin contestar) y costaba una por objeto: el
+			// "ninguno" queda en parcial, y adoptar no crea con él.
 			return sbs, v.completa, nil
 		}
 	}

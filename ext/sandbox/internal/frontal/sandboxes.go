@@ -405,7 +405,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// Cuota. Se cuenta lo vivo en los daemons más lo que este proceso tiene en
 	// camino, y se reserva el hueco ANTES de crear para que dos peticiones a la
 	// vez no lo compartan.
-	if err := s.reservar(r.Context(), t, pet.Template, efectiva.MemMiB); err != nil {
+	if err := s.reservar(r.Context(), t, pet.Template, memCuota(efectiva.MemMiB)); err != nil {
 		codigo := codigoReservar(err)
 		if codigo == http.StatusTooManyRequests {
 			s.metricas.registrar(resultadoCuota, 0)
@@ -415,7 +415,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, codigo, err)
 		return
 	}
-	defer s.liberar(t, pet.Template, efectiva.MemMiB)
+	defer s.liberar(t, pet.Template, memCuota(efectiva.MemMiB))
 
 	inicio := time.Now()
 	h, mc, err := s.crear(r.Context(), t, pet, snaps)
@@ -542,15 +542,32 @@ func clavePlantilla(t *Tenant, plantilla string) string { return t.Nombre + "\x0
 // claveMemoria es la clave de enVuelo con los MiB que el tenant tiene en camino.
 func claveMemoria(t *Tenant) string { return t.Nombre + "\x00mem" }
 
-// memoriaViva es lo que unos sandboxes pueden ocupar en RAM: todo salvo lo
-// parado o roto. Uno dormido (frozen) cuenta, porque un exec lo despierta sin
+// memPorDefectoMiB es la RAM que el daemon da a una máquina pedida con
+// mem_mib 0 (internal/machine: req.MemMiB <= 0 pasa a 256). La cuota cuenta
+// eso y no el 0: con 0, cualquier número de sandboxes de imagen cabía en el
+// tope total.
+const memPorDefectoMiB = 256
+
+// memCuota son los MiB que cuenta la cuota por una máquina de mem MiB.
+func memCuota(mem int) int { return max(mem, memPorDefectoMiB) }
+
+// ocupaRAM dice si una máquina en ese estado puede ocupar RAM: todo salvo lo
+// parado o roto. Una dormida (frozen) cuenta, porque un exec la despierta sin
 // pedir permiso a nadie.
-func memoriaViva(sbs []Sandbox) int {
+func ocupaRAM(estado api.State) bool {
+	return estado != api.StateStopped && estado != api.StateFailed
+}
+
+// memoriaViva es lo que unos sandboxes y grafos pueden ocupar en RAM.
+func memoriaViva(sbs []Sandbox, grafos []Grafo) int {
 	total := 0
 	for _, sb := range sbs {
-		if sb.State != api.StateStopped && sb.State != api.StateFailed {
-			total += sb.MemMiB
+		if ocupaRAM(sb.State) {
+			total += memCuota(sb.MemMiB)
 		}
+	}
+	for _, g := range grafos {
+		total += g.memMiB
 	}
 	return total
 }
@@ -579,19 +596,21 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string, me
 	// responden dejaba crear de más: con un host caído sus sandboxes no
 	// contaban, y al volver el tenant tenía más de los que su cuota permite.
 	//
-	// La suma de memoria sola no: lo que vive en un host caído no ocupa la RAM
-	// de los que contestan, así que contar lo alcanzable sigue acotando la de
-	// cada host. Negarse ahí dejaba sin crear a todos los tenants (el tope de
-	// memoria va puesto por defecto) en cuanto un host se caía.
+	// La suma de memoria sola solo perdona al host que el registro da por
+	// caído: lo que vive en él no ocupa la RAM de los que contestan, y negarse
+	// dejaba sin crear a todos los tenants en cuanto un host se caía. Un host
+	// sano cuya lista falló ahora (un plazo vencido) sí cuenta: tomarlo por
+	// caído subestimaba lo usado.
 	cuenta := t.MaxSandboxes > 0 || (t.MaxPorPlantilla > 0 && plantilla != "")
 	vivos, errs := s.sandboxesDe(ctx, t)
 	var grafos []Grafo
-	if cuenta {
+	if cuenta || t.MaxMemTotalMiB > 0 {
 		var errsG []error
 		grafos, errsG = s.grafosDe(ctx, t)
-		if errs = append(errs, errsG...); len(errs) > 0 {
-			return &errCuotaSinContar{errors.Join(errs...)}
-		}
+		errs = append(errs, errsG...)
+	}
+	if len(errs) > 0 && (cuenta || !s.todosCaidos(ctx, errs)) {
+		return &errCuotaSinContar{errors.Join(errs...)}
 	}
 	if s.trasContar != nil {
 		s.trasContar()
@@ -619,7 +638,7 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string, me
 	}
 	// La suma de memoria: lo vivo, lo que está en camino y lo que se pide.
 	if t.MaxMemTotalMiB > 0 {
-		usada := memoriaViva(vivos) + s.enVuelo[claveMemoria(t)]
+		usada := memoriaViva(vivos, grafos) + s.enVuelo[claveMemoria(t)]
 		if usada+mem > t.MaxMemTotalMiB {
 			return fmt.Errorf("tenant %s already uses %d MiB and asks for %d more; the limit is %d MiB in total",
 				t.Nombre, usada, mem, t.MaxMemTotalMiB)
@@ -631,6 +650,29 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string, me
 		s.enVuelo[claveMemoria(t)] += mem
 	}
 	return nil
+}
+
+// todosCaidos dice si cada error de errs es de un host caído: uno que tampoco
+// contesta ahora a su sonda de estado (sin caché: la de hace un momento podía
+// darlo por vivo o por muerto). Un error sin host, o de uno que contesta, es
+// que no se sabe lo que hay ahí.
+func (s *Servidor) todosCaidos(ctx context.Context, errs []error) bool {
+	vivo := map[string]bool{}
+	for _, e := range s.reg.Estados(ctx) {
+		vivo[e.Nombre] = e.Vivo
+	}
+	for _, err := range errs {
+		hs := hostsDe(err)
+		if len(hs) == 0 {
+			return false
+		}
+		for _, nombre := range hs {
+			if vivo[nombre] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // cerrojoDe es el cerrojo de cuota del tenant nombre.

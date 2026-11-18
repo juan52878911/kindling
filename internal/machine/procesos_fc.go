@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -31,7 +32,7 @@ func (m *Manager) vmmVivoDe(id string, pistas ...int) int {
 			continue
 		}
 		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
-		if err == nil && m.vmmDeArgs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"), prefix) == id {
+		if err == nil && m.duenoVMM(strconv.Itoa(pid)) && m.vmmDeArgs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"), prefix) == id {
 			return pid
 		}
 	}
@@ -67,11 +68,34 @@ func (m *Manager) liveVMs() map[string]int {
 		if err != nil {
 			continue // murió mientras mirábamos, o no es nuestro
 		}
-		if id := m.vmmDeArgs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"), prefix); id != "" {
+		id := m.vmmDeArgs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"), prefix)
+		if id != "" && m.duenoVMM(e.Name()) {
 			out[id] = pid
 		}
 	}
 	return out
+}
+
+// duenoVMM dice si el proceso pid es de un dueño que puede tener un VMM
+// nuestro: el usuario del daemon o, con usuario de servicio, ese. La línea de
+// órdenes la escribe quien lanza el proceso, así que cualquier usuario del
+// host podía hacerse pasar por el VMM de una máquina con solo copiarla: el
+// daemon lo daba por vivo, lo adoptaba y lo mataba. El dueño de /proc/<pid>
+// es el uid efectivo del proceso (root si no es volcable).
+func (m *Manager) duenoVMM(pid string) bool {
+	fi, err := os.Stat("/proc/" + pid)
+	if err != nil {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	uid := int(st.Uid)
+	if uid == os.Geteuid() {
+		return true
+	}
+	return m.priv != nil && m.priv.Enabled && uid == m.priv.UID
 }
 
 // vmmDeArgs es la máquina cuyo VMM es el proceso de línea de órdenes args, o
@@ -109,7 +133,7 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 		return "", false
 	}
 	cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(mc.PID) + "/cmdline")
-	if err != nil {
+	if err != nil || !m.duenoVMM(strconv.Itoa(mc.PID)) {
 		return "", false
 	}
 	// Una instancia jailed: tras el exec de jailer, el proceso ES firecracker con
