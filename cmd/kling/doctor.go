@@ -58,7 +58,10 @@ type doctorInput struct {
 	// stale no se pueden restaurar con el VMM de ahora.
 	snaps []*api.Snapshot
 	// images: para avisar de agentes de invitado viejos (checkAgentesViejos).
-	images     []api.Image
+	images []api.Image
+	// listErr: no se pudieron listar los dorados o las imágenes; sin ellos,
+	// los avisos de dorados obsoletos y agentes viejos no se comprueban.
+	listErr    error
 	plugins    []*plugin.Plugin
 	completion bool // $_KLING_COMPLETION: lo exportan los scripts de completado
 	// completionRC es que el rc de la shell carga el fichero que escribió
@@ -129,8 +132,10 @@ func cmdDoctor(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	in.info, in.infoErr = api.NewClient(endpoint).Info(ctx)
 	if in.infoErr == nil {
-		in.snaps, _ = api.NewClient(endpoint).Snapshots(ctx)
-		in.images, _ = api.NewClient(endpoint).Images(ctx)
+		var serr, ierr error
+		in.snaps, serr = api.NewClient(endpoint).Snapshots(ctx)
+		in.images, ierr = api.NewClient(endpoint).Images(ctx)
+		in.listErr = errors.Join(serr, ierr)
 	}
 	cancel()
 
@@ -234,6 +239,12 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		}
 		if c, ok := checkAuthz(in.info.Authz); ok {
 			out = append(out, c)
+		}
+		if in.listErr != nil {
+			// Callar aquí daba un doctor en verde sin haber mirado los dorados.
+			out = append(out, doctorCheck{Name: "template list", State: doctorFail,
+				Detail: fmt.Sprintf("could not list templates or images: %v; stale templates and old guest agents were not checked", in.listErr),
+				Fix:    "run kling doctor again; if it keeps failing, look at the daemon's log"})
 		}
 		if c, ok := checkStale(delMismoVMM(in.snaps, in.info)); ok {
 			out = append(out, c)
