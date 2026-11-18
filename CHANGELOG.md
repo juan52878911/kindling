@@ -16,6 +16,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling db sql` keeps at most 10 000 rows (`-max-rows`, 0 = no row limit) and 64 MiB of values; the rest is read and dropped and the result says `truncated`. 500 000 rows of 100 bytes: 77 to 1.5 MiB retained.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -118,6 +119,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `kling db sql`: control characters in cells, column names and command tags are replaced before they reach the terminal.
 - `kling db ask` with opencode: the model gets no tools (a deny-all agent, user MCP servers off), checked with opencode before the prompt is sent; if it cannot be checked, it refuses. The child no longer gets `KLING_*` or `PG*` variables.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
