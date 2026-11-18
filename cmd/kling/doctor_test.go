@@ -278,3 +278,18 @@ func TestDoctorMaquinasAtascadas(t *testing.T) {
 	}
 	t.Fatal("kling doctor no avisa de la máquina atascada")
 }
+
+// F17: si no se pueden listar dorados o imágenes, doctor no puede salir en
+// verde: no ha mirado si hay dorados obsoletos ni agentes viejos.
+func TestDoctorSinListaDeDoradosFalla(t *testing.T) {
+	in := doctorInput{cliVersion: "v1", info: &api.Info{Version: "1"}, completion: true,
+		listErr: errors.New("context deadline exceeded")}
+	c := findCheck(doctorChecks(in), "template list")
+	if c == nil || c.State != doctorFail || !strings.Contains(c.Detail, "deadline") {
+		t.Fatalf("template list = %+v", c)
+	}
+	in.listErr = nil
+	if c := findCheck(doctorChecks(in), "template list"); c != nil {
+		t.Fatalf("sin error no hay línea: %+v", c)
+	}
+}

@@ -382,7 +382,11 @@ func remoteProbe(target, root string) (probe, error) {
 
 	// BatchMode: si las claves no están puestas queremos un error inmediato, no
 	// una petición de contraseña en mitad de un diagnóstico.
-	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "sh", "-s")
+	// "--": un destino que empiece por "-" no es una opción de ssh.
+	if strings.HasPrefix(target, "-") {
+		return p, fmt.Errorf("invalid ssh destination %q: it must be a host, user@host or an ssh config alias", target)
+	}
+	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", target, "sh", "-s")
 	cmd.Stdin = strings.NewReader(remoteProbeScript(p.runAs, p.buildAs, root, extensionUnits()))
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()

@@ -98,7 +98,7 @@ que anuncia `db-attach` las entiende.
 | `DELETE /machines/{ref}/credentials/{env}?upstream_machine=ID` | retira de la máquina la credencial de esa variable (404 si no la tiene). Con `upstream_machine`, solo si va a esa máquina (`kling db detach`). En una máquina viva el proxy deja de conocer el marcador y corta las sesiones de Postgres que lo usaban, y el marcador sale de MMDS; en una congelada o parada solo cambia el almacén. Devuelve la máquina |
 | `PUT /machines/{ref}/labels` | reetiqueta. Cambiar `kling.db.owner`, `kling.db.state`, `kling.db.golden` o `kling.ports` corta las sesiones de otras máquinas hacia esta y las suyas hacia otras (modelo A, ver Credenciales de Postgres) |
 | `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas). Antes espera a que esté lista según su imagen (`ready_timeout_seconds`, por defecto 120; `409` si no llega; `skip_ready` se lo salta) |
-| `GET /machines/{ref}/logs?tail=N` | consola serie |
+| `GET /machines/{ref}/logs?tail=N` | consola serie; con `offset=B&rotation=R` (las cabeceras `X-Kling-Log-Offset` y `X-Kling-Log-Rotation` de la respuesta anterior), solo los bytes escritos después |
 | `GET /machines/{ref}/credaudit?tail=N&denied=1&since=T` | registro de auditoría del proxy de credenciales, NDJSON (ver abajo) |
 | `POST /machines/{ref}/guest` | reenvía una petición HTTP al invitado (ver abajo) |
 | `DELETE /machines/{ref}` | la borra |
@@ -1089,7 +1089,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `GET /store/{ns}/{key}` | 200 | `404`; `storeStatus` |
 | `PUT /store/{ns}/{key}` | 204 | `413`/`400` cuerpo; `403` en `graph`; `storeStatus` |
 | `DELETE /store/{ns}/{key}` | 204 (también si no existía) | `403` en `graph`; `storeStatus` |
-| `GET /machines/{ref}/logs` | 200 texto | `400` `tail`; `404` sin máquina o sin log; `500` al leerlo |
+| `GET /machines/{ref}/logs` | 200 texto | `400` `tail` u `offset`; `404` sin máquina o sin log; `500` al leerlo |
 | `GET /machines/{ref}/credaudit` | 200 NDJSON | `400` parámetros; `404`; `500` |
 | `GET /machines/{ref}/egress` | 200 | `404` |
 | `POST /machines/{ref}/guest` | 200 (el estado del invitado va en el cuerpo) | `413`/`400` cuerpo; `400` `path` o `max_body_bytes`; `403` puerto no expuesto; `404`; `409` no corre o no se alcanza; `502` invitado inalcanzable o respuesta de más; `504` `wait_ms` vencido |

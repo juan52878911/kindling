@@ -146,7 +146,8 @@ func cmdExec(args []string) (int, error) {
 		if ctx.Err() == nil && !api.IsNotFound(err) {
 			avisarEgress(ctx, c, ref)
 		}
-		return 1, err
+		// Interrumpido sale con 130, como el resto de comandos (codigoDeSalida).
+		return codigoDeSalida(err), err
 	}
 	if res.TimedOut {
 		fmt.Fprintf(os.Stderr, "kling: killed after %s (timeout)\n", time.Duration(res.DurationMS)*time.Millisecond)
@@ -235,7 +236,7 @@ func cmdCp(args []string) error {
 		return err
 	}
 	defer rc.Close()
-	var w io.Writer = os.Stdout
+	var w io.WriteCloser = nopCloser{os.Stdout}
 	if dst != "-" {
 		if fi, err := os.Stat(dst); err == nil && fi.IsDir() {
 			dst = strings.TrimSuffix(dst, "/") + "/" + baseName(srcPath)
@@ -244,15 +245,31 @@ func cmdCp(args []string) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 		w = f
 	}
-	n, err := io.Copy(w, rc)
+	n, err := volcarYCerrar(w, rc)
 	if err != nil || !*asJSON {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(copiaJSON{Machine: srcRef, Path: srcPath, Size: n, Dest: dst})
 }
+
+// volcarYCerrar copia r en w y lo cierra, y el error del Close cuenta: en un
+// disco lleno o una carpeta de red, lo que no se pudo escribir puede salir
+// solo ahí, y cp acababa con 0 dejando un fichero a medias.
+func volcarYCerrar(w io.WriteCloser, r io.Reader) (int64, error) {
+	n, err := io.Copy(w, r)
+	if cerr := w.Close(); err == nil {
+		err = cerr
+	}
+	return n, err
+}
+
+// nopCloser es un io.WriteCloser cuyo Close no hace nada (la salida estándar
+// no se cierra).
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }
 
 // copiaJSON es lo que `kling cp -json` dice de una copia: la máquina y la ruta
 // de dentro, el tamaño y, al sacar un fichero, dónde quedó.

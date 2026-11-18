@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -101,13 +102,13 @@ func FormatPorts(ps []PortPublish) string {
 // ocupado falla sin publicar los demás.
 func (c *Client) Publish(ctx context.Context, ref string, ports []PortPublish) (*Publication, error) {
 	var p Publication
-	return &p, c.do(ctx, http.MethodPost, "/machines/"+ref+"/publish", PublishRequest{Ports: ports}, &p)
+	return &p, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/publish", PublishRequest{Ports: ports}, &p)
 }
 
 // Unpublish deja de publicar los puertos del host hosts de la máquina ref
 // (ninguno: todos).
 func (c *Client) Unpublish(ctx context.Context, ref string, hosts ...int) error {
-	path := "/machines/" + ref + "/publish"
+	path := "/machines/" + url.PathEscape(ref) + "/publish"
 	if len(hosts) > 0 {
 		var l []string
 		for _, h := range hosts {

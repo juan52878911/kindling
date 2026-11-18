@@ -48,11 +48,16 @@ func warmUp(ctx context.Context, ops warmOps, w warmSpec, out io.Writer, logf fu
 		CPUPct: w.CPUs * 100, AllowExec: true, Egress: w.Egress,
 		WaitReady: true, ReadyTimeoutSeconds: int(w.Wait.Seconds()),
 	})
+	// Se retira siempre, por éxito o por fallo, y aunque se cancele el contexto.
+	// También si Run falla o se corta (Ctrl-C mientras espera a "listo"): el
+	// daemon pudo crearla igual, y quedaría viva y sin TTL. Si el nombre ya
+	// estaba cogido, la máquina no es nuestra: esa no se toca.
+	if !api.IsNameTaken(err) {
+		defer func() { _ = ops.Remove(context.WithoutCancel(ctx), m) }()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("starting %s: %w", m, err)
 	}
-	// Se retira siempre, por éxito o por fallo, y aunque se cancele el contexto.
-	defer func() { _ = ops.Remove(context.WithoutCancel(ctx), m) }()
 	if mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed {
 		if a := avisoEgress(ctx, ops, m); a != "" {
 			logf("%s", a)

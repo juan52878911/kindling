@@ -37,6 +37,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling compose down -v` only removes volumes labeled with its project and compose file, so it no longer removes another project's volume with the same name, even when that project is down; volumes from an older kling are left with a warning.
 - `kling db rotate` takes a per-copy lock: two rotations of the same copy at once could leave the host with the other one's password.
 - `kling db sql` keeps at most 10 000 rows (`-max-rows`, 0 = no row limit) and 64 MiB of values; the rest is read and dropped and the result says `truncated`. 500 000 rows of 100 bytes: 77 to 1.5 MiB retained.
+- macOS: `kling doctor` also warns about a kernel or `min.ext4` with no release mark (downloaded before marks existed) instead of saying nothing.
+- `kling cp` from a machine to a file fails when closing the file fails (a full disk or a network folder) instead of exiting 0 with a short file.
+- `kling graph audit` exits non-zero when some node's log couldn't be read (it still prints the rest), and `kling doctor` fails when it couldn't list templates or images instead of skipping those checks.
+- An interrupted `kling exec` exits with 130, like every other command, instead of 1.
+- `kling image import -warm` removes its `<template>-warm` machine also when Ctrl-C lands while it starts, and commands clean up their temporary machines on SIGHUP (closing the terminal) and SIGPIPE (`| head -1`) as on Ctrl-C.
+- `kling logs -f` no longer drops repeated lines and reads only what is new: `GET /machines/{ref}/logs` takes `offset` and `rotation` and answers with the next cursor in `X-Kling-Log-Offset`/`X-Kling-Log-Rotation`. Older daemons keep the old behaviour.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -148,6 +154,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db ask`: the read-only role gets `SELECT` on the application schemas instead of `pg_read_all_data`, which also read `pg_authid` and other protected catalogs; existing roles lose it. `sqlguard` also rejects `ts_stat`, `ts_rewrite`, `crosstab`, `connectby`, the `*_to_xml` dumps and those catalogs.
 - `kling db sql`: control characters in cells, column names and command tags are replaced before they reach the terminal.
 - `kling db ask` with opencode: the model gets no tools (a deny-all agent, user MCP servers off), checked with opencode before the prompt is sent; if it cannot be checked, it refuses. The child no longer gets `KLING_*` or `PG*` variables.
+- `ssh://` hosts: the destination goes after `--` and one starting with `-` is refused, so it can't be read as an ssh option (`KLING_HOST`, contexts, `kling up`).
+- Go client (`pkg/api`): machine, volume, snapshot and image names are escaped in request paths, and the client doesn't follow redirects, so a name with `/` or `..` can't reach another route with the caller's token.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.

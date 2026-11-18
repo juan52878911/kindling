@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -105,8 +106,17 @@ func auditoriaGrafo(ctx context.Context, leer leerAuditoriaMaquina, g *api.Graph
 	if tail > 0 && len(out) > tail {
 		out = out[len(out)-tail:]
 	}
+	if leidos < conMaquina {
+		// Lo leído se enseña, pero la salida no puede pasar por completa: un
+		// script que mire solo el código creería que no hubo más tráfico.
+		return out, fmt.Errorf("%w: %d of %d nodes", errAuditoriaParcial, conMaquina-leidos, conMaquina)
+	}
 	return out, nil
 }
+
+// errAuditoriaParcial es el error de auditoriaGrafo cuando algún nodo no se
+// pudo leer: los registros que devuelve son los del resto.
+var errAuditoriaParcial = errors.New("some nodes' audit logs could not be read")
 
 const graphAuditRowFmt = "%-14s  %-12s  %-7s  %-24s  %-32s  %6s  %-12s  %6s  %s\n"
 
@@ -167,8 +177,11 @@ func graphAudit(args []string) error {
 		return errSinGrafos(err)
 	}
 	recs, err := auditoriaGrafo(ctx, c.CredAudit, g, q, *all, *tail, os.Stderr)
-	if err != nil {
+	if err != nil && !errors.Is(err, errAuditoriaParcial) {
 		return err
 	}
-	return escribirAuditoriaGrafo(os.Stdout, os.Stderr, recs, *asJSON)
+	if werr := escribirAuditoriaGrafo(os.Stdout, os.Stderr, recs, *asJSON); werr != nil {
+		return werr
+	}
+	return err
 }
