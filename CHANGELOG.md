@@ -16,6 +16,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling cp` from a machine to a file fails when closing the file fails (a full disk or a network folder) instead of exiting 0 with a short file.
 - `kling graph audit` exits non-zero when some node's log couldn't be read (it still prints the rest), and `kling doctor` fails when it couldn't list templates or images instead of skipping those checks.
 - An interrupted `kling exec` exits with 130, like every other command, instead of 1.
 - `kling image import -warm` removes its `<template>-warm` machine also when Ctrl-C lands while it starts, and commands clean up their temporary machines on SIGHUP (closing the terminal) and SIGPIPE (`| head -1`) as on Ctrl-C.
