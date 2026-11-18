@@ -75,30 +75,65 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	escribirDaemon(w, machine.RecursosDaemon(), runtime.NumGoroutine(), s.mgr.EnBateria())
 }
 
-// plazoMuestraMetrics es cuánto vale una muestra de /metrics. Variable para
-// los tests.
-var plazoMuestraMetrics = time.Second
+// plazoMuestraMetrics es cuánto vale una muestra de /metrics, y
+// esperaMuestraMetrics cuánto espera un scrape a la que se está tomando.
+// Variables para los tests.
+var (
+	plazoMuestraMetrics  = time.Second
+	esperaMuestraMetrics = 5 * time.Second
+)
 
 // muestraMetrics es ProcStats para /metrics, con la muestra de hace menos de
 // plazoMuestraMetrics si la hay. Cada muestra son dos lecturas por máquina
 // viva (smaps_rollup y estado; en macOS, preguntas al ayudante), y /metrics
 // lo puede pedir cualquier inquilino: sin caché, unos cuantos scrapes en
-// paralelo multiplicaban ese trabajo por máquina. Con el cerrojo tomado
-// mientras se muestrea, los que llegan a la vez esperan a esa muestra en vez
-// de hacer cada uno la suya. kling top (/procstats) sigue muestreando cada
-// vez: es una persona mirando, no un scrape.
+// paralelo multiplicaban ese trabajo por máquina. Hay como mucho una muestra
+// en curso, y los que llegan mientras tanto esperan a esa en vez de hacer
+// cada uno la suya.
+//
+// La espera tiene plazo (P4): antes el cerrojo se tenía durante la muestra,
+// y si una lectura se quedaba colgada (el ayudante de macOS que no contesta,
+// un /proc atascado) cada scrape se quedaba detrás para siempre, con su
+// goroutine y su conexión. Ahora la muestra va aparte, y quien se cansa de
+// esperar se lleva la anterior (vacía si no hay).
 func (s *Server) muestraMetrics() api.ProcStats {
 	s.muestraMu.Lock()
-	defer s.muestraMu.Unlock()
-	if s.muestraEn.IsZero() || time.Since(s.muestraEn) >= plazoMuestraMetrics {
+	if !s.muestraEn.IsZero() && time.Since(s.muestraEn) < plazoMuestraMetrics {
+		ps := s.copiaMuestra()
+		s.muestraMu.Unlock()
+		return ps
+	}
+	lista := s.muestraEnCurso
+	if lista == nil {
+		lista = make(chan struct{})
+		s.muestraEnCurso = lista
 		muestrear := s.muestrear
 		if muestrear == nil {
 			muestrear = s.mgr.ProcStats
 		}
-		s.muestra = muestrear()
-		s.muestraEn = time.Now()
+		go func() {
+			ps := muestrear()
+			s.muestraMu.Lock()
+			s.muestra, s.muestraEn, s.muestraEnCurso = ps, time.Now(), nil
+			s.muestraMu.Unlock()
+			close(lista)
+		}()
 	}
-	// Copia de la lista: quien la recibe la puede vaciar o reordenar.
+	s.muestraMu.Unlock()
+	espera := time.NewTimer(esperaMuestraMetrics)
+	defer espera.Stop()
+	select {
+	case <-lista:
+	case <-espera.C:
+	}
+	s.muestraMu.Lock()
+	defer s.muestraMu.Unlock()
+	return s.copiaMuestra()
+}
+
+// copiaMuestra es la última muestra con su propia lista: quien la recibe la
+// puede vaciar o reordenar. Bajo muestraMu.
+func (s *Server) copiaMuestra() api.ProcStats {
 	ps := s.muestra
 	ps.Machines = slices.Clone(ps.Machines)
 	return ps
