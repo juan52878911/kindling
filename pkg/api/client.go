@@ -72,6 +72,11 @@ func NewClient(endpoint string) *Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	// El daemon no redirige nunca. Sin esto, http.Client seguiría la
+	// redirección que ServeMux hace de una ruta con ".." conservando método y
+	// token, y la petición acabaría en el handler de otra ruta.
+	c.long.CheckRedirect = sinRedirecciones
+	c.http.CheckRedirect = sinRedirecciones
 	c.long.Transport = comprobarAPI{c.long.Transport, &c.avisoAPI}
 	c.http.Transport = comprobarAPI{c.http.Transport, &c.avisoAPI}
 	if tok := os.Getenv(AuthzTokenEnv); tok != "" {
@@ -80,6 +85,10 @@ func NewClient(endpoint string) *Client {
 	}
 	return c
 }
+
+// sinRedirecciones devuelve la respuesta 3xx tal cual; doWith la trata como
+// error.
+func sinRedirecciones(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // AuthzTokenEnv es la variable con el token de inquilino que el cliente manda
 // al daemon (Authorization: Bearer). Solo tiene efecto con una política de
@@ -206,7 +215,7 @@ func (c *Client) PruneImageSnapshots(ctx context.Context) (*ImageSnapshotsPrune,
 // ImageRecipe devuelve cómo se construyó una imagen.
 func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, error) {
 	var rec ImageRecipe
-	return &rec, c.do(ctx, http.MethodGet, "/images/"+name+"/recipe", nil, &rec)
+	return &rec, c.do(ctx, http.MethodGet, "/images/"+url.PathEscape(name)+"/recipe", nil, &rec)
 }
 
 func (c *Client) Volumes(ctx context.Context) ([]*Volume, error) {
@@ -228,55 +237,55 @@ func (c *Client) CreateVolume(ctx context.Context, r CreateVolumeRequest) (*Volu
 // fallaría por tiempo mientras el daemon lo está haciendo bien.
 func (c *Client) PopulateVolume(ctx context.Context, r PopulateRequest) (*PopulateResult, error) {
 	var res PopulateResult
-	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+r.Volume+"/populate", r, &res)
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+url.PathEscape(r.Volume)+"/populate", r, &res)
 }
 
 // CloneVolume clona un volumen. Va por el cliente largo: con reflink son
 // milisegundos, pero con Copy puede ser una copia de gigas.
 func (c *Client) CloneVolume(ctx context.Context, name string, r CloneVolumeRequest) (*CloneVolumeResult, error) {
 	var res CloneVolumeResult
-	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+name+"/clone", r, &res)
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+url.PathEscape(name)+"/clone", r, &res)
 }
 
 func (c *Client) RemoveVolume(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/volumes/"+name, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/volumes/"+url.PathEscape(name), nil, nil)
 }
 
 // RemoveVolumeWithSnapshots borra el volumen Y sus snapshots. Sin esto, un
 // volumen con snapshots no se deja borrar: son la única copia de su pasado.
 func (c *Client) RemoveVolumeWithSnapshots(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/volumes/"+name+"?snapshots=1", nil, nil)
+	return c.do(ctx, http.MethodDelete, "/volumes/"+url.PathEscape(name)+"?snapshots=1", nil, nil)
 }
 
 // SnapshotVolume copia un volumen sin escritores. Va por c.long: sin reflink ni
 // clonefile es una copia completa, y un volumen grande pasa del minuto.
 func (c *Client) SnapshotVolume(ctx context.Context, volume string, r SnapshotVolumeRequest) (*VolumeSnapshot, error) {
 	var s VolumeSnapshot
-	return &s, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+volume+"/snapshots", r, &s)
+	return &s, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+url.PathEscape(volume)+"/snapshots", r, &s)
 }
 
 // VolumeSnapshots lista los snapshots de un volumen, del más antiguo al último.
 func (c *Client) VolumeSnapshots(ctx context.Context, volume string) ([]*VolumeSnapshot, error) {
 	var l []*VolumeSnapshot
-	return l, c.do(ctx, http.MethodGet, "/volumes/"+volume+"/snapshots", nil, &l)
+	return l, c.do(ctx, http.MethodGet, "/volumes/"+url.PathEscape(volume)+"/snapshots", nil, &l)
 }
 
 // RestoreVolume devuelve el volumen a un snapshot, guardando antes el estado
 // actual en "undo". Por c.long, por lo mismo que SnapshotVolume.
 func (c *Client) RestoreVolume(ctx context.Context, volume string, r RestoreVolumeRequest) (*RestoreVolumeResult, error) {
 	var res RestoreVolumeResult
-	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+volume+"/restore", r, &res)
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+url.PathEscape(volume)+"/restore", r, &res)
 }
 
 // RemoveVolumeSnapshot borra un snapshot de un volumen.
 func (c *Client) RemoveVolumeSnapshot(ctx context.Context, volume, snapshot string) error {
-	return c.do(ctx, http.MethodDelete, "/volumes/"+volume+"/snapshots/"+snapshot, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/volumes/"+url.PathEscape(volume)+"/snapshots/"+url.PathEscape(snapshot), nil, nil)
 }
 
 // Get devuelve una máquina por id, prefijo o nombre.
 func (c *Client) Get(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodGet, "/machines/"+ref, nil, &m)
+	return &m, c.do(ctx, http.MethodGet, "/machines/"+url.PathEscape(ref), nil, &m)
 }
 
 // Freeze congela una máquina running. Va por c.long, como Commit: volcar la
@@ -284,21 +293,21 @@ func (c *Client) Get(ctx context.Context, ref string) (*Machine, error) {
 // Acota ctx.
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)
+	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/freeze", nil, &m)
 }
 
 // Pause pausa una máquina running sin volcarla (nivel "pausada"; capacidad
 // "pause"). Thaw la reanuda.
 func (c *Client) Pause(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/pause", nil, &m)
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/pause", nil, &m)
 }
 
 // Thaw despierta una máquina congelada o pausada. Por c.long: restaurar desde
 // disco frío y esperar al invitado puede tardar más del minuto. Acota ctx.
 func (c *Client) Thaw(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/thaw", nil, &m)
+	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/thaw", nil, &m)
 }
 
 // Start arranca otra vez una máquina parada, en frío sobre su propio disco.
@@ -306,12 +315,12 @@ func (c *Client) Thaw(ctx context.Context, ref string) (*Machine, error) {
 // c.long: un arranque en frío con su sonda de listo puede pasar del minuto.
 func (c *Client) Start(ctx context.Context, ref string, env []string) (*Machine, error) {
 	var m Machine
-	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/start", StartRequest{Env: env}, &m)
+	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/start", StartRequest{Env: env}, &m)
 }
 
 func (c *Client) Stop(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/stop", nil, &m)
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/stop", nil, &m)
 }
 
 // Squeeze aprieta el globo de una instancia running para devolver RAM al host
@@ -320,7 +329,7 @@ func (c *Client) Stop(ctx context.Context, ref string) (*Machine, error) {
 // Resize cambia la memoria de una máquina en caliente, dentro de su techo.
 func (c *Client) Resize(ctx context.Context, ref string, memMiB int) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/resize", ResizeRequest{MemMiB: memMiB}, &m)
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/resize", ResizeRequest{MemMiB: memMiB}, &m)
 }
 
 func (c *Client) Squeeze(ctx context.Context, ref string) (*SqueezeResult, error) {
@@ -331,7 +340,7 @@ func (c *Client) Squeeze(ctx context.Context, ref string) (*SqueezeResult, error
 // con su dorado (Machine.MemShared), que el daemon rechaza sin él.
 func (c *Client) SqueezeWith(ctx context.Context, ref string, force bool) (*SqueezeResult, error) {
 	var res SqueezeResult
-	path := "/machines/" + ref + "/squeeze"
+	path := "/machines/" + url.PathEscape(ref) + "/squeeze"
 	if force {
 		path += "?force=1"
 	}
@@ -343,7 +352,7 @@ func (c *Client) SqueezeWith(ctx context.Context, ref string, force bool) (*Sque
 // esto la máquina queda marcada HasSecrets y ya no se puede congelar.
 func (c *Client) PutMMDS(ctx context.Context, ref string, data any) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/mmds", data, &m)
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/mmds", data, &m)
 }
 
 // SetCredentials entrega credenciales al proxy de credenciales de una microVM
@@ -353,7 +362,7 @@ func (c *Client) PutMMDS(ctx context.Context, ref string, data any) (*Machine, e
 // credenciales sobreviven al reinicio del daemon.
 func (c *Client) SetCredentials(ctx context.Context, ref string, req CredentialsRequest) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/credentials", req, &m)
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/credentials", req, &m)
 }
 
 // RemoveCredential quita de una máquina la credencial de variable env. Con
@@ -374,24 +383,24 @@ func (c *Client) RemoveCredential(ctx context.Context, ref, env, upstreamMachine
 // credenciales al arrancar. Exige que la plantilla tenga egress allowlist.
 func (c *Client) SetSnapshotCredentials(ctx context.Context, name string, req CredentialsRequest) (*Snapshot, error) {
 	var s Snapshot
-	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/credentials", req, &s)
+	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+url.PathEscape(name)+"/credentials", req, &s)
 }
 
 // SetSnapshotPool fija cuántas copias despiertas mantiene el daemon de una
 // plantilla (0 la apaga y vacía el fondo). Devuelve el estado del fondo.
 func (c *Client) SetSnapshotPool(ctx context.Context, name string, size int) (*PoolInfo, error) {
 	var p PoolInfo
-	return &p, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/pool", PoolRequest{Size: size}, &p)
+	return &p, c.do(ctx, http.MethodPut, "/snapshots/"+url.PathEscape(name)+"/pool", PoolRequest{Size: size}, &p)
 }
 
 // SnapshotPool devuelve el estado del fondo de una plantilla.
 func (c *Client) SnapshotPool(ctx context.Context, name string) (*PoolInfo, error) {
 	var p PoolInfo
-	return &p, c.do(ctx, http.MethodGet, "/snapshots/"+name+"/pool", nil, &p)
+	return &p, c.do(ctx, http.MethodGet, "/snapshots/"+url.PathEscape(name)+"/pool", nil, &p)
 }
 
 func (c *Client) Remove(ctx context.Context, ref string) error {
-	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/machines/"+url.PathEscape(ref), nil, nil)
 }
 
 // maxLogsResponse acota lo que Logs() lee de la respuesta del daemon. El
@@ -404,7 +413,7 @@ const maxLogsResponse = 8 << 20
 // Logs trae la consola serie. Se devuelve texto plano, no JSON: es para leer.
 func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("http://kling/machines/%s/logs?tail=%d", ref, tail), nil)
+		fmt.Sprintf("http://kling/machines/%s/logs?tail=%d", url.PathEscape(ref), tail), nil)
 	if err != nil {
 		return "", err
 	}
@@ -484,7 +493,7 @@ func (c *Client) CredAudit(ctx context.Context, ref string, q CredAuditQuery) ([
 // SetLabels reetiqueta una máquina. Se usa al importar, cuando la decisión sobre
 // el modo de ejecución solo puede tomarse DESPUÉS de ver su catálogo.
 func (c *Client) SetLabels(ctx context.Context, ref string, labels map[string]string) error {
-	return c.do(ctx, http.MethodPut, "/machines/"+ref+"/labels", labels, nil)
+	return c.do(ctx, http.MethodPut, "/machines/"+url.PathEscape(ref)+"/labels", labels, nil)
 }
 
 // Commit congela una máquina como snapshot dorado. replace permite pisar uno
@@ -498,7 +507,7 @@ func (c *Client) Commit(ctx context.Context, ref, name string, replace bool) (*S
 // imagen antes de congelarlo, y eso puede ser más de un minuto. Acota ctx.
 func (c *Client) CommitWith(ctx context.Context, ref string, req CommitRequest) (*Snapshot, error) {
 	var s Snapshot
-	return &s, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/commit", req, &s)
+	return &s, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/commit", req, &s)
 }
 
 // Ready pregunta si la máquina ref está lista según su imagen (sonda y ganchos
@@ -506,7 +515,7 @@ func (c *Client) CommitWith(ctx context.Context, ref string, req CommitRequest) 
 // error: mira ReadyResult.OK.
 func (c *Client) Ready(ctx context.Context, ref string, wait time.Duration) (*ReadyResult, error) {
 	var res ReadyResult
-	path := "/machines/" + ref + "/ready"
+	path := "/machines/" + url.PathEscape(ref) + "/ready"
 	if wait > 0 {
 		path += "?wait=" + url.QueryEscape(wait.String())
 	}
@@ -517,7 +526,7 @@ func (c *Client) Ready(ctx context.Context, ref string, wait time.Duration) (*Re
 // wait > 0, espera a que acaben.
 func (c *Client) RunHooks(ctx context.Context, ref string, wait time.Duration) (*ReadyResult, error) {
 	var res ReadyResult
-	path := "/machines/" + ref + "/hooks"
+	path := "/machines/" + url.PathEscape(ref) + "/hooks"
 	if wait > 0 {
 		path += "?wait=" + url.QueryEscape(wait.String())
 	}
@@ -531,11 +540,11 @@ func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
 
 // RemoveImage retira una imagen del disco.
 func (c *Client) RemoveImage(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/images/"+name, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(name), nil, nil)
 }
 
 func (c *Client) RemoveSnapshot(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/snapshots/"+name, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/snapshots/"+url.PathEscape(name), nil, nil)
 }
 
 // Events consume el stream NDJSON del daemon hasta que se cancele el contexto.
@@ -579,7 +588,7 @@ func (c *Client) Guest(ctx context.Context, ref string, r GuestRequest) (*GuestR
 	// descongelándose, y la herramienta que se invoca puede tardar lo suyo.
 	// Acotar esto por cabeceras es acotar el trabajo del usuario, no la salud
 	// del daemon.
-	if err := c.doWith(c.long, ctx, "POST", "/machines/"+ref+"/guest", r, &out); err != nil {
+	if err := c.doWith(c.long, ctx, "POST", "/machines/"+url.PathEscape(ref)+"/guest", r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
