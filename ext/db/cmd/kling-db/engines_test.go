@@ -192,6 +192,35 @@ func TestRotateRedis(t *testing.T) {
 	assertNoLeak(t, ta.f, nueva)
 }
 
+// Con otro rotate de la misma copia en marcha (su cerrojo tomado), rotate y
+// rotate -resume no tocan nada: ni la base ni password.new.
+func TestRotateConCerrojoOcupado(t *testing.T) {
+	ta := testAppMotores(t)
+	mc, err := ta.up(ctx, "rd", "r1", 0, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vieja := password(t, mc.ID)
+	un, err := dbstate.Lock(ctx, "rotate-"+mc.ID, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer un()
+	espera := rotateLockWait
+	rotateLockWait = 0
+	defer func() { rotateLockWait = espera }()
+	rot := ta.f.rotations
+	if _, err := ta.rotateCopy(ctx, "r1", "local"); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("rotate with the lock taken: %v", err)
+	}
+	if _, err := ta.resumeRotate(ctx, "r1", "local"); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("rotate -resume with the lock taken: %v", err)
+	}
+	if password(t, mc.ID) != vieja || ta.f.rotations != rot || dbstate.HasStaged(mc.ID) {
+		t.Fatal("a rotation went ahead while another one held the lock")
+	}
+}
+
 // El guion de rotación lleva el hash y no la clave, y rechaza lo que no sea
 // un usuario simple o un hash de 64 hexadecimales.
 func TestRedisRotateScript(t *testing.T) {

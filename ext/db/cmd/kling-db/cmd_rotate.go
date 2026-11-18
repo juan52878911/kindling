@@ -99,6 +99,11 @@ func (a *app) resumeRotate(ctx context.Context, ref, owner string) (*api.Machine
 	if err != nil {
 		return nil, err
 	}
+	un, err := a.lockRotate(ctx, mc)
+	if err != nil {
+		return nil, err
+	}
+	defer un()
 	pw, err := dbstate.ReadStaged(mc.ID)
 	if errors.Is(err, dbstate.ErrNoPassword) {
 		return nil, fmt.Errorf("%s has no interrupted rotation to resume (kling db rotate %s makes a new password)", mc.Name, mc.Name)
@@ -115,6 +120,22 @@ func (a *app) resumeRotate(ctx context.Context, ref, owner string) (*api.Machine
 	return mc, nil
 }
 
+// rotateLockWait es cuánto espera un rotate a que acabe otro de la misma copia.
+var rotateLockWait = 2 * time.Minute
+
+// lockRotate toma el cerrojo de rotación de la copia. Dos rotate a la vez
+// comparten password.new: uno podría confirmar en el host la clave del otro
+// mientras la base se queda con la suya.
+func (a *app) lockRotate(ctx context.Context, mc *api.Machine) (func(), error) {
+	un, err := dbstate.Lock(ctx, "rotate-"+mc.ID, rotateLockWait, func() {
+		fmt.Fprintf(a.stderr, "waiting for another kling db rotate of %s to finish...\n", mc.Name)
+	})
+	if errors.Is(err, dbstate.ErrLocked) {
+		return nil, fmt.Errorf("another kling db rotate of %s is still running; retry when it ends", mc.Name)
+	}
+	return un, err
+}
+
 // warnInterruptedRotate avisa de una rotación que murió a medias: la base
 // puede tener ya la clave nueva y el host la anterior.
 func (a *app) warnInterruptedRotate(mc *api.Machine) {
@@ -129,6 +150,11 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
+	un, err := a.lockRotate(ctx, mc)
+	if err != nil {
+		return nil, err
+	}
+	defer un()
 	oldPw, err := dbstate.ReadPassword(mc.ID)
 	if err != nil {
 		return nil, err

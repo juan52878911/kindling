@@ -16,6 +16,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling db rotate` takes a per-copy lock: two rotations of the same copy at once could leave the host with the other one's password.
 - `kling db sql` keeps at most 10 000 rows (`-max-rows`, 0 = no row limit) and 64 MiB of values; the rest is read and dropped and the result says `truncated`. 500 000 rows of 100 bytes: 77 to 1.5 MiB retained.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
