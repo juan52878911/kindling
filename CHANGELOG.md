@@ -16,6 +16,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- MCP bridge (http mode): the shared server is no longer restarted at random with two or more MMDS secrets, nor restarted without them when MMDS doesn't answer.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.

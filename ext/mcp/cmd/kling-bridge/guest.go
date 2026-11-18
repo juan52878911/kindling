@@ -2,7 +2,9 @@ package main
 
 import (
 	"log"
+	"maps"
 	"os/exec"
+	"slices"
 	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/guest"
@@ -51,13 +53,31 @@ func waitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 // sesiones (un secreto se inyecta después del boot, en la microVM ya viva), y una
 // caché lo dejaría sin ver justo lo recién inyectado.
 func (b *bridge) sessionEnv(id string) ([]string, bool) {
-	store, err := fetchMMDS()
+	env, n, err := b.entornoMMDS()
 	if err != nil {
 		log.Printf("session %s: can't read MMDS, starting without its secrets: %v", id[:8], err)
 		return b.env, false
 	}
+	if n > 0 {
+		log.Printf("session %s: %d MMDS secret(s) injected into the environment", id[:8], n)
+	}
+	return env, n > 0
+}
+
+// entornoMMDS es sessionEnv sin logs y con el error de MMDS a la vista: quien
+// compara entornos (ensureProxyChild) tiene que distinguir «MMDS sin secretos»
+// de «MMDS no contestó», que también devuelve b.env.
+//
+// Las claves van ORDENADAS: el entorno resultante es estable para un mismo
+// almacén, y huellaEnv puede compararlo. Recorrer el map tal cual daba un orden
+// distinto en cada lectura y la huella cambiaba sin que cambiara ningún secreto.
+func (b *bridge) entornoMMDS() ([]string, int, error) {
+	store, err := fetchMMDS()
+	if err != nil {
+		return b.env, 0, err
+	}
 	if store == nil {
-		return b.env, false
+		return b.env, 0, nil
 	}
 
 	// Se parte del entorno base y se AÑADEN/PISAN las claves de MMDS comunes.
@@ -77,13 +97,12 @@ func (b *bridge) sessionEnv(id string) ([]string, bool) {
 	}
 
 	if len(extra) == 0 {
-		return b.env, false
+		return b.env, 0, nil
 	}
 
 	env := append([]string(nil), b.env...)
-	for k, v := range extra {
-		env = append(env, k+"="+v)
+	for _, k := range slices.Sorted(maps.Keys(extra)) {
+		env = append(env, k+"="+extra[k])
 	}
-	log.Printf("session %s: %d MMDS secret(s) injected into the environment", id[:8], len(extra))
-	return env, true
+	return env, len(extra), nil
 }
