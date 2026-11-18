@@ -146,7 +146,8 @@ func cmdExec(args []string) (int, error) {
 		if ctx.Err() == nil && !api.IsNotFound(err) {
 			avisarEgress(ctx, c, ref)
 		}
-		return 1, err
+		// Interrumpido sale con 130, como el resto de comandos (codigoDeSalida).
+		return codigoDeSalida(err), err
 	}
 	if res.TimedOut {
 		fmt.Fprintf(os.Stderr, "kling: killed after %s (timeout)\n", time.Duration(res.DurationMS)*time.Millisecond)
