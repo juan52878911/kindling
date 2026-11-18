@@ -21,7 +21,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling graph audit` exits non-zero when some node's log couldn't be read (it still prints the rest), and `kling doctor` fails when it couldn't list templates or images instead of skipping those checks.
 - An interrupted `kling exec` exits with 130, like every other command, instead of 1.
 - `kling image import -warm` removes its `<template>-warm` machine also when Ctrl-C lands while it starts, and commands clean up their temporary machines on SIGHUP (closing the terminal) and SIGPIPE (`| head -1`) as on Ctrl-C.
-- `kling logs -f` no longer drops repeated lines and reads only what is new: `GET /machines/{ref}/logs` takes `offset` and `rotation` and answers with the next cursor in `X-Kling-Log-Offset`/`X-Kling-Log-Rotation` (a poll with a full console: 24.5 ms and 16.6 MB to 68 µs and 4 KB). Older daemons keep the old behaviour.
+- `kling logs -f` no longer drops repeated lines and reads only what is new: `GET /machines/{ref}/logs` takes `offset` and `rotation` and answers with the next cursor in `X-Kling-Log-Offset`/`X-Kling-Log-Rotation`. Older daemons keep the old behaviour.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -125,7 +125,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - `ssh://` hosts: the destination goes after `--` and one starting with `-` is refused, so it can't be read as an ssh option (`KLING_HOST`, contexts, `kling up`).
-- Go client (`pkg/api`): machine, volume, snapshot and image names are escaped in request paths, and the client no so a name with `/` or `..` can't reach another route with the caller's token.
+- Go client (`pkg/api`): machine, volume, snapshot and image names are escaped in request paths, and the client doesn't follow redirects, so a name with `/` or `..` can't reach another route with the caller's token.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
