@@ -136,6 +136,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: stale `.khv-clon-*` directories left by a killed snapshot (each holding a full copy of guest RAM) are removed by the next snapshot.
 - macOS networking: the netstack TCP buffers of a VM share a 256 MiB budget (512 open connections could hold up to 7 GiB of host memory), and DNS answers over 4 KiB are not cached.
 - kling-hv: the CPU cap charges the whole process, not only the vCPU threads, so disk, network and vsock work count too (cpu_pct=10 with a direct-I/O read loop: 45% to 12% of a core).
+- Linux: a host firewall repair that fails halfway is redone in full on the next check instead of leaving the INPUT drops without their accepts; a reload that deletes the `KL-ACCESO` chain no longer blocks every start and thaw until the daemon restarts.
+- Linux: `iptables-restore` in a machine's namespace retries while the xtables lock is held, and the remaining `iptables -S` calls wait for it.
 
 ### Security
 
@@ -185,6 +187,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Sandbox gateway: tenant tokens must be at least 16 characters and unique across tenants; `/v1/health` no longer reports the host count.
 - Kubernetes operator: it only renews or deletes the sandbox in `status.id` when it carries the object's UID, and rejects ids that are not `host/machine`.
 - `kling phone view` and `kling phone mcp` refuse a non-loopback `-listen` and only answer loopback connections; a loopback `Host` header is no longer enough.
+- Linux: the daemon checks the host firewall rules every 10 s while it has machines with a network, and before a thaw that keeps the frozen network, so a firewall reload no longer leaves running machines without them until another machine starts.
+- Linux: the `KL-ACCESO` jump in OUTPUT and the agent drop in mangle PREROUTING are put back first in their chain when another firewall inserts above them.
+- Linux: the group 0 permission without `--suppl-groups` left by older versions is removed from `KL-ACCESO` too.
 
 ### Changed
 

@@ -357,12 +357,20 @@ func (n *Net) reglasEnlace(port, slot int) [][]string {
 	}
 }
 
+// argsIptablesNetns es `iptables args` dentro del netns ns, con -w como las
+// demás llamadas a iptables (conEspera): sin él, con iptables-legacy y otro
+// arranque a la vez, el -S fallaba al momento y con él las aristas.
+func argsIptablesNetns(ns string, args ...string) []string {
+	return conEspera(append([]string{"ip", "netns", "exec", ns, "iptables"}, args...))
+}
+
 // quitarReglasEnlaceSobrantes borra del netns las reglas de enlace que no son
 // de links (ya ordenados: el slot de cada uno es su índice) y, con quitarCred,
 // las de los proxies de credenciales (reglasCredSobrantes).
 func (n *Net) quitarReglasEnlaceSobrantes(links []LinkSpec, quitarCred bool) error {
 	listar := func(args ...string) ([]string, error) {
-		out, err := exec.Command("ip", append([]string{"netns", "exec", n.NS, "iptables"}, args...)...).Output()
+		c := argsIptablesNetns(n.NS, args...)
+		out, err := exec.Command(c[0], c[1:]...).Output()
 		if err != nil {
 			return nil, fmt.Errorf("graph: iptables %s: %w", strings.Join(args, " "), err)
 		}
