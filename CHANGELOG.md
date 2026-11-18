@@ -153,7 +153,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The `.xz` decoder (Debian indexes and `.deb` packages) no longer panics on malformed filter properties or out-of-window distances, caps the dictionary at 64 MiB and allocates the window as it fills; a decompressed `Packages.xz` is capped at 1 GiB.
 - OCI pulls reject manifests with more than 1024 layers or whose declared layer sizes overflow the size limit, before downloading any blob; the unpacked-size check in the oci builder no longer overflows either.
 - Image layers with sparse files (`GNU.sparse.*`) are rejected when building the ext4 tree, as the reader of local `docker save` and OCI layout archives already did.
-- Sandbox gateway: the per-sandbox memory limit checks the effective size (the template snapshot when `mem_mib` is 0), and a tenant's live sandboxes have a total memory limit (`-max-mem-total-mib`, 7th field of `KLING_SANDBOX_TENANTS`, 16384 MiB by default).
+- Sandbox gateway: the per-sandbox memory limit checks the effective size (the template snapshot when `mem_mib` is 0), and a tenant's live sandboxes can have a total memory limit (`-max-mem-total-mib`, 7th field of `KLING_SANDBOX_TENANTS`; off unless set).
 - Sandbox gateway: tenant tokens must be at least 16 characters and unique across tenants; `/v1/health` no longer reports the host count.
 - Kubernetes operator: it only renews or deletes the sandbox in `status.id` when it carries the object's UID, and rejects ids that are not `host/machine`.
 - `kling phone view` and `kling phone mcp` refuse a non-loopback `-listen` and only answer loopback connections; a loopback `Host` header is no longer enough.
