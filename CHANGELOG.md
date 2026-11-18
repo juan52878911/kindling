@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - An interrupted `kling exec` exits with 130, like every other command, instead of 1.
 - `kling image import -warm` removes its `<template>-warm` machine also when Ctrl-C lands while it starts, and commands clean up their temporary machines on SIGHUP (closing the terminal) and SIGPIPE (`| head -1`) as on Ctrl-C.
 - `kling logs -f` no longer drops repeated lines and reads only what is new: `GET /machines/{ref}/logs` takes `offset` and `rotation` and answers with the next cursor in `X-Kling-Log-Offset`/`X-Kling-Log-Rotation`. Older daemons keep the old behaviour.
+- `kling mcp connect`/`migrate -install`: patching a client config follows symlinks, keeps the first backup, keeps large numbers exact, rereads the file before a durable write and keeps its permissions.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -165,6 +166,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db ask` with opencode: the model gets no tools (a deny-all agent, user MCP servers off), checked with opencode before the prompt is sent; if it cannot be checked, it refuses. The child no longer gets `KLING_*` or `PG*` variables.
 - `ssh://` hosts: the destination goes after `--` and one starting with `-` is refused, so it can't be read as an ssh option (`KLING_HOST`, contexts, `kling up`).
 - Go client (`pkg/api`): machine, volume, snapshot and image names are escaped in request paths, and the client doesn't follow redirects, so a name with `/` or `..` can't reach another route with the caller's token.
+- `kling mcp import`/`link`/`ls -v`/`show`/`connect`/`migrate`: server names, tool names and descriptions from an MCP server are printed without control characters.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - `install.sh`: wget is only used with `--https-only`, and a download cut inside the last line no longer runs the installer without its arguments.
 - The daemon only takes a process as a machine's VMM if it belongs to the daemon's user or the service user: a matching command line from another user is no longer adopted or killed.
