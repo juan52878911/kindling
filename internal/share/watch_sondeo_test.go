@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -96,5 +97,70 @@ func TestRepasoNoReleeFotosQuietas(t *testing.T) {
 	repasar(w)
 	if got := r.espera(1, time.Second); len(got) != 1 || got[0] != "C viejo/b" {
 		t.Fatalf("pushes %v, want [C viejo/b]", got)
+	}
+}
+
+// sinSitio es un backend al que no le caben más vigilancias (los descriptores de
+// kqueue del daemon gastados por otras sesiones).
+type sinSitio struct{}
+
+func (sinSitio) add(string, bool) error { return errWatchFull }
+func (sinSitio) remove(string)          {}
+func (sinSitio) close()                 {}
+
+// F8: sin sitio para una vigilancia más del sistema la ruta se olvidaba: los
+// vigilantes del invitado no disparaban nunca con sus cambios. Ahora se vigila
+// por sondeo.
+func TestSinSitioSeVigilaPorSondeo(t *testing.T) {
+	viejo := pollInterval
+	pollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { pollInterval = viejo })
+	root := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("v1"), 0o644))
+	srv, err := Open(root, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	r := &recogedor{t: t}
+	w := &watcher{srv: srv, be: sinSitio{}, entries: map[string]*watchEntry{}, lru: list.New(),
+		echo: map[string]time.Time{}, pend: map[string]rawEvent{}, push: r.push}
+	defer w.close()
+	w.note("f.txt", false)
+	must(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("version 2"), 0o644))
+	if got := r.espera(1, 2*time.Second); len(got) != 1 || got[0] != "M f.txt" {
+		t.Fatalf("pushes %v, want [M f.txt]", got)
+	}
+}
+
+// F8: pasado el tope de vigilancias del sistema de una sesión (1024 en macOS)
+// la ruta menos reciente se soltaba en silencio. Ahora pasa a sondeo y sus
+// cambios siguen llegando.
+func TestPasadoElTopeLaMenosRecienteSigueAvisando(t *testing.T) {
+	viejo := pollInterval
+	pollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { pollInterval = viejo })
+	root := t.TempDir()
+	const n = 1025
+	for i := range n {
+		must(t, os.WriteFile(filepath.Join(root, "f"+strconv.Itoa(i)), nil, 0o644))
+	}
+	srv, err := Open(root, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	r := &recogedor{t: t}
+	w, err := newWatcher(srv, r.push)
+	if err != nil {
+		t.Skipf("no host file watching here: %v", err)
+	}
+	defer w.close()
+	for i := range n {
+		w.note("f"+strconv.Itoa(i), false)
+	}
+	must(t, os.WriteFile(filepath.Join(root, "f0"), []byte("cambio"), 0o644))
+	if got := r.espera(1, 2*time.Second); len(got) != 1 || got[0] != "M f0" {
+		t.Fatalf("pushes %v, want [M f0]", got)
 	}
 }
