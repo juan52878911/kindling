@@ -261,6 +261,16 @@ func (c *Client) PatchDrive(ctx context.Context, driveID, pathOnHost string) err
 	})
 }
 
+// PatchNetworkLimiters cambia los limitadores de caudal de una interfaz ya
+// configurada: los de una copia restaurada, que trae los de su snapshot.
+func (c *Client) PatchNetworkLimiters(ctx context.Context, ifaceID string, rx, tx *RateLimiter) error {
+	// Un mapa y no NetworkInterface: el PATCH de Firecracker rechaza los campos
+	// que no admite (host_dev_name, guest_mac).
+	return c.do(ctx, http.MethodPatch, "/network-interfaces/"+ifaceID, map[string]any{
+		"iface_id": ifaceID, "rx_rate_limiter": rx, "tx_rate_limiter": tx,
+	})
+}
+
 // PatchDriveDisposable es PatchDrive marcando además el disco como overlay
 // desechable (kling_disposable, ver Drive). Solo para kling-vz y solo antes de
 // crear la VM: tras cargar un snapshot con resume_vm false.

@@ -22,8 +22,11 @@ type pollBackend struct {
 
 func newPollBackend(emit func(rawEvent)) *pollBackend {
 	b := &pollBackend{stop: make(chan struct{})}
+	// Se lee aquí y no en la goroutine: un test que cambie pollInterval no
+	// choca con la de otro que aún no ha arrancado.
+	cada := pollInterval
 	go func() {
-		t := time.NewTicker(pollInterval)
+		t := time.NewTicker(cada)
 		defer t.Stop()
 		for {
 			select {

@@ -1995,6 +1995,8 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// Un dorado de antes de globo_ritmo.go trae las estadísticas del globo
 	// cada 1 s; la copia, al de reposo.
 	ritmoGloboReposo(ctx, c)
+	// Su caudal de red, si no es el que quedó en el snapshot (red_caudal.go).
+	m.caudalTrasCargar(ctx, c, id)
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
 	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al

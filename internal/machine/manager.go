@@ -4530,9 +4530,6 @@ func (m *Manager) thawVMMViejo(mc *api.Machine, pid int) error {
 }
 
 func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool) {
-	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
-	// es mejor cerrarlas que esperar a que el keepalive lo note.
-	m.stopShares(id)
 	// Dos kill de la misma máquina a la vez (un fail sin cerrojo de ciclo de
 	// vida contra un Stop) leían los dos el mismo PID; el segundo mandaba su
 	// SIGKILL cuando el primero ya lo había visto morir, y ese PID podía ser
@@ -4552,15 +4549,23 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool)
 		// Sin PID puede quedar el VMM que un Freeze dejó vivo (M1): una warm
 		// tiene PID 0 aunque su VMM siga ahí. Darlo por muerto dejaba que el
 		// Start de después lanzase otro sobre el mismo overlay.
+		m.stopShares(id)
 		return m.matarVMMDeCongelado(id)
 	}
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
-		// El servicio primero: es quien escribe en los volúmenes.
+		// El servicio primero: es quien escribe en los volúmenes y en las
+		// carpetas vivas.
 		m.stopService(mc)
 		m.flushVolume(mc, conservaDisco)
 	}
+	// Las carpetas vivas, después del servicio y antes del SIGKILL: sus
+	// sesiones van a morir con el VMM, y es mejor cerrarlas que esperar a que
+	// el keepalive lo note. Antes del servicio no: lo que este escribiera al
+	// recibir su señal de parada, y lo que el agente tuviera diferido (que sale
+	// al cerrar cada fichero), fallaba con la sesión ya cortada y se perdía.
+	m.stopShares(id)
 	senalMatar(pid)
 	defer func() {
 		if !murio {

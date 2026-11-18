@@ -144,6 +144,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: the CPU cap charges the whole process, not only the vCPU threads, so disk, network and vsock work count too (cpu_pct=10 with a direct-I/O read loop: 45% to 12% of a core).
 - Linux: a host firewall repair that fails halfway is redone in full on the next check instead of leaving the INPUT drops without their accepts; a reload that deletes the `KL-ACCESO` chain no longer blocks every start and thaw until the daemon restarts.
 - Linux: `iptables-restore` in a machine's namespace retries while the xtables lock is held, and the remaining `iptables -S` calls wait for it.
+- Stop and remove ask the guest to stop its service before cutting its live shared folders, so what the service writes on shutdown reaches the host.
+- Stop, freeze and remove wait at most 5 s for live shared folders to close, so a host folder on a hung NFS or SMB mount no longer hangs them.
+- Linux: after an atomic save on the host (write aside, rename over) of a file the guest watches, later changes to it reach the guest again; the watch stayed on the old inode while anything held it open.
+- macOS: a shared-folder session that watches more than 1024 paths, or finds the daemon out of watch descriptors, polls the rest every 2 s (up to 4096, as on Linux) instead of silently dropping them; it is logged once per session.
+- Linux: a copy of a template given live shared folders (run -from with shares, sandboxes) gets the 256 MiB/s network floor instead of the 16 MiB/s left in its snapshot (1 GiB through a rw share: 17 to 58 MB/s writing, 17 to 87 MB/s reading, the same as a cold boot).
+- The 256 MiB/s network floor for machines with live shared folders no longer overrides a lower `daemon.net_mibps` (or `KLING_NET_MIBPS`) set on purpose.
 
 ### Security
 
@@ -232,6 +238,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
 - rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
 - Machines with shares started through the API (gateway, sandbox) get at least 256 MiB/s of network, as `kling run -share` already did.
+- Shared folders watched by polling no longer re-read every watched directory each 2 s when its date has not changed (100 directories of 500 entries: 22 ms to 0.21 ms per poll on Linux, 71 ms to 0.2 ms on macOS).
 
 ## [1.0.0-rc.2] - 2026-11-10
 
