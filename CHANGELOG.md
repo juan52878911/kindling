@@ -193,6 +193,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
 - rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
 - Machines with shares started through the API (gateway, sandbox) get at least 256 MiB/s of network, as `kling run -share` already did.
+- Shared folders watched by polling no longer re-read every watched directory each 2 s when its date has not changed (100 directories of 500 entries: 22 ms to 0.21 ms per poll on Linux, 71 ms to 0.2 ms on macOS).
 
 ## [1.0.0-rc.2] - 2026-11-10
 

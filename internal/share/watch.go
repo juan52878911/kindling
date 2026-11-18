@@ -122,6 +122,9 @@ type watchEntry struct {
 	cost  int64
 	id    Ident
 	hayID bool
+	// fotoDesde es cuándo se empezó a leer snap: el repaso no la relee si el
+	// directorio no ha cambiado de fecha desde bastante antes (fotoFiable).
+	fotoDesde time.Time
 	// fp es su huella al vigilarlo o al último aviso; en un directorio sin
 	// foto, lo único con lo que el repaso sabe si cambió su lista.
 	fp fingerprint
@@ -243,6 +246,7 @@ func (w *watcher) note(rel string, dir bool) {
 	// que cambie mientras tanto llega como evento; si flush lo procesa antes
 	// de que esté la foto, avisa del directorio entero y la toma él.
 	w.mu.Unlock()
+	desde := time.Now()
 	snap, id, ok := w.snapshot(rel, func(id Ident) bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -250,14 +254,14 @@ func (w *watcher) note(rel string, dir bool) {
 	})
 	w.mu.Lock()
 	if !w.closed && w.entries[rel] == e && e.snap == nil {
-		w.setSnapLocked(e, snap, id, ok)
+		w.setSnapLocked(e, snap, id, ok, desde)
 	}
 }
 
-// setSnapLocked pone snap como foto de e, si cabe en el presupuesto de la
-// sesión y ninguna otra entrada tiene ya la de ese directorio; si no, e se
-// queda sin foto.
-func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, hayID bool) {
+// setSnapLocked pone snap (leída desde desde) como foto de e, si cabe en el
+// presupuesto de la sesión y ninguna otra entrada tiene ya la de ese
+// directorio; si no, e se queda sin foto.
+func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, hayID bool, desde time.Time) {
 	w.clearSnapLocked(e)
 	if snap == nil {
 		return
@@ -269,7 +273,7 @@ func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, h
 	if w.snapBytes+c > maxSnapBytes {
 		return
 	}
-	e.snap, e.cost, e.id, e.hayID = snap, c, id, hayID
+	e.snap, e.cost, e.id, e.hayID, e.fotoDesde = snap, c, id, hayID, desde
 	w.snapBytes += c
 	if hayID {
 		if w.snapOf == nil {
@@ -491,12 +495,13 @@ func (w *watcher) flush() {
 			}
 		case e.dir:
 			e.fp = fp
+			desde := time.Now()
 			now, id, hayID := w.snapshot(ev.rel, func(id Ident) bool { return w.otraFotoLocked(e, id) })
 			if e.snap == nil || now == nil {
 				// Sin foto con la que comparar (directorio enorme, presupuesto
 				// gastado, otro nombre del mismo directorio ya la tiene): se
 				// avisa del directorio, y el invitado relee su lista.
-				w.setSnapLocked(e, now, id, hayID)
+				w.setSnapLocked(e, now, id, hayID, desde)
 				if ev.rel != "" {
 					add(proto.EventModify, ev.rel)
 				}
@@ -516,7 +521,7 @@ func (w *watcher) flush() {
 					}
 				}
 			}
-			w.setSnapLocked(e, now, id, hayID)
+			w.setSnapLocked(e, now, id, hayID, desde)
 		default:
 			e.fp = fp
 			add(proto.EventModify, ev.rel)
@@ -548,12 +553,28 @@ func (w *watcher) resyncLocked(pend map[string]rawEvent) {
 			// Sin foto, flush avisaría del directorio entero: por sondeo, cada
 			// pollInterval y para siempre (vite o nodemon recompilando en
 			// bucle). Si su fecha y su tamaño no cambiaron, su lista tampoco.
+		case e.dir && fingerprintOf(fi) == e.fp && fotoFiable(e, fi):
+			// Con foto, lo mismo: releerla era leer hasta 20 000 nombres de
+			// cada directorio vigilado, con w.mu tomado, cada pollInterval.
 		case e.dir:
 			pend[r] = rawEvent{rel: r, dir: true}
 		case fingerprintOf(fi) != e.fp:
 			pend[r] = rawEvent{rel: r}
 		}
 	}
+}
+
+// margenFecha es lo que se desconfía de la fecha de un directorio: en un
+// sistema de ficheros con fechas gruesas (HFS+ por segundos, FAT por dos, un
+// SMB) un cambio en el mismo tic que la foto no mueve la fecha.
+const margenFecha = 2 * time.Second
+
+// fotoFiable dice si la foto de e vale mientras la fecha del directorio (fi)
+// no cambie: se empezó a leer más de margenFecha después de esa fecha, así que
+// cualquier cambio posterior la habría movido. Si no, se relee, y la foto
+// nueva ya lo es.
+func fotoFiable(e *watchEntry, fi fs.FileInfo) bool {
+	return e.fotoDesde.Sub(fi.ModTime()) > margenFecha
 }
 
 // relPath es rel para os.Root ("" es la raíz).
