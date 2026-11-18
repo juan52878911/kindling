@@ -495,8 +495,34 @@ func resyncNota(t time.Duration, ok bool) string {
 // resync—. Equivocarse aquí solo deja sin poner el reloj de UNA máquina: un
 // thaw no tiene clones con los que compartir el CSPRNG.
 func (m *Manager) agenteEscucha(ctx context.Context, id string) bool {
+	return m.sondearAgente(ctx, id) == sondeoAbierto
+}
+
+// sondeoAgente es lo que contesta el puerto del agente: alguien escucha,
+// nadie (un RST, o el "cerrado" del VMM) o nada claro (un plazo u otro fallo,
+// que con el host cargado no prueba que no haya agente).
+type sondeoAgente uint8
+
+const (
+	sondeoAbierto sondeoAgente = iota
+	sondeoCerrado
+	sondeoNoSe
+)
+
+// dialAgente es el SYN al puerto del agente; los tests lo sustituyen para
+// simular un plazo agotado.
+var dialAgente = func(addr string, plazo time.Duration) (net.Conn, error) {
+	return net.DialTimeout("tcp", addr, plazo)
+}
+
+// sondearAgente sondea el puerto del agente de id distinguiendo los tres
+// casos. Sin dirección dice "abierto", como siempre: ante la duda, sí.
+func (m *Manager) sondearAgente(ctx context.Context, id string) sondeoAgente {
 	if open, ok := m.sondearPuerto(ctx, id, api.GuestPort, false); ok {
-		return open
+		if open {
+			return sondeoAbierto
+		}
+		return sondeoCerrado
 	}
 	m.mu.RLock()
 	mc := m.byID[id]
@@ -506,12 +532,16 @@ func (m *Manager) agenteEscucha(ctx context.Context, id string) bool {
 	}
 	m.mu.RUnlock()
 	if addr == "" {
-		return true
+		return sondeoAbierto
 	}
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
+	conn, err := dialAgente(addr, 200*time.Millisecond)
+	switch {
+	case err == nil:
+		conn.Close()
+		return sondeoAbierto
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return sondeoCerrado
+	default:
+		return sondeoNoSe
 	}
-	conn.Close()
-	return true
 }
