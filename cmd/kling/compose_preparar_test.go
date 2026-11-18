@@ -230,7 +230,7 @@ func TestEntornoAFichero(t *testing.T) {
 // S14: el hijo lee el -env-file de /dev/fd/3 y su entorno, y no queda
 // ningún fichero en el directorio temporal mientras corre.
 func TestCorrerLineaSinFichero(t *testing.T) {
-	if _, err := os.Stat(fdEntorno); err != nil {
+	if _, err := os.Stat("/dev/fd"); err != nil {
 		t.Skipf("sin /dev/fd: %v", err)
 	}
 	dir := t.TempDir()

@@ -52,7 +52,7 @@ func TestEtiquetasDeVolumenAcotadas(t *testing.T) {
 		muchas[strings.Repeat("k", i+1)] = "v"
 	}
 	for _, l := range []map[string]string{muchas, {"": "v"}, {"k": strings.Repeat("v", maxValorEtiqueta+1)}} {
-		if _, err := m.CreateVolumeLabeled(t.Context(), "notas", 64, l); err == nil {
+		if _, err := m.CreateVolumeLabeled(t.Context(), "notas", 64, l); err == nil || !strings.Contains(err.Error(), "label") {
 			t.Fatalf("aceptó %d etiquetas", len(l))
 		}
 	}
