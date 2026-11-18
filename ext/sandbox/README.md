@@ -100,8 +100,8 @@ kling sbx gateway -listen 0.0.0.0:8090 -tls-cert gw.pem -tls-key gw.key   # haci
 Un sandbox no puede pedir más `mem_mib` ni `vcpus` que el máximo de su inquilino; sin
 máximo propio rige el del gateway (`-max-mem-mib`, 4096 por defecto; `-max-vcpus`, 4).
 Con plantilla y sin `mem_mib` cuenta la memoria del snapshot. La suma de `mem_mib` de
-los sandboxes vivos (o dormidos) de un inquilino también tiene tope (séptimo campo, o
-`-max-mem-total-mib`, 16384 por defecto). Cada token tiene al menos 16 caracteres y no se
+los sandboxes vivos (o dormidos) de un inquilino puede tener tope (séptimo campo, o
+`-max-mem-total-mib`); sin configurarlo no lo hay. Cada token tiene al menos 16 caracteres y no se
 repite entre inquilinos.
 
 Los tokens van en cada petición, así que el gateway solo sirve HTTP en claro por

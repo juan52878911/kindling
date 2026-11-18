@@ -779,9 +779,9 @@ func TestReclamarConUnHostColgadoNoParaALosDemas(t *testing.T) {
 	f.snapshots = []string{"sbx-node"}
 	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	f.sandboxesEspera, f.sandboxesEmpezado = make(chan struct{}), make(chan struct{})
-	// La primera lista es la de la cuota de memoria; la segunda, la de la
-	// reclamación, que es la que se cuelga.
-	f.sandboxesColgarN = 2
+	// Sin tope de memoria total (no viene por defecto) la cuota no lista: la
+	// primera lista es la de la reclamación, que es la que se cuelga.
+	f.sandboxesColgarN = 1
 	srv, _ := montar(t, map[string]*falso{"a": f})
 	t.Cleanup(func() { close(f.sandboxesEspera) })
 

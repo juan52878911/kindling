@@ -42,13 +42,22 @@ func TestTopeDeMemoriaAgregadoPorTenant(t *testing.T) {
 	crea(t, srv, tokenBob, CrearPeticion{Image: "base", MemMiB: 512})
 	esperaCodigo(t, pide(t, srv, tokenBob, "POST", "/v1/sandboxes", CrearPeticion{Template: "py"}), 429)
 
-	// Sin decir nada, a cada tenant le toca el del frontal.
+	// Sin decir nada no hay tope total; con el del frontal, cada tenant sin el
+	// suyo hereda ese, y el suyo manda sobre él.
 	s, err := Nuevo(Opciones{Hosts: hosts.Nuevo(nil), Tenants: []Tenant{{Nombre: "x", Token: tokenAlice}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.tenants[0].MaxMemTotalMiB != MaxMemTotalMiBPorDefecto {
-		t.Fatalf("default total limit %d, want %d", s.tenants[0].MaxMemTotalMiB, MaxMemTotalMiBPorDefecto)
+	if got := s.tenants[0].MaxMemTotalMiB; got != 0 {
+		t.Fatalf("total limit without configuration %d, want 0 (off)", got)
+	}
+	s, err = Nuevo(Opciones{Hosts: hosts.Nuevo(nil), MaxMemTotalMiB: 8192, Tenants: []Tenant{
+		{Nombre: "x", Token: tokenAlice}, {Nombre: "y", Token: tokenBob, MaxMemTotalMiB: 2048}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := s.tenants[0].MaxMemTotalMiB, s.tenants[1].MaxMemTotalMiB; a != 8192 || b != 2048 {
+		t.Fatalf("total limits %d and %d, want 8192 (frontal) and 2048 (own)", a, b)
 	}
 }
 

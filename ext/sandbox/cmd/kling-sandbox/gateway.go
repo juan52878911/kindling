@@ -90,7 +90,7 @@ func cmdGateway(args []string) error {
 	abandono := fs.Duration("abandon", 0, "how long a sandbox may sit unused before it is destroyed (default 24h)")
 	maxMem := fs.Int("max-mem-mib", 0, "largest mem_mib a sandbox may ask for, for tenants without their own (default 4096)")
 	maxCPU := fs.Int("max-vcpus", 0, "largest vcpus a sandbox may ask for, for tenants without their own (default 4)")
-	maxTotal := fs.Int("max-mem-total-mib", 0, "largest sum of mem_mib a tenant may have alive, for tenants without their own (default 16384)")
+	maxTotal := fs.Int("max-mem-total-mib", 0, "largest sum of mem_mib a tenant may have alive, for tenants without their own (default: no total limit)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

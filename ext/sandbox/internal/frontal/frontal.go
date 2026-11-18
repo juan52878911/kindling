@@ -82,8 +82,10 @@ type Tenant struct {
 	// MaxMemTotalMiB acota la suma de mem_mib de todos los sandboxes vivos del
 	// tenant, contando el tamaño EFECTIVO (el del snapshot de la plantilla
 	// cuando la petición no dice nada). 0 = el del frontal
-	// (Opciones.MaxMemTotalMiB). Sin él, el tope por sandbox no impide que un
-	// token llene la RAM del host con muchos sandboxes medianos.
+	// (Opciones.MaxMemTotalMiB), y si tampoco hay, sin tope total. Sin él, el
+	// tope por sandbox no impide que un token llene la RAM del host con muchos
+	// sandboxes medianos; es opt-in porque contarlo lista los hosts en cada
+	// creación y solo suma los que contestan.
 	MaxMemTotalMiB int
 	// Admin ve lo que es del operador y no de un tenant: /v1/hosts (los
 	// endpoints de los daemons) y las métricas de TODOS los tenants. Sin él,
@@ -108,7 +110,7 @@ type Opciones struct {
 	MaxMemMiB int
 	MaxVCPUs  int
 	// MaxMemTotalMiB es la suma máxima de mem_mib vivos por tenant para los que
-	// no traen la suya. 0 = MaxMemTotalMiBPorDefecto.
+	// no traen la suya. 0 = sin tope total salvo el que traiga cada tenant.
 	MaxMemTotalMiB int
 
 	// Abandono es cuánto puede llevar un sandbox sin usarse antes de que la
@@ -180,9 +182,6 @@ var nombreValido = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 const (
 	MaxMemMiBPorDefecto = 4096
 	MaxVCPUsPorDefecto  = 4
-	// MaxMemTotalMiBPorDefecto es la suma de mem_mib vivos que puede tener un
-	// tenant: cuatro sandboxes del máximo, o muchos más pequeños.
-	MaxMemTotalMiBPorDefecto = 4 * MaxMemMiBPorDefecto
 )
 
 // minToken es la longitud mínima de un token de tenant. Uno corto se adivina
@@ -204,9 +203,6 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		return nil, errors.New("default mem_mib and vcpus limits can't be negative")
 	}
 	maxMem, maxCPU, maxTotal := o.MaxMemMiB, o.MaxVCPUs, o.MaxMemTotalMiB
-	if maxTotal == 0 {
-		maxTotal = MaxMemTotalMiBPorDefecto
-	}
 	if maxMem == 0 {
 		maxMem = MaxMemMiBPorDefecto
 	}
