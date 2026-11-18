@@ -121,6 +121,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `POST /graphs/{ref}/snapshot`: a template name already in use gives a neutral 409 that no longer confirms another tenant's template or how to remove it.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
