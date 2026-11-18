@@ -11,6 +11,8 @@ package main
 // avisa, una línea por cosa, nunca se descarta en silencio.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +36,9 @@ type traduccionCompose struct {
 	Antes   []string // órdenes a correr antes de `graph up`
 	Avisos  []string // una línea por cosa sin equivalente
 	Proyect string
+	// proyectoViejo es el nombre que un kling anterior daba a un proyecto de
+	// más de maxNombreDNS (cortado sin hash); "" si no hubo que cortarlo.
+	proyectoViejo string
 	// Publica son los puertos publicados en el host por nodo (Host 0: uno
 	// libre al azar, como `ports: "80"` en Docker). `graph up` no los publica;
 	// `kling compose up` se los pide al daemon, en 127.0.0.1.
@@ -365,7 +370,12 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 	if n, ok := top["name"].(string); ok && n != "" && !forzar {
 		proyecto = n
 	}
-	proyecto = nombreDNS(proyecto)
+	n, cortado := nombreDNSCortado(proyecto)
+	if cortado {
+		avisa("project name %s is over %d characters: it is %s", proyecto, maxNombreDNS, n)
+		t.proyectoViejo = nombreDNSViejo(proyecto)
+	}
+	proyecto = n
 	if err := api.ValidateGraphName(proyecto); err != nil {
 		return nil, fmt.Errorf("graph name %q: %w (use -name)", proyecto, err)
 	}
@@ -1438,13 +1448,38 @@ func reescribirHosts(k, v string, por map[string]*servicioCompose) (string, []st
 	return v, cambios
 }
 
+// maxNombreDNS es el largo de un nombre de grafo (api.ValidateGraphName).
+const maxNombreDNS = 24
+
+// nombreDNS normaliza s a un nombre de grafo o de nodo. Uno más largo que
+// maxNombreDNS se corta y lleva detrás 6 cifras del hash del nombre entero:
+// cortado a secas, customer-portal-backend-staging y …-production daban el
+// mismo proyecto, y por tanto los mismos volúmenes (down -v de uno borraba
+// los del otro).
 func nombreDNS(s string) string {
-	s = reDNSNodo.ReplaceAllString(strings.ToLower(s), "-")
-	s = strings.Trim(s, "-")
-	if len(s) > 24 {
-		s = strings.Trim(s[:24], "-")
+	n, _ := nombreDNSCortado(s)
+	return n
+}
+
+// nombreDNSViejo es el nombre que un kling anterior daba a s: cortado a
+// maxNombreDNS sin más. Solo para encontrar un proyecto levantado con él.
+func nombreDNSViejo(s string) string {
+	s = strings.Trim(reDNSNodo.ReplaceAllString(strings.ToLower(s), "-"), "-")
+	if len(s) > maxNombreDNS {
+		s = strings.Trim(s[:maxNombreDNS], "-")
 	}
 	return s
+}
+
+// nombreDNSCortado es nombreDNS, y dice si hubo que cortarlo.
+func nombreDNSCortado(s string) (string, bool) {
+	s = reDNSNodo.ReplaceAllString(strings.ToLower(s), "-")
+	s = strings.Trim(s, "-")
+	if len(s) <= maxNombreDNS {
+		return s, false
+	}
+	h := sha256.Sum256([]byte(s))
+	return strings.Trim(s[:maxNombreDNS-7], "-") + "-" + hex.EncodeToString(h[:3]), true
 }
 
 func nombreVolumen(s string) string {

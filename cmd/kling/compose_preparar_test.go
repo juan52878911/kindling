@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -186,45 +187,61 @@ func (o *opsContadas) CommitWith(context.Context, string, api.CommitRequest) (*a
 func (o *opsContadas) Remove(context.Context, string) error { return nil }
 
 // S21b: el entorno de un servicio va a kling image import en un -env-file y
-// no en argv (lo ve cualquiera con ps), y llega igual.
+// no en argv (lo ve cualquiera con ps), y llega igual. S14: el fichero no
+// toca el disco (llega por un pipe), y un valor que no cabe en él va por el
+// entorno del hijo sin arrastrar a los demás de vuelta a argv.
 func TestEntornoAFichero(t *testing.T) {
 	s := &servicioCompose{nodo: "db", imagen: "postgres:17", user: "-e", entry: []string{"-e"},
-		env: [][2]string{{"DB_PASS", "s3cr #et"}, {"DSN", "a=b: c"}, {"VACIA", ""}}, cmd: []string{"-e", "X=1"}}
-	argv, limpiar, err := argvKling(ordenImport(s, "dev"))
+		env: [][2]string{{"DB_PASS", "s3cr #et"}, {"DSN", "a=b: c"}, {"VACIA", ""}, {"CERT", "-----BEGIN\nfin "}},
+		cmd: []string{"-e", "X=1"}}
+	o, err := argvKling(ordenImport(s, "dev"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range argv {
-		if strings.Contains(a, "s3cr") || strings.Contains(a, "a=b") {
-			t.Fatalf("el secreto sigue en argv: %q", argv)
+	for _, a := range o.argv {
+		if strings.Contains(a, "s3cr") || strings.Contains(a, "a=b") || strings.Contains(a, "BEGIN") {
+			t.Fatalf("un secreto sigue en argv: %q", o.argv)
 		}
 	}
 	// -user y -entrypoint conservan su valor ("-e"), y lo de detrás de --,
 	// también; el -env-file va antes del --.
-	k := slices.Index(argv, "-env-file")
-	if k < 0 || !slices.Equal(argv[k+2:], []string{"--", "-e", "X=1"}) || argv[slices.Index(argv, "-user")+1] != "-e" {
-		t.Fatalf("argv = %q", argv)
+	k := slices.Index(o.argv, "-env-file")
+	if k < 0 || o.argv[k+1] != fdEntorno || !slices.Equal(o.argv[k+2:], []string{"--", "-e", "X=1"}) || o.argv[slices.Index(o.argv, "-user")+1] != "-e" {
+		t.Fatalf("argv = %q", o.argv)
 	}
-	fichero := argv[k+1]
-	if fi, err := os.Stat(fichero); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("fichero de entorno: %v %v", fi, err)
+	if !slices.Contains(o.argv, "CERT") || !slices.Equal(o.env, []string{"CERT=-----BEGIN\nfin "}) {
+		t.Fatalf("CERT: argv %q env %q", o.argv, o.env)
 	}
-	got, err := resolveEnv(nil, []string{fichero}, nil, os.ReadFile)
+	got, err := resolveEnv(nil, []string{"f"}, nil, func(string) ([]byte, error) { return o.fichero, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got, []string{"DB_PASS=s3cr #et", "DSN=a=b: c", "VACIA="}) {
 		t.Fatalf("entorno = %q", got)
 	}
-	limpiar()
-	if _, err := os.Stat(fichero); !os.IsNotExist(err) {
-		t.Fatalf("el fichero sigue: %v", err)
+	// Uno que no puede ir por el entorno del hijo (cambiaría a qué daemon
+	// habla) se queda en argv, solo él.
+	sin, lineas, env, ok := entornoAFichero([]string{"image", "import", "x", "-e", "KLING_HOST=a\nb", "-e", "P=s"})
+	if !ok || !slices.Equal(sin, []string{"image", "import", "x", "-e", "KLING_HOST=a\nb"}) || !slices.Equal(lineas, []string{"P=s"}) || env != nil {
+		t.Fatalf("sin %q lineas %q env %q", sin, lineas, env)
 	}
-	// Lo que el fichero cambiaría (espacio al final, un salto) se queda en argv.
-	for _, v := range []string{"fin ", "a\nb"} {
-		argv := []string{"image", "import", "x", "-e", "K=" + v}
-		if _, _, ok := entornoAFichero(argv); ok {
-			t.Errorf("%q: al fichero", v)
-		}
+}
+
+// S14: el hijo lee el -env-file de /dev/fd/3 y su entorno, y no queda
+// ningún fichero en el directorio temporal mientras corre.
+func TestCorrerLineaSinFichero(t *testing.T) {
+	if _, err := os.Stat(fdEntorno); err != nil {
+		t.Skipf("sin /dev/fd: %v", err)
+	}
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	o := &ordenKling{fichero: []byte("A=1\nB=dos\n"), env: []string{"CERT=x\ny"}}
+	cmd := exec.Command("sh", "-c", `ls -A "$TMPDIR"; cat `+fdEntorno+`; printf '%s' "$CERT"`)
+	out, err := correrLinea(cmd, o)
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if out != "A=1\nB=dos\nx\ny" {
+		t.Fatalf("salida = %q", out)
 	}
 }

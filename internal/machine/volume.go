@@ -3,6 +3,7 @@ package machine
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,10 +37,58 @@ const defaultVolumeMiB = 1024
 func (m *Manager) volumesDir() string         { return filepath.Join(m.root, "volumes") }
 func (m *Manager) volumePath(n string) string { return filepath.Join(m.volumesDir(), n+".ext4") }
 
+// volumeLabelsPath guarda las etiquetas del volumen n junto a él. El nombre
+// no lleva puntos (reVolume), así que no se confunde con un volumen.
+func (m *Manager) volumeLabelsPath(n string) string {
+	return filepath.Join(m.volumesDir(), n+".labels.json")
+}
+
+// Topes de las etiquetas de un volumen: son metadatos, no un almacén.
+const (
+	maxEtiquetasVolumen = 32
+	maxClaveEtiqueta    = 128
+	maxValorEtiqueta    = 4096
+)
+
+func validarEtiquetasVolumen(labels map[string]string) error {
+	if len(labels) > maxEtiquetasVolumen {
+		return peticionInvalida("too many volume labels: %d (at most %d)", len(labels), maxEtiquetasVolumen)
+	}
+	for k, v := range labels {
+		if k == "" || len(k) > maxClaveEtiqueta || len(v) > maxValorEtiqueta {
+			return peticionInvalida("volume label %q: the key is 1-%d bytes and the value at most %d", k, maxClaveEtiqueta, maxValorEtiqueta)
+		}
+	}
+	return nil
+}
+
+// leerEtiquetasVolumen son las etiquetas guardadas de n (nil sin ellas: un
+// volumen de antes o creado sin ninguna).
+func (m *Manager) leerEtiquetasVolumen(n string) map[string]string {
+	b, err := os.ReadFile(m.volumeLabelsPath(n))
+	if err != nil {
+		return nil
+	}
+	var l map[string]string
+	if json.Unmarshal(b, &l) != nil || len(l) == 0 {
+		return nil
+	}
+	return l
+}
+
 // CreateVolume crea un volumen vacío formateado en ext4.
 func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*api.Volume, error) {
+	return m.CreateVolumeLabeled(ctx, name, sizeMiB, nil)
+}
+
+// CreateVolumeLabeled es CreateVolume con etiquetas: quien lo creó (compose
+// pone su proyecto), para que nadie más lo tome por suyo al borrar.
+func (m *Manager) CreateVolumeLabeled(ctx context.Context, name string, sizeMiB int, labels map[string]string) (*api.Volume, error) {
 	if !reVolume.MatchString(name) {
 		return nil, marcado(ErrInvalidName, "invalid volume name %q: lowercase letters, digits, hyphen and underscore", name)
+	}
+	if err := validarEtiquetasVolumen(labels); err != nil {
+		return nil, err
 	}
 	if sizeMiB <= 0 {
 		sizeMiB = defaultVolumeMiB
@@ -80,8 +129,16 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("formatting volume: %w", err)
 	}
+	// Las etiquetas van antes que el volumen: existir implica tenerlas. Sin
+	// ninguna, se quita la que pudiera quedar de un volumen anterior con el
+	// mismo nombre (un daemon muerto entre las dos retiradas).
+	if err := m.escribirEtiquetasVolumen(name, labels); err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
 	if err := durable.Renombrar(tmp, path); err != nil {
 		_ = os.Remove(tmp)
+		_ = os.Remove(m.volumeLabelsPath(name))
 		return nil, err
 	}
 	// El VMM corre sin privilegios y tiene que poder ESCRIBIR el fichero: un
@@ -93,6 +150,22 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 	// para que un VMM comprometido no pueda reescribir el pasado de nadie.
 	m.permisosVolumen(path)
 	return m.statVolume(name)
+}
+
+// escribirEtiquetasVolumen guarda las etiquetas de n, o quita las que haya
+// si no lleva ninguna.
+func (m *Manager) escribirEtiquetasVolumen(n string, labels map[string]string) error {
+	if len(labels) == 0 {
+		if err := os.Remove(m.volumeLabelsPath(n)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	b, err := json.Marshal(labels)
+	if err != nil {
+		return err
+	}
+	return durable.Escribir(m.volumeLabelsPath(n), b, 0o600)
 }
 
 // Volumes lista los volúmenes con su ocupación real y quién los usa.
@@ -137,6 +210,7 @@ func (m *Manager) statVolume(name string) (*api.Volume, error) {
 		// ver con el tamaño lógico: un volumen de 2 GiB recién creado ocupa
 		// kilobytes.
 		UsedBytes: allocatedBytes(m.volumePath(name)),
+		Labels:    m.leerEtiquetasVolumen(name),
 	}, nil
 }
 
@@ -404,6 +478,12 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 		return &api.StatusError{Code: http.StatusConflict, Message: fmt.Sprintf(
 			"volume %q has %d snapshot(s): remove them first (kling volume rm %s@<snapshot>)\n"+
 				"or remove everything with:  kling volume rm -snapshots %s", name, n, name, name)}
+	}
+	// Las etiquetas se van antes que el volumen: si el daemon muere entre
+	// las dos, queda un volumen sin dueño (nadie lo borra por suyo) y no unas
+	// etiquetas que adopte el próximo volumen con ese nombre.
+	if err := os.Remove(m.volumeLabelsPath(name)); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	apartado, errVol := m.aLaPapelera(m.volumePath(name), "vol-"+name)
 	if errVol != nil && !os.IsNotExist(errVol) {

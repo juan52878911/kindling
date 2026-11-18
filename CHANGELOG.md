@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Volumes take labels (`labels` in `POST /volumes` and in `GET /volumes`); compose labels its volumes with the project and the compose file.
 - macOS: `kling doctor` warns when the kernel or `min.ext4` that `kling up` downloaded come from another release, since `kling up` never replaces them.
 - `kling-mcp gateway -max-sessions` caps the MCP sessions a tenant has open at once (default 256; without named tokens every client shares the `default` tenant).
 - `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
@@ -16,6 +17,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling compose down -v` only removes volumes labeled with its project and compose file, so it no longer removes another project's volume with the same name, even when that project is down; volumes from an older kling are left with a warning.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -118,6 +120,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `kling compose up` passes the services' environment to `image import` through a pipe instead of a temp file, and a multi-line value no longer puts the rest back on the command line; SIGHUP now cleans up like Ctrl-C.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
@@ -160,6 +163,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Compose project and service names over 24 characters end in a short hash instead of being cut, so two long names no longer become the same project; a project an older kling started is still found by `down` and `up`.
 - MCP gateway `/mcp/_all`: up to 16 idle connections per guest (was 2), so concurrent tool calls stop redialing, and tool results are written without being re-encoded.
 - Linux: setting up a machine's network runs 11 processes instead of 23 (`ip -batch`, one `sysctl`, no teardown when there is nothing): 46 to 20 ms in the lab.
 - `kling plugin install` streams the asset to disk while hashing it instead of holding it (up to 512 MiB) in memory.

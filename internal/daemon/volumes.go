@@ -43,7 +43,7 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	// Formatear un ext4 tarda; se acota por el contexto de la petición porque
 	// aquí no queda nada a medias que pueda envenenar al host: CreateVolume
 	// construye en .tmp y solo renombra al terminar.
-	v, err := s.mgr.CreateVolume(r.Context(), req.Name, req.SizeMiB)
+	v, err := s.mgr.CreateVolumeLabeled(r.Context(), req.Name, req.SizeMiB, req.Labels)
 	if err != nil {
 		fail(w, volumeStatus(err), err)
 		return
