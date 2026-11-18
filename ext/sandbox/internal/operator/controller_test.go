@@ -284,6 +284,10 @@ type fakeFrontal struct {
 	listas  int
 	gets    int
 	renews  int
+	// hostCaido: el GET de un id de ese host contesta 503 (y cuenta en
+	// getsCaido), como el frontal cuando ese host no contesta.
+	hostCaido string
+	getsCaido int
 }
 
 func (f *fakeFrontal) setDown(v bool) {
@@ -373,6 +377,12 @@ func (f *fakeFrontal) get(w http.ResponseWriter, r *http.Request) {
 	}
 	id := idDe(r)
 	f.mu.Lock()
+	if f.hostCaido != "" && r.PathValue("host") == f.hostCaido {
+		f.getsCaido++
+		f.mu.Unlock()
+		writeTestJSON(w, http.StatusServiceUnavailable, api.Error{Message: "host " + f.hostCaido + " did not answer"})
+		return
+	}
 	f.gets++
 	sb, ok := f.sandboxes[id]
 	f.mu.Unlock()

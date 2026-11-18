@@ -95,6 +95,39 @@ func TestResyncUnaListaPorPasada(t *testing.T) {
 	}
 }
 
+// Con un host caído, sus objetos no hacen cada uno su GET (y su lista) en
+// serie: el primer GET que falla marca el host para el resto de la pasada, y
+// los objetos sin status.id se quedan con la foto parcial.
+func TestResyncConHostCaidoUnGETPorHost(t *testing.T) {
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	fr.parcial = true
+	fr.hostCaido = "host2"
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	for i := 0; i < 20; i++ {
+		sb := newTestSandbox("default", fmt.Sprintf("s%d", i))
+		sb.Metadata.UID = fmt.Sprintf("uid-%d", i)
+		sb.Metadata.Finalizers = []string{CleanupFinalizer}
+		if i%2 == 0 {
+			id := fmt.Sprintf("host2/sbx-%d", i)
+			sb.Status = SandboxStatus{ID: id, Host: "host2", State: string(api.StateRunning), ObservedGeneration: 1}
+		}
+		k8s.seed(sb)
+		ctrl.remember(&sb)
+	}
+	ctrl.resyncPasada(testCtx(t))
+	fr.mu.Lock()
+	listas, gets := fr.listas, fr.getsCaido
+	creates := fr.creates
+	fr.mu.Unlock()
+	if listas != 1 || gets != 1 {
+		t.Fatalf("one resync pass with host2 down made %d lists and %d gets to it, want 1 and 1", listas, gets)
+	}
+	if creates != 0 {
+		t.Fatalf("%d sandboxes created from a partial list", creates)
+	}
+}
+
 // Un host que no contesta no deja en Terminating a los objetos cuyo sandbox
 // está resuelto: se borra el del status y se suelta el finalizer. Sin status.id
 // sí se espera a una lista completa (su sandbox podría estar en ese host).
