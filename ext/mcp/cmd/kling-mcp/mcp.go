@@ -548,11 +548,7 @@ func mcpList(args []string) error {
 			}
 			fmt.Printf("\n%s:\n", s.Name)
 			for _, t := range tools {
-				d := t.Description
-				if len(d) > 70 {
-					d = d[:69] + "…"
-				}
-				fmt.Printf("  %-32s %s\n", t.Name, d)
+				fmt.Printf("  %-32s %s\n", saneado.Linea(t.Name), columna(t.Description, 70))
 			}
 		}
 	}
@@ -1140,11 +1136,7 @@ func mcpInspect(args []string) error {
 		fmt.Printf("catalog:     not captured (kling mcp refresh %s)\n", fs.Arg(0))
 	}
 	for _, t := range tools {
-		d := t.Description
-		if len(d) > 70 {
-			d = d[:69] + "…"
-		}
-		fmt.Printf("  %-32s %s\n", t.Name, d)
+		fmt.Printf("  %-32s %s\n", saneado.Linea(t.Name), columna(t.Description, 70))
 	}
 	return nil
 }
