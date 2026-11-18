@@ -11,7 +11,7 @@ package machine
 // la causa. La firma v2 cubría el NOMBRE de la imagen, no su contenido.
 //
 // Coste: el digest es el de internal/digest.Tree (en paralelo, sin leer los
-// huecos) y se cachea por ruta, tamaño y fecha, como el del kernel: se hashea
+// huecos) y se cachea por ruta y huella (tamaño, fecha, inodo y ctime): se hashea
 // una vez por imagen y arranque del daemon, aunque haya cien dorados sobre la
 // misma base. Restaurar paga dos stat.
 
@@ -27,9 +27,33 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-// digestDiscoBase es el digest en árbol del ext4 path, cacheado por tamaño y
-// fecha. La huella se toma ANTES de hashear: si el fichero cambia mientras, la
-// siguiente llamada no casa y lo vuelve a leer.
+// huellaDisco es lo que dice que un ext4 de imagen sigue siendo el que se
+// hasheó: tamaño y fecha, y también dispositivo, inodo y ctime. La fecha la
+// pone a mano quien escribe en el fichero (utimes): con solo tamaño y fecha,
+// reescribir la imagen con otro contenido del mismo tamaño y devolverle su
+// mtime pasaría por la de antes, y comprobarDiscoBase daría por bueno un
+// disco que ya no es el del dorado. El ctime no se puede fijar desde fuera
+// del kernel (cualquier escritura o utimes lo mueve) y un fichero puesto en
+// su lugar con rename trae otro inodo.
+type huellaDisco struct {
+	tam, fecha, ctime int64
+	dev, ino          uint64
+}
+
+func huellaDeDisco(st os.FileInfo) huellaDisco {
+	dev, ino, ctime := identidadDisco(st)
+	return huellaDisco{tam: st.Size(), fecha: st.ModTime().UnixNano(), ctime: ctime, dev: dev, ino: ino}
+}
+
+// digestCacheado es el digest de un ext4 junto con la huella que lo produjo.
+type digestCacheado struct {
+	huella huellaDisco
+	hash   string
+}
+
+// digestDiscoBase es el digest en árbol del ext4 path, cacheado por su
+// huella (huellaDisco). La huella se toma ANTES de hashear: si el fichero
+// cambia mientras, la siguiente llamada no casa y lo vuelve a leer.
 //
 // Uno solo por ruta a la vez (P5): tras arrancar el daemon, N run -from
 // simultáneos del mismo dorado hasheaban cada uno la imagen entera (con 8
@@ -41,17 +65,17 @@ func (m *Manager) digestDiscoBase(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		tam, fecha := st.Size(), st.ModTime().UnixNano()
+		huella := huellaDeDisco(st)
 		if v, ok := m.discosBase.Load(path); ok {
-			if h := v.(huellaKernel); h.tam == tam && h.fecha == fecha {
-				return h.hash, nil
+			if c := v.(digestCacheado); c.huella == huella {
+				return c.hash, nil
 			}
 		}
-		v := &vueloDigest{hecho: make(chan struct{}), tam: tam, fecha: fecha}
+		v := &vueloDigest{hecho: make(chan struct{}), huella: huella}
 		if otro, enCurso := m.discosEnVuelo.LoadOrStore(path, v); enCurso {
 			o := otro.(*vueloDigest)
 			<-o.hecho
-			if o.tam == tam && o.fecha == fecha {
+			if o.huella == huella {
 				return o.hash, o.err
 			}
 			continue // era de otra huella: el fichero cambió entre medias
@@ -66,7 +90,7 @@ func (m *Manager) digestDiscoBase(path string) (string, error) {
 			v.err = errors.New("digest interrupted")
 			v.hash, v.err = digestArbol(path)
 			if v.err == nil {
-				m.discosBase.Store(path, huellaKernel{tam: tam, fecha: fecha, hash: v.hash})
+				m.discosBase.Store(path, digestCacheado{huella: huella, hash: v.hash})
 			}
 		}()
 		return v.hash, v.err
@@ -74,12 +98,12 @@ func (m *Manager) digestDiscoBase(path string) (string, error) {
 }
 
 // vueloDigest es un digestDiscoBase en curso: hecho se cierra con hash y err
-// ya puestos, de la huella tam y fecha.
+// ya puestos, de esa huella.
 type vueloDigest struct {
-	hecho      chan struct{}
-	tam, fecha int64
-	hash       string
-	err        error
+	hecho  chan struct{}
+	huella huellaDisco
+	hash   string
+	err    error
 }
 
 // digestArbol es digest.Tree; una variable para contar lecturas en las

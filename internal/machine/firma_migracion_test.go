@@ -241,6 +241,63 @@ func TestMigrarFirmasV1(t *testing.T) {
 	}
 }
 
+// S5: en un host que ya pasó a la v2 (marca v2, sin la v3), la migración del
+// arranque a la v3 no re-firma una v1: es un meta.json viejo vuelto a poner,
+// y la v1 no cubre las etiquetas que pudo cambiar.
+func TestMigrarFirmasNoRefirmaUnaV1ConLaMarcaV2(t *testing.T) {
+	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	m := annotTestManager(t)
+	doradoEnDisco(t, m, "repuesto", "v1")
+	doradoEnDisco(t, m, "bueno", "v2")
+	if err := os.WriteFile(filepath.Join(m.root, "secrets", marcaFirmasV2), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.MigrarFirmas(context.Background())
+	if s, err := m.loadSnapshot("repuesto"); err != nil || strings.HasPrefix(s.Signature, firmaV3) {
+		t.Fatalf("una v1 vuelta a poner salió re-firmada en v3 (%v)", err)
+	}
+	if s, err := m.loadSnapshot("bueno"); err != nil || !strings.HasPrefix(s.Signature, firmaV3) {
+		t.Fatalf("la v2 del host no se migró: %v", err)
+	}
+	if !m.firmasV3Migradas() {
+		t.Fatal("sin la marca v3: rechazar la v1 repuesta no es algo pasajero")
+	}
+}
+
+// F12: un meta.json devuelto desde su .bak quita las marcas que lo
+// rechazarían, y solo esas.
+func TestReabrirMigracionFirmas(t *testing.T) {
+	marcas := func(t *testing.T, root string) (v2, v3 bool) {
+		_, e2 := os.Stat(filepath.Join(root, "secrets", marcaFirmasV2))
+		_, e3 := os.Stat(filepath.Join(root, "secrets", marcaFirmasV3))
+		return e2 == nil, e3 == nil
+	}
+	for _, c := range []struct {
+		firma            string
+		quedaV2, quedaV3 bool
+	}{
+		{"v3:aa", true, true},
+		{"v2:aa", true, false},
+		{"abcdef", false, false},
+		{"", true, true},
+	} {
+		root := t.TempDir()
+		os.MkdirAll(filepath.Join(root, "secrets"), 0o700)
+		for _, marca := range []string{marcaFirmasV2, marcaFirmasV3} {
+			os.WriteFile(filepath.Join(root, "secrets", marca), []byte("1\n"), 0o600)
+		}
+		meta := filepath.Join(root, "snapshots", "svc", "meta.json")
+		os.MkdirAll(filepath.Dir(meta), 0o700)
+		os.WriteFile(meta, []byte(`{"name":"svc","signature":"`+c.firma+`"}`), 0o600)
+		if err := ReabrirMigracionFirmas(root, []string{meta}); err != nil {
+			t.Fatal(err)
+		}
+		if v2, v3 := marcas(t, root); v2 != c.quedaV2 || v3 != c.quedaV3 {
+			t.Errorf("firma %q: marcas v2=%v v3=%v; quería v2=%v v3=%v", c.firma, v2, v3, c.quedaV2, c.quedaV3)
+		}
+	}
+}
+
 // Un meta.json que no se pudo leer puede ser una v1 que cuadra: la migración
 // no deja la marca (que la rechazaría para siempre) y se reintenta.
 func TestMigrarFirmasNoMarcaSiNoPudoLeerUnMeta(t *testing.T) {
