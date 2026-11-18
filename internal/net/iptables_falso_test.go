@@ -128,13 +128,19 @@ func (f *iptablesFalso) ejecutar(args ...string) error {
 // usarIptablesFalso pone f en lugar de iptables y de ip_forward hasta el
 // final del test, y deja el estado de SetupHost como estaba.
 func usarIptablesFalso(t interface{ Cleanup(func()) }, f *iptablesFalso) {
-	oldC, oldE, oldL, oldR := comprobarEstado, ejecutar, listarCadena, activarReenvio
+	oldC, oldE, oldL, oldR, oldT := comprobarEstado, ejecutar, listarCadena, activarReenvio, listarTabla
 	t.Cleanup(func() {
-		comprobarEstado, ejecutar, listarCadena, activarReenvio = oldC, oldE, oldL, oldR
+		comprobarEstado, ejecutar, listarCadena, activarReenvio, listarTabla = oldC, oldE, oldL, oldR, oldT
 		inputMontado.Store(false)
 		accesoMontado.Store(nil)
 		accesoPedido.Store(nil)
 	})
 	comprobarEstado, ejecutar, listarCadena = f.estado, f.ejecutar, f.listar
+	listarTabla = func(tabla, cadena string) ([]string, error) {
+		if tabla != "filter" {
+			cadena = tabla + "/" + cadena
+		}
+		return f.listar(cadena)
+	}
 	activarReenvio = func() error { return nil }
 }

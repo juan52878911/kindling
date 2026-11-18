@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -917,6 +918,9 @@ func (m *Manager) vueltaVigilante(ctx context.Context) {
 		// La red que Freeze dejó montada, en las que llevan mucho tiempo
 		// congeladas (ver red.go).
 		{"soltarRedesDormidas", m.soltarRedesDormidas},
+		// Las barreras del host, con máquinas con red en pie: un reload del
+		// cortafuegos las borra, y antes solo se reponían al montar otra red.
+		{"barrerasHost", m.vigilarBarrerasHost},
 		// Errores de disco que el invitado vio (errores_disco.go), antes de
 		// rotar: si no, se perderían.
 		{"revisarErroresDisco", m.revisarErroresDisco},
@@ -974,6 +978,36 @@ func (m *Manager) vueltaVigilante(ctx context.Context) {
 			}
 			p.f()
 		})
+	}
+}
+
+// asegurarBarrerasHost es knet.AsegurarHost detrás de una variable, para los
+// tests.
+var asegurarBarrerasHost = knet.AsegurarHost
+
+// errBarrerasHost es el último fallo de vigilarBarrerasHost, para no repetir
+// el mismo error en el log cada vuelta.
+var errBarrerasHost atomic.Pointer[string]
+
+// vigilarBarrerasHost comprueba (y repone) las reglas del host si este daemon
+// tiene alguna red montada: sin ninguna, no hay a quién proteger y no se
+// lanza ningún iptables. Un fallo se dice una vez, y su arreglo también.
+func (m *Manager) vigilarBarrerasHost() {
+	hay := false
+	m.redMontada.Range(func(any, any) bool { hay = true; return false })
+	if !hay {
+		return
+	}
+	err := asegurarBarrerasHost()
+	if err == nil {
+		if errBarrerasHost.Swap(nil) != nil {
+			log.Printf("watch: the host firewall rules for the machines are back")
+		}
+		return
+	}
+	msg := err.Error()
+	if previo := errBarrerasHost.Swap(&msg); previo == nil || *previo != msg {
+		log.Printf("watch: ERROR: the host firewall rules for the machines: %v (retrying every round)", err)
 	}
 }
 

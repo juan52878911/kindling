@@ -3858,19 +3858,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// La red suele seguir montada desde el Freeze (ver red.go); si no —un
 	// reinicio del daemon o del host, o el vigilante la soltó—, se rehace con
 	// el mismo índice para que la máquina conserve su IP.
-	egress, _ := knet.ParseEgress(mc.Egress)
-	netcfg := knet.Plan(mc.NetIndex, mc.ID)
-	if !m.redLista(netcfg, mc.ID) {
-		n, err := m.redParaRehacer(mc)
-		if err != nil {
-			soltarFull()
-			return nil, fmt.Errorf("rebuilding the network: %w", err)
-		}
-		netcfg = n
-		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
-			soltarFull()
-			return nil, fmt.Errorf("rebuilding the network: %w", err)
-		}
+	netcfg, errRed := m.redDelThaw(mc)
+	if errRed != nil {
+		soltarFull()
+		return nil, errRed
 	}
 	// Las aristas del nodo, si es de un grafo: si la red se rehízo, sus
 	// proxies de enlace y su resolver se fueron con ella. Idempotente. Un
@@ -4489,6 +4480,37 @@ func (m *Manager) vmmCongeladoEnDisco(id string, pid int) bool {
 	m.vmmDeCongelado.Store(id, pid)
 	return true
 }
+
+// redDelThaw es la red con la que despierta mc: la que dejó montada el
+// Freeze si sigue en pie (redLista) o, si no, una rehecha con el mismo
+// índice.
+//
+// La conservada no pasa por Setup, que es quien comprueba las barreras del
+// host antes de dar red (knet.AsegurarHost): tras un reload del cortafuegos,
+// la máquina despertaba con el host abierto. Ahora se comprueban también, y
+// si no se pueden reponer no despierta, como en Setup.
+func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, error) {
+	netcfg := knet.Plan(mc.NetIndex, mc.ID)
+	if redConservada(m, netcfg, mc.ID) {
+		if err := asegurarBarrerasHost(); err != nil {
+			return nil, fmt.Errorf("host firewall rules: %w", err)
+		}
+		return netcfg, nil
+	}
+	n, err := m.redParaRehacer(mc)
+	if err != nil {
+		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	}
+	egress, _ := knet.ParseEgress(mc.Egress)
+	if err := m.montarRed(n, mc.ID, egress, mc.AllowDomains); err != nil {
+		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	}
+	return n, nil
+}
+
+// redConservada es redLista detrás de una variable, para los tests (en macOS
+// la red nunca se conserva).
+var redConservada = (*Manager).redLista
 
 // thawVMMViejo mata el VMM pid que dejó vivo el Freeze de mc antes de que
 // Thaw arranque el nuevo. Readoptarlo era dar por buena una VM que ya se

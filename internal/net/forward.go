@@ -125,6 +125,11 @@ func AvisoForward(reglas string) string {
 
 // LeerFiltro devuelve `iptables -S` (tabla filter). Hace falta root.
 func LeerFiltro() (string, error) {
-	out, err := exec.Command("iptables", "-S").Output()
+	c := argsLeerFiltro()
+	out, err := exec.Command(c[0], c[1:]...).Output()
 	return string(out), err
 }
+
+// argsLeerFiltro es el iptables de LeerFiltro, con -w (conEspera): sin él,
+// con iptables-legacy y un arranque a la vez, fallaba y el aviso no salía.
+func argsLeerFiltro() []string { return conEspera([]string{"iptables", "-S"}) }
