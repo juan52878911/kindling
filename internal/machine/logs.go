@@ -169,20 +169,14 @@ func leerDesde(path string, ini, max int64) ([]byte, int64, error) {
 	return b, ini + int64(len(b)), nil
 }
 
-// leerConsola lee como mucho max bytes del final de la consola de dir,
-// contando lo que rotarConsola apartó en firecracker.log.1.
+// leerConsolaPos lee como mucho max bytes del final de la consola de dir,
+// contando lo que rotarConsola apartó en firecracker.log.1, y dice hasta qué
+// byte de firecracker.log leyó (0 si no existe).
 //
 // Sin el .1, justo tras una rotación firecracker.log está vacío (se trunca en
 // sitio) y `kling logs` no enseñaba nada: el MiB que la rotación conserva para
 // diagnosticar lo que acaba de pasar no lo leía nadie. Lo de antes va delante,
 // como en el fichero original.
-func leerConsola(dir string, max int64) ([]byte, error) {
-	b, _, err := leerConsolaPos(dir, max)
-	return b, err
-}
-
-// leerConsolaPos es leerConsola y además hasta qué byte de firecracker.log
-// leyó (0 si no existe).
 func leerConsolaPos(dir string, max int64) ([]byte, int64, error) {
 	var fin int64
 	actual, err := func() ([]byte, error) {

@@ -223,7 +223,10 @@ func sinDescargadores(t *testing.T, dir string) string {
 		}
 		for _, e := range ents {
 			n := e.Name()
-			if n == "curl" || n == "wget" || existe(filepath.Join(dir, n)) {
+			// Lstat y no existe(): en Ubuntu /bin es /usr/bin, y un enlace ya
+			// puesto a un ejecutable que es a su vez un enlace roto
+			// (grub-ntldr-img) no «existe» por Stat pero ocupa el nombre.
+			if _, err := os.Lstat(filepath.Join(dir, n)); n == "curl" || n == "wget" || err == nil {
 				continue
 			}
 			if err := os.Symlink(filepath.Join(d, n), filepath.Join(dir, n)); err != nil {
