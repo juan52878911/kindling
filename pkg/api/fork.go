@@ -66,7 +66,7 @@ func ValidateForkLabels(labels map[string]string) error {
 		if !KeyPattern.MatchString(k) {
 			return fmt.Errorf("label %q is not valid (lowercase letters, digits, '.', '_', '-')", k)
 		}
-		if k == LabelKind || k == LabelForkOf || IsGraphLabel(k) {
+		if k == LabelKind || k == LabelForkOf || IsReservedLabel(k) {
 			return fmt.Errorf("label %q is reserved", k)
 		}
 		if len(v) > forkMaxLabelVal {

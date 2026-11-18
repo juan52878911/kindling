@@ -8,7 +8,6 @@ package net
 
 import (
 	"fmt"
-	"log"
 	stdnet "net"
 	"os"
 	"os/exec"
@@ -50,63 +49,54 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	}
 	n.Teardown()
 
+	// Los 11 procesos de ip del enlace son 3: el netns y un `ip -batch`
+	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
+	// iproute2, el resto de líneas acabaría dentro del netns nuevo.
 	if err := run("ip", "netns", "add", n.NS); err != nil {
 		return err
 	}
 	// El extremo del namespace nace ya dentro de él. Crearlo fuera y moverlo
 	// después (`ip link set ... netns`) espera un periodo de gracia de RCU en
 	// el kernel: 14 ms medidos en un i7-8700T, un tercio de todo el montaje.
-	if err := run("ip", "link", "add", n.HostIf, "type", "veth", "peer", "name", n.NSIf, "netns", n.NS); err != nil {
+	if err := ipBatch("",
+		"link add "+n.HostIf+" type veth peer name "+n.NSIf+" netns "+n.NS,
+		"addr add "+n.HostIP+"/30 dev "+n.HostIf,
+		"link set "+n.HostIf+" up",
+	); err != nil {
 		return err
 	}
-
-	// lado host
-	if err := run("ip", "addr", "add", n.HostIP+"/30", "dev", n.HostIf); err != nil {
-		return err
+	// Lado namespace, con el TAP de nombre e IP fijos: idénticos en todos los
+	// namespaces.
+	tap := "tuntap add " + TapName + " mode tap"
+	if owner > 0 {
+		tap += fmt.Sprintf(" user %d", owner)
 	}
-	if err := run("ip", "link", "set", n.HostIf, "up"); err != nil {
+	if err := ipBatch(n.NS,
+		"addr add "+n.NSIP+"/30 dev "+n.NSIf,
+		"link set "+n.NSIf+" up",
+		"link set lo up",
+		tap,
+		"addr add "+GuestGW+"/30 dev "+TapName,
+		"link set "+TapName+" address "+TapMAC+" up",
+		"route add default via "+n.HostIP,
+	); err != nil {
 		return err
 	}
 
 	ns := func(args ...string) error {
 		// `ip -n NS ...` entra en el namespace dentro del propio ip: un
 		// proceso en vez de dos (`ip netns exec NS ip ...`). Lo demás
-		// (iptables, sh) no sabe entrar solo y va con netns exec.
+		// (iptables, sysctl) no sabe entrar solo y va con netns exec.
 		if args[0] == "ip" {
 			return run(append([]string{"ip", "-n", n.NS}, args[1:]...)...)
 		}
 		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
 	}
 
-	// lado namespace
-	if err := ns("ip", "addr", "add", n.NSIP+"/30", "dev", n.NSIf); err != nil {
-		return err
-	}
-	if err := ns("ip", "link", "set", n.NSIf, "up"); err != nil {
-		return err
-	}
-	if err := ns("ip", "link", "set", "lo", "up"); err != nil {
-		return err
-	}
-
-	// TAP con nombre e IP fijos: idénticos en todos los namespaces
-	tap := []string{"ip", "tuntap", "add", TapName, "mode", "tap"}
-	if owner > 0 {
-		tap = append(tap, "user", fmt.Sprintf("%d", owner))
-	}
-	if err := ns(tap...); err != nil {
-		return err
-	}
-	if err := ns("ip", "addr", "add", GuestGW+"/30", "dev", TapName); err != nil {
-		return err
-	}
-	if err := ns("ip", "link", "set", TapName, "address", TapMAC, "up"); err != nil {
-		return err
-	}
-	if err := ns("ip", "route", "add", "default", "via", n.HostIP); err != nil {
-		return err
-	}
-	// ARP del tap0 reintentando cada 50 ms en vez de cada 1 s. El daemon sondea
+	// Los sysctl del netns, en un solo proceso (aplicarSysctls): el reenvío,
+	// el endurecimiento de sysctlsNetns y la capa 1 de la barrera IPv6.
+	//
+	// El ARP del tap0 reintenta cada 50 ms en vez de cada 1 s. El daemon sondea
 	// al agente mientras el invitado aún arranca: la primera resolución queda
 	// incompleta y, con el valor por defecto, el kernel no la reintenta hasta
 	// 1 s después por muchos connect nuevos que se lancen. Junto con los
@@ -119,21 +109,13 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	// la vieja en su caché, y lo que se la corrige es justo la petición ARP del
 	// host (despertar.md, palanca 8). Con la entrada permanente el host no
 	// pregunta y esas restauraciones se quedaban sin red.
-	if err := ns("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward; "+
-		"echo 50 > /proc/sys/net/ipv4/neigh/"+TapName+"/retrans_time_ms"); err != nil {
+	if err := aplicarSysctls(ns, n.NS, n.NSIf); err != nil {
 		return err
 	}
-	// Endurecimiento (firewall.go/sysctlsNetns), después de ip_forward, que
-	// reescribe accept_redirects. Un solo proceso y no fatal: sysctl aplica
-	// las demás claves aunque una falle (un kernel sin conntrack cargado no
-	// tiene net.netfilter), y la máquina arranca con lo que se pudo.
-	if err := ns(append([]string{"sysctl", "-q", "-w"}, sysctlsNetns(n.NSIf)...)...); err != nil {
-		log.Printf("net: WARNING: some hardening sysctls failed in %s: %v", n.NS, err)
-	}
 
-	// Barrera IPv6 (firewall.go): va AQUÍ, antes de la rama rápida de
-	// iptables-restore de más abajo, y no dentro de applyEgress. Esa rama
-	// devuelve sin pasar por applyEgress para none/internet cuando hay
+	// Capa 2 de la barrera IPv6 (firewall.go): va AQUÍ, antes de la rama
+	// rápida de iptables-restore de más abajo, y no dentro de applyEgress. Esa
+	// rama devuelve sin pasar por applyEgress para none/internet cuando hay
 	// iptables-restore, así que si esta llamada viviera solo dentro de
 	// applyEgress se saltaría en el camino más común. Se aplica igual en los
 	// tres modos, por eso no depende de egress.
@@ -201,8 +183,37 @@ func (n *Net) Teardown() {
 	stopGraph(n.NS)
 	stopCredProxy(n.NS)
 	cerrarIPSet(n.NS)
-	quiet("ip", "netns", "del", n.NS)
-	quiet("ip", "link", "del", n.HostIf)
+	borrarEnlace(n.NS, n.HostIf)
+}
+
+// borrarEnlace borra el netns y el veth del host, solo si están: Setup
+// empieza siempre por Teardown, y en el caso corriente (una máquina nueva) no
+// hay nada, así que eran dos procesos que fallaban. Mirarlo es un stat.
+func borrarEnlace(ns, hostIf string) {
+	if _, err := os.Stat("/var/run/netns/" + ns); err == nil {
+		quiet("ip", "netns", "del", ns)
+	}
+	// Después del netns: borrarlo se lleva el veth, pero el kernel lo hace en
+	// diferido y puede seguir ahí; `ip link del` lo quita en el acto.
+	if _, err := os.Stat("/sys/class/net/" + hostIf); err == nil {
+		quiet("ip", "link", "del", hostIf)
+	}
+}
+
+// ipBatch ejecuta varias órdenes de ip en un solo proceso (`ip -batch -`),
+// dentro del netns ns si no está vacío. Para en la primera que falla.
+func ipBatch(ns string, ordenes ...string) error {
+	args := []string{"ip"}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	args = append(args, "-batch", "-")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdin = strings.NewReader(strings.Join(ordenes, "\n") + "\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s (%s): %v: %s", strings.Join(args, " "), strings.Join(ordenes, "; "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // Sustituibles en tests: mirar la red de verdad pide /sys y un veth.
@@ -280,8 +291,7 @@ func TeardownNamespace(ns string) {
 	stopGraph(ns)
 	stopCredProxy(ns)
 	cerrarIPSet(ns)
-	quiet("ip", "netns", "del", ns)
-	quiet("ip", "link", "del", "vh-"+strings.TrimPrefix(ns, "kl-"))
+	borrarEnlace(ns, "vh-"+strings.TrimPrefix(ns, "kl-"))
 }
 
 // Available indica si el host tiene lo necesario para montar redes.

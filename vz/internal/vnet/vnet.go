@@ -102,6 +102,18 @@ const (
 	// buffer) solo los agranda cuando el flujo lo pide.
 	tcpRXBufMax = 8 << 20
 	tcpTXBufMax = 6 << 20
+
+	// tcpBufPresupuesto es lo que deberían sumar como mucho los buffers TCP
+	// de la pila (recepción + envío) de todas las conexiones vivas de una VM
+	// (R7). Viven en este proceso, fuera de la memoria de la VM: con
+	// MaxTCPFlows conexiones a tcpRXBufMax + tcpTXBufMax eran hasta 7 GiB del
+	// Mac. Con pocas conexiones cada una sigue teniendo los máximos de
+	// arriba; con más, el máximo de cada una baja (topesTCP), y la
+	// autoescala de gVisor lee el máximo de la pila en cada ajuste, así que
+	// también las ya crecidas se recortan en el siguiente.
+	tcpBufPresupuesto = 256 << 20
+	// tcpBufSuelo: ni con todas las conexiones ocupadas baja de esto.
+	tcpBufSuelo = 64 << 10
 )
 
 // Config es lo que la red necesita saber de la máquina.
@@ -224,6 +236,70 @@ type Net struct {
 
 	// Plazas de MaxDNSUDPFlows, MaxDNSTCPConns y MaxUDPFlows.
 	dnsUDP, dnsTCP, udpFlows, tcpFlows chan struct{}
+
+	// bufMu protege bufTramo: el tramo de conexiones vivas (potencia de dos)
+	// con el que se fijaron los máximos de los buffers TCP (ajustarBuffers).
+	bufMu    sync.Mutex
+	bufTramo int
+}
+
+// topesTCP da el máximo de los buffers de recepción y envío de cada
+// conexión con vivas conexiones TCP abiertas: el reparto de
+// tcpBufPresupuesto en la proporción de tcpRXBufMax y tcpTXBufMax, sin pasar
+// de ellos ni bajar de tcpBufSuelo.
+func topesTCP(vivas int) (rx, tx int) {
+	parte := tcpBufPresupuesto / max(vivas, 1)
+	rx = parte * tcpRXBufMax / (tcpRXBufMax + tcpTXBufMax)
+	tx = parte - rx
+	return min(max(rx, tcpBufSuelo), tcpRXBufMax), min(max(tx, tcpBufSuelo), tcpTXBufMax)
+}
+
+// tomarTCP ocupa una plaza de tcpFlows y ajusta los buffers; soltarTCP la
+// suelta.
+func (n *Net) tomarTCP() bool {
+	if !tomar(n.tcpFlows) {
+		return false
+	}
+	n.ajustarBuffers()
+	return true
+}
+
+func (n *Net) soltarTCP() {
+	<-n.tcpFlows
+	n.ajustarBuffers()
+}
+
+// ajustarBuffers fija en la pila los máximos de topesTCP para las conexiones
+// vivas, redondeadas a la potencia de dos de encima: solo se toca la pila al
+// cambiar de tramo, no en cada conexión.
+func (n *Net) ajustarBuffers() {
+	// Con el cerrojo: dos que cambian de tramo a la vez no pueden dejar
+	// puesto el del que leyó primero.
+	n.bufMu.Lock()
+	defer n.bufMu.Unlock()
+	tramo := 1
+	for tramo < len(n.tcpFlows) {
+		tramo <<= 1
+	}
+	if tramo == n.bufTramo {
+		return
+	}
+	n.bufTramo = tramo
+	_ = fijarBuffers(n.stack, tramo)
+}
+
+// fijarBuffers pone en la pila los rangos de buffer TCP para vivas
+// conexiones (topesTCP).
+func fijarBuffers(s *stack.Stack, vivas int) error {
+	rxMax, txMax := topesTCP(vivas)
+	rx := tcpip.TCPReceiveBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: min(tcp.DefaultReceiveBufferSize, rxMax), Max: rxMax}
+	tx := tcpip.TCPSendBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: min(tcp.DefaultSendBufferSize, txMax), Max: txMax}
+	for _, o := range []tcpip.SettableTransportProtocolOption{&rx, &tx} {
+		if e := s.SetTransportProtocolOption(tcp.ProtocolNumber, o); e != nil {
+			return fmt.Errorf("netstack tcp option %T: %s", o, e)
+		}
+	}
+	return nil
 }
 
 // tomar ocupa una plaza de sem sin esperar; false si no queda ninguna.
@@ -469,11 +545,11 @@ func (l *escucha) Accept() (net.Conn, error) {
 		if e != nil {
 			return nil, &net.OpError{Op: "accept", Net: "tcp", Addr: l.addr, Err: errors.New(e.String())}
 		}
-		if !tomar(l.n.tcpFlows) {
+		if !l.n.tomarTCP() {
 			cep.Abort() // por encima de MaxTCPFlows: RST
 			continue
 		}
-		return &conPlaza{conexionInvitado: conexionInvitado{TCPConn: gonet.NewTCPConn(cwq, cep), ep: cep}, sem: l.n.tcpFlows}, nil
+		return &conPlaza{conexionInvitado: conexionInvitado{TCPConn: gonet.NewTCPConn(cwq, cep), ep: cep}, n: l.n}, nil
 	}
 }
 
@@ -491,11 +567,11 @@ func (l *escucha) Addr() net.Addr { return l.addr }
 // vez, en el primer Close o Abort.
 type conPlaza struct {
 	conexionInvitado
-	sem   chan struct{}
+	n     *Net
 	libre sync.Once
 }
 
-func (c *conPlaza) soltar() { c.libre.Do(func() { <-c.sem }) }
+func (c *conPlaza) soltar() { c.libre.Do(c.n.soltarTCP) }
 
 func (c *conPlaza) Close() error {
 	defer c.soltar()
@@ -618,14 +694,12 @@ func (n *Net) txLoop() {
 func opcionesTCP(s *stack.Stack) error {
 	sack := tcpip.TCPSACKEnabled(true)
 	moderar := tcpip.TCPModerateReceiveBufferOption(true)
-	rx := tcpip.TCPReceiveBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: tcp.DefaultReceiveBufferSize, Max: tcpRXBufMax}
-	tx := tcpip.TCPSendBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: tcp.DefaultSendBufferSize, Max: tcpTXBufMax}
-	for _, o := range []tcpip.SettableTransportProtocolOption{&sack, &moderar, &rx, &tx} {
+	for _, o := range []tcpip.SettableTransportProtocolOption{&sack, &moderar} {
 		if e := s.SetTransportProtocolOption(tcp.ProtocolNumber, o); e != nil {
 			return fmt.Errorf("netstack tcp option %T: %s", o, e)
 		}
 	}
-	return nil
+	return fijarBuffers(s, 1) // con una conexión: tcpRXBufMax y tcpTXBufMax
 }
 
 func addrOf(a tcpip.Address) netip.Addr {
@@ -656,11 +730,11 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		n.serveDNSTCP(gonet.NewTCPConn(&wq, ep))
 		return
 	}
-	if !tomar(n.tcpFlows) {
+	if !n.tomarTCP() {
 		r.Complete(true) // por encima de MaxTCPFlows: RST
 		return
 	}
-	defer func() { <-n.tcpFlows }()
+	defer n.soltarTCP()
 	if dst == GatewayIP && n.cfg.Graph != nil && n.cfg.Graph.Link(id.LocalPort) {
 		n.cfg.Graph.Serve(n.ctx, id.LocalPort, func() (net.Conn, error) {
 			var wq waiter.Queue

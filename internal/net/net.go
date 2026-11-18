@@ -87,6 +87,7 @@ type Net struct {
 }
 
 func run(args ...string) error {
+	args = conEspera(args)
 	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -107,11 +108,56 @@ var ErrRedAjena = errors.New("network namespace already in use with another addr
 var ejecutar = run
 
 // quiet ejecuta ignorando el error; para limpiezas donde "no existe" es válido.
-func quiet(args ...string) { _ = exec.Command(args[0], args[1:]...).Run() }
+func quiet(args ...string) {
+	args = conEspera(args)
+	_ = exec.Command(args[0], args[1:]...).Run()
+}
+
+// esperaXtables son los segundos que iptables espera al cerrojo de xtables
+// (-w) en vez de fallar en el acto. Con iptables-legacy y varios arranques a
+// la vez, el que lo encontraba tomado fallaba: un -C se leía como «la regla
+// no está» y un -I como un Setup roto. Con iptables-nft no hay cerrojo y -w
+// no hace nada. -w con segundos es de la 1.6.0 (2015); antes no llevaba valor.
+const esperaXtables = "5"
+
+// conEspera añade -w a una llamada a iptables o ip6tables, también dentro de
+// `ip netns exec NS`. iptables-restore no: -w ahí es de la 1.6.2 y una más
+// vieja rechazaría la opción.
+func conEspera(args []string) []string {
+	i := 0
+	if len(args) > 4 && args[0] == "ip" && args[1] == "netns" && args[2] == "exec" {
+		i = 4
+	}
+	if len(args) <= i+1 || (args[i] != "iptables" && args[i] != "ip6tables") || args[i+1] == "-w" {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[:i+1]...)
+	out = append(out, "-w", esperaXtables)
+	return append(out, args[i+1:]...)
+}
 
 // exec_ok indica si un comando termina bien; se usa para comprobar reglas ya puestas.
 func exec_ok(args []string) bool {
-	return exec.Command(args[0], args[1:]...).Run() == nil
+	ok, _ := comprobarIptables(args)
+	return ok
+}
+
+// comprobarIptables ejecuta un `iptables -C` (o un `-n -L`): true si la regla
+// está, false si iptables dice que no (código 1) y error si falló por otra
+// cosa (código 2 o más: una opción que no entiende, un cerrojo que no llegó).
+// Antes las dos últimas eran «no está», y se reinstalaba lo que sí estaba.
+func comprobarIptables(args []string) (bool, error) {
+	args = conEspera(args)
+	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var salida *exec.ExitError
+	if errors.As(err, &salida) && salida.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("%s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 }
 
 // LargoCorto es cuántos caracteres del id nombran la red de una máquina (netns,

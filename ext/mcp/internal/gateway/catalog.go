@@ -416,9 +416,17 @@ func (c *catalog) all(ctx context.Context, services []string) ([]Tool, map[strin
 var httpc = &http.Client{
 	// Con plazo de conexión: un invitado que no acepta no debe retener la
 	// llamada hasta ResponseHeaderTimeout.
+	//
+	// Con 16 conexiones ociosas por invitado, como el proxy de cada instancia
+	// (transporteInvitado en pkg/scheduler): con el tope de 2 de net/http, un
+	// agente con más de dos call_tool a la vez cerraba la conexión de cada una
+	// al acabar y la siguiente volvía a marcar. Y que se cierren solas a los
+	// 30 s: sin plazo quedaban abiertas hacia invitados congelados.
 	Transport: &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 5 * time.Minute,
+		IdleConnTimeout:       30 * time.Second,
+		MaxIdleConnsPerHost:   16,
 	},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }

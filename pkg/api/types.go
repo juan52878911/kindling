@@ -863,6 +863,12 @@ type Snapshot struct {
 	// intenta, como en los dorados anteriores a este campo.
 	SinAgente bool `json:"sin_agente,omitempty"`
 
+	// ConAgente: al guardarlo el agente SÍ escuchaba (kling save lo sondeó).
+	// Una copia suya cuyo agente no contesta no es "una imagen sin agente":
+	// es un fallo, y no se entrega (resyncInstancia). Falso/ausente: no se
+	// sabe (un dorado anterior al campo, un fork, un grafo).
+	ConAgente bool `json:"con_agente,omitempty"`
+
 	// Warnings solo va en la respuesta de un commit (kling save): lo que salió
 	// mal fuera del dorado, que sí vale (p.ej. la plantilla no pudo volver a
 	// montar sus volúmenes y quedó fallida). No se guarda en meta.json.

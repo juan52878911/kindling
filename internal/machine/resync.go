@@ -87,6 +87,11 @@ func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snap
 	if snap.SinAgente {
 		return resultadoResync{}
 	}
+	if snap.ConAgente {
+		// Se guardó con el agente escuchando: si ahora nadie contesta, es un
+		// fallo (S4), y nada se recuerda.
+		return m.resyncGuestCon(ctx, id, "", api.ResyncInstance, true)
+	}
 	return m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
 }
 
@@ -134,6 +139,12 @@ type resultadoResync struct {
 // clave es la del snapshot del que se restauró (claveSnapshot) para recordar
 // que no tiene agente, o "" para no recordar nada.
 func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resultadoResync {
+	return m.resyncGuestCon(ctx, id, clave, kind, false)
+}
+
+// resyncGuestCon es resyncGuest sabiendo, con conAgente, que el invitado
+// tenía agente: entonces "nadie escucha" también es un fallo.
+func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, conAgente bool) resultadoResync {
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr, image, name string
@@ -178,14 +189,19 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resul
 		return resultadoResync{took: took}
 	}
 	if err != nil {
-		if clave != "" && errors.Is(err, errResyncNadie) {
+		// Solo un rechazo de la conexión (RST: nadie en el puerto) se
+		// recuerda. Un ECONNRESET o un EOF pueden ser un agente que sí estaba
+		// y cortó bajo carga (S4): recordarlo saltaba el resync de las copias
+		// siguientes durante resyncSinAgenteTTL.
+		if clave != "" && errors.Is(err, errResyncRechazada) {
 			m.recordarSinAgente(clave, time.Now())
 		}
 		m.avisarResync(image, name, err)
 		// Un agente anterior o nadie escuchando no tienen ganchos que lanzar;
 		// cualquier otro fallo (un plazo agotado, un 5xx) es de un agente que
-		// sí debía contestar.
-		fallo := !errors.Is(err, errResyncNoSoportado) && !errors.Is(err, errResyncNadie)
+		// sí debía contestar. Nadie escuchando también lo es si el dorado se
+		// guardó con el agente escuchando.
+		fallo := !errors.Is(err, errResyncNoSoportado) && (conAgente || !errors.Is(err, errResyncNadie))
 		return resultadoResync{took: took, fallo: fallo}
 	}
 	if res.SkewMS > 1000 || res.SkewMS < -1000 {
@@ -377,6 +393,9 @@ var (
 	// errResyncNadie acompaña a errResyncConexion cuando nadie escucha en el
 	// puerto del agente: RST en Linux, cierre del reenvío en macOS.
 	errResyncNadie = errors.New("nothing listens on the guest agent port")
+	// errResyncRechazada acompaña a errResyncNadie cuando fue un RST
+	// (ECONNREFUSED): lo único que se recuerda por snapshot.
+	errResyncRechazada = errors.New("connection refused")
 )
 
 func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, error) {
@@ -397,8 +416,10 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := resyncClient.Do(req)
 	if err != nil {
-		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
-			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return out, fmt.Errorf("%w: %w: %w: %v", errResyncConexion, errResyncNadie, errResyncRechazada, err)
+		}
+		if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return out, fmt.Errorf("%w: %w: %v", errResyncConexion, errResyncNadie, err)
 		}
 		return out, fmt.Errorf("%w: %v", errResyncConexion, err)

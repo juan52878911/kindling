@@ -18,6 +18,12 @@ import (
 // a las operaciones.
 var watchFDs = make(chan struct{}, 4096)
 
+// watchesPorSesion es el tope de rutas vigiladas de una sesión: la cuarta
+// parte de watchFDs. Con el de las demás plataformas (4096, todo watchFDs) una
+// sola sesión se quedaba con los descriptores de vigilancia del daemon entero
+// y las demás carpetas dejaban de avisar.
+const watchesPorSesion = 1024
+
 const kqNotes = syscall.NOTE_WRITE | syscall.NOTE_EXTEND | syscall.NOTE_ATTRIB |
 	syscall.NOTE_DELETE | syscall.NOTE_RENAME | syscall.NOTE_REVOKE
 

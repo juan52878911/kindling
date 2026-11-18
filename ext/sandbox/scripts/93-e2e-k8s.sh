@@ -176,7 +176,7 @@ else
   fi
   FRONTAL_PORT="${FRONTAL_PORT:-18096}"
   FRONTAL_URL="http://$HOST_IP:$FRONTAL_PORT"
-  FRONTAL_TOKEN="e2ek8stok$$"
+  FRONTAL_TOKEN="e2ek8stok$$-0123456789"
   KLING_SANDBOX_TENANTS="e2ek8s:$FRONTAL_TOKEN:50:20" \
     "$KLING_SANDBOX" sbx gateway -listen "$HOST_IP:$FRONTAL_PORT" -insecure-listen -image "$IMAGE" >"$TMP/frontal.log" 2>&1 &
   FRONTAL_PID=$!

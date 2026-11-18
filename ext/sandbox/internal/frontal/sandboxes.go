@@ -383,7 +383,21 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := dentroDeLimites(t, pet); err != nil {
+	// Con plantilla, lo que la petición no dice (mem_mib o vcpus a 0) lo pone
+	// el snapshot: se averigua aquí para acotar el tamaño EFECTIVO, que es el
+	// que ocupa RAM en el host, y no solo el pedido.
+	var snaps map[string]*api.Snapshot
+	if pet.Template != "" {
+		snaps = s.snapshotsDe(r.Context(), plantilla.SnapshotDe(pet.Template))
+		if len(snaps) == 0 {
+			err := &errSinPlantilla{pet.Template}
+			s.metricas.registrar(resultadoDe(err), 0)
+			fail(w, codigoCrear(err), err)
+			return
+		}
+	}
+	efectiva := tamanoEfectivo(pet, snaps)
+	if err := dentroDeLimites(t, efectiva); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -391,7 +405,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// Cuota. Se cuenta lo vivo en los daemons más lo que este proceso tiene en
 	// camino, y se reserva el hueco ANTES de crear para que dos peticiones a la
 	// vez no lo compartan.
-	if err := s.reservar(r.Context(), t, pet.Template); err != nil {
+	if err := s.reservar(r.Context(), t, pet.Template, efectiva.MemMiB); err != nil {
 		codigo := codigoReservar(err)
 		if codigo == http.StatusTooManyRequests {
 			s.metricas.registrar(resultadoCuota, 0)
@@ -401,10 +415,10 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, codigo, err)
 		return
 	}
-	defer s.liberar(t, pet.Template)
+	defer s.liberar(t, pet.Template, efectiva.MemMiB)
 
 	inicio := time.Now()
-	h, mc, err := s.crear(r.Context(), t, pet)
+	h, mc, err := s.crear(r.Context(), t, pet, snaps)
 	if err != nil {
 		s.metricas.registrar(resultadoDe(err), time.Since(inicio))
 		// Un reinicio del host invalida sus dorados: la reconstrucción ya se
@@ -496,9 +510,22 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 	return nil
 }
 
+// tamanoEfectivo es p con mem_mib y vcpus a lo que de verdad tendrá el
+// sandbox: lo pedido o, si es más, el mayor de los snapshots de la plantilla en
+// los hosts que la tienen (cualquiera puede acabar sirviéndola). Se cuenta
+// el mayor de los dos, que es el lado seguro. Con imagen y 0 manda el
+// valor por defecto del daemon, que fija el operador del host.
+func tamanoEfectivo(p CrearPeticion, snaps map[string]*api.Snapshot) CrearPeticion {
+	for _, sn := range snaps {
+		p.MemMiB = max(p.MemMiB, sn.MemMiB)
+		p.VCPUs = max(p.VCPUs, sn.VCPUs)
+	}
+	return p
+}
+
 // dentroDeLimites rechaza un sandbox más grande de lo que el tenant puede pedir.
-// mem_mib o vcpus a 0 son "lo de la plantilla o la imagen", que fija el
-// operador, así que no se acotan aquí.
+// p es el tamaño efectivo (tamanoEfectivo); un 0 que queda es "lo de la imagen",
+// que fija el operador del daemon, así que no se acota aquí.
 func dentroDeLimites(t *Tenant, p CrearPeticion) error {
 	if t.MaxMemMiB > 0 && p.MemMiB > t.MaxMemMiB {
 		return fmt.Errorf("mem_mib %d is over the limit of tenant %s (%d)", p.MemMiB, t.Nombre, t.MaxMemMiB)
@@ -512,9 +539,26 @@ func dentroDeLimites(t *Tenant, p CrearPeticion) error {
 // clave de contabilidad por plantilla.
 func clavePlantilla(t *Tenant, plantilla string) string { return t.Nombre + "\x00" + plantilla }
 
-// reservar comprueba la cuota y apunta la creación en vuelo.
-func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) error {
-	if t.MaxSandboxes == 0 && (t.MaxPorPlantilla == 0 || plantilla == "") {
+// claveMemoria es la clave de enVuelo con los MiB que el tenant tiene en camino.
+func claveMemoria(t *Tenant) string { return t.Nombre + "\x00mem" }
+
+// memoriaViva es lo que unos sandboxes pueden ocupar en RAM: todo salvo lo
+// parado o roto. Uno dormido (frozen) cuenta, porque un exec lo despierta sin
+// pedir permiso a nadie.
+func memoriaViva(sbs []Sandbox) int {
+	total := 0
+	for _, sb := range sbs {
+		if sb.State != api.StateStopped && sb.State != api.StateFailed {
+			total += sb.MemMiB
+		}
+	}
+	return total
+}
+
+// reservar comprueba la cuota y apunta la creación en vuelo. mem son los MiB
+// efectivos del sandbox que se va a crear (0 si no se saben).
+func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string, mem int) error {
+	if t.MaxSandboxes == 0 && (t.MaxPorPlantilla == 0 || plantilla == "") && t.MaxMemTotalMiB == 0 {
 		s.mu.Lock()
 		s.enVuelo[t.Nombre]++
 		s.enVuelo[clavePlantilla(t, plantilla)]++
@@ -534,10 +578,20 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	// Falla CERRADO si algún host no contesta. Contar solo los que sí
 	// responden dejaba crear de más: con un host caído sus sandboxes no
 	// contaban, y al volver el tenant tenía más de los que su cuota permite.
+	//
+	// La suma de memoria sola no: lo que vive en un host caído no ocupa la RAM
+	// de los que contestan, así que contar lo alcanzable sigue acotando la de
+	// cada host. Negarse ahí dejaba sin crear a todos los tenants (el tope de
+	// memoria va puesto por defecto) en cuanto un host se caía.
+	cuenta := t.MaxSandboxes > 0 || (t.MaxPorPlantilla > 0 && plantilla != "")
 	vivos, errs := s.sandboxesDe(ctx, t)
-	grafos, errsG := s.grafosDe(ctx, t)
-	if errs = append(errs, errsG...); len(errs) > 0 {
-		return &errCuotaSinContar{errors.Join(errs...)}
+	var grafos []Grafo
+	if cuenta {
+		var errsG []error
+		grafos, errsG = s.grafosDe(ctx, t)
+		if errs = append(errs, errsG...); len(errs) > 0 {
+			return &errCuotaSinContar{errors.Join(errs...)}
+		}
 	}
 	if s.trasContar != nil {
 		s.trasContar()
@@ -563,8 +617,19 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	if plantilla != "" && t.MaxPorPlantilla > 0 && dePlantilla+s.enVuelo[clavePlantilla(t, plantilla)] >= t.MaxPorPlantilla {
 		return fmt.Errorf("tenant %s already has %d sandboxes of template %s; the limit is %d", t.Nombre, dePlantilla, plantilla, t.MaxPorPlantilla)
 	}
+	// La suma de memoria: lo vivo, lo que está en camino y lo que se pide.
+	if t.MaxMemTotalMiB > 0 {
+		usada := memoriaViva(vivos) + s.enVuelo[claveMemoria(t)]
+		if usada+mem > t.MaxMemTotalMiB {
+			return fmt.Errorf("tenant %s already uses %d MiB and asks for %d more; the limit is %d MiB in total",
+				t.Nombre, usada, mem, t.MaxMemTotalMiB)
+		}
+	}
 	s.enVuelo[t.Nombre]++
 	s.enVuelo[clavePlantilla(t, plantilla)]++
+	if mem > 0 {
+		s.enVuelo[claveMemoria(t)] += mem
+	}
 	return nil
 }
 
@@ -610,7 +675,7 @@ func codigoReservar(err error) int {
 	return http.StatusTooManyRequests
 }
 
-func (s *Servidor) liberar(t *Tenant, plantilla string) {
+func (s *Servidor) liberar(t *Tenant, plantilla string, mem int) {
 	ct := s.cerrojoDe(t.Nombre)
 	ct.Lock()
 	defer ct.Unlock()
@@ -618,6 +683,13 @@ func (s *Servidor) liberar(t *Tenant, plantilla string) {
 	defer s.mu.Unlock()
 	s.bajarEnVueloLocked(t.Nombre)
 	s.bajarEnVueloLocked(clavePlantilla(t, plantilla))
+	if k := claveMemoria(t); mem > 0 {
+		if s.enVuelo[k] <= mem {
+			delete(s.enVuelo, k)
+		} else {
+			s.enVuelo[k] -= mem
+		}
+	}
 }
 
 // bajarEnVueloLocked descuenta una creación en vuelo y borra la clave al
@@ -653,7 +725,7 @@ func codigoCrear(err error) int {
 // nada distinto de lo que una precalentada ya es, se reclama una; si no, se
 // restaura una nueva del snapshot. Todo pasa por hosts.Intentar para que "no
 // cabe" en un host se reintente en el siguiente.
-func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion) (*hosts.Host, *api.Machine, error) {
+func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps map[string]*api.Snapshot) (*hosts.Host, *api.Machine, error) {
 	etiquetas := map[string]string{LabelTenant: t.Nombre}
 	for k, v := range p.Labels {
 		etiquetas[k] = v
@@ -684,28 +756,15 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion) (*host
 		}
 		sirve = func(h *hosts.Host) bool { return tienen[h.Nombre] }
 	} else {
-		snap := plantilla.SnapshotDe(p.Template)
-		req.From = snap
+		req.From = plantilla.SnapshotDe(p.Template)
 		etiquetas[LabelTemplate] = p.Template
-		tienen := s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
-			snaps, err := h.Cliente.Snapshots(ctx)
-			if err != nil {
-				return false, err
-			}
-			for _, sn := range snaps {
-				if sn.Name == snap {
-					return true, nil
-				}
-			}
-			return false, nil
-		})
-		if len(tienen) == 0 {
+		if len(snaps) == 0 {
 			return nil, nil, &errSinPlantilla{p.Template}
 		}
-		sirve = func(h *hosts.Host) bool { return tienen[h.Nombre] }
+		sirve = func(h *hosts.Host) bool { return snaps[h.Nombre] != nil }
 
 		if puedeReclamar(p) {
-			if h, mc := s.reclamarPrecalentada(ctx, t, p, etiquetas, sirve); mc != nil {
+			if h, mc := s.reclamarPrecalentada(ctx, t, p, etiquetas, snaps); mc != nil {
 				return h, mc, nil
 			}
 		}
@@ -728,6 +787,29 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion) (*host
 		return nil, nil, err
 	}
 	return h, mc, nil
+}
+
+// snapshotsDe devuelve, por host, el snapshot llamado nombre en los hosts que
+// lo tienen.
+func (s *Servidor) snapshotsDe(ctx context.Context, nombre string) map[string]*api.Snapshot {
+	var mu sync.Mutex
+	out := map[string]*api.Snapshot{}
+	s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
+		snaps, err := h.Cliente.Snapshots(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, sn := range snaps {
+			if sn.Name == nombre {
+				mu.Lock()
+				out[h.Nombre] = sn
+				mu.Unlock()
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	return out
 }
 
 // hostsCon devuelve los nombres de los hosts para los que f dice que sí.
@@ -796,8 +878,14 @@ const (
 // por s.mu para apuntarse en vuelo). Dos FRONTALES distintos sobre el mismo
 // daemon sí podrían chocar: SetLabels es un merge y el último gana; por eso
 // reclamarUna va en dos fases con un nonce y solo uno pone etiquetas y TTL.
-func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearPeticion, etiquetas map[string]string, sirve func(*hosts.Host) bool) (*hosts.Host, *api.Machine) {
+//
+// snaps es el snapshot de la plantilla en cada host que la tiene: solo vale una
+// precalentada que salió de ESE snapshot (plantilla.LabelVersion), no de uno
+// anterior con el mismo nombre que un rebuild ya reemplazó.
+func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearPeticion, etiquetas map[string]string, snaps map[string]*api.Snapshot) (*hosts.Host, *api.Machine) {
+	sirve := func(h *hosts.Host) bool { return snaps[h.Nombre] != nil }
 	for _, h := range s.reg.Candidatos(ctx, sirve) {
+		version := plantilla.VersionDe(snaps[h.Nombre])
 		listada := time.Now()
 		lctx, cancel := context.WithTimeout(ctx, plazoDaemon)
 		ms, err := h.Cliente.Sandboxes(lctx)
@@ -806,7 +894,7 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 			continue
 		}
 		for _, mc := range ms {
-			if !esPrecalentadaDe(mc, p.Template) {
+			if !esPrecalentadaDe(mc, p.Template, version) {
 				continue
 			}
 			if time.Since(listada) > vidaLista {
@@ -816,7 +904,7 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 			if !s.marcarReclamo(clave, listada) {
 				continue
 			}
-			out, ok := s.reclamarUna(ctx, h, mc, t, p, etiquetas)
+			out, ok := s.reclamarUna(ctx, h, mc, t, p, etiquetas, version)
 			s.acabarReclamo(clave)
 			if ok {
 				return h, out
@@ -872,7 +960,7 @@ const esperaReclamo = 50 * time.Millisecond
 // fase 2 del ganador ya ha caído (se comprueba que tardó menos que la pausa;
 // si no, la máquina se destruye: no se sabe si otro también pasó). Así solo
 // uno pone etiquetas y TTL, y nadie mezcla los suyos con los de otro.
-func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machine, t *Tenant, p CrearPeticion, etiquetas map[string]string) (*api.Machine, bool) {
+func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machine, t *Tenant, p CrearPeticion, etiquetas map[string]string, version string) (*api.Machine, bool) {
 	espera := s.esperaReclamo
 	if espera <= 0 {
 		espera = esperaReclamo
@@ -899,7 +987,7 @@ func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machi
 		s.log.Printf("frontal: claiming %s/%s: %v", h.Nombre, mc.ID, err)
 		return nil, false
 	}
-	if cur.Labels[LabelReclamo] != nonce || !esPrecalentadaDe(cur, p.Template) {
+	if cur.Labels[LabelReclamo] != nonce || !esPrecalentadaDe(cur, p.Template, version) {
 		// Otro frontal la está reclamando o ya es suya: no se toca.
 		return nil, false
 	}
@@ -971,10 +1059,12 @@ func nuevoNonce() (string, error) {
 // máquina kind=sandbox, de esta plantilla, sin tenant, viva o dormida, sin red
 // y que duerme al vencer. Y del frontal (sin kling.owner): las etiquetas de
 // arriba las puede poner cualquier inquilino del daemon, que conservaría exec y
-// ficheros de lo que se le diera a un cliente.
-func esPrecalentadaDe(mc *api.Machine, template string) bool {
+// ficheros de lo que se le diera a un cliente. Y de la versión del snapshot
+// que el host tiene ahora (plantilla.LabelVersion): una de un dorado anterior
+// llevaría el contenido viejo.
+func esPrecalentadaDe(mc *api.Machine, template, version string) bool {
 	if mc.Labels[api.LabelKind] != api.KindSandbox || mc.Labels[LabelTemplate] != template || mc.Labels[LabelTenant] != "" ||
-		!plantilla.DelFrontal(mc.Labels) {
+		!plantilla.DelFrontal(mc.Labels) || mc.Labels[plantilla.LabelVersion] != version {
 		return false
 	}
 	if mc.State != api.StateRunning && mc.State != api.StateWarm {

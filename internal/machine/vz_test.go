@@ -69,7 +69,7 @@ func puertoFalso(p int) string {
 
 // escucharReservado abre un listener en 127.0.0.1 dentro del rango reservado
 // a los reenvíos: el daemon rechaza un reenvío fuera de él.
-func escucharReservado(t *testing.T) net.Listener {
+func escucharReservado(t testing.TB) net.Listener {
 	t.Helper()
 	for p := credproxy.ForwardPortMax; p >= credproxy.ForwardPortMin; p-- {
 		if l, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
@@ -273,7 +273,7 @@ func servirVZFalso(sock, logPath string) {
 // managerVZ monta un Manager mínimo cuyo VMM es el falso, con la raíz en un
 // temporal corto (/tmp) o, con largo, en uno tan hondo que el socket de cada
 // máquina no cabe en sun_path.
-func managerVZ(t *testing.T, largo ...bool) (*Manager, string) {
+func managerVZ(t testing.TB, largo ...bool) (*Manager, string) {
 	t.Helper()
 	base, err := os.MkdirTemp("/tmp", "kvz")
 	if err != nil {

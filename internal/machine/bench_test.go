@@ -1,10 +1,12 @@
 package machine
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -70,7 +72,7 @@ func benchManager(n int) *Manager {
 // el RLock dentro añadiría un coste constante que no es de persist() y que, con
 // 10 máquinas, pesaría más que lo que se quiere observar.
 func BenchmarkPersist(b *testing.B) {
-	for _, n := range []int{10, 100, 500} {
+	for _, n := range []int{10, 100, 500, 1000} {
 		m := benchManager(n)
 		b.Run(fmt.Sprintf("maquinas=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -78,6 +80,39 @@ func BenchmarkPersist(b *testing.B) {
 			defer m.mu.RUnlock()
 			for b.Loop() {
 				m.persist()
+			}
+		})
+	}
+}
+
+// BenchmarkFotoEstado mide serializar la foto de state.json, lo que
+// persistLoop (y persistirYa, antes de cada VMM) paga en cada transición
+// (P4), con 100 y 1000 máquinas: "antes" es la pasada única de MarshalIndent
+// de siempre, "ahora" serializarFoto.
+func BenchmarkFotoEstado(b *testing.B) {
+	for _, n := range []int{100, 1000} {
+		m := benchManager(n)
+		list := make([]api.Machine, 0, n)
+		for _, mc := range m.byID {
+			list = append(list, *mc.Clone())
+		}
+		b.Run(fmt.Sprintf("maquinas=%d/antes", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := json.MarshalIndent(struct {
+					esquema.Cabecera
+					Machines []api.Machine `json:"machines"`
+				}{esquema.Cabecera{Schema: versionEstado}, list}, "", "  "); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("maquinas=%d/ahora", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := serializarFoto(list, versionEstado); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}

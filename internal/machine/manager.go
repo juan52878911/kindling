@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -226,6 +227,9 @@ type Manager struct {
 	// (ruta → huellaKernel) que los dorados llevan en image_digest y
 	// base_digest. Ver digestDiscoBase.
 	discosBase sync.Map
+	// discosEnVuelo: ruta → *vueloDigest del digest que alguien está
+	// calculando ahora; los demás lo esperan en vez de hashear lo mismo (P5).
+	discosEnVuelo sync.Map
 	// vigiaOverlays despierta a vigilarOverlays cuando duerme sin máquinas
 	// en marcha: persist avisa en cada cambio. Ver canalVigiaOverlays.
 	vigiaOverlays     chan struct{}
@@ -432,6 +436,9 @@ type Manager struct {
 	// pruebasAntesDeResync, si no es nil, se llama en el thaw justo antes del
 	// resync del invitado (tests de B12).
 	pruebasAntesDeResync func()
+	// pruebasTrasEscaneo, si no es nil, se llama en el paso sweepDirs del
+	// vigilante entre el escaneo y la toma de m.mu (P9). Para las pruebas.
+	pruebasTrasEscaneo func()
 	// pruebasEscaneoHuerfanos, si no es nil, se llama en killOrphanVMMs justo
 	// antes de escanear los procesos. Para las pruebas.
 	pruebasEscaneoHuerfanos func()
@@ -1134,13 +1141,8 @@ func (m *Manager) writePending() error {
 
 // escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
 func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
-
 	schema := esquemaParaEscribir(list)
-	f := struct {
-		esquema.Cabecera
-		Machines []api.Machine `json:"machines"`
-	}{esquema.Cabecera{Schema: schema}, list}
-	b, err := json.MarshalIndent(f, "", "  ")
+	b, err := serializarFoto(list, schema)
 	if err != nil {
 		return fmt.Errorf("could not serialize it: %w", err)
 	}
@@ -1166,6 +1168,82 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	}
 	m.escritoGen = gen
 	return nil
+}
+
+// serializarFoto es el state.json de la foto list con esquema schema: los
+// mismos bytes que json.MarshalIndent(..., "", "  ") de la cabecera y la
+// lista, pero cada máquina por su lado y, con muchas, en paralelo.
+//
+// Serializar las N máquinas en una sola pasada costaba ~1,7 ms con 1000 en
+// el M4 por cada escritura (P4), y persistirYa lo paga antes de lanzar cada
+// VMM. Cachear los bytes de las que no cambiaron no compensa: saber que no
+// cambiaron (reflect.DeepEqual con la copia escrita) cuesta lo mismo que
+// serializarlas. Repartirlas entre los núcleos sí: el mismo trabajo en la
+// mitad del tiempo de pared (0,8 ms con 1000; BenchmarkFotoEstado).
+func serializarFoto(list []api.Machine, schema int) ([]byte, error) {
+	var buf bytes.Buffer
+	// Como MarshalIndent de esquema.Cabecera (solo schema) y la lista.
+	fmt.Fprintf(&buf, "{\n  \"schema\": %d,\n  \"machines\": ", schema)
+	if list == nil {
+		buf.WriteString("null\n}")
+		return buf.Bytes(), nil
+	}
+	if len(list) == 0 {
+		buf.WriteString("[]\n}")
+		return buf.Bytes(), nil
+	}
+	// Cada tanda, sus máquinas separadas como en MarshalIndent; las tandas se
+	// unen igual.
+	const porTanda = 64
+	tanda := max(porTanda, (len(list)+runtime.GOMAXPROCS(0)-1)/runtime.GOMAXPROCS(0))
+	n := (len(list) + tanda - 1) / tanda
+	trozos := make([]bytes.Buffer, n)
+	errs := make([]error, n)
+	codificar := func(k int) {
+		t := &trozos[k]
+		enc := json.NewEncoder(t)
+		enc.SetIndent("    ", "  ")
+		for i := k * tanda; i < min((k+1)*tanda, len(list)); i++ {
+			if i > k*tanda {
+				t.WriteString(",\n    ")
+			}
+			if err := enc.Encode(&list[i]); err != nil {
+				errs[k] = err
+				return
+			}
+			t.Truncate(t.Len() - 1) // el "\n" que añade Encode
+		}
+	}
+	if n == 1 {
+		codificar(0)
+	} else {
+		var wg sync.WaitGroup
+		for k := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				codificar(k)
+			}()
+		}
+		wg.Wait()
+	}
+	total := 0
+	for k := range trozos {
+		if errs[k] != nil {
+			return nil, errs[k]
+		}
+		total += trozos[k].Len() + 8
+	}
+	buf.Grow(total + 8)
+	buf.WriteString("[\n    ")
+	for k := range trozos {
+		if k > 0 {
+			buf.WriteString(",\n    ")
+		}
+		buf.Write(trozos[k].Bytes())
+	}
+	buf.WriteString("\n  ]\n}")
+	return buf.Bytes(), nil
 }
 
 // persistirYa escribe el estado AHORA, sin esperar al debounce. Se llama SIN m.mu.
@@ -3481,6 +3559,28 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 	return out, nil
 }
 
+// plazoCredencialesThaw acota cada intento de entregar sus credenciales a
+// una máquina que se descongela (MMDS y su proxy, y el DNS de los
+// -upstream).
+const plazoCredencialesThaw = 30 * time.Second
+
+// entregarSinPeticion prueba los intentos en orden hasta que uno sale bien,
+// cada uno con su plazo y sin la cancelación de ctx: lo que la máquina
+// necesita para servir no depende de que quien la despertó siga esperando.
+// Devuelve el error del último.
+func entregarSinPeticion(ctx context.Context, plazo time.Duration, intentos ...func(context.Context) error) error {
+	var err error
+	for _, intento := range intentos {
+		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazo)
+		err = intento(c)
+		cancel()
+		if err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	mc, err := m.thaw(ctx, ref)
@@ -3745,6 +3845,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		soltarFull()
 		return nil, glErr
 	}
+	// Se suelta en cuanto la memoria está cargada (P3): lo pesado es el
+	// LoadSnapshot; el resync y las credenciales esperan al invitado, y
+	// reteniéndola una tanda de invitados lentos dejaba el host en ~1 thaw/s.
 	defer release()
 	crono.marca(&crono.p.WaitMS)
 
@@ -3796,6 +3899,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		defer cg.Close()
 	}
 	var enCg bool
+	// esperarSello es el resultado de retirar el sello del volcado (P2), que
+	// corre a la vez que el spawn; intentoCarga, si ya se pidió el
+	// LoadSnapshot (desde ahí, si el sello vuelve lo decide su error).
+	var esperarSello func() error
+	var intentoCarga bool
 
 	// abortar es la única salida de error a partir de aquí.
 	//
@@ -3808,6 +3916,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// detectaba porque el proceso existe de verdad.
 	abortar := func(err error) (*api.Machine, error) {
 		cortarPrecarga()
+		// Sin cargar nada, el volcado sigue valiendo: si el sello ya se
+		// retiró en paralelo con el spawn, vuelve a su sitio.
+		if esperarSello != nil && !intentoCarga && esperarSello() == nil {
+			if rerr := restaurarSello(dir); rerr != nil {
+				log.Printf("warning: thaw: %s: couldn't restore the seal of its memory dump: %v", mc.Name, rerr)
+			}
+		}
 		if pid > 0 {
 			// Esperando a que muera, como start.devolver (M3): sin esperar, un
 			// reintento inmediato veía el VMM moribundo en liveVMs, lo
@@ -3832,6 +3947,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if m.JailerBlocked != "" {
 		return abortar(errors.New(m.JailerBlocked))
 	}
+	// El sello del volcado se retira mientras arranca el VMM (P2): es un
+	// rename y un fsync del directorio (un F_FULLFSYNC, ~5 ms en el M4) que
+	// antes iban en serie justo antes de cargar. Se espera antes del
+	// LoadSnapshot: no se carga nada con el sello puesto.
+	selloRetirado := make(chan error, 1)
+	go func() { selloRetirado <- retirarSello(dir) }()
+	esperarSello = sync.OnceValue(func() error { return <-selloRetirado })
 	if m.jailerJailed {
 		// El warm también se descongela dentro de un jail, o el aislamiento se
 		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
@@ -3899,9 +4021,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// si el daemon moría el volcado viejo pasaba por anterior a los sellos y el
 	// siguiente thaw cargaba aquella RAM sobre el disco ya escrito. Ahora es un
 	// rename durable (volcadoEnCurso) y, si no se puede, no se carga nada.
-	if err := retirarSello(dir); err != nil {
+	if err := esperarSello(); err != nil {
 		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
 	}
+	intentoCarga = true
 	start := time.Now()
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
@@ -3924,6 +4047,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	elapsed := time.Since(start).Milliseconds()
 	crono.marca(&crono.p.LoadMS)
+	// Cargada y reanudada: la compuerta, para el siguiente (P3).
+	release()
 	// Un volcado de antes de globo_ritmo.go trae las estadísticas cada 1 s.
 	ritmoGloboReposo(ctx, c)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
@@ -3953,7 +4078,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if credsPrevia {
 			entregar = m.marcadoresCredenciales
 		}
-		if _, err := entregar(ctx, mc, c); err != nil {
+		// Sin el ctx de la petición (F7), como el resync: si quien pidió el
+		// thaw se iba, la entrega se cortaba y la máquina quedaba running sin
+		// su proxy. Con su plazo, y una segunda entrega entera si falla.
+		err := entregarSinPeticion(ctx, plazoCredencialesThaw,
+			func(c2 context.Context) error { _, err := entregar(c2, mc, c); return err },
+			func(c2 context.Context) error { _, err := m.reentregarCredenciales(c2, mc, c); return err })
+		if err != nil {
 			log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
 		}
 	}()

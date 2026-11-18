@@ -231,53 +231,148 @@ type importCompose struct {
 	yaReplace bool
 }
 
-// runSetup crea los volúmenes y después importa en paralelo.
-func runSetup(ctx context.Context, host string, vols []string, imports []importCompose) error {
-	run := func(l string) (string, error) {
-		argv, err := shellWords(strings.TrimPrefix(l, "kling "))
-		if err != nil {
-			return "", err
-		}
-		out, err := selfCmd(ctx, host, argv...).CombinedOutput()
-		s := strings.TrimSpace(string(out))
-		if err != nil {
-			if len(argv) >= 3 && argv[0] == "volume" && strings.Contains(s, "exists") {
-				return s, nil // ya estaba: se reutiliza, como un volumen de Docker
-			}
-			return s, fmt.Errorf("%s: %s", l, s)
-		}
-		return s, nil
+// lineaKling corre una línea de t.Antes con este mismo binario y devuelve su
+// salida combinada. Una variable para los tests.
+var lineaKling = func(ctx context.Context, host, l string) (string, error) {
+	argv, limpiar, err := argvKling(l)
+	if err != nil {
+		return "", err
 	}
+	defer limpiar()
+	out, err := selfCmd(ctx, host, argv...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// argvKling parte una línea de t.Antes en los argumentos de kling. El
+// entorno del servicio (contraseñas, a menudo) va en un -env-file temporal
+// (0600) y no en la línea de órdenes, que ve cualquiera con ps; limpiar lo
+// borra.
+func argvKling(l string) (argv []string, limpiar func(), err error) {
+	limpiar = func() {}
+	argv, err = shellWords(strings.TrimPrefix(l, "kling "))
+	if err != nil {
+		return nil, limpiar, err
+	}
+	sin, lineas, ok := entornoAFichero(argv)
+	if !ok {
+		return argv, limpiar, nil
+	}
+	f, err := os.CreateTemp("", "kling-compose-env-*")
+	if err != nil {
+		return nil, limpiar, err
+	}
+	limpiar = func() { os.Remove(f.Name()) }
+	_, err = f.WriteString(strings.Join(lineas, "\n") + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		limpiar()
+		return nil, func() {}, err
+	}
+	fin := slices.Index(sin, "--")
+	if fin < 0 {
+		fin = len(sin)
+	}
+	return slices.Insert(sin, fin, "-env-file", f.Name()), limpiar, nil
+}
+
+// banderasConValor son las de ordenImportCon que llevan un valor detrás.
+var banderasConValor = map[string]bool{"-name": true, "-arch": true, "-user": true, "-restart": true, "-entrypoint": true}
+
+// entornoAFichero saca los -e K=V de un kling image import: argv sin ellos y
+// las líneas de su -env-file, en el mismo orden. ok es false si no hay
+// ninguno o si alguno no cabe en una línea de -env-file tal cual (un salto
+// de línea, o espacio al final, que el fichero recortaría): entonces se
+// queda como estaba.
+func entornoAFichero(argv []string) (sin, lineas []string, ok bool) {
+	if len(argv) < 2 || argv[0] != "image" || argv[1] != "import" {
+		return nil, nil, false
+	}
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case a == "--":
+			sin = append(sin, argv[i:]...)
+			i = len(argv)
+		case a == "-e" && i+1 < len(argv):
+			kv := argv[i+1]
+			k, _, _ := strings.Cut(kv, "=")
+			if strings.ContainsAny(kv, "\n\r") || strings.TrimSpace(kv) != kv || strings.HasPrefix(k, "#") || strings.ContainsAny(k, " \t") {
+				return nil, nil, false
+			}
+			lineas = append(lineas, kv)
+			i++
+		case banderasConValor[a] && i+1 < len(argv):
+			sin = append(sin, a, argv[i+1])
+			i++
+		default:
+			sin = append(sin, a)
+		}
+	}
+	return sin, lineas, len(lineas) > 0
+}
+
+// falloLinea es el error de una línea de t.Antes: lo que dijo, o el error si
+// no dijo nada.
+func falloLinea(l, out string, err error) error {
+	if out == "" {
+		out = err.Error()
+	}
+	return fmt.Errorf("%s: %s", l, out)
+}
+
+// crearVolumenes crea los volúmenes del proyecto; uno que ya está se
+// reutiliza, como un volumen de Docker.
+func crearVolumenes(ctx context.Context, run func(context.Context, string) (string, error), vols []string) error {
 	for _, l := range vols {
-		if _, err := run(l); err != nil {
-			return err
+		if out, err := run(ctx, l); err != nil && !strings.Contains(out, "exists") {
+			return falloLinea(l, out, err)
 		}
 	}
-	errs := make([]error, len(imports))
-	var wg sync.WaitGroup
-	for i, im := range imports {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if im.yaReplace {
-				if im.antesDeReplace != nil {
-					im.antesDeReplace()
-				}
-				_, errs[i] = run(im.conReplace)
-				return
+	return nil
+}
+
+// importarSinReemplazar corre los imports que no reemplazan nada: una
+// imagen nueva se importa y una con la misma receta no hace nada. Va antes
+// de quitar el proyecto que está levantado, así que un pull que falla lo
+// deja como estaba. Devuelve los que necesitan -replace (la receta cambió,
+// o -fresh), para después.
+func importarSinReemplazar(ctx context.Context, run func(context.Context, string) (string, error), imports []importCompose) ([]importCompose, error) {
+	var mu sync.Mutex
+	var pendientes []importCompose
+	err := enParaleloHastaFallo(ctx, len(imports), paraleloCompose, func(ctx context.Context, i int) error {
+		im := imports[i]
+		if !im.yaReplace {
+			out, err := run(ctx, im.linea)
+			if err == nil {
+				return nil
 			}
-			out, err := run(im.linea)
-			if err != nil && strings.Contains(out, "-replace") {
-				if im.antesDeReplace != nil {
-					im.antesDeReplace()
-				}
-				_, err = run(im.conReplace)
+			if !strings.Contains(out, "-replace") {
+				return falloLinea(im.linea, out, err)
 			}
-			errs[i] = err
-		}()
-	}
-	wg.Wait()
-	return errors.Join(errs...)
+		}
+		mu.Lock()
+		pendientes = append(pendientes, im)
+		mu.Unlock()
+		return nil
+	})
+	return pendientes, err
+}
+
+// importarReemplazando corre los imports con -replace, ya sin el proyecto:
+// antes, las plantillas que salieron de la imagen vieja.
+func importarReemplazando(ctx context.Context, run func(context.Context, string) (string, error), imports []importCompose) error {
+	return enParaleloHastaFallo(ctx, len(imports), paraleloCompose, func(ctx context.Context, i int) error {
+		im := imports[i]
+		if im.antesDeReplace != nil {
+			im.antesDeReplace()
+		}
+		if out, err := run(ctx, im.conReplace); err != nil {
+			return falloLinea(im.conReplace, out, err)
+		}
+		return nil
+	})
 }
 
 // shellWords parte una línea de t.Antes (que sale de comillaSh) en palabras.
@@ -360,6 +455,9 @@ func composeUp(g globalesCompose, args []string) error {
 	if err := v.dueno(t.Proyect, abs); err != nil {
 		return err
 	}
+	if err := colisionDe(t, v.ms, false); err != nil {
+		return err
+	}
 	info := v.info
 	publicaDaemon := slices.Contains(info.Capabilities, api.CapabilityPublish)
 	if *detach && !publicaDaemon {
@@ -367,20 +465,11 @@ func composeUp(g globalesCompose, args []string) error {
 	}
 	t.etiquetas = map[string]string{labelComposeProject: t.Proyect, labelComposeFile: abs}
 
-	// Un up de un proyecto que ya está: se sustituye (sus volúmenes siguen).
-	if quitarProyectoDe(ctx, c, t.Proyect, v.g) && v.ms != nil {
-		quitarHuerfanasDe(ctx, c, t, v.sinGrafo(v.g))
-	} else {
-		// El grafo no se fue (o no se pudo listar): se mira de nuevo.
-		quitarHuerfanas(ctx, c, t)
+	prep, err := planCompose(ctx, c, *host, t, *fresh)
+	if err != nil {
+		return err
 	}
-	// Un puerto ocupado se dice antes de importar ni preparar nada.
-	if esLocal(endpoint) {
-		if err := comprobarPuertosLibres(t); err != nil {
-			return err
-		}
-	}
-	if err := prepararCompose(ctx, c, *host, t, *fresh); err != nil {
+	if err := sustituirProyecto(ctx, c, t, v, prep, esLocal(endpoint)); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp("", "kling-compose-*.yaml")
@@ -436,6 +525,31 @@ func composeUp(g globalesCompose, args []string) error {
 	fmt.Fprintf(os.Stderr, "\nremoving %s...\n", t.Proyect)
 	quitarProyecto(context.Background(), c, t.Proyect)
 	return nil
+}
+
+// sustituirProyecto deja listo lo que necesita el grafo de t en lugar del
+// proyecto que pueda estar levantado (v). Lo que no lo toca va antes de
+// quitarlo: un import que falla (un pull, una etiqueta que no existe) deja
+// el proyecto vivo como estaba. Después, sin él (sus volúmenes siguen): las
+// huérfanas, los puertos, los imports con -replace y las plantillas.
+func sustituirProyecto(ctx context.Context, c *api.Client, t *traduccionCompose, v *vistaProyecto, prep *preparacionCompose, local bool) error {
+	if err := prep.importarAntes(ctx); err != nil {
+		return err
+	}
+	if quitarProyectoDe(ctx, c, t.Proyect, v.g) && v.ms != nil {
+		quitarHuerfanasDe(ctx, c, t, v.sinGrafo(v.g))
+	} else {
+		// El grafo no se fue (o no se pudo listar): se mira de nuevo.
+		quitarHuerfanas(ctx, c, t)
+	}
+	// Un puerto ocupado se dice antes de reemplazar imágenes ni preparar
+	// plantillas (los del proyecto anterior ya están libres).
+	if local {
+		if err := comprobarPuertosLibres(t); err != nil {
+			return err
+		}
+	}
+	return prep.terminar(ctx)
 }
 
 // esLocal dice si el daemon de endpoint corre en esta máquina (un socket
@@ -581,7 +695,9 @@ func quitarHuerfanasDe(ctx context.Context, c *api.Client, t *traduccionCompose,
 		nombres[t.Proyect+"-"+s.nodo] = true
 	}
 	for _, m := range ms {
-		huerfana := nombres[m.Name] && m.Labels[api.LabelGraph] != ""
+		// Con la etiqueta del proyecto: el nombre solo no basta (el servicio
+		// b-web del proyecto a y el web del proyecto a-b son los dos a-b-web).
+		huerfana := nombres[m.Name] && m.Labels[api.LabelGraph] != "" && m.Labels[labelComposeProject] == t.Proyect
 		if m.Labels[labelComposeProject] == t.Proyect && strings.HasSuffix(m.Name, "-prep") {
 			huerfana = true
 		}
@@ -590,6 +706,55 @@ func quitarHuerfanasDe(ctx context.Context, c *api.Client, t *traduccionCompose,
 			_ = c.Remove(ctx, m.ID)
 		}
 	}
+}
+
+// volumenesDe son los volúmenes de kling del proyecto de t.
+func volumenesDe(t *traduccionCompose) []string {
+	var out []string
+	for _, l := range t.Antes {
+		if v, ok := strings.CutPrefix(l, "kling volume create "); ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// colisionDe se niega a seguir si una máquina de OTRO proyecto de compose
+// se llama como una del de t o monta uno de sus volúmenes: los nombres son
+// <proyecto>-<servicio>, y el servicio b-web del proyecto a y el web del
+// proyecto a-b dan los dos a-b-web (máquina e imagen). Seguir borraría o
+// reemplazaría lo del otro. Con soloVolumenes, solo los volúmenes (down -v).
+func colisionDe(t *traduccionCompose, ms []*api.Machine, soloVolumenes bool) error {
+	nombres := map[string]bool{}
+	if !soloVolumenes {
+		for _, s := range t.vivos {
+			nombres[t.Proyect+"-"+s.nodo] = true
+		}
+	}
+	vols := map[string]bool{}
+	for _, v := range volumenesDe(t) {
+		vols[v] = true
+	}
+	for _, m := range ms {
+		otro := m.Labels[labelComposeProject]
+		if otro == "" || otro == t.Proyect {
+			continue
+		}
+		que := ""
+		if nombres[m.Name] {
+			que = "machine and image " + m.Name
+		}
+		for _, va := range m.Volumes {
+			if que == "" && vols[va.Name] {
+				que = "volume " + va.Name
+			}
+		}
+		if que != "" {
+			return &errWithHint{err: fmt.Errorf("projects %s and %s both name %s", t.Proyect, otro, que),
+				hint: "give this project another name with -p"}
+		}
+	}
+	return nil
 }
 
 func composeDown(g globalesCompose, args []string) error {
@@ -622,11 +787,10 @@ func composeDown(g globalesCompose, args []string) error {
 		if t == nil {
 			return errors.New("-v needs the compose file (to know its volumes): run it where the compose is, or with -f")
 		}
-		for _, l := range t.Antes {
-			v, ok := strings.CutPrefix(l, "kling volume create ")
-			if !ok {
-				continue
-			}
+		if err := colisionDe(t, v.ms, true); err != nil {
+			return err
+		}
+		for _, v := range volumenesDe(t) {
 			if err := c.RemoveVolume(ctx, v); err != nil {
 				var se *api.StatusError
 				if errors.As(err, &se) && se.Code == 404 {

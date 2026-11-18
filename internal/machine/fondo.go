@@ -557,6 +557,15 @@ func (m *Manager) reanudarFondos() {
 		if plantilla == "" {
 			continue
 		}
+		// La etiqueta sola no basta para ser del fondo: solo informa, y una
+		// que llegara por un camino que no la rechazara convertiría la
+		// máquina de un inquilino en una copia que se entrega al siguiente
+		// que pida la plantilla. Una copia de verdad la crea crearParaFondo:
+		// restaurada de esa plantilla y sin dueño. Lo demás ni se adopta ni
+		// se retira (no es del fondo, y borrarla sería perder algo ajeno).
+		if mc.From != plantilla || mc.Labels[api.LabelOwner] != "" {
+			continue
+		}
 		if mc.State == api.StateRunning && mc.Labels[api.LabelPoolReady] == "1" && tam[plantilla] > 0 {
 			vivas[plantilla] = append(vivas[plantilla], id)
 		} else {

@@ -335,6 +335,10 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 // hostil encadenaba tantos como quisiera, cada uno una petición.
 const maxIndices = 4
 
+// maxLayers es el tope de capas de un manifiesto (Docker deja 127 y
+// containerd unas 125): cada capa es una descarga y un desempaquetado.
+const maxLayers = 1024
+
 // pull es Pull con los índices que ya se atravesaron.
 func (c *Client) pull(ctx context.Context, ref, digest, arch string, indices int) (*Image, error) {
 	if !reDigest.MatchString(digest) {
@@ -390,16 +394,21 @@ func (c *Client) pull(ctx context.Context, ref, digest, arch string, indices int
 	if len(m.Layers) == 0 {
 		return nil, fmt.Errorf("manifest %s has no layers (media type %s)", digest, m.MediaType)
 	}
+	if len(m.Layers) > maxLayers {
+		return nil, fmt.Errorf("manifest %s has %d layers, over the limit of %d", digest, len(m.Layers), maxLayers)
+	}
 	if c.MaxBytes > 0 {
 		var total int64
 		for _, l := range m.Layers {
 			if l.Size <= 0 {
 				return nil, fmt.Errorf("layer %s has no declared size", l.Digest)
 			}
+			// Se compara antes de sumar: dos tamaños enormes desbordaban
+			// total, que quedaba negativo y pasaba el tope.
+			if l.Size > c.MaxBytes-total {
+				return nil, fmt.Errorf("image %s is over the %d MiB compressed limit", digest, c.MaxBytes>>20)
+			}
 			total += l.Size
-		}
-		if total > c.MaxBytes {
-			return nil, fmt.Errorf("image %s is %d MiB compressed, over the %d MiB limit", digest, total>>20, c.MaxBytes>>20)
 		}
 	}
 	img := &Image{Ref: registry + "/" + repo + "@" + digest, ManifestDigest: digest, Manifest: m}

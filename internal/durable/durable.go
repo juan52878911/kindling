@@ -78,6 +78,25 @@ func Escribir(ruta string, datos []byte, perm os.FileMode) error {
 	return nil
 }
 
+// Mover renombra `origen`, que YA está en disco (escrito con Escribir, o
+// publicado con Renombrar), a `destino` y hace fsync del directorio: el
+// rename llega al disco antes de volver. Es Renombrar sin el fsync del
+// fichero, que ahí no lleva nada (P2). Mismo directorio, como Renombrar.
+func Mover(origen, destino string) error {
+	if err := os.Rename(origen, destino); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(destino))
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // Renombrar mueve `tmp` a `destino` de forma durable: el FICHERO al disco
 // primero (Ordenar, por lo mismo que en Escribir: sin él el rename acaba
 // apuntando a contenido que todavia vive en la cache), rename, y fsync del

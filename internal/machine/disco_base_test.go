@@ -83,8 +83,9 @@ func TestCommitFirmaElDiscoBase(t *testing.T) {
 }
 
 // Un meta.json v3 (v1.0: firma v2 sin los digests del disco) se sigue
-// restaurando: su firma cuadra, la imagen no se comprueba, y al reescribirse
-// sube a v4 con meta.json.v3.bak sin dejar de cuadrar. Lo firmó la clave de
+// restaurando: su firma cuadra y, antes de que corra la migración, se
+// re-firma en el momento en v3 con los digests de la imagen que hay (M13);
+// sube a v5 con meta.json.v3.bak sin dejar de cuadrar. Lo firmó la clave de
 // testdata/esquema/clave-de-prueba.key sobre los ficheros de doradoEnDisco.
 func TestMetaV3SigueValiendoYSubeAV4(t *testing.T) {
 	m := managerConClaveDePrueba(t)
@@ -99,6 +100,13 @@ func TestMetaV3SigueValiendoYSubeAV4(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	img := m.imagePath("toolchain")
+	if err := os.MkdirAll(filepath.Dir(img), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(img, []byte("imagen"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ruta := filepath.Join(dir, "meta.json")
 	original := copiarFijacion(t, "meta.v3.json", ruta)
 	if v, _ := esquema.Version(original); v != 3 {
@@ -111,8 +119,11 @@ func TestMetaV3SigueValiendoYSubeAV4(t *testing.T) {
 	if err := m.comprobarFirma(s); err != nil {
 		t.Fatalf("la firma de un v3 ya no cuadra: %v", err)
 	}
+	if !strings.HasPrefix(s.Signature, firmaV3) || s.ImageDigest == "" {
+		t.Fatalf("no se re-firmó en v3 con el digest de la imagen: firma %q, imagen %q", s.Signature, s.ImageDigest)
+	}
 	if err := m.verifyIntegrity(s, dir); err != nil {
-		t.Fatalf("un v3 sin digests del disco no se restaura: %v", err)
+		t.Fatalf("un v3 re-firmado no se restaura: %v", err)
 	}
 	if _, err := m.SetAnnotation("svc", "nota", []byte(`1`)); err != nil {
 		t.Fatal(err)
@@ -130,6 +141,6 @@ func TestMetaV3SigueValiendoYSubeAV4(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := m.comprobarFirma(s); err != nil {
-		t.Fatalf("subido a v4 la firma ya no cuadra: %v", err)
+		t.Fatalf("subido a v5 la firma ya no cuadra: %v", err)
 	}
 }

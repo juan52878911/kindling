@@ -39,7 +39,7 @@ es uno por daemon).
 | `adopt <máquina>` | identidad y token para un teléfono que no hizo `kling phone`: un nodo de grafo `from: <dorado>`. Hasta entonces su API está cerrada |
 | `golden build [-image I] [-name G] [-replace]` | arranque en frío con `-cpu-pct vCPU×100` y `-wait-ready`; salud; con un token de un solo uso, `POST /v1/verify-cache` (la caché de páginas contra el disco, `O_DIRECT`) y el búfer de fallos (SIGILL, caídas de system_server); revoca el token; `save`; y **otra vez en un clon del dorado guardado**: si el clon no pasa, el dorado se borra |
 | `golden verify` · `golden inspect [-json]` | la misma comprobación en un clon de usar y tirar; lo que quedó anotado |
-| `mcp [-listen 127.0.0.1:8095] [-phone P] [-pool N]` | el servidor MCP (abajo) |
+| `mcp [-listen 127.0.0.1:8095] [-phone P] [-pool N] [-max-sessions 4]` | el servidor MCP (abajo) |
 
 `<tel>` es el nombre (`phone-3`) o el número (`3`). Configuración (`kling config set
 phone.<clave>`): `image`, `golden`, `prefix`, `cpus`, `mem`, `egress`, `adb_pubkey`
@@ -77,7 +77,11 @@ identidad y token propios. `initialize` y `tools/list` no crean nada (es lo que 
 `kling mcp link` para leer el catálogo). Sin uso durante `-idle` (2 min) se pausa y
 vuelve solo en la siguiente llamada; a los `-session-ttl` (15 min), o con un `DELETE`
 de la sesión, se borra: lo que hizo una conversación en su teléfono no lo hereda otra.
-`-phone P` da el mismo teléfono a todas las sesiones.
+`-phone P` da el mismo teléfono a todas las sesiones. `-max-sessions` (4) acota las
+sesiones abiertas a la vez, y con ellas los teléfonos; un `initialize` de más recibe 503.
+Un teléfono que no se pudo borrar se reintenta en cada vuelta, y al arrancar el servidor
+borra los que dejó con dueño una ejecución anterior en su misma dirección (con
+`-listen` de puerto 0 la dirección cambia y no los encuentra).
 
 Por qué así y no `kling-phoned` sirviendo MCP en el invitado e importado con `kling mcp
 import -isolation session`: el gateway habla MCP solo con el 8080 del invitado (el
@@ -92,7 +96,9 @@ pequeño y va por la API del daemon (`Pause`, `Thaw`, `Freeze`, etiquetas).
 La API del teléfono exige un token (#110, `SECURITY.md` §21): el muro y el servidor MCP
 lo añaden solos, y escuchan en loopback con defensas contra otras webs del navegador
 (`Host` de loopback, cabecera propia en los POST del muro, `Content-Type:
-application/json` y ruta secreta en el MCP). Quien llega a ellos controla los teléfonos.
+application/json` y ruta secreta en el MCP). Quien llega a ellos controla los teléfonos,
+así que `-listen` fuera de loopback se rechaza y solo se contesta a conexiones de loopback
+(el `Host` lo escribe el cliente).
 
 ### Con la autorización del daemon (`docs/authz.md`)
 

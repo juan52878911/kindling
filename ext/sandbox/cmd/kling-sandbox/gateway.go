@@ -90,6 +90,7 @@ func cmdGateway(args []string) error {
 	abandono := fs.Duration("abandon", 0, "how long a sandbox may sit unused before it is destroyed (default 24h)")
 	maxMem := fs.Int("max-mem-mib", 0, "largest mem_mib a sandbox may ask for, for tenants without their own (default 4096)")
 	maxCPU := fs.Int("max-vcpus", 0, "largest vcpus a sandbox may ask for, for tenants without their own (default 4)")
+	maxTotal := fs.Int("max-mem-total-mib", 0, "largest sum of mem_mib a tenant may have alive, for tenants without their own (default 16384)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -120,6 +121,7 @@ func cmdGateway(args []string) error {
 		Abandono:         a.Reap,
 		MaxMemMiB:        *maxMem,
 		MaxVCPUs:         *maxCPU,
+		MaxMemTotalMiB:   *maxTotal,
 		Log:              log.New(os.Stderr, "", log.LstdFlags),
 	})
 	if err != nil {
@@ -137,11 +139,7 @@ func cmdGateway(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Sin WriteTimeout: por aquí pasan sesiones de shell y ejecuciones largas, y
-	// un plazo global las cortaría a media faena. Lo que sí se acota es la
-	// espera a las CABECERAS, que es lo que separa "está trabajando" de "no hay
-	// nadie".
-	hsrv := &http.Server{Handler: srv, ReadHeaderTimeout: 20 * time.Second}
+	hsrv := servidorHTTP(srv)
 
 	log.Printf("sandbox gateway on %s · %d tenant(s) · hosts: %s", ln.Addr(), len(tenants), strings.Join(nombres(a.Hosts), ", "))
 	for _, e := range reg.Estados(ctx) {
@@ -171,6 +169,21 @@ func cmdGateway(args []string) error {
 	}
 }
 
+// servidorHTTP es el servidor del gateway. Sin WriteTimeout: por aquí pasan
+// sesiones de shell y ejecuciones largas, y un plazo global las cortaría a media
+// faena. Lo que sí se acota es la espera a las CABECERAS (lo que separa "está
+// trabajando" de "no hay nadie"), su tamaño, y cuánto vive una conexión
+// keep-alive sin peticiones: sin IdleTimeout, cada cliente que abre y se calla
+// deja un descriptor y una goroutine para siempre.
+func servidorHTTP(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 20 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+}
+
 func nombres(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -187,7 +200,11 @@ func nombres(m map[string]string) []string {
 // de kindling-mcp a su token.
 //
 //	KLING_SANDBOX_TOKEN=xxx                              un inquilino "default", sin tope
-//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus]]]]
+//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus[:máx. mem_mib total]]]]]
+//
+// Cada token tiene al menos 16 caracteres y no se repite entre inquilinos
+// (frontal.Nuevo se niega a arrancar si no).
+//
 //	KLING_SANDBOX_ADMINS=ana                             tenants que ven /v1/hosts y las métricas de todos
 func leerTenants() ([]frontal.Tenant, error) {
 	var out []frontal.Tenant
@@ -203,8 +220,8 @@ func leerTenants() ([]frontal.Tenant, error) {
 		// sandboxes) no se mueven de sitio, así que una configuración escrita
 		// antes de que existiera el máximo de shells se sigue leyendo igual.
 		partes := strings.Split(t, ":")
-		if len(partes) < 2 || len(partes) > 6 || partes[0] == "" || partes[1] == "" {
-			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus]]]]", t)
+		if len(partes) < 2 || len(partes) > 7 || partes[0] == "" || partes[1] == "" {
+			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus[:max_mem_total_mib]]]]]", t)
 		}
 		te := frontal.Tenant{Nombre: partes[0], Token: partes[1]}
 		if len(partes) > 2 && partes[2] != "" {
@@ -234,6 +251,13 @@ func leerTenants() ([]frontal.Tenant, error) {
 				return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: max_vcpus has to be a number", t)
 			}
 			te.MaxVCPUs = n
+		}
+		if len(partes) > 6 && partes[6] != "" {
+			n, err := strconv.Atoi(partes[6])
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: max_mem_total_mib has to be a number", t)
+			}
+			te.MaxMemTotalMiB = n
 		}
 		out = append(out, te)
 	}

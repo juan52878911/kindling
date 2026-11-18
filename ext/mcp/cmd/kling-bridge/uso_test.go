@@ -25,7 +25,9 @@ func postJSON(b *bridge, sid, body string) (int, string) {
 // roots) lleva id y no method. No espera nada: antes se trataba como petición y
 // se quedaba colgada hasta el tope de respuesta.
 func TestRespuestaDelClienteSeEntregaSinEsperar(t *testing.T) {
-	b := testBridge("cat")
+	// El servidor falso y no `cat`: el eco devolvería el initialize con su
+	// method, y eso es un mensaje iniciado por el servidor, no una respuesta.
+	b := testBridge()
 	b.reqTimeout = 3 * time.Second
 	defer b.closeAll()
 

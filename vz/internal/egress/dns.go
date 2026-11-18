@@ -76,6 +76,10 @@ type Resolver struct {
 const (
 	MaxCacheTTL     = 5 * time.Minute
 	MaxCacheEntries = 512
+	// MaxCacheResp: una respuesta más grande (solo llegan por TCP, hasta
+	// 64 KiB) no se guarda: con 512 así la caché eran 32 MiB por VM (R7).
+	// Las de nombres corrientes caben de sobra.
+	MaxCacheResp = 4 << 10
 	// NegCacheTTL: una respuesta NOERROR sin registros (AAAA de un nombre
 	// solo IPv4, lo más común) se recuerda este tiempo.
 	NegCacheTTL = 30 * time.Second
@@ -118,9 +122,10 @@ func (r *Resolver) deCache(query []byte, name string, qtype uint16) []byte {
 
 // aCache guarda resp si es una respuesta que vale la pena recordar: NOERROR,
 // no truncada, y con TTL > 0 en todos sus registros (uno a 0 pide no
-// recordar nada). Vacía (sin registros) se guarda NegCacheTTL.
+// recordar nada). Vacía (sin registros) se guarda NegCacheTTL. Más grande que
+// MaxCacheResp, no.
 func (r *Resolver) aCache(name string, qtype uint16, resp []byte) {
-	if len(resp) < 12 || resp[2]&0x02 != 0 || resp[3]&0x0F != 0 {
+	if len(resp) < 12 || len(resp) > MaxCacheResp || resp[2]&0x02 != 0 || resp[3]&0x0F != 0 {
 		return
 	}
 	ttl, n, ok := ttlMinimo(resp)
@@ -417,7 +422,11 @@ func exchange(ctx context.Context, upstream string, query []byte, viaTCP bool) (
 		return nil, err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	plazo := time.Now().Add(5 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(plazo) {
+		plazo = d
+	}
+	_ = c.SetDeadline(plazo)
 	salida, propio, err := conTxidPropio(query)
 	if err != nil {
 		return nil, err
@@ -427,12 +436,21 @@ func exchange(ctx context.Context, upstream string, query []byte, viaTCP bool) (
 		if _, err := c.Write(salida); err != nil {
 			return nil, err
 		}
+		// Un datagrama con otro TXID (la respuesta tardía de una consulta
+		// anterior que reusó el puerto, o una falsa) se ignora y se sigue
+		// esperando la nuestra hasta el plazo, como hace el resolver de Go.
+		// Antes daba error al momento y el invitado recibía SERVFAIL (F13).
 		buf := make([]byte, 4096)
-		n, err := c.Read(buf)
-		if err != nil {
-			return nil, err
+		for {
+			n, err := c.Read(buf)
+			if err != nil {
+				return nil, err
+			}
+			if n >= 12 && binary.BigEndian.Uint16(buf[0:2]) == propio {
+				resp = buf[:n]
+				break
+			}
 		}
-		resp = buf[:n]
 	} else {
 		if err := WriteTCPMsg(c, salida); err != nil {
 			return nil, err

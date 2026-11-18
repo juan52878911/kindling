@@ -36,9 +36,13 @@ type falso struct {
 	// snapAnot son las anotaciones de cada snapshot (por nombre), donde vive la
 	// receta que plantilla.Construir cuelga de AnotacionReceta.
 	snapAnot map[string]map[string]json.RawMessage
-	imagenes []string
-	ficheros map[string][]byte
-	libreMiB int64
+	// snapMem y snapHecho son la memoria y el instante de guardado de cada
+	// snapshot (por nombre). Restaurar sin mem_mib da la del snapshot.
+	snapMem   map[string]int
+	snapHecho map[string]time.Time
+	imagenes  []string
+	ficheros  map[string][]byte
+	libreMiB  int64
 
 	// crearCodigo hace fallar POST /sandboxes con ese estado (507, 409...).
 	crearCodigo int
@@ -78,10 +82,14 @@ type falso struct {
 	grafosUp int
 	// sandboxesEspera, si no es nil, para todo GET /sandboxes hasta que se
 	// cierre (o la petición se cancele); el primero cierra sandboxesEmpezado.
-	// Es un host colgado.
+	// Es un host colgado. Con sandboxesColgarN > 0 solo para la N-ésima (las
+	// demás contestan): una petición que cuenta la cuota antes de reclamar
+	// lista dos veces, y lo que se quiere colgar es la segunda.
 	sandboxesEspera   chan struct{}
 	sandboxesEmpezado chan struct{}
 	sandboxesUnaVez   sync.Once
+	sandboxesColgarN  int
+	sandboxesLlamadas int
 	// etiquetasEspera, si no es nil, para el PRIMER PUT labels (antes de
 	// aplicarlo) hasta que se cierre; antes cierra etiquetasEmpezado.
 	etiquetasEspera   chan struct{}
@@ -129,7 +137,8 @@ func (f *falso) rutas() http.Handler {
 		f.mu.Lock()
 		out := []*api.Snapshot{}
 		for _, n := range f.snapshots {
-			out = append(out, &api.Snapshot{Name: n, AllowExec: true, Annotations: f.snapAnot[n]})
+			out = append(out, &api.Snapshot{Name: n, AllowExec: true, Annotations: f.snapAnot[n],
+				MemMiB: f.snapMem[n], CreatedAt: f.snapHecho[n]})
 		}
 		f.mu.Unlock()
 		writeJSON(w, 200, out)
@@ -220,7 +229,11 @@ func (f *falso) rutas() http.Handler {
 	})
 	m.HandleFunc("POST /sandboxes", f.crear)
 	m.HandleFunc("GET /sandboxes", func(w http.ResponseWriter, r *http.Request) {
-		if f.sandboxesEspera != nil {
+		f.mu.Lock()
+		f.sandboxesLlamadas++
+		colgar := f.sandboxesEspera != nil && (f.sandboxesColgarN == 0 || f.sandboxesLlamadas == f.sandboxesColgarN)
+		f.mu.Unlock()
+		if colgar {
 			f.sandboxesUnaVez.Do(func() { close(f.sandboxesEmpezado) })
 			select {
 			case <-f.sandboxesEspera:
@@ -365,6 +378,11 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 		labels[k] = v
 	}
 	labels[api.LabelKind] = api.KindSandbox
+	if req.From != "" && req.MemMiB == 0 {
+		f.mu.Lock()
+		req.MemMiB = f.snapMem[req.From]
+		f.mu.Unlock()
+	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	ahora := time.Now()

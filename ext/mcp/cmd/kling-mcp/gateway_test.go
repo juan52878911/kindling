@@ -16,6 +16,7 @@ func TestGatewayValidaElNivelPausada(t *testing.T) {
 	}{
 		{[]string{"-paused-mib", "-2"}, "-paused-mib"},
 		{[]string{"-paused-for", "-1s"}, "-paused-for"},
+		{[]string{"-max-sessions", "-1"}, "-max-sessions"},
 	} {
 		err := cmdGateway(append(c.args, "-listen", "127.0.0.1:0", "-no-auth"))
 		if err == nil || !strings.Contains(err.Error(), c.want) {

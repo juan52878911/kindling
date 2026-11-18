@@ -395,9 +395,15 @@ static void rx_cerrar(const struct vs_hdr *h) {
 }
 
 // Mete un paquete de control (sin datos) en el siguiente búfer de rx. false
-// si no hay búfer o no cabe.
+// si no hay búfer o no cabe; entonces marca sin_rx, como el camino de datos:
+// bombear se para aquí, antes de los datos de las conexiones de detrás, y si
+// el poll siguiera pidiendo su POLLIN volvería al momento sin que nada pudiera
+// salir (un núcleo al 100 %, R5).
 static bool rx_poner(struct vs_hdr *h) {
-  if (!rx_mirar() || rxb.cap < VS_HDR) return false;
+  if (!rx_mirar() || rxb.cap < VS_HDR) {
+    sin_rx = true;
+    return false;
+  }
   rx_cerrar(h);
   return true;
 }
@@ -1431,19 +1437,23 @@ int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int
 // khv_vsock_prueba_sin_rx (R1): una conexión abierta con crédito y 4 KiB del
 // host en su socket, y la cola 0 sin búferes. En 200 ms vs_hilo tiene que dar
 // pocas vueltas (*vueltas; antes giraba miles), y al publicar un búfer y
-// avisar la cola 0 el dato tiene que llegar (*llego, en bytes). 0, o negativo
-// si no se pudo preparar. No puede convivir con una VM.
-int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego) {
+// avisar la cola 0 el dato tiene que llegar (*llego, en bytes). Con ctl hay
+// además un RST suelto en cola (R5): bombear se para en él, antes de llegar a
+// los datos, y el invitado publica dos búferes (uno para el RST). 0, o
+// negativo si no se pudo preparar. No puede convivir con una VM.
+int khv_vsock_prueba_sin_rx(int ctl, unsigned *vueltas, uint32_t *llego) {
   *vueltas = 0;
   *llego = 0;
   if (!activo) vsock_init(53);
-  const uint64_t base = 0x10000, tam = base + PRUEBA_RX_BUF;
+  const uint64_t base = 0x10000, tam = base + 2 * PRUEBA_RX_BUF;
   uint8_t *ram = mmap(NULL, tam, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   if (ram == MAP_FAILED) return -ENOMEM;
   struct vdesc *d = (struct vdesc *)ram;
   uint16_t *av = (uint16_t *)(ram + 0x1000);
   d[0] = (struct vdesc){RAM_BASE + base, PRUEBA_RX_BUF, VIRTQ_DESC_F_WRITE, 0};
+  d[1] = (struct vdesc){RAM_BASE + base + PRUEBA_RX_BUF, PRUEBA_RX_BUF, VIRTQ_DESC_F_WRITE, 0};
   av[2] = 0;
+  av[3] = 1;
   av[1] = 0;  // ningún búfer publicado todavía
   pthread_mutex_lock(&mu);
   uint8_t *ram_antes = g_ram;
@@ -1476,6 +1486,7 @@ int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego) {
     c->p_request = false;
     c->peer_buf = 64u << 10;
     (void)!write(sv[1], trozo, sizeof trozo);
+    if (ctl) encolar_rst(PRUEBA_PUERTO + 11, PRUEBA_PUERTO + 12);
     g_pausa = false;
     pthread_cond_broadcast(&cv);
   }
@@ -1486,8 +1497,8 @@ int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego) {
     unsigned antes = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE);
     usleep(200000);
     *vueltas = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE) - antes;
-    // El invitado publica un búfer y avisa la cola 0.
-    __atomic_store_n(&av[1], 1, __ATOMIC_RELEASE);
+    // El invitado publica un búfer (dos con ctl) y avisa la cola 0.
+    __atomic_store_n(&av[1], ctl ? 2 : 1, __ATOMIC_RELEASE);
     prueba_w(0x050, 0);
     for (int i = 0; i < 100 && *llego < sizeof trozo; i++) {
       usleep(10000);
@@ -1499,6 +1510,7 @@ int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego) {
     g_pausa = true;
     liberar(c);
     close(sv[1]);
+    n_rst = 0;
     pthread_mutex_unlock(&mu);
   }
   prueba_w(0x070, 0);

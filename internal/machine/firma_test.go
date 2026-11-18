@@ -97,11 +97,12 @@ func TestFirmaV2CubreEtiquetasTopesEntornoYMemoria(t *testing.T) {
 	s.Labels = map[string]string{api.LabelPorts: "8080", api.LabelOwner: "ana"}
 	s.MemMaxMiB, s.CPUPct, s.EnvKeys = 512, 50, []string{"TOKEN"}
 	s.MemDigest = "sha256-tree-4m:aa"
+	s.ConAgente, s.ImageDigest = true, "sha256-tree-4m:cc"
 	if err := m.firmar(s); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(s.Signature, firmaV2) {
-		t.Fatalf("una firma nueva debería ser v2: %q", s.Signature)
+	if !strings.HasPrefix(s.Signature, firmaV3) {
+		t.Fatalf("una firma nueva debería ser v3: %q", s.Signature)
 	}
 	if err := m.comprobarFirma(s); err != nil {
 		t.Fatalf("recién firmada: %v", err)
@@ -118,9 +119,15 @@ func TestFirmaV2CubreEtiquetasTopesEntornoYMemoria(t *testing.T) {
 		"fijar el tope":    func(s *api.Snapshot) { s.CPUPctFixed = true },
 		"cambiar el env":   func(s *api.Snapshot) { s.EnvKeys = nil },
 		"cambiar la RAM":   func(s *api.Snapshot) { s.MemDigest = "sha256-tree-4m:bb" },
-		"bajar a firma v1": func(s *api.Snapshot) { s.Signature = strings.TrimPrefix(s.Signature, firmaV2) },
+		"bajar a firma v1": func(s *api.Snapshot) { s.Signature = strings.TrimPrefix(s.Signature, firmaV3) },
+		"bajar a firma v2": func(s *api.Snapshot) { s.Signature = firmaV2 + strings.TrimPrefix(s.Signature, firmaV3) },
 		"y lo de siempre":  func(s *api.Snapshot) { s.AllowExec = true },
-		"otra versión":     func(s *api.Snapshot) { s.Signature = "v3:" + strings.TrimPrefix(s.Signature, firmaV2) },
+		"otra versión":     func(s *api.Snapshot) { s.Signature = "v4:" + strings.TrimPrefix(s.Signature, firmaV3) },
+		// M13: lo que decide cómo se resincroniza una copia.
+		"apagar el resync":    func(s *api.Snapshot) { s.SinAgente = true },
+		"quitar con_agente":   func(s *api.Snapshot) { s.ConAgente = false },
+		"cambiar share_wait":  func(s *api.Snapshot) { s.ShareWait = 2 },
+		"quitar el de imagen": func(s *api.Snapshot) { s.ImageDigest = "" },
 	} {
 		c := *s
 		tocar(&c)

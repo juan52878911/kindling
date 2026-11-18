@@ -101,7 +101,7 @@ func esCommitDeFork(ctx context.Context) bool {
 // máquina.
 func volcarNodoPausado(ctx context.Context, m *Manager, id, name string) error {
 	if esCommitDeFork(ctx) {
-		_, err := m.commit(ctx, id, name, false, nil, true, true, false)
+		_, err := m.commit(ctx, id, name, false, nil, true, true, agenteSinSondear)
 		return err
 	}
 	_, err := m.commitPausada(ctx, id, name)

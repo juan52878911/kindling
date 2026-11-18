@@ -14,20 +14,20 @@ func TestEnVueloSeVaciaAlLiberar(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		ten := &Tenant{Nombre: fmt.Sprintf("t%d", i)}
 		pl := fmt.Sprintf("pl%d", i)
-		if err := s.reservar(ctx, ten, pl); err != nil {
+		if err := s.reservar(ctx, ten, pl, 0); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.reservar(ctx, ten, pl); err != nil {
+		if err := s.reservar(ctx, ten, pl, 0); err != nil {
 			t.Fatal(err)
 		}
 		if s.enVuelo[ten.Nombre] != 2 {
 			t.Fatalf("en vuelo %d; quería 2", s.enVuelo[ten.Nombre])
 		}
-		s.liberar(ten, pl)
+		s.liberar(ten, pl, 0)
 		if s.enVuelo[ten.Nombre] != 1 {
 			t.Fatalf("en vuelo %d tras liberar una; quería 1", s.enVuelo[ten.Nombre])
 		}
-		s.liberar(ten, pl)
+		s.liberar(ten, pl, 0)
 	}
 	if len(s.enVuelo) != 0 {
 		t.Fatalf("enVuelo guarda %d claves a cero", len(s.enVuelo))

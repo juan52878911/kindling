@@ -80,7 +80,7 @@ func (v *invitadoRepetidor) recibidos() []string {
 
 // daemonDosMaquinas es un daemon falso que entrega una máquina distinta en
 // cada POST /machines: primero la de a, luego la de b.
-func daemonDosMaquinas(t *testing.T, service string, addrs ...string) string {
+func daemonDosMaquinas(t testing.TB, service string, addrs ...string) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "kmcp-ses")
 	if err != nil {
@@ -139,7 +139,7 @@ func daemonDosMaquinas(t *testing.T, service string, addrs ...string) string {
 	return sock
 }
 
-func pedir(t *testing.T, h http.Handler, metodo, ruta, sid, body string) *httptest.ResponseRecorder {
+func pedir(t testing.TB, h http.Handler, metodo, ruta, sid, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(metodo, ruta, strings.NewReader(body))
 	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback

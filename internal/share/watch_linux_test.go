@@ -68,3 +68,49 @@ func TestPresupuestoInotify(t *testing.T) {
 		t.Fatalf("after closing one: backend %T, want inotify again", w3.be)
 	}
 }
+
+// Dos nombres del mismo inodo (un enlace duro) comparten la vigilancia del
+// kernel: soltar uno no deja sin avisos al otro, y los cambios llegan a los dos.
+func TestInotifyDosNombresMismoInodo(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "a"), []byte("v1"), 0o644))
+	must(t, os.Link(filepath.Join(dir, "a"), filepath.Join(dir, "b")))
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	evs := make(chan string, 64)
+	be, err := newWatchBackend(root, func(ev rawEvent) { evs <- ev.rel })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.close()
+	if _, ok := be.(*inBackend); !ok {
+		t.Skipf("backend %T, want inotify", be)
+	}
+	espera := func(want string) bool {
+		plazo := time.After(2 * time.Second)
+		for {
+			select {
+			case r := <-evs:
+				if r == want {
+					return true
+				}
+			case <-plazo:
+				return false
+			}
+		}
+	}
+	must(t, be.add("a", false))
+	must(t, be.add("b", false))
+	must(t, os.WriteFile(filepath.Join(dir, "a"), []byte("v2"), 0o644))
+	if !espera("a") {
+		t.Fatal("a change through a is not reported for a while b is also watched")
+	}
+	be.remove("b")
+	must(t, os.WriteFile(filepath.Join(dir, "a"), []byte("v3"), 0o644))
+	if !espera("a") {
+		t.Fatal("after unwatching b, a change to a is not reported")
+	}
+}

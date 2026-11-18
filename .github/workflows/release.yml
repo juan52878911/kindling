@@ -378,11 +378,34 @@ jobs:
             *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
 
-      - name: download all artifacts
+      # Solo los artefactos de los jobs que producen assets, por nombre: con
+      # merge-multiple, uno de otro job (un log de un e2e, por ejemplo) con el
+      # nombre de un asset lo pisaría antes de calcular SHA256SUMS. Un
+      # artefacto nuevo de assets se añade aquí y en el contrato de abajo.
+      # Todos los binarios sueltos en release/, sin un directorio por job.
+      - name: download artifacts (build)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: bin-*
           path: release
-          # Todos los binarios sueltos en release/, sin un directorio por job.
+          merge-multiple: true
+      - name: download artifacts (vz)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: vmm-darwin-arm64
+          path: release
+          merge-multiple: true
+      - name: download artifacts (imagenes)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: imagenes
+          path: release
+          merge-multiple: true
+      - name: download artifacts (android)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: android-kernel-*
+          path: release
           merge-multiple: true
 
       # Lo que `make deploy` instala en el host del daemon, para quien no clona
@@ -667,6 +690,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Para comprobar la firma del SHA256SUMS con las claves de esta etiqueta
+      # (go run ./internal/upgrade/firmar verify, solo stdlib).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
       - name: subir kling.rb al tap
         shell: bash
         env:
@@ -680,6 +713,8 @@ jobs:
             echo "::notice::HOMEBREW_TAP_TOKEN is not set: $TAP keeps its current formula"
             exit 0
           fi
+          # Fuera del checkout: lo que se baja no se mezcla con los ficheros del repo.
+          w="$RUNNER_TEMP/tap"; mkdir -p "$w"; cd "$w"
           path=Formula/kling.rb
           sha=""; cur=""
           if GH_TOKEN="$TAP_TOKEN" gh api "repos/$TAP/contents/$path" > cur.json 2>/dev/null; then
@@ -695,9 +730,19 @@ jobs:
             exit 0
           fi
 
-          # La fórmula publicada, comprobada contra el SHA256SUMS (firmado desde
-          # v1.0.0) de la misma release: al tap va lo mismo que al asset.
+          # La fórmula publicada, comprobada contra el SHA256SUMS de la misma
+          # release y este contra su firma (para esta etiqueta): al tap va lo
+          # mismo que al asset, y un SHA256SUMS cambiado en la release no pasa.
+          # Una 0.x sin firma (anterior a v1.0.0) solo con el sha256.
           gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p kling.rb -p SHA256SUMS
+          if gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS.minisig; then
+            (cd "$GITHUB_WORKSPACE" && go run ./internal/upgrade/firmar verify -tag "$VERSION" -in "$w/SHA256SUMS")
+          else
+            case "$VERSION" in
+              v0.*) echo "::warning::$VERSION has no SHA256SUMS.minisig: checking kling.rb by sha256 only" ;;
+              *) echo "::error::$VERSION has no SHA256SUMS.minisig (docs/firmas.md)"; exit 1 ;;
+            esac
+          fi
           sha256sum -c --ignore-missing SHA256SUMS
           grep -q "releases/download/$VERSION/" kling.rb || { echo "::error::kling.rb is not for $VERSION"; exit 1; }
 

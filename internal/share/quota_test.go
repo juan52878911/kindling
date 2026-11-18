@@ -2,6 +2,7 @@ package share
 
 import (
 	"context"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -135,6 +136,26 @@ func TestCuotaSetSizeEnorme(t *testing.T) {
 	}
 	if n := tamaño(t, filepath.Join(dir, "a")); n != 0 {
 		t.Fatalf("the file is %d bytes after ENOSPC", n)
+	}
+}
+
+// Un tamaño cerca de MaxInt64 con algo ya gastado no desborda la cuenta: antes
+// v+n daba negativo, pasaba por debajo del tope y el ENOSPC no llegaba.
+func TestCuotaSetSizeDesborda(t *testing.T) {
+	dir := t.TempDir()
+	q := NewQuota(Limits{MaxBytes: 1 << 20})
+	q.SetUsage(1000, 0)
+	c := servirConCuota(t, dir, q)
+	e, h := c.create("a", 0o644)
+	if e != 0 {
+		t.Fatalf("create: %d", e)
+	}
+	defer c.release(h)
+	if e := c.setSize("a", h, math.MaxInt64); e != proto.ENOSPC {
+		t.Fatalf("SetSize MaxInt64 = %d, want ENOSPC", e)
+	}
+	if b, _ := q.Usage(); b != 1000 {
+		t.Fatalf("usage %d bytes after ENOSPC, want 1000", b)
 	}
 }
 

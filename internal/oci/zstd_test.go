@@ -117,53 +117,48 @@ func TestPullZstdBomb(t *testing.T) {
 	}
 }
 
-// Las capas zstd se descomprimen de dos en dos como mucho (cada una guarda
-// ~230 MiB con la ventana más grande); las gzip, tantas como núcleos.
-func TestPullZstdParallel(t *testing.T) {
-	if runtime.NumCPU() < 3 {
-		t.Skip("needs 3 CPUs")
-	}
+// picoDeDescompresion baja una imagen con capas y devuelve cuántas se
+// descomprimieron a la vez como mucho. Cada capa se queda dentro hasta que se
+// ve el pico objetivo (o vence plazo): con un sueño fijo, en un runner de 3 núcleos
+// cargado y con -race, la última llegaba tarde y el pico salía corto.
+//
+// Las zstd y las gzip van en tests separados: las dos comparten los turnos de
+// CPU, y con 3 núcleos una zstd que espera a la segunda zstd más dos gzip que
+// esperan a la tercera ocupan los tres turnos y se bloquean entre sí hasta el
+// plazo (el pico de gzip salía 2 en el job de APFS).
+func picoDeDescompresion(t *testing.T, zst bool, objetivo int, plazo time.Duration) int {
+	t.Helper()
 	r := ocitest.New()
 	defer r.Close()
 	var layers [][]byte
 	for i := 0; i < 6; i++ {
 		f := []ocitest.File{{Name: fmt.Sprintf("f%d", i), Body: strings.Repeat("z", 100*i)}}
-		layers = append(layers, ocitest.Zstd(ocitest.Tar(f)), ocitest.TarGz(f))
+		if zst {
+			layers = append(layers, ocitest.Zstd(ocitest.Tar(f)))
+		} else {
+			layers = append(layers, ocitest.TarGz(f))
+		}
 	}
 	var mu sync.Mutex
-	var now, peak [2]int // [gzip, zstd]
-	oci.SetUnpackHook(func(zst bool) func() {
-		k := 0
-		if zst {
-			k = 1
+	var now, peak int
+	oci.SetUnpackHook(func(esZstd bool) func() {
+		if esZstd != zst {
+			t.Errorf("capa zstd=%v en una imagen zstd=%v", esZstd, zst)
 		}
 		mu.Lock()
-		now[k]++
-		peak[k] = max(peak[k], now[k])
+		now++
+		peak = max(peak, now)
 		mu.Unlock()
-		// Cada capa se queda dentro hasta que se ha visto el pico que su tipo
-		// tiene que poder alcanzar: tres gzip a la vez, o dos zstd (o 2 s).
-		// Con un sueño fijo de 30 ms, en un runner de 3 núcleos cargado y con
-		// -race la tercera gzip llegaba tarde (falló en macos-15). Y las zstd
-		// no esperan a las gzip: las dos comparten los turnos de CPU, así que
-		// con 3 núcleos dos zstd retenidas dejaban sitio a una sola gzip y el
-		// pico de gzip salía 2 (falló en el job de APFS). Si el código limitara
-		// las gzip a menos de 3, o dejara pasar más de 2 zstd, el test falla
-		// igual.
-		objetivo := 3
-		if zst {
-			objetivo = 2
-		}
-		for fin := time.Now().Add(2 * time.Second); time.Now().Before(fin); {
+		for fin := time.Now().Add(plazo); time.Now().Before(fin); {
 			mu.Lock()
-			n := peak[k]
+			n := peak
 			mu.Unlock()
 			if n >= objetivo {
 				break
 			}
 			time.Sleep(time.Millisecond)
 		}
-		return func() { mu.Lock(); now[k]--; mu.Unlock() }
+		return func() { mu.Lock(); now--; mu.Unlock() }
 	})
 	defer oci.SetUnpackHook(nil)
 	man, _ := r.Image("amd64", nil, layers...)
@@ -171,7 +166,29 @@ func TestPullZstdParallel(t *testing.T) {
 	if _, err := c.Pull(context.Background(), r.Host()+"/x/y", man, "amd64"); err != nil {
 		t.Fatal(err)
 	}
-	if peak[1] > 2 || peak[0] < 3 {
-		t.Fatalf("%d zstd and %d gzip layers unpacked at once, want <= 2 and >= 3", peak[1], peak[0])
+	mu.Lock()
+	defer mu.Unlock()
+	return peak
+}
+
+// Las capas zstd se descomprimen de dos en dos como mucho (cada una guarda
+// ~230 MiB con la ventana más grande). Se espera a ver 3, que no debe llegar:
+// si el código dejara pasar más de 2, la tercera entraría dentro del plazo.
+func TestPullZstdParallel(t *testing.T) {
+	if runtime.NumCPU() < 3 {
+		t.Skip("needs 3 CPUs")
+	}
+	if p := picoDeDescompresion(t, true, 3, 300*time.Millisecond); p != 2 {
+		t.Fatalf("%d zstd layers unpacked at once, want 2", p)
+	}
+}
+
+// Las gzip, tantas como núcleos: con 3 o más, tres a la vez.
+func TestPullGzipParallel(t *testing.T) {
+	if runtime.NumCPU() < 3 {
+		t.Skip("needs 3 CPUs")
+	}
+	if p := picoDeDescompresion(t, false, 3, 2*time.Second); p < 3 {
+		t.Fatalf("%d gzip layers unpacked at once, want >= 3", p)
 	}
 }

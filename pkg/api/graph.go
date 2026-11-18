@@ -38,15 +38,29 @@ func IsGraphLabel(k string) bool {
 	return k == LabelGraph || strings.HasPrefix(k, LabelGraph+".")
 }
 
+// IsReservedLabel dice si k es una etiqueta de estado que solo pone el
+// daemon: las de los grafos (IsGraphLabel) y las del fondo precalentado
+// (LabelPool, LabelPoolReady). Es la única lista: run, sandbox, PUT labels,
+// fork y los nodos de un grafo la consultan, y una entrada que faltara en uno
+// de ellos dejaría colar una máquina con aspecto de copia del fondo.
+func IsReservedLabel(k string) bool {
+	return IsGraphLabel(k) || k == LabelPool || k == LabelPoolReady
+}
+
+// errReservedLabel explica por qué k está reservada.
+func errReservedLabel(k string) error {
+	if IsGraphLabel(k) {
+		return fmt.Errorf("label %q is reserved: the daemon sets it on the machines of a graph", k)
+	}
+	return fmt.Errorf("label %q is reserved: the daemon sets it on the pre-warmed copies of a template", k)
+}
+
 // ValidateNoGraphLabels rechaza un juego de etiquetas que traiga alguna de
-// los grafos.
+// las reservadas al daemon (IsReservedLabel).
 func ValidateNoGraphLabels(labels map[string]string) error {
 	for k := range labels {
-		if IsGraphLabel(k) {
-			return fmt.Errorf("label %q is reserved: the daemon sets it on the machines of a graph", k)
-		}
-		if k == LabelPool || k == LabelPoolReady {
-			return fmt.Errorf("label %q is reserved: the daemon sets it on the pre-warmed copies of a template", k)
+		if IsReservedLabel(k) {
+			return errReservedLabel(k)
 		}
 	}
 	return nil
@@ -250,6 +264,19 @@ const (
 	GraphHealthStartInterval = 200 * time.Millisecond
 	// GraphHealthMaxWait acota la espera total de una arista.
 	GraphHealthMaxWait = 10 * time.Minute
+	// GraphHealthMinStartInterval es el paso más corto entre intentos: con
+	// uno de 1 ms el daemon lanzaría mil exec por segundo durante la espera.
+	GraphHealthMinStartInterval = 100 * time.Millisecond
+)
+
+// Topes de GraphHealth (validarSalud): kling compose los aplica al traducir,
+// con un aviso, para no fallar con un valor que Docker acepta.
+const (
+	GraphHealthMaxTests              = 256
+	GraphHealthMaxTimeoutSeconds     = 600
+	GraphHealthMaxStartPeriodSeconds = 3600
+	GraphHealthMaxRetries            = 100
+	GraphHealthMaxIntervalMS         = 3600_000
 )
 
 // Tiempos de h con los valores por defecto puestos.
@@ -271,6 +298,7 @@ func (h GraphHealth) Tiempos() (intervalo, plazo time.Duration, reintentos int, 
 	if pasoArranque <= 0 {
 		pasoArranque = GraphHealthStartInterval
 	}
+	pasoArranque = max(pasoArranque, GraphHealthMinStartInterval)
 	return
 }
 
@@ -279,8 +307,8 @@ func validarSalud(desc string, h *GraphHealth) error {
 	if len(h.Test) == 0 || h.Test[0] == "" {
 		return fmt.Errorf("%s: health: test is empty", desc)
 	}
-	if len(h.Test) > 256 {
-		return fmt.Errorf("%s: health: test has %d arguments (max 256)", desc, len(h.Test))
+	if len(h.Test) > GraphHealthMaxTests {
+		return fmt.Errorf("%s: health: test has %d arguments (max %d)", desc, len(h.Test), GraphHealthMaxTests)
 	}
 	for _, a := range h.Test {
 		if strings.ContainsRune(a, 0) {
@@ -290,7 +318,8 @@ func validarSalud(desc string, h *GraphHealth) error {
 	if h.IntervalMS < 0 || h.TimeoutSeconds < 0 || h.Retries < 0 || h.StartPeriodSeconds < 0 || h.StartIntervalMS < 0 {
 		return fmt.Errorf("%s: health: negative times", desc)
 	}
-	if h.TimeoutSeconds > 600 || h.StartPeriodSeconds > 3600 || h.Retries > 100 || h.IntervalMS > 3600_000 || h.StartIntervalMS > 3600_000 {
+	if h.TimeoutSeconds > GraphHealthMaxTimeoutSeconds || h.StartPeriodSeconds > GraphHealthMaxStartPeriodSeconds ||
+		h.Retries > GraphHealthMaxRetries || h.IntervalMS > GraphHealthMaxIntervalMS || h.StartIntervalMS > GraphHealthMaxIntervalMS {
 		return fmt.Errorf("%s: health: times out of range", desc)
 	}
 	return nil
@@ -448,7 +477,7 @@ func validarNodo(name string, n *GraphNode) error {
 		if !KeyPattern.MatchString(k) {
 			return fmt.Errorf("node %s: label %q is not valid (lowercase letters, digits, '.', '_', '-')", name, k)
 		}
-		if IsGraphLabel(k) || k == LabelForkOf || k == LabelPorts {
+		if IsReservedLabel(k) || k == LabelForkOf || k == LabelPorts {
 			return fmt.Errorf("node %s: label %q is reserved (the daemon sets it; ports go in ports)", name, k)
 		}
 	}

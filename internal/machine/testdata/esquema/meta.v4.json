@@ -1,0 +1,24 @@
+{
+  "schema": 4,
+  "name": "svc",
+  "image": "toolchain",
+  "created_at": "2026-11-12T12:00:00Z",
+  "vcpus": 1,
+  "mem_mib": 256,
+  "mem_bytes": 0,
+  "disk_bytes": 0,
+  "instances": 0,
+  "sin_agente": true,
+  "egress": "none",
+  "labels": {
+    "kling.owner": "ana",
+    "kling.ports": "8080"
+  },
+  "snap_sha256": "2e7f8e8c72e5a9178f4766338083a5b482c2d385cfacf26c41fd2086a8a420ce",
+  "rootfs_digest": "sha256-tree-4m:3feba5d69aa51c3aca38997ac846f7cf6e753098bc6a359e7b655296d494e6da",
+  "mem_digest": "sha256-tree-4m:1a0f72bd89fab16af13958384a3fa8435d728909701b08fcbce9c6076fdd2f1f",
+  "image_digest": "sha256-tree-4m:c58b686b3c7e481840d36807456174286d0b5dcccda75a23cb2035f3b308db1f",
+  "vmm": "firecracker 1.12.0",
+  "kling_version": "1.0.0",
+  "signature": "v2:6a1ced7a7272060d133347fdfea34f042005e77ae0e469dbf9d1dff51f0901dd"
+}

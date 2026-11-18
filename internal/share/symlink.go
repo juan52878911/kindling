@@ -139,7 +139,7 @@ func (s *Server) renameKeepsLinks(oldp, newp string) bool {
 // scanLinks recorre el directorio from (que pasaría a llamarse to) y dice si
 // todos sus enlaces relativos siguen dentro de la carpeta en el sitio nuevo.
 func (s *Server) scanLinks(from, to string, left *int) bool {
-	f, err := s.root.Open(rel(from))
+	f, err := openDir(s.root, rel(from))
 	if err != nil {
 		return false
 	}

@@ -411,6 +411,16 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 		api.HTTPError(w, "no MCP session: start one with initialize", http.StatusBadRequest)
 		return
 	}
+	// La cuota de peticiones en vuelo del tenant, como /mcp/_all de un solo
+	// host. Se cuenta en el primer host, el que autentica (Handler): forward
+	// no la toma, así que no se cuenta dos veces.
+	tnt := scheduler.TenantFrom(ctx)
+	cuotas := ra.r.hosts[0].GW
+	if !cuotas.TenantBegin(tnt) {
+		escribirCuotaTenant(w, tnt)
+		return
+	}
+	defer cuotas.TenantEnd(tnt)
 	s, sid, created := ra.session(req)
 	if s == nil && req.Header.Get(SessionHeader) == "" {
 		// Sin cabecera, ra.session solo falla por el tope del tenant.
@@ -516,8 +526,9 @@ func (ra *routerAgg) reap(ctx context.Context, idle time.Duration) {
 	}
 }
 
-// soltarAisladas destruye las microVMs aisladas que la conversación abrió en
-// cada host. forward las crea con la clave de la sesión sombra de ese host, y
+// soltarAisladas suelta lo que la conversación retiene en cada host (ver
+// aggregator.soltar): sus sesiones en los puentes y las microVMs aisladas que
+// abrió. forward las crea con la clave de la sesión sombra de ese host, y
 // sin esto ni el DELETE ni el segador del router las tocaban: quedaban vivas
 // hasta el SessionTTL del daemon. Se llama fuera de ra.mu: habla con daemons.
 func (ra *routerAgg) soltarAisladas(ctx context.Context, s *routerSession) {
@@ -529,7 +540,7 @@ func (ra *routerAgg) soltarAisladas(ctx context.Context, s *routerSession) {
 	ra.mu.Unlock()
 	for name, sub := range subs {
 		if h := ra.r.hostByName(name); h != nil {
-			h.GW.agg.soltarAisladas(ctx, sub)
+			h.GW.agg.soltar(ctx, sub)
 		}
 	}
 }

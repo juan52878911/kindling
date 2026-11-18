@@ -40,6 +40,9 @@ type fakeDaemon struct {
 	storeForbidden bool
 	// guestCalls cuenta llamadas al proxy por ruta.
 	guestCalls map[string]int
+	// removeFails hace fallar los próximos N Remove; thawFails, todo Thaw.
+	removeFails int
+	thawFails   bool
 }
 
 type fakeMachine struct {
@@ -137,6 +140,10 @@ func (f *fakeDaemon) Run(_ context.Context, r api.RunRequest) (*api.Machine, err
 func (f *fakeDaemon) Remove(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.removeFails > 0 {
+		f.removeFails--
+		return &api.StatusError{Code: 500, Message: "remove failed"}
+	}
 	fm := f.find(ref)
 	if fm == nil {
 		return notFound("machine")
@@ -166,6 +173,12 @@ func (f *fakeDaemon) Pause(_ context.Context, ref string) (*api.Machine, error) 
 	return f.setState(ref, api.StatePaused)
 }
 func (f *fakeDaemon) Thaw(_ context.Context, ref string) (*api.Machine, error) {
+	f.mu.Lock()
+	falla := f.thawFails
+	f.mu.Unlock()
+	if falla {
+		return nil, &api.StatusError{Code: 500, Message: "thaw failed"}
+	}
 	return f.setState(ref, api.StateRunning)
 }
 func (f *fakeDaemon) Freeze(_ context.Context, ref string) (*api.Machine, error) {

@@ -116,7 +116,12 @@ func crea(t *testing.T, srv *httptest.Server, token string, pet any) Sandbox {
 func TestHealthSinTokenYElRestoConToken(t *testing.T) {
 	srv, _ := montar(t, map[string]*falso{"a": nuevoFalso(t)},
 		Tenant{Nombre: "alice", Token: tokenAlice, Admin: true}, Tenant{Nombre: "bob", Token: tokenBob})
-	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/health", nil), 200)
+	salud := pide(t, srv, "", "GET", "/v1/health", nil)
+	esperaCodigo(t, salud, 200)
+	// Sin token no cuenta nada del despliegue (ni cuántos hosts hay).
+	if b, _ := io.ReadAll(salud.Body); strings.TrimSpace(string(b)) != `{"ok":true}` {
+		t.Fatalf("health without a token says %s", b)
+	}
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/hosts", nil), 401)
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/sandboxes", nil), 401)
 	esperaCodigo(t, pide(t, srv, "mal", "GET", "/v1/sandboxes", nil), 401)
@@ -774,6 +779,9 @@ func TestReclamarConUnHostColgadoNoParaALosDemas(t *testing.T) {
 	f.snapshots = []string{"sbx-node"}
 	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	f.sandboxesEspera, f.sandboxesEmpezado = make(chan struct{}), make(chan struct{})
+	// La primera lista es la de la cuota de memoria; la segunda, la de la
+	// reclamación, que es la que se cuelga.
+	f.sandboxesColgarN = 2
 	srv, _ := montar(t, map[string]*falso{"a": f})
 	t.Cleanup(func() { close(f.sandboxesEspera) })
 

@@ -58,12 +58,24 @@ func opsRed(bps int64) int64 {
 func (m *Manager) caudalRedDe(id string) int64 {
 	m.mu.RLock()
 	var pedido int
+	var carpetas bool
 	if mc := m.byID[id]; mc != nil {
-		pedido = mc.NetMiBps
+		pedido, carpetas = mc.NetMiBps, len(mc.Shares) > 0
 	}
 	m.mu.RUnlock()
-	return caudalRed(pedido, m.netMiBps)
+	bps := caudalRed(pedido, m.netMiBps)
+	if pedido <= 0 && carpetas {
+		bps = max(bps, netMiBpsCarpetas<<20)
+	}
+	return bps
 }
+
+// netMiBpsCarpetas es el caudal mínimo de una máquina con carpetas que no pide
+// otro: viajan por su red, y con los 16 MiB/s de siempre un `cp` de la carpeta
+// iba a 16 MiB/s. El CLI ya lo pedía (run -share, compose); decidirlo aquí lo
+// da también a lo que arranca por el API (gateway, sandbox) y a las plantillas
+// con carpetas, cuyas copias heredan el limitador de su snapshot.
+const netMiBpsCarpetas = 256
 
 // caudalRed elige: lo pedido, si no el del daemon, si no defaultNetMiBps. Un
 // valor del daemon fuera de rango (un fichero editado a mano) cae al de

@@ -235,10 +235,40 @@ func loopbackHost(h string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// loopbackRemote dice si la petición viene de esta máquina. El Host lo escribe
+// el cliente, así que solo no basta: quien llegue por la red lo pone a
+// "localhost" y pasa.
+func loopbackRemote(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// soloLoopback es el chequeo del muro y del servidor MCP: nombre de loopback
+// (contra el rebinding de DNS) y conexión desde loopback.
+func soloLoopback(r *http.Request) bool { return loopbackHost(r.Host) && loopbackRemote(r) }
+
+// escucharLoopback abre listen y se niega si no es de loopback: lo que se sirve
+// controla teléfonos, y el chequeo del Host no protege nada si la red llega.
+func escucharLoopback(listen string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return nil, err
+	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+		ln.Close()
+		return nil, fmt.Errorf("%s is not a loopback address: whoever reaches it controls the phones; listen on 127.0.0.1", listen)
+	}
+	return ln, nil
+}
+
 // handler sirve el muro bajo prefix ("/" o "/<secreto>/"); fuera de él, 404.
 func (w *wall) handler(checkHost bool, prefix string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		if checkHost && !loopbackHost(r.Host) {
+		if checkHost && !soloLoopback(r) {
 			http.Error(rw, "the wall only answers on a loopback host name", http.StatusForbidden)
 			return
 		}
@@ -427,12 +457,9 @@ func cmdView(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	a := newApp(*host)
-	ln, err := net.Listen("tcp", *listen)
+	ln, err := escucharLoopback(*listen)
 	if err != nil {
 		return err
-	}
-	if tcp, ok := ln.Addr().(*net.TCPAddr); ok && !tcp.IP.IsLoopback() {
-		fmt.Fprintf(a.errw, "warning: the wall listens on %s, not loopback: anyone who reaches it controls the phones\n", ln.Addr())
 	}
 	w := newWall(a, max(1, *par))
 	go w.healthLoop(ctx)

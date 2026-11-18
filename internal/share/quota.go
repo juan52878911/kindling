@@ -21,6 +21,7 @@ package share
 import (
 	"io/fs"
 	"log"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -199,7 +200,9 @@ func (q *Quota) reservar(s *Server, n int64) uint32 {
 	}
 	for {
 		v := q.bytes.Load()
-		if q.lim.MaxBytes > 0 && v+n > q.lim.MaxBytes {
+		// n > Max-v y no v+n > Max: con un tamaño pedido cerca de MaxInt64,
+		// v+n desbordaba a negativo y pasaba por debajo del tope.
+		if n > math.MaxInt64-v || (q.lim.MaxBytes > 0 && n > q.lim.MaxBytes-v) {
 			return proto.ENOSPC
 		}
 		if q.bytes.CompareAndSwap(v, v+n) {

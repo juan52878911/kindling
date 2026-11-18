@@ -24,9 +24,18 @@ type Bus struct {
 	mu   sync.RWMutex
 	subs map[int]*suscriptor
 	next int
+	// dueño dice de quién es la máquina de un evento (SetDueño); filtrados
+	// cuenta los suscriptores con filtro, para no preguntarlo si no hay
+	// ninguno.
+	dueño     func(api.Event) string
+	filtrados atomic.Int32
 
 	descartados atomic.Int64
 }
+
+// Filtro decide si un evento le llega a un suscriptor. dueño es el de la
+// máquina del evento según SetDueño ("" si no se sabe o no hay).
+type Filtro func(ev api.Event, dueño string) bool
 
 // suscriptor es un canal y lo que se ha perdido desde su último aviso. mu pone
 // en fila a los Publish concurrentes (todos bajo el RLock del bus) sobre ESTE
@@ -35,6 +44,7 @@ type suscriptor struct {
 	mu       sync.Mutex
 	ch       chan api.Event
 	perdidos int64
+	filtro   Filtro
 }
 
 func New() *Bus {
@@ -51,6 +61,15 @@ func (b *Bus) Subscribe() (<-chan api.Event, func()) {
 // max > 0), no suscribe y devuelve false. Es para quien suscribe en nombre
 // de un cliente (GET /events): cada uno es un canal y una conexión abierta.
 func (b *Bus) SubscribeHasta(max int) (<-chan api.Event, func(), bool) {
+	return b.SubscribeFiltrado(max, nil)
+}
+
+// SubscribeFiltrado es SubscribeHasta con un filtro (nil = todo). El filtro
+// se aplica al publicar, ANTES del búfer: lo que no es para este suscriptor
+// no ocupa su sitio. Filtrando después, la actividad de las máquinas de un
+// inquilino llenaba el búfer de otro, que perdía eventos suyos por culpa de
+// otros que nunca iba a ver.
+func (b *Bus) SubscribeFiltrado(max int, filtro Filtro) (<-chan api.Event, func(), bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if max > 0 && len(b.subs) >= max {
@@ -59,8 +78,11 @@ func (b *Bus) SubscribeHasta(max int) (<-chan api.Event, func(), bool) {
 
 	id := b.next
 	b.next++
-	s := &suscriptor{ch: make(chan api.Event, subBuffer)}
+	s := &suscriptor{ch: make(chan api.Event, subBuffer), filtro: filtro}
 	b.subs[id] = s
+	if filtro != nil {
+		b.filtrados.Add(1)
+	}
 
 	return s.ch, func() {
 		b.mu.Lock()
@@ -68,15 +90,40 @@ func (b *Bus) SubscribeHasta(max int) (<-chan api.Event, func(), bool) {
 		if c, ok := b.subs[id]; ok {
 			delete(b.subs, id)
 			close(c.ch)
+			if c.filtro != nil {
+				b.filtrados.Add(-1)
+			}
 		}
 	}, true
 }
 
+// SetDueño fija cómo se sabe de quién es la máquina de un evento, para los
+// filtros. Se llama una vez por evento, fuera del candado del bus, y solo si
+// hay algún suscriptor con filtro. No debe poder bloquearse esperando a quien
+// publica: quien publica no puede tener tomado lo que dueño necesita.
+func (b *Bus) SetDueño(f func(api.Event) string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.dueño = f
+}
+
 // Publish entrega el evento a quien esté escuchando. No bloquea.
 func (b *Bus) Publish(ev api.Event) {
+	dueño := ""
+	if b.filtrados.Load() > 0 {
+		b.mu.RLock()
+		f := b.dueño
+		b.mu.RUnlock()
+		if f != nil {
+			dueño = f(ev)
+		}
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for _, s := range b.subs {
+		if s.filtro != nil && !s.filtro(ev, dueño) {
+			continue
+		}
 		if !s.entregar(ev) {
 			b.descartados.Add(1)
 		}

@@ -72,16 +72,32 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 	// ¿Escucha el agente ahora? Si no, el dorado nace sin agente (o con el
 	// invitado a medio arrancar) y cada run -from pagaría el reintento entero
 	// del resync (~320 ms con "no route to host"): se recuerda como en Freeze.
-	sinAgente := false
+	// Y si escucha, el dorado lo dice (ConAgente): sus copias no se entregan
+	// sin resync (S4).
+	agente := agenteSinSondear
 	if mc, ok := m.Get(ref); ok && mc.Reachable() && mc.State == api.StateRunning {
-		sinAgente = !m.agenteEscucha(ctx, mc.ID)
+		agente = agenteNoEscuchaba
+		if m.agenteEscucha(ctx, mc.ID) {
+			agente = agenteEscuchaba
+		}
 	}
-	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false, sinAgente)
+	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false, agente)
 	if err == nil {
 		snap.Warnings = append(snap.Warnings, avisos...)
 	}
 	return snap, err
 }
+
+// agenteAlGuardar es lo que kling save sabe del agente de la plantilla al
+// congelarla: si no lo sondeó (un fork, un grafo, una plantilla sin red),
+// si escuchaba o si no.
+type agenteAlGuardar uint8
+
+const (
+	agenteSinSondear agenteAlGuardar = iota
+	agenteEscuchaba
+	agenteNoEscuchaba
+)
 
 // commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
 // deja pausada: el snapshot de un grafo pausa todos sus nodos, vuelca uno a
@@ -90,7 +106,7 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 // pausarla (soltarlos pide hablar con el agente, y un invitado pausado no
 // contesta), y es también quien se los devuelve: aquí no se tocan.
 func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
-	return m.commit(ctx, ref, name, false, nil, true, false, false)
+	return m.commit(ctx, ref, name, false, nil, true, false, agenteSinSondear)
 }
 
 // commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
@@ -100,7 +116,7 @@ func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Sna
 // máquina tiene que estar pausada, no se pausa ni se reanuda (commitPausada).
 // Con deFork es el snapshot temporal de un fork: no se hashea su overlay (ver
 // la DECISIÓN junto a los digests).
-func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork, sinAgente bool) (snapOut *api.Snapshot, errOut error) {
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork bool, agente agenteAlGuardar) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
@@ -650,7 +666,8 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		Volumes:   sinSync(mc.Volumes),
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
-		SinAgente: sinAgente,
+		SinAgente: agente == agenteNoEscuchaba,
+		ConAgente: agente == agenteEscuchaba,
 	}
 	// Con qué VMM, kling y macOS se hizo: lo que permite marcarlo obsoleto
 	// cuando cambien en vez de fallar al despertar (meta.go).
@@ -2003,6 +2020,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
 	}
+	// Cargada y reanudada: la compuerta, para la siguiente (P3). El resync
+	// (hasta 2 s, 4 s con su reintento) espera al invitado, no al host.
+	release()
 	// macOS: sin reenvíos el host no llega al invitado, y acquireVolumes de
 	// aquí abajo ya necesita hablarle.
 	if err := m.abrirReenvios(ctx, c, id); err != nil {
@@ -2016,7 +2036,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
 	resync, err := m.resyncCopia(ctx, id, snap)
 	if err != nil {
-		return abortar(fmt.Errorf("snapshot %s: %w", req.From, err))
+		return m.descartarCopia(id, soltarCiclo, abortar, fmt.Errorf("snapshot %s: %w", req.From, err))
 	}
 	fases.marca("resync")
 	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
@@ -2024,7 +2044,8 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// CSPRNG de la plantilla.
 	if ai != nil {
 		if !resync.ok {
-			return abortar(fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
+			return m.descartarCopia(id, soltarCiclo, abortar,
+				fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
 		}
 		if err := m.entregarMaquina(ctx, id, ai); err != nil {
 			return abortar(fmt.Errorf("image snapshot %s: %w", req.From, err))
@@ -2124,6 +2145,19 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	return &out, nil
 }
 
+// descartarCopia aborta una copia que no se resincronizó (F8) y la borra: un
+// fallo del invitado, no de la petición, así que quedarse failed con su nombre
+// solo hacía que el reintento con el mismo -name diera ErrNameTaken. Como el
+// camino de las carpetas compartidas: suelta el cerrojo de ciclo y Remove.
+func (m *Manager) descartarCopia(id string, soltarCiclo func(), abortar func(error) (*api.Machine, error), err error) (*api.Machine, error) {
+	_, err = abortar(err)
+	soltarCiclo()
+	if rerr := m.Remove(id); rerr != nil {
+		log.Printf("%s: removing the copy that did not resync: %v", shortID(id), rerr)
+	}
+	return nil, err
+}
+
 // writeMeta guarda el meta.json de un snapshot de forma atómica.
 //
 // Al lado y renombrar, nunca encima. os.WriteFile TRUNCA primero: un corte a
@@ -2215,15 +2249,33 @@ func restosDeCommit(dir string) bool {
 // más de dirGrace sin tocarse y que nadie esté escribiendo. Solo mueve (rápido);
 // vaciarPapelera borra. Se llama con m.mu tomado.
 func (m *Manager) sweepSnapshotLeftovers() {
+	m.sweepSnapshotLeftoversDe(m.candidatosRestos())
+}
+
+// candidatosRestos son los directorios de snapshots/ que, al mirarlos, eran
+// un commit a medias (restosDeCommit). Sin m.mu: es la parte con E/S, dos
+// stat por snapshot; sweepSnapshotLeftoversDe lo vuelve a mirar, con el
+// cerrojo, solo en estos.
+func (m *Manager) candidatosRestos() []os.DirEntry {
 	base := filepath.Join(m.root, "snapshots")
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return
+		return nil
 	}
+	var out []os.DirEntry
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && restosDeCommit(filepath.Join(base, e.Name())) {
+			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// sweepSnapshotLeftoversDe es sweepSnapshotLeftovers sobre los candidatos
+// de candidatosRestos. Se llama con m.mu tomado.
+func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
+	base := filepath.Join(m.root, "snapshots")
+	for _, e := range entries {
 		if m.reserved[reservaSnapshot(e.Name())] > 0 || !restosDeCommit(filepath.Join(base, e.Name())) {
 			continue
 		}

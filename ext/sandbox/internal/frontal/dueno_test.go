@@ -17,11 +17,11 @@ func TestPrecalentadaConDuenoNoSeReparte(t *testing.T) {
 		OnTTL:  api.OnTTLFreeze,
 		Labels: map[string]string{api.LabelKind: api.KindSandbox, LabelTemplate: "py"},
 	}
-	if !esPrecalentadaDe(mc, "py") {
+	if !esPrecalentadaDe(mc, "py", "") {
 		t.Fatal("la precalentada del frontal no se reconoce")
 	}
 	mc.Labels[api.LabelOwner] = "a"
-	if esPrecalentadaDe(mc, "py") {
+	if esPrecalentadaDe(mc, "py", "") {
 		t.Error("esPrecalentadaDe acepta una máquina con kling.owner=a")
 	}
 	mc.Labels[LabelTenant] = "b"

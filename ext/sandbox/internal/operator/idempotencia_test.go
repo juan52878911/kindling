@@ -41,9 +41,9 @@ func TestCreateQueRespondeTardeNoDuplica(t *testing.T) {
 func TestBorrarSinStatusBorraElSandboxPorUID(t *testing.T) {
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
-	fr.sandboxes["sbx-x"] = &frontal.Sandbox{ID: "sbx-x", Host: "host1", State: api.StateRunning,
+	fr.sandboxes["host1/sbx-x"] = &frontal.Sandbox{ID: "host1/sbx-x", Host: "host1", State: api.StateRunning,
 		Labels: map[string]string{LabelK8sUID: "uid-huerfano"}}
-	fr.sandboxes["sbx-otro"] = &frontal.Sandbox{ID: "sbx-otro", Host: "host1", State: api.StateRunning,
+	fr.sandboxes["host1/sbx-otro"] = &frontal.Sandbox{ID: "host1/sbx-otro", Host: "host1", State: api.StateRunning,
 		Labels: map[string]string{LabelK8sUID: "uid-ajeno"}}
 
 	now := time.Now()
@@ -62,8 +62,8 @@ func TestBorrarSinStatusBorraElSandboxPorUID(t *testing.T) {
 		return !ok
 	})
 	fr.mu.Lock()
-	_, sigue := fr.sandboxes["sbx-x"]
-	_, ajeno := fr.sandboxes["sbx-otro"]
+	_, sigue := fr.sandboxes["host1/sbx-x"]
+	_, ajeno := fr.sandboxes["host1/sbx-otro"]
 	fr.mu.Unlock()
 	if sigue || !ajeno {
 		t.Fatalf("sbx-x sigue=%v, sbx-otro sigue=%v; quería borrado solo el suyo", sigue, ajeno)

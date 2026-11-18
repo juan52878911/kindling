@@ -199,7 +199,7 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	// La comprobación de credenciales se repite con el cerrojo de la máquina:
 	// entre la de arriba y la pausa, un SetCredentials pudo darle alguna. La
 	// marca de fork (forkMarca) la deja commit antes del meta.json.
-	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales, false, true, false); err != nil {
+	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales, false, true, agenteSinSondear); err != nil {
 		return "", nil, fmt.Errorf("forking %s: %w", src.Name, err)
 	}
 	t.marca("commit")

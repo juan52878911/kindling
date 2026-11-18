@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // La RAM de una congelación es un clon APFS del fichero que la respalda (el
@@ -62,6 +63,39 @@ func TestClonRAMSinVentana(t *testing.T) {
 	// RENAME_EXCL: no pisa una RAM que ya esté (como fclonefileat).
 	if m := clonRAM(base, out); m != -int(syscall.EEXIST) {
 		t.Fatalf("cloning over an existing file = %d, want -EEXIST", m)
+	}
+}
+
+// F16: un .khv-clon-* que dejó un kling-hv muerto entre el clon y el rename
+// (con la RAM entera dentro) se quita en el siguiente snapshot; uno reciente,
+// que puede ser de otro en marcha, no.
+func TestClonRAMBarreHuerfanos(t *testing.T) {
+	dir := t.TempDir()
+	base, out := filepath.Join(dir, "mem.base"), filepath.Join(dir, "mem.file")
+	if err := os.WriteFile(base, make([]byte, 1<<16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viejo, nuevo := filepath.Join(dir, ".khv-clon-viejo"), filepath.Join(dir, ".khv-clon-nuevo")
+	for _, d := range []string{viejo, nuevo} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "mem"), make([]byte, 4096), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hace := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(viejo, hace, hace); err != nil {
+		t.Fatal(err)
+	}
+	if m := clonRAM(base, out); m < 0 {
+		t.Fatalf("cloning the RAM file: errno %d", -m)
+	}
+	if _, err := os.Stat(viejo); !os.IsNotExist(err) {
+		t.Fatalf("a stale clone directory survived the snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(nuevo, "mem")); err != nil {
+		t.Fatalf("a recent clone directory was removed: %v", err)
 	}
 }
 

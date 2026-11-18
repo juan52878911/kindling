@@ -105,50 +105,79 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 		return
 	}
 
+	// La versión de cada plantilla que el host tiene ahora. Una precalentada sin
+	// dueño de otra versión (un rebuild reemplazó el snapshot) o de una
+	// plantilla que ya no está (template rm) no la va a reclamar nadie: el
+	// frontal exige la versión de ahora. Se borra, y si la plantilla sigue, se
+	// fabrica otra de su snapshot actual.
+	version := map[string]string{}
+	for _, s := range snaps {
+		if nombre, _ := DeseoDe(s); nombre != "" {
+			version[nombre] = plantilla.VersionDe(s)
+		}
+	}
+	hay := map[string]int{}
+	for _, mc := range vivas {
+		nombre := mc.Labels[LabelTemplate]
+		if nombre == "" || mc.Labels[LabelTenant] != "" || !plantilla.DelFrontal(mc.Labels) {
+			continue
+		}
+		v, sigue := version[nombre]
+		motivo := ""
+		switch {
+		case !sigue:
+			motivo = "orphaned (its template is gone)"
+		case mc.Labels[plantilla.LabelVersion] != v:
+			motivo = "stale (its template was rebuilt)"
+		case rota(mc):
+			// Una rota no la reclama el frontal (esPrecalentadaDe): contarla
+			// dejaría la plaza ocupada para siempre y cada create caería al
+			// restore. Se borra y se fabrica otra.
+			motivo = string(mc.State)
+		}
+		if motivo == "" {
+			hay[nombre]++
+			continue
+		}
+		if err := h.Cliente.Remove(ctx, mc.ID); err != nil {
+			r.log.Printf("pool %s/%s: removing the %s prewarmed %s: %v", h.Nombre, nombre, motivo, shortID(mc.ID), err)
+		} else {
+			r.log.Printf("pool %s/%s: removed the %s prewarmed %s", h.Nombre, nombre, motivo, shortID(mc.ID))
+		}
+	}
+
 	for _, s := range snaps {
 		nombre, quiere := DeseoDe(s)
 		if quiere <= 0 {
 			continue
 		}
-		hay := 0
-		for _, mc := range vivas {
-			if mc.Labels[LabelTemplate] != nombre || mc.Labels[LabelTenant] != "" || !plantilla.DelFrontal(mc.Labels) {
-				continue
-			}
-			// Una rota no la reclama el frontal (esPrecalentadaDe): contarla
-			// dejaría la plaza ocupada para siempre y cada create caería al
-			// restore. Se borra y se fabrica otra.
-			if rota(mc) {
-				if err := h.Cliente.Remove(ctx, mc.ID); err != nil {
-					r.log.Printf("pool %s/%s: removing the %s prewarmed %s: %v", h.Nombre, nombre, mc.State, shortID(mc.ID), err)
-				} else {
-					r.log.Printf("pool %s/%s: removed the %s prewarmed %s", h.Nombre, nombre, mc.State, shortID(mc.ID))
-				}
-				continue
-			}
-			hay++
-		}
-		for i := hay; i < quiere; i++ {
+		for i := hay[nombre]; i < quiere; i++ {
 			if ctx.Err() != nil {
 				return
+			}
+			etiquetas := map[string]string{LabelTemplate: nombre}
+			if v := version[nombre]; v != "" {
+				etiquetas[plantilla.LabelVersion] = v
 			}
 			mc, err := h.Cliente.CreateSandbox(ctx, api.SandboxRequest{
 				From:       s.Name,
 				TTLSeconds: TTLPrecalentada,
 				OnTTL:      api.OnTTLFreeze,
 				Egress:     "none",
-				Labels:     map[string]string{LabelTemplate: nombre},
+				Labels:     etiquetas,
 			})
 			if err != nil {
 				// Que no quepa no es un fallo del fondo: es el host diciendo que
 				// la RAM es para quien la pide de verdad. Se reintenta en la
-				// vuelta siguiente, sin ruido en el log.
+				// vuelta siguiente, sin ruido en el log. Y se sigue con la
+				// siguiente plantilla: puede caber aunque esta no, y un fallo de
+				// una no debe dejar sin fondo a las demás del host.
 				if !api.IsInsufficientMemory(err) && !api.IsMachineLimit(err) {
 					r.log.Printf("pool %s/%s: %v", h.Nombre, nombre, err)
 				}
-				return
+				break
 			}
-			r.log.Printf("pool %s/%s: prewarmed %s (%d/%d)", h.Nombre, nombre, mc.ID[:12], i+1, quiere)
+			r.log.Printf("pool %s/%s: prewarmed %s (%d/%d)", h.Nombre, nombre, shortID(mc.ID), i+1, quiere)
 		}
 	}
 }

@@ -370,6 +370,7 @@ kling save -force -json m1 tpl:  allow_exec bool
 kling save -force -json m1 tpl:  annotations.x string
 kling save -force -json m1 tpl:  arch string
 kling save -force -json m1 tpl:  base_digest string
+kling save -force -json m1 tpl:  con_agente bool
 kling save -force -json m1 tpl:  cpu_pct number
 kling save -force -json m1 tpl:  cpu_pct_fixed bool
 kling save -force -json m1 tpl:  created_at string
@@ -428,6 +429,7 @@ kling template ls -json:  [].allow_exec bool
 kling template ls -json:  [].annotations.x string
 kling template ls -json:  [].arch string
 kling template ls -json:  [].base_digest string
+kling template ls -json:  [].con_agente bool
 kling template ls -json:  [].cpu_pct number
 kling template ls -json:  [].cpu_pct_fixed bool
 kling template ls -json:  [].created_at string

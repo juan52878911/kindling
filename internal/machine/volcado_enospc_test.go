@@ -9,7 +9,7 @@ import (
 )
 
 // volcadoSellado deja en dir un volcado completo y sellado.
-func volcadoSellado(t *testing.T, dir string) {
+func volcadoSellado(t testing.TB, dir string) {
 	t.Helper()
 	for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {

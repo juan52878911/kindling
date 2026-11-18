@@ -618,7 +618,7 @@ func (m *Manager) prepararImagen(ctx context.Context, req api.RunRequest, c clav
 		return &errImagenIncompatible{motivo: fmt.Sprintf("%d process(es) (%s) run before the image's service starts",
 			procs.Count, strings.Join(procs.Names, ", "))}
 	}
-	if _, err := m.commit(ctx, id, nombre, false, comprobarPrepImagen, false, false, false); err != nil {
+	if _, err := m.commit(ctx, id, nombre, false, comprobarPrepImagen, false, false, agenteSinSondear); err != nil {
 		return fmt.Errorf("saving it: %w", err)
 	}
 	m.podarSnapshotsImagen(tope)

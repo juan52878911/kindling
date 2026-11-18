@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ func (s *Server) handleProcStats(w http.ResponseWriter, r *http.Request) {
 // arrastrar client_golang y su árbol de dependencias a un binario que hoy no
 // tiene ninguna externa.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	ps := s.mgr.ProcStats()
+	ps := s.muestraMetrics()
 	// Un inquilino ve las cifras del host, no las máquinas: las series por
 	// máquina llevan el ID y el nombre de todas, también las ajenas.
 	if _, filtrar := inquilinoDe(r); filtrar {
@@ -72,6 +73,35 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	escribirPorMaquina(w, ps, time.Now())
 	escribirTelemetria(w, s.mgr.Telemetria(), s.bus.Descartados())
 	escribirDaemon(w, machine.RecursosDaemon(), runtime.NumGoroutine(), s.mgr.EnBateria())
+}
+
+// plazoMuestraMetrics es cuánto vale una muestra de /metrics. Variable para
+// los tests.
+var plazoMuestraMetrics = time.Second
+
+// muestraMetrics es ProcStats para /metrics, con la muestra de hace menos de
+// plazoMuestraMetrics si la hay. Cada muestra son dos lecturas por máquina
+// viva (smaps_rollup y estado; en macOS, preguntas al ayudante), y /metrics
+// lo puede pedir cualquier inquilino: sin caché, unos cuantos scrapes en
+// paralelo multiplicaban ese trabajo por máquina. Con el cerrojo tomado
+// mientras se muestrea, los que llegan a la vez esperan a esa muestra en vez
+// de hacer cada uno la suya. kling top (/procstats) sigue muestreando cada
+// vez: es una persona mirando, no un scrape.
+func (s *Server) muestraMetrics() api.ProcStats {
+	s.muestraMu.Lock()
+	defer s.muestraMu.Unlock()
+	if s.muestraEn.IsZero() || time.Since(s.muestraEn) >= plazoMuestraMetrics {
+		muestrear := s.muestrear
+		if muestrear == nil {
+			muestrear = s.mgr.ProcStats
+		}
+		s.muestra = muestrear()
+		s.muestraEn = time.Now()
+	}
+	// Copia de la lista: quien la recibe la puede vaciar o reordenar.
+	ps := s.muestra
+	ps.Machines = slices.Clone(ps.Machines)
+	return ps
 }
 
 // escribirDaemon escribe lo que gasta el propio daemon y si va con batería:

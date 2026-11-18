@@ -60,36 +60,35 @@ func loadBrowserSpec() *browserSpec {
 // launch arranca el Chromium compartido y espera a que su puerto de depuración
 // responda. Si no llega a estar listo, mata el proceso y devuelve error: mejor
 // fallar aquí, donde se ve en la consola serie, que como un CDP roto más tarde.
-func (s *browserSpec) launch(env []string) (*exec.Cmd, error) {
+func (s *browserSpec) launch(env []string) (*hijoVigilado, error) {
 	cmd := exec.Command(s.Sidecar[0], s.Sidecar[1:]...)
 	cmd.Env = env
 	// La salida del navegador va a la consola serie de la microVM, como la del
 	// servidor MCP: si Chromium se queja (sandbox, /dev/shm), se lee ahí.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	// Chromium lanza un arbol de procesos (zygote, gpu, renderers). En su propio
-	// grupo se puede matar entero; sin esto quedaban vivos al cerrar.
-	enSuPropioGrupo(cmd)
-	if err := cmd.Start(); err != nil {
+	// grupo (lo pone lanzarVigilado) se puede matar entero; sin esto quedaban
+	// vivos al cerrar. Vigilado: si muere, ensureBrowser lo ve y lo relanza.
+	h, err := lanzarVigilado(cmd, "browser: shared Chromium")
+	if err != nil {
 		return nil, fmt.Errorf("launching shared Chromium: %w", err)
 	}
 	log.Printf("browser: shared Chromium launched (pid %d)", cmd.Process.Pid)
-	// No hacemos Wait: es de por vida. Cuando muera, el cosechador (procReaper,
-	// wait4 de PID 1) lo recoge como huérfano.
 
 	if s.ReadyURL == "" {
-		return cmd, nil
+		return h, nil
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(40 * time.Second)
-	for time.Now().Before(deadline) {
+	for time.Now().Before(deadline) && h.vivo() {
 		resp, err := client.Get(s.ReadyURL)
 		if err == nil {
 			resp.Body.Close()
-			return cmd, nil
+			return h, nil
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	matarGrupo(cmd)
+	h.matar()
 	return nil, fmt.Errorf("shared Chromium did not open %s within 40s", s.ReadyURL)
 }
 
@@ -103,14 +102,22 @@ func (b *bridge) ensureBrowser() error {
 	}
 	b.bmu.Lock()
 	defer b.bmu.Unlock()
-	if b.bproc != nil {
+	if b.bproc.vivo() {
 		return nil // ya vivo, se reusa
 	}
-	cmd, err := b.browser.launch(b.env)
+	if b.bproc != nil {
+		// Murió por su cuenta (el oom-killer, un fallo). Antes se seguía dando
+		// por vivo y cada sesión nueva conectaba por CDP a un puerto muerto
+		// hasta un /reset. Las sesiones que ya estaban atadas a él no se
+		// recuperan; las nuevas reciben un navegador nuevo.
+		log.Printf("browser: shared Chromium died; launching it again")
+		b.bproc = nil
+	}
+	h, err := b.browser.launch(b.env)
 	if err != nil {
 		return err
 	}
-	b.bproc = cmd
+	b.bproc = h
 	return nil
 }
 
@@ -124,7 +131,7 @@ func (b *bridge) stopBrowser() {
 	b.bmu.Lock()
 	defer b.bmu.Unlock()
 	if b.bproc != nil {
-		matarGrupo(b.bproc)
+		b.bproc.matar()
 		b.bproc = nil
 		log.Printf("browser: shared Chromium stopped")
 	}
