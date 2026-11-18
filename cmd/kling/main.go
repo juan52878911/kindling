@@ -376,14 +376,36 @@ func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 // senalesDeCorte son las que cancelan el contexto de ctxWithSignals.
 var senalesDeCorte = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE}
 
+// senalesDeServidor son las de los procesos que atienden conexiones (el
+// daemon, kling ai serve): las de corte sin SIGPIPE. Con signal.Notify para
+// SIGPIPE, Go entrega al canal la de CUALQUIER descriptor, no solo la de la
+// salida estándar: un cliente que colgaba a media respuesta (un exec cortado,
+// un VMM que moría con su socket abierto) apagaba el daemon entero, en
+// silencio y como un SIGTERM. Sin Notify, un EPIPE en un socket es solo un
+// error de esa escritura.
+var senalesDeServidor = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
 func ctxWithSignals() (context.Context, context.CancelFunc) {
-	// signal.NotifyContext, apuntando que llegó la señal (codigoDeSalida).
-	ctx, cancel := context.WithCancel(context.Background())
-	ch := make(chan os.Signal, 1)
 	// SIGHUP (se cierra la terminal) y SIGPIPE (`kling try … | head -1`)
 	// también: sin ellas el proceso muere sin pasar por los defer que retiran
 	// las máquinas temporales.
-	signal.Notify(ch, senalesDeCorte...)
+	return ctxConSenales(senalesDeCorte)
+}
+
+// ctxWithSignalsServidor es ctxWithSignals para los que sirven conexiones
+// (ver senalesDeServidor).
+func ctxWithSignalsServidor() (context.Context, context.CancelFunc) {
+	return ctxConSenales(senalesDeServidor)
+}
+
+// ctxDelDaemon es el contexto con el que corre `kling daemon`.
+var ctxDelDaemon = ctxWithSignalsServidor
+
+func ctxConSenales(senales []os.Signal) (context.Context, context.CancelFunc) {
+	// signal.NotifyContext, apuntando que llegó la señal (codigoDeSalida).
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, senales...)
 	go func() {
 		select {
 		case <-ch:
@@ -454,7 +476,7 @@ func cmdDaemon(args []string) error {
 	// Antes de atender nada: lo que dejaron las construcciones y descargas
 	// cortadas con el daemon anterior ya no es de nadie.
 	srv.BarrerTemporales()
-	ctx, stop := ctxWithSignals()
+	ctx, stop := ctxDelDaemon()
 	defer stop()
 	return srv.Listen(ctx)
 }

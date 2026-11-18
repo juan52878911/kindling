@@ -139,7 +139,8 @@ func aiServe(args []string) error {
 		}
 	}
 
-	ctx, stop := ctxWithSignals()
+	// Un servidor: un cliente que cuelga no lo apaga (senalesDeServidor).
+	ctx, stop := ctxWithSignalsServidor()
 	defer stop()
 	client := api.NewClient(hostOf(*host))
 	if len(flagsGiven(fs, "paused-mib")) == 0 {
