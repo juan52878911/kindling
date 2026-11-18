@@ -293,21 +293,34 @@ func psqlAs(ro, db, format string) string {
 		" -v ON_ERROR_STOP=1 -h /run/postgresql -U " + ro + " -d " + db
 }
 
-// createRORole crea kling_db_ro si no existe: LOGIN, sin ningún atributo, con
-// pg_read_all_data (lee todo lo que no proteja RLS) y en solo lectura por
-// defecto. %[1]s es el rol (identPattern).
-const createRORole = `DO $k$BEGIN
+// createRORole crea kling_db_ro si no existe (LOGIN, sin ningún atributo, en
+// solo lectura por defecto) y le da SELECT en las tablas de los esquemas de la
+// aplicación, los que no son del sistema. Corre en cada ask, así que también
+// cubre las tablas nuevas. NO pg_read_all_data: ese rol lee también los
+// catálogos protegidos (pg_authid con los verificadores de las claves,
+// pg_user_mapping, pg_statistic...); se le quita al rol de versiones
+// anteriores. %[1]s es el rol (identPattern).
+const createRORole = `DO $k$
+DECLARE s name;
+BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%[1]s') THEN
     CREATE ROLE %[1]s LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT CONNECTION LIMIT 5;
   END IF;
+  IF EXISTS (SELECT FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member
+             WHERE g.rolname = 'pg_read_all_data' AND u.rolname = '%[1]s') THEN
+    REVOKE pg_read_all_data FROM %[1]s;
+  END IF;
+  FOR s IN SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA %%I TO %[1]s', s);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %%I TO %[1]s', s);
+  END LOOP;
 END$k$;
-GRANT pg_read_all_data TO %[1]s;
 ALTER ROLE %[1]s SET default_transaction_read_only = on;
 `
 
 // checkRORole lista por qué un rol NO es de solo lectura en esta base (vacío:
 // lo es). Lo que se exige: que exista y pueda entrar; ningún atributo de
-// administración; no pertenecer a NINGÚN rol salvo pg_read_all_data; no ser
+// administración; no pertenecer a NINGÚN rol (tampoco a pg_read_all_data); no ser
 // dueño de ninguna relación ni de la base, ni poder escribir en ninguna.
 //
 // Pertenencia con 'MEMBER', no 'USAGE': en PG16 un GRANT app TO ro WITH
@@ -323,7 +336,7 @@ SELECT coalesce(json_agg(p), '[]')::text FROM (
   UNION ALL SELECT 'has REPLICATION' FROM r WHERE rolreplication
   UNION ALL SELECT 'has BYPASSRLS' FROM r WHERE rolbypassrls
   UNION ALL (SELECT DISTINCT 'is a member of ' || s.rolname FROM r, pg_roles s
-    WHERE s.oid <> r.oid AND s.rolname <> 'pg_read_all_data'
+    WHERE s.oid <> r.oid
       AND (pg_has_role(r.oid, s.oid, 'MEMBER')
            OR EXISTS (SELECT FROM pg_auth_members m WHERE m.member = r.oid AND m.roleid = s.oid))
     ORDER BY 1 LIMIT 10)

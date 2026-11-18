@@ -67,11 +67,35 @@ var forbiddenFuncs = map[string]bool{
 	"txid_current": true, "pg_current_xact_id": true,
 }
 
-// forbiddenPrefixes: familias enteras.
+// forbiddenPrefixes: familias enteras. ts_stat/ts_rewrite y las de tablefunc
+// (crosstab, connectby) también ejecutan SQL que va en una cadena; las
+// *_to_xml vuelcan tablas, esquemas o la base entera de una vez.
 var forbiddenPrefixes = []string{
 	"pg_sleep", "dblink", "lo_", "pg_ls_", "pg_file_", "pg_advisory_", "pg_try_advisory_",
 	"pg_create_", "pg_drop_", "pg_replication_", "pg_logical_", "pg_stat_reset",
 	"pg_backup_", "pg_start_backup", "pg_stop_backup", "pg_wal_replay_",
+	"ts_stat", "ts_rewrite", "crosstab", "connectby",
+	"table_to_xml", "schema_to_xml", "database_to_xml",
+}
+
+// forbiddenRelations son catálogos con secretos o con valores de columnas que
+// el rol no debería ver: verificadores de claves (pg_authid, pg_shadow),
+// opciones de user mappings y suscripciones (pueden llevar contraseñas),
+// estadísticas con valores de muestra y objetos grandes. El rol de solo
+// lectura ya no los puede leer; esto da además un motivo claro. Prefijos:
+// pg_statistic cubre pg_statistic_ext_data.
+var forbiddenRelations = []string{
+	"pg_authid", "pg_shadow", "pg_user_mapping", "pg_subscription", "pg_statistic", "pg_largeobject",
+}
+
+// forbiddenRelation dice si un nombre (en minúsculas) es de un catálogo prohibido.
+func forbiddenRelation(name string) bool {
+	for _, p := range forbiddenRelations {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // forbiddenName dice si un nombre (en minúsculas) es de una función prohibida.
@@ -168,6 +192,9 @@ func Validate(sql string) error {
 			if forbiddenName(strings.ToLower(t.text)) {
 				return reject("function %s is not allowed", strings.ToLower(t.text))
 			}
+			if forbiddenRelation(strings.ToLower(t.text)) {
+				return reject("catalog %s is not allowed", strings.ToLower(t.text))
+			}
 			if t.text == "FOR" && i+1 < len(toks) && toks[i+1].k == word {
 				// FOR UPDATE / FOR NO KEY UPDATE / FOR SHARE / FOR KEY SHARE bloquean filas.
 				switch toks[i+1].text {
@@ -181,6 +208,9 @@ func Validate(sql string) error {
 		case quoted:
 			if forbiddenName(strings.ToLower(t.text)) {
 				return reject("function %q is not allowed", t.text)
+			}
+			if forbiddenRelation(strings.ToLower(t.text)) {
+				return reject("catalog %q is not allowed", t.text)
 			}
 		}
 	}

@@ -120,6 +120,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `kling db ask`: the read-only role gets `SELECT` on the application schemas instead of `pg_read_all_data`, which also read `pg_authid` and other protected catalogs; existing roles lose it. `sqlguard` also rejects `ts_stat`, `ts_rewrite`, `crosstab`, `connectby`, the `*_to_xml` dumps and those catalogs.
 - `kling db sql`: control characters in cells, column names and command tags are replaced before they reach the terminal.
 - `kling db ask` with opencode: the model gets no tools (a deny-all agent, user MCP servers off), checked with opencode before the prompt is sent; if it cannot be checked, it refuses. The child no longer gets `KLING_*` or `PG*` variables.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
