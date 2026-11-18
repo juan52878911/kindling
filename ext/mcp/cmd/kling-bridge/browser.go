@@ -108,8 +108,8 @@ func (b *bridge) ensureBrowser() error {
 	if b.bproc != nil {
 		// Murió por su cuenta (el oom-killer, un fallo). Antes se seguía dando
 		// por vivo y cada sesión nueva conectaba por CDP a un puerto muerto
-		// hasta un /reset. Las sesiones que ya estaban atadas a él no se
-		// recuperan; las nuevas reciben un navegador nuevo.
+		// hasta un /reset. Las sesiones atadas a él las cierra
+		// vigilarNavegador; las nuevas reciben un navegador nuevo.
 		log.Printf("browser: shared Chromium died; launching it again")
 		b.bproc = nil
 	}
@@ -118,7 +118,43 @@ func (b *bridge) ensureBrowser() error {
 		return err
 	}
 	b.bproc = h
+	go b.vigilarNavegador(h)
 	return nil
+}
+
+// navegadorActual devuelve el Chromium compartido de ahora (nil si no corre o
+// el servicio no es de navegador).
+func (b *bridge) navegadorActual() *hijoVigilado {
+	if b.browser == nil {
+		return nil
+	}
+	b.bmu.Lock()
+	defer b.bmu.Unlock()
+	return b.bproc
+}
+
+// vigilarNavegador espera a que salga el Chromium h y cierra las sesiones que
+// se conectaron a él. Su CDP apunta a un puerto muerto: antes seguían vivas,
+// fallando en cada herramienta, hasta caducar por ociosas o un /reset. Cerradas,
+// el cliente recibe 404 y rehace el initialize, que levanta un navegador nuevo.
+func (b *bridge) vigilarNavegador(h *hijoVigilado) {
+	<-h.fin
+	var atadas []*session
+	b.mu.Lock()
+	for id, s := range b.sessions {
+		if s.navegador == h {
+			atadas = append(atadas, s)
+			delete(b.sessions, id)
+		}
+	}
+	b.mu.Unlock()
+	if len(atadas) == 0 {
+		return
+	}
+	log.Printf("browser: shared Chromium exited; closing %d session(s) attached to it", len(atadas))
+	for _, s := range atadas {
+		go s.close()
+	}
 }
 
 // stopBrowser mata el Chromium compartido si corre. Lo llama /reset —para que el
