@@ -538,8 +538,15 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// (la sesión ya no existe allí: cosechada, o su servidor murió): la
 		// ruta se olvida también, o seguía contando como sesión de la
 		// instancia y forzaba réplicas para sesiones que no existen.
+		//
+		// Si la sesión era aislada, su máquina se libera también: sin ruta ya
+		// nadie llega a ella (el cliente rehace el initialize y recibe otra),
+		// y seguía ocupando memoria y overlay hasta su caducidad.
 		if r.Method == http.MethodDelete ||
 			(r.Method == http.MethodPost && r.URL.Path == "/mcp" && cw.code == http.StatusNotFound) {
+			if g.IsIsolated(ext) {
+				g.ReleaseIsolated(r.Context(), ext)
+			}
 			g.Forget(ext)
 		}
 		return
