@@ -172,7 +172,7 @@ func aiServe(args []string) error {
 
 	g.Start(ctx)
 	srv := &http.Server{
-		Handler:           g.Handler(token),
+		Handler:           g.ServeHandler(token, *listen != ""),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       2 * time.Minute,

@@ -333,7 +333,9 @@ código.
 - Socket Unix 0600 por defecto (nace 0600 con `umask`, sin ventana), en un
   directorio 0700; no pisa un socket vivo. TCP solo con `-listen` y token:
   `$KLING_AI_TOKEN` o el fichero `ai.token`, generado 0600 si falta y rechazado si
-  otros pueden leerlo. Nunca por la línea de comandos. `-no-auth` solo en loopback.
+  otros pueden leerlo. Nunca por la línea de comandos. `-no-auth` solo en loopback,
+  y entonces el gateway rechaza (403) las peticiones cuyo `Host` u `Origin` no son
+  de loopback. Todo `POST` tiene que llevar `Content-Type: application/json` (415).
 - Tokens con nombre y cuota (`tenants` en el registro, que entonces tiene que ser
   0600): `max_inflight` da 429 y `max_instances` limita las réplicas que despierta.
   Son reparto justo, no aislamiento. Las rutas `/v1/admin/*` solo con el token
