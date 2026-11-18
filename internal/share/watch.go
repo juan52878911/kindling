@@ -457,6 +457,17 @@ func (w *watcher) flush() {
 		if e == nil {
 			continue
 		}
+		// La huella de ahora, antes que la foto: lo que cambie entre medias se
+		// ve en el repaso siguiente.
+		fp := w.fingerprint(ev.rel)
+		if !ev.gone && e.fp.ino != 0 && fp.ino != 0 && fp.ino != e.fp.ino {
+			// En su sitio hay otro inodo (un guardado atómico) y el sistema solo
+			// contó un cambio de atributos del viejo: inotify sigue el inodo,
+			// no el nombre, y si alguien aún lo tiene abierto no avisa de su
+			// borrado. Se trata como lo que es, otro fichero en la ruta: sin
+			// esto la vigilancia se quedaba en el viejo y no avisaba de nada más.
+			ev.gone = true
+		}
 		switch {
 		case ev.gone:
 			// Se borró o se movió. Si en su sitio hay otra cosa (un guardado
@@ -479,9 +490,7 @@ func (w *watcher) flush() {
 				add(proto.EventDelete, ev.rel)
 			}
 		case e.dir:
-			// La huella antes que la foto: lo que cambie entre medias se ve
-			// en el repaso siguiente.
-			e.fp = w.fingerprint(ev.rel)
+			e.fp = fp
 			now, id, hayID := w.snapshot(ev.rel, func(id Ident) bool { return w.otraFotoLocked(e, id) })
 			if e.snap == nil || now == nil {
 				// Sin foto con la que comparar (directorio enorme, presupuesto
@@ -509,7 +518,7 @@ func (w *watcher) flush() {
 			}
 			w.setSnapLocked(e, now, id, hayID)
 		default:
-			e.fp = w.fingerprint(ev.rel)
+			e.fp = fp
 			add(proto.EventModify, ev.rel)
 		}
 	}

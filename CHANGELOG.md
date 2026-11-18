@@ -117,6 +117,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: the CPU cap charges the whole process, not only the vCPU threads, so disk, network and vsock work count too (cpu_pct=10 with a direct-I/O read loop: 45% to 12% of a core).
 - Stop and remove ask the guest to stop its service before cutting its live shared folders, so what the service writes on shutdown reaches the host.
 - Stop, freeze and remove wait at most 5 s for live shared folders to close, so a host folder on a hung NFS or SMB mount no longer hangs them.
+- Linux: after an atomic save on the host (write aside, rename over) of a file the guest watches, later changes to it reach the guest again; the watch stayed on the old inode while anything held it open.
 
 ### Security
 
