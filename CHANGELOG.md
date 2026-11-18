@@ -119,6 +119,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Stop, freeze and remove wait at most 5 s for live shared folders to close, so a host folder on a hung NFS or SMB mount no longer hangs them.
 - Linux: after an atomic save on the host (write aside, rename over) of a file the guest watches, later changes to it reach the guest again; the watch stayed on the old inode while anything held it open.
 - macOS: a shared-folder session that watches more than 1024 paths, or finds the daemon out of watch descriptors, polls the rest every 2 s (up to 4096, as on Linux) instead of silently dropping them; it is logged once per session.
+- Linux: a copy of a template given live shared folders (run -from with shares, sandboxes) gets the 256 MiB/s network floor instead of the 16 MiB/s left in its snapshot (1 GiB through a rw share: 17 to 58 MB/s writing, 17 to 87 MB/s reading, the same as a cold boot).
+- The 256 MiB/s network floor for machines with live shared folders no longer overrides a lower `daemon.net_mibps` (or `KLING_NET_MIBPS`) set on purpose.
 
 ### Security
 

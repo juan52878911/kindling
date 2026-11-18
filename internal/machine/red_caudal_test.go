@@ -1,10 +1,18 @@
 package machine
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -77,7 +85,7 @@ func TestInterfazRedLlegaAFirecracker(t *testing.T) {
 }
 
 // Con carpetas y sin pedir caudal (lo que arranca por el API), eth0 lleva al
-// menos netMiBpsCarpetas, como pide el CLI; lo pedido y un daemon más alto
+// menos netMiBpsCarpetas, como pide el CLI; lo pedido y lo que diga el daemon
 // siguen mandando.
 func TestInterfazRedConCarpetas(t *testing.T) {
 	m := newTestManager(t)
@@ -94,13 +102,16 @@ func TestInterfazRedConCarpetas(t *testing.T) {
 		daemon int
 		mib    int64
 	}{
-		{"aaaa000000000004", 32, netMiBpsCarpetas},
+		{"aaaa000000000004", 0, netMiBpsCarpetas},
 		{"aaaa000000000004", 1024, 1024},
+		// P1: un daemon.net_mibps menor puesto a propósito se respeta.
+		{"aaaa000000000004", 32, 32},
 		{"aaaa000000000005", 32, 8},
+		{"aaaa000000000005", 0, 8},
 		{"aaaa000000000006", 32, 32},
 	} {
 		daemon = c.daemon
-		if got := m.caudalRedDe(c.id); got != c.mib<<20 {
+		if got, _ := m.caudalRedDe(c.id); got != c.mib<<20 {
 			t.Errorf("%s with daemon %d MiB/s: %d B/s, want %d MiB/s", c.id, c.daemon, got, c.mib)
 		}
 	}
@@ -141,5 +152,75 @@ func TestInterfazRedLlevaTopeDeTramas(t *testing.T) {
 	}
 	if got := opsRed(1 << 20); got != opsRedMin {
 		t.Fatalf("1 MiB/s: %d tramas/s, quería el suelo %d", got, opsRedMin)
+	}
+}
+
+// P1: una copia restaurada traía el limitador de su snapshot (el dorado
+// arrancó en frío sin carpetas: 16 MiB/s) aunque llevase carpetas. Tras cargar
+// se le pone el suyo; a una sin carpetas ni caudal pedido no se le toca.
+func TestCaudalTrasCargarUnaCopia(t *testing.T) {
+	viejo := limitadorEnVMM
+	limitadorEnVMM = true
+	t.Cleanup(func() { limitadorEnVMM = viejo })
+	dir, err := os.MkdirTemp("/tmp", "kcaudal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "fc.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("no se puede abrir un socket unix aquí: %v", err)
+	}
+	var mu sync.Mutex
+	var cuerpos []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		cuerpos = append(cuerpos, r.Method+" "+r.URL.Path+" "+string(b))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	m := newTestManager(t)
+	m.SetNetMiBps(func() int { return 0 })
+	carpeta := []api.ShareAttachment{{Source: "/src", Mount: "/src", Mode: "rw"}}
+	m.mu.Lock()
+	m.byID["aaaa000000000007"] = &api.Machine{ID: "aaaa000000000007", Shares: carpeta}
+	m.byID["aaaa000000000008"] = &api.Machine{ID: "aaaa000000000008"}
+	m.mu.Unlock()
+	c := fc.New(sock)
+	m.caudalTrasCargar(context.Background(), c, "aaaa000000000008")
+	m.caudalTrasCargar(context.Background(), c, "aaaa000000000007")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(cuerpos) != 1 {
+		t.Fatalf("requests %q, want one PATCH for the copy with shares only", cuerpos)
+	}
+	var ni struct {
+		IfaceID string `json:"iface_id"`
+		Rx      struct {
+			Bandwidth struct{ Size int64 } `json:"bandwidth"`
+		} `json:"rx_rate_limiter"`
+		Tx struct {
+			Bandwidth struct{ Size int64 } `json:"bandwidth"`
+		} `json:"tx_rate_limiter"`
+	}
+	pre := "PATCH /network-interfaces/eth0 "
+	if !strings.HasPrefix(cuerpos[0], pre) {
+		t.Fatalf("request %q, want %s...", cuerpos[0], pre)
+	}
+	cuerpo := strings.TrimPrefix(cuerpos[0], pre)
+	if strings.Contains(cuerpo, "host_dev_name") || strings.Contains(cuerpo, "guest_mac") {
+		t.Fatalf("PATCH body %s carries fields Firecracker rejects", cuerpo)
+	}
+	if err := json.Unmarshal([]byte(cuerpo), &ni); err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(netMiBpsCarpetas) << 20; ni.IfaceID != "eth0" || ni.Rx.Bandwidth.Size != want || ni.Tx.Bandwidth.Size != want {
+		t.Fatalf("PATCH body %s, want %d MiB/s both ways", cuerpo, netMiBpsCarpetas)
 	}
 }
