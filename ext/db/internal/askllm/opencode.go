@@ -5,6 +5,9 @@ package askllm
 // cuenta y no quiere una clave de Anthropic.
 //
 // Cómo se encierra el CLI:
+//   - sin herramientas: un agente propio que lo deniega todo, comprobado con
+//     este opencode antes de mandarle nada (ver opencode_cerrojo.go). Si no se
+//     puede comprobar, no se llama al modelo.
 //   - --pure: sin plugins externos.
 //   - directorio temporal NUEVO y vacío (0700) como cwd, borrado al acabar:
 //     opencode no ve ni el proyecto ni nada del usuario por ahí.
@@ -14,13 +17,15 @@ package askllm
 //     cualquier usuario del equipo, y un fichero adjunto hace que el modelo a
 //     veces intente la herramienta de lectura, lo que aborta.
 //   - solo se aceptan eventos text y step_start/step_finish; cualquier otro
-//     (uso de herramientas, permisos, errores) aborta y mata al proceso.
+//     (uso de herramientas, permisos, errores) aborta y mata al proceso. Es
+//     detección, no prevención: el evento de una herramienta sale cuando ya
+//     se ejecutó.
 //   - plazo por contexto, matando el GRUPO de procesos entero.
 //
 // El entorno del hijo es el del usuario (opencode necesita su config y sus
-// credenciales de MiniMax): no se filtra a propósito. opencode guarda además
-// la sesión (el prompt y la respuesta) en su propio almacén local, como con
-// cualquier uso suyo; este paquete no lo puede evitar.
+// credenciales de MiniMax) sin las de kindling ni las de Postgres. opencode
+// guarda además la sesión (el prompt y la respuesta) en su propio almacén
+// local, como con cualquier uso suyo; este paquete no lo puede evitar.
 
 import (
 	"bufio"
@@ -107,18 +112,25 @@ func (e *providerError) Error() string {
 func (o *OpenCode) Complete(ctx context.Context, system, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
-	text, err := o.attempt(ctx, system, prompt)
+	cfg, err := o.configCerrada(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("opencode did not answer within %s (killed)", o.Timeout)
+		}
+		return "", err
+	}
+	text, err := o.attempt(ctx, cfg, system, prompt)
 	var pe *providerError
 	if errors.As(err, &pe) && ctx.Err() == nil {
 		// Fallos del proveedor intermitentes (visto con MiniMax): un reintento,
 		// dentro del mismo plazo total.
-		text, err = o.attempt(ctx, system, prompt)
+		text, err = o.attempt(ctx, cfg, system, prompt)
 	}
 	return text, err
 }
 
-// attempt es una ejecución de opencode.
-func (o *OpenCode) attempt(ctx context.Context, system, prompt string) (string, error) {
+// attempt es una ejecución de opencode con la configuración cerrada cfg.
+func (o *OpenCode) attempt(ctx context.Context, cfg, system, prompt string) (string, error) {
 	dir, err := os.MkdirTemp("", "kling-db-ask-")
 	if err != nil {
 		return "", fmt.Errorf("creating the scratch directory: %w", err)
@@ -129,9 +141,10 @@ func (o *OpenCode) attempt(ctx context.Context, system, prompt string) (string, 
 	}
 	full := system + "\n\n" + prompt
 	// Sin mensaje en los argumentos: opencode lo lee de stdin (ver arriba).
-	cmd := exec.CommandContext(ctx, o.Bin, "run", "--pure", "-m", o.Model, "--format", "json")
+	cmd := exec.CommandContext(ctx, o.Bin, "run", "--pure", "--agent", agenteAsk, "-m", o.Model, "--format", "json")
 	cmd.Stdin = strings.NewReader(full)
 	cmd.Dir = dir
+	cmd.Env = entornoHijo(os.Environ(), cfg)
 	setProcessGroup(cmd)
 	var stderr limitBuf
 	cmd.Stderr = &stderr

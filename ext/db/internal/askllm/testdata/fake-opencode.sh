@@ -2,6 +2,15 @@
 # opencode falso para los tests: FAKE_OC_MODE elige qué emite.
 # Deja en $FAKE_OC_LOG los argumentos, el cwd, el contenido de su directorio y
 # el principio de su stdin (por donde llega el prompt).
+# A `debug config` y `debug agent` contesta como un opencode que acepta la
+# configuración cerrada (la simulación de los permisos está en cerrojo_test.go).
+if [ "$1" = debug ]; then
+  case "$2" in
+    config) echo '{}' ;;
+    agent) echo '{"name":"kling-db-ask","mode":"primary","permission":[{"permission":"*","action":"allow","pattern":"*"},{"permission":"*","action":"deny","pattern":"*"}],"tools":{"bash":false}}' ;;
+  esac
+  exit 0
+fi
 if [ -n "$FAKE_OC_LOG" ]; then
   {
     echo "ARGS: $*"
