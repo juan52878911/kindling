@@ -210,3 +210,21 @@ func TestLineasVMMSinDaemon(t *testing.T) {
 		}
 	}
 }
+
+// S16: un destino que empieza por "-" no llega a ssh como una opción.
+func TestRemoteProbeRechazaDestinoConGuion(t *testing.T) {
+	// Un ssh falso en el PATH: si se llegara a lanzar, el test lo vería.
+	dir := t.TempDir()
+	marca := filepath.Join(dir, "lanzado")
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\ntouch "+marca+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	_, err := remoteProbe("-oProxyCommand=x", "/r")
+	if err == nil || !strings.Contains(err.Error(), "invalid ssh destination") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(marca); err == nil {
+		t.Fatal("ssh se lanzó con el destino como opción")
+	}
+}
