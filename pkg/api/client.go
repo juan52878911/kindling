@@ -412,28 +412,71 @@ const maxLogsResponse = 8 << 20
 
 // Logs trae la consola serie. Se devuelve texto plano, no JSON: es para leer.
 func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error) {
+	out, _, err := c.LogsTail(ctx, ref, tail)
+	return out, err
+}
+
+// LogOffsetHeader y LogRotationHeader son el cursor que GET .../logs devuelve
+// con la consola: hasta qué byte se leyó y en qué rotación del fichero. Un
+// daemon anterior no los manda.
+const (
+	LogOffsetHeader   = "X-Kling-Log-Offset"
+	LogRotationHeader = "X-Kling-Log-Rotation"
+)
+
+// LogCursor es dónde se quedó una lectura de la consola; se pasa a LogsAfter
+// para traer solo lo escrito después.
+type LogCursor struct {
+	Offset   int64
+	Rotation string
+}
+
+// LogsTail es Logs y además el cursor del final de lo leído; nil si el daemon
+// es anterior y no lo da.
+func (c *Client) LogsTail(ctx context.Context, ref string, tail int) (string, *LogCursor, error) {
+	return c.logs(ctx, ref, url.Values{"tail": {strconv.Itoa(tail)}})
+}
+
+// LogsAfter devuelve los bytes de la consola escritos después de cur, tal cual
+// (la última línea puede venir a medias), y el cursor nuevo. Si la consola rotó
+// entretanto, empieza por el principio del fichero nuevo. Un cursor nil en la
+// respuesta es un daemon anterior, que ignora offset y devuelve la cola.
+func (c *Client) LogsAfter(ctx context.Context, ref string, cur LogCursor) (string, *LogCursor, error) {
+	return c.logs(ctx, ref, url.Values{
+		"offset":   {strconv.FormatInt(cur.Offset, 10)},
+		"rotation": {cur.Rotation},
+	})
+}
+
+func (c *Client) logs(ctx context.Context, ref string, q url.Values) (string, *LogCursor, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("http://kling/machines/%s/logs?tail=%d", url.PathEscape(ref), tail), nil)
+		"http://kling/machines/"+url.PathEscape(ref)+"/logs?"+q.Encode(), nil)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxLogsResponse))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if resp.StatusCode >= 300 {
 		var e Error
 		if json.Unmarshal(b, &e) == nil && e.Message != "" {
-			return "", fmt.Errorf("%s", e.Message)
+			return "", nil, fmt.Errorf("%s", e.Message)
 		}
-		return "", fmt.Errorf("%s", resp.Status)
+		return "", nil, fmt.Errorf("%s", resp.Status)
 	}
-	return string(b), nil
+	var cur *LogCursor
+	if v := resp.Header.Get(LogOffsetHeader); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			cur = &LogCursor{Offset: n, Rotation: resp.Header.Get(LogRotationHeader)}
+		}
+	}
+	return string(b), cur, nil
 }
 
 // maxCredAuditResponse acota lo que CredAudit lee del daemon, que ya acota por

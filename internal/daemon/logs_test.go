@@ -59,4 +59,18 @@ func TestHandleLogsValidaTail(t *testing.T) {
 	if rr := call(t, h, "GET", "/machines/svc/logs", ""); rr.Code != http.StatusOK {
 		t.Fatalf("sin tail: quería 200, salió %d %s", rr.Code, rr.Body)
 	}
+
+	// F10: la respuesta trae el cursor, y offset sigue desde él.
+	rr := call(t, h, "GET", "/machines/svc/logs?tail=1", "")
+	if rr.Header().Get(api.LogOffsetHeader) != "15" || rr.Header().Get(api.LogRotationHeader) != "0" {
+		t.Fatalf("cursor: %v", rr.Header())
+	}
+	if rr := call(t, h, "GET", "/machines/svc/logs?offset=9&rotation=0", ""); rr.Code != http.StatusOK || rr.Body.String() != "l4\nl5\n" {
+		t.Fatalf("offset=9: %d %q", rr.Code, rr.Body)
+	}
+	for _, off := range []string{"x", "-3"} {
+		if rr := call(t, h, "GET", "/machines/svc/logs?offset="+off, ""); rr.Code != http.StatusBadRequest {
+			t.Fatalf("offset=%q: quería 400, salió %d", off, rr.Code)
+		}
+	}
 }

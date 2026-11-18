@@ -1389,7 +1389,24 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		tail = n
 	}
-	out, err := s.mgr.Logs(r.PathValue("ref"), tail)
+	// offset (con rotation) sigue desde un cursor anterior: los bytes nuevos tal
+	// cual, sin releer la cola entera (kling logs -f). Las cabeceras dan el
+	// cursor siguiente también sin offset, para empezar desde un tail.
+	var out string
+	var cur machine.LogCursor
+	var err error
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil || n < 0 {
+			fail(w, http.StatusBadRequest, fmt.Errorf("invalid offset %q: must be a non-negative integer", v))
+			return
+		}
+		var b []byte
+		b, cur, err = s.mgr.LogsDesde(r.PathValue("ref"), machine.LogCursor{Offset: n, Rotacion: r.URL.Query().Get("rotation")})
+		out = string(b)
+	} else {
+		out, cur, err = s.mgr.LogsCola(r.PathValue("ref"), tail)
+	}
 	if err != nil {
 		// 404 si no hay máquina o aún no tiene consola; leerla mal es del host.
 		code := http.StatusInternalServerError
@@ -1400,6 +1417,8 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set(api.LogOffsetHeader, strconv.FormatInt(cur.Offset, 10))
+	w.Header().Set(api.LogRotationHeader, cur.Rotacion)
 	_, _ = w.Write([]byte(out))
 }
 
