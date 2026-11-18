@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -55,6 +56,16 @@ type aggregator struct {
 	snapMu   sync.RWMutex
 	snapOf   map[string]string
 	stateful map[string]bool
+
+	// vida: máquina -> última vez que el daemon la dio por viva. Una
+	// conversación vuelve a la instancia donde tiene sesión sin pasar por
+	// Ensure, y con ello se saltaba su comprobación de vida: si la máquina
+	// moría por debajo, cada tools/call fallaba hasta que el latido del TTL la
+	// sacaba (o nunca, sin renew). Se confirma con el daemon como mucho una vez
+	// cada vidaTTL por máquina, no en cada llamada.
+	vidaMu  sync.Mutex
+	vida    map[string]time.Time
+	vidaTTL time.Duration
 }
 
 // sessionLock devuelve el candado de creación de sesión de la conversación s
@@ -105,6 +116,7 @@ func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
 		gw: gw, cat: newCatalog(gw, 10*time.Minute),
 		ephemeral: ephemeral, sessions: map[string]*aggSession{},
 		snapOf: map[string]string{}, stateful: map[string]bool{},
+		vida: map[string]time.Time{}, vidaTTL: 15 * time.Second,
 	}
 }
 
@@ -572,12 +584,15 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 
 	// Antes de nada, reparar los tipos que el cliente pudiera haber estropeado.
 	// Se hace aquí, con el esquema declarado por la herramienta a mano.
-	before := string(args)
-	args = coerceArgs(args, t.Schema)
-	if s := string(args); s != before {
-		log.Printf("%s: types repaired\n  received: %s\n  sent:     %s",
-			t.Qualified, trunc(before, 300), trunc(s, 300))
+	// El aviso no lleva los argumentos: pueden traer secretos o datos del
+	// usuario, y el log del gateway lo lee quien opera el host, no el dueño de
+	// la conversación. Basta con saber qué herramienta y cuánto ocupaban.
+	before := len(args)
+	reparados := coerceArgs(args, t.Schema)
+	if !bytes.Equal(reparados, args) {
+		log.Printf("%s: argument types repaired (%d -> %d bytes)", t.Qualified, before, len(reparados))
 	}
+	args = reparados
 
 	// Servidor externo enlazado: no hay microVM que despertar, se enruta y ya.
 	// Es la vía para traer un servicio de memoria propio sin que kindling tenga
@@ -634,7 +649,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 			s.aisladas[t.Service] = true
 			a.mu.Unlock()
 		}
-	} else if r := a.instanciaRespaldada(s, t.Service); r != nil {
+	} else if r := a.instanciaRespaldada(ctx, s, t.Service); r != nil {
 		// La conversación ya tiene sesión en una instancia viva del servicio
 		// (la primaria o una réplica a la que escaló): se vuelve a ESA. Partir
 		// siempre de la primaria hacía que, con la primaria llena, cada
@@ -694,7 +709,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		if sid == "" && !aislado {
 			// Otra llamada de la conversación pudo abrir sesión en una réplica
 			// mientras esperábamos el candado: se usa esa en vez de escalar otra.
-			if r := a.instanciaRespaldada(s, t.Service); r != nil && r != e {
+			if r := a.instanciaRespaldada(ctx, s, t.Service); r != nil && r != e {
 				a.gw.Begin(r)
 				a.gw.End(e)
 				e, base = r, "http://"+r.Addr(GuestPort)
@@ -759,6 +774,13 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	}
 
 	raw, err := call(sid)
+	if err != nil && !errors.Is(err, errStaleSession) {
+		// Error de transporte o HTTP: no se reintenta (la llamada pudo
+		// ejecutarse), pero la vida de la máquina se vuelve a mirar en la
+		// siguiente en vez de fiarse de la última confirmación.
+		a.olvidarVida(e.MachineID())
+		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+	}
 	if d := time.Since(tCall); d > 2*time.Second || dEnsure > time.Second || dLock > time.Second {
 		log.Printf("slow %s: ensure=%s lock=%s call=%s",
 			t.Qualified, dEnsure.Round(time.Millisecond), dLock.Round(time.Millisecond),
@@ -776,6 +798,11 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		if cur == sid { // nadie la rehízo mientras esperábamos
 			newSid, ierr := mcpInit(ctx, base)
 			if ierr != nil {
+				// Sin la sesión caducada: la siguiente llamada abre una por el
+				// camino normal, que sabe ir a una réplica si esta está llena.
+				a.mu.Lock()
+				delete(s.backing, bkey)
+				a.mu.Unlock()
 				initLock.Unlock()
 				return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, ierr)}
 			}
@@ -922,7 +949,11 @@ func (a *aggregator) backedOn(machineID string) int {
 // instanciaRespaldada devuelve una instancia viva del servicio en la que la
 // conversación s ya tiene sesión abierta, o nil. Si hay varias (la primaria se
 // reconstruyó y luego escaló), cualquiera vale: todas tienen sesión de s.
-func (a *aggregator) instanciaRespaldada(s *aggSession, service string) *scheduler.Instance {
+//
+// Viva quiere decir que el daemon la da por viva (ver respaldoViva). Una que
+// murió por debajo se suelta como en handleProxy, y la conversación sigue por
+// Ensure con otra.
+func (a *aggregator) instanciaRespaldada(ctx context.Context, s *aggSession, service string) *scheduler.Instance {
 	pre := service + "\x00"
 	a.mu.Lock()
 	var maquinas []string
@@ -933,11 +964,62 @@ func (a *aggregator) instanciaRespaldada(s *aggSession, service string) *schedul
 	}
 	a.mu.Unlock()
 	for _, mid := range maquinas {
-		if e := a.gw.Instance(service, mid); e != nil {
+		e := a.gw.Instance(service, mid)
+		if e == nil {
+			a.olvidarVida(mid)
+			continue
+		}
+		if a.respaldoViva(ctx, mid) {
 			return e
 		}
+		log.Printf("%s: machine %s of a pinned conversation is gone; moving it to another instance", service, mid)
+		a.gw.DropInstance(service, mid)
 	}
 	return nil
+}
+
+// respaldoViva dice si la máquina mid sigue corriendo según el daemon, con la
+// respuesta guardada vidaTTL. Lo mismo que hace Ensure con la primaria. Solo un
+// «no existe» o un estado distinto de running la dan por muerta: si el daemon
+// no contesta, se sigue confiando en ella, como antes de esta comprobación.
+func (a *aggregator) respaldoViva(ctx context.Context, mid string) bool {
+	a.vidaMu.Lock()
+	t, ok := a.vida[mid]
+	a.vidaMu.Unlock()
+	if ok && time.Since(t) < a.vidaTTL {
+		return true
+	}
+	c := a.gw.Client()
+	if c == nil {
+		return true
+	}
+	m, err := c.Get(ctx, mid)
+	if err != nil && !api.IsNotFound(err) {
+		return true
+	}
+	if err != nil || m.State != api.StateRunning {
+		a.olvidarVida(mid)
+		return false
+	}
+	a.vidaMu.Lock()
+	a.vida[mid] = time.Now()
+	// Las máquinas que se van sin pasar por aquí dejarían su entrada: se podan
+	// las caducadas cuando el mapa crece.
+	if len(a.vida) > 256 {
+		for k, v := range a.vida {
+			if time.Since(v) >= a.vidaTTL {
+				delete(a.vida, k)
+			}
+		}
+	}
+	a.vidaMu.Unlock()
+	return true
+}
+
+func (a *aggregator) olvidarVida(mid string) {
+	a.vidaMu.Lock()
+	delete(a.vida, mid)
+	a.vidaMu.Unlock()
 }
 
 // cerrarRespaldos termina en el puente las sesiones que la conversación s
