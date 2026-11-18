@@ -102,3 +102,76 @@ func TestCopiaSinResyncSeBorraYLiberaElNombre(t *testing.T) {
 	}
 	soltar()
 }
+
+// F20: una copia que el arranque dejó failed sin entregarla, con su VMM
+// aún vivo, tampoco se readopta: antes pasaba a running sin resync. Y
+// conserva el error por el que falló.
+func TestReconcileNoReadoptaUnaCopiaFallidaSinEntregar(t *testing.T) {
+	m := newTestManager(t)
+	id := "c0b1a00000000003"
+	mc := m.addForTest(id)
+	mc.From = "dorado"
+	mc.LastErr = "resync failed"
+	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateFailed)
+	falso.ponerEstado("Running")
+
+	m.reconcile()
+
+	viva := vivaDe(t, m, id)
+	if viva.State != api.StateFailed || viva.LastErr != "resync failed" || readoptada(m, id) {
+		t.Fatalf("estado %s (%q), readoptada %v; quería failed con su error, sin readoptar",
+			viva.State, viva.LastErr, readoptada(m, id))
+	}
+	select {
+	case <-fin:
+	case <-time.After(5 * time.Second):
+		t.Fatal("el VMM de la copia fallida sigue vivo")
+	}
+}
+
+// F6: un VMM vivo que no llegó a arrancar invitado (estado "Not started": el
+// reinicio cortó un thaw antes de cargar) no se readopta como running. En un
+// thaw, el volcado no se cargó: su sello vuelve y la máquina sigue warm.
+func TestReconcileNoReadoptaUnVMMSinArrancar(t *testing.T) {
+	t.Run("thaw cortado", func(t *testing.T) {
+		m := newTestManager(t)
+		id := "a7a7000000000021"
+		congeladaParaThaw(t, m, id, 64)
+		falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateWarm)
+		falso.ponerEstado(estadoNoArrancado)
+		if err := retirarSello(m.dir(id)); err != nil {
+			t.Fatal(err)
+		}
+
+		m.reconcile()
+
+		if viva := vivaDe(t, m, id); viva.State != api.StateWarm || readoptada(m, id) {
+			t.Fatalf("estado %s, readoptada %v; quería warm sin readoptar", viva.State, readoptada(m, id))
+		}
+		if err := volcadoValido(m.dir(id), nil); err != nil {
+			t.Fatalf("el volcado que nadie cargó dejó de valer: %v", err)
+		}
+		select {
+		case <-fin:
+		case <-time.After(5 * time.Second):
+			t.Fatal("el VMM sin arrancar sigue vivo")
+		}
+	})
+	t.Run("figura running", func(t *testing.T) {
+		m := newTestManager(t)
+		id := "a7a7000000000022"
+		falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+		falso.ponerEstado(estadoNoArrancado)
+
+		m.reconcile()
+
+		if viva := vivaDe(t, m, id); viva.State == api.StateRunning || readoptada(m, id) {
+			t.Fatalf("estado %s, readoptada %v; quería sin readoptar", viva.State, readoptada(m, id))
+		}
+		select {
+		case <-fin:
+		case <-time.After(5 * time.Second):
+			t.Fatal("el VMM sin arrancar sigue vivo")
+		}
+	})
+}

@@ -368,3 +368,67 @@ func TestFondoReanudarSoloAdoptaCopiasDeVerdad(t *testing.T) {
 		}
 	}
 }
+
+// R1: la copia del fondo hereda las etiquetas del dorado, kling.owner
+// incluida. Con un dorado de inquilino, reanudarFondos descartaba todas sus
+// copias por llevar dueño: quedaban huérfanas (corriendo y contando en la
+// cuota) y en cada reinicio se daban de alta otras tantas.
+func TestFondoReanudarAdoptaCopiasDeDoradoConDueno(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	escribirSnapshot(t, m, "dorado", api.Snapshot{Labels: map[string]string{api.LabelOwner: "a"}})
+	var n atomic.Int32
+	n.Store(100) // ids de las altas lejos de los de las copias previas
+	m.altaFondo = altaFalsa(m, &n)
+	t.Cleanup(func() {
+		m.pararFondos()
+		m.fondoMu.Lock()
+		var hechos []chan struct{}
+		for _, f := range m.fondos {
+			if f.hecho != nil {
+				hechos = append(hechos, f.hecho)
+			}
+		}
+		m.fondoMu.Unlock()
+		for _, h := range hechos {
+			<-h
+		}
+	})
+	if err := m.escribirFondos(fotoFondos{tam: map[string]int{"dorado": 2}, gen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	copia := map[string]string{api.LabelPool: "dorado", api.LabelPoolReady: "1", api.LabelOwner: "a"}
+	for _, id := range []string{"aaaa000000000001", "aaaa000000000002"} {
+		m.byID[id] = &api.Machine{ID: id, Name: "pool-" + id[10:], From: "dorado", State: api.StateRunning,
+			CreatedAt: time.Now(), Labels: api.MergeLabels(copia, nil)}
+	}
+	// De otro inquilino: ni se adopta ni se retira.
+	m.byID["aaaa000000000003"] = &api.Machine{ID: "aaaa000000000003", Name: "ajena", From: "dorado",
+		State: api.StateRunning, CreatedAt: time.Now(),
+		Labels: api.MergeLabels(copia, map[string]string{api.LabelOwner: "b"})}
+	m.reanudarFondos()
+	esperar(t, "reposición acabada", func() bool {
+		m.fondoMu.Lock()
+		defer m.fondoMu.Unlock()
+		return !m.fondos["dorado"].llenando
+	})
+
+	m.fondoMu.Lock()
+	f := m.fondos["dorado"]
+	adoptadas := len(f.todas)
+	propias := f.todas["aaaa000000000001"] && f.todas["aaaa000000000002"]
+	ajena := f.todas["aaaa000000000003"]
+	m.fondoMu.Unlock()
+	if !propias || ajena || adoptadas != 2 {
+		t.Errorf("adoptadas %d (propias %v, ajena %v); quería las dos copias del dueño", adoptadas, propias, ajena)
+	}
+	if altas := n.Load() - 100; altas != 0 {
+		t.Errorf("%d altas nuevas con el fondo ya lleno", altas)
+	}
+	m.mu.RLock()
+	_, sigue := m.byID["aaaa000000000003"]
+	m.mu.RUnlock()
+	if !sigue {
+		t.Error("retiró la máquina de otro inquilino")
+	}
+}

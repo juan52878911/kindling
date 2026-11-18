@@ -535,9 +535,10 @@ const errCopiaCortada = "the daemon restarted while this copy was starting from 
 // copiaSinEntregar dice si mc es una copia de un dorado que runFrom publicó
 // (created) y nunca llegó a entregar: StartedAt solo se pone al entregarla, y
 // un Start posterior (que vuelve a created) arranca en frío con StartedAt ya
-// puesto.
+// puesto. También la que el arranque dejó failed sin entregarla: su VMM
+// pudo seguir vivo, y readoptarla la daba por running sin resync (F20).
 func copiaSinEntregar(mc *api.Machine) bool {
-	return mc.State == api.StateCreated && mc.StartedAt == nil && origenCopia(mc) != ""
+	return (mc.State == api.StateCreated || mc.State == api.StateFailed) && mc.StartedAt == nil && origenCopia(mc) != ""
 }
 
 // origenCopia es el snapshot del que se restauró mc, o "" si arrancó en frío.
@@ -680,9 +681,26 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 		// como running la entregaría así. Se para y queda failed.
 		log.Printf("reconcile: %s (%s): a copy of %s whose start the restart cut (VMM pid %d); stopping it: failed",
 			mc.Name, shortID(mc.ID), origenCopia(mc), pid)
-		ahora := time.Now()
-		mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errCopiaCortada, &ahora
+		// Una que ya estaba failed conserva su error: dice por qué falló.
+		if mc.State != api.StateFailed || mc.LastErr == "" {
+			ahora := time.Now()
+			mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errCopiaCortada, &ahora
+		}
 		mc.PID = 0
+		return false
+	}
+	if estado == estadoNoArrancado {
+		// F6: el VMM vive pero nunca cargó un volcado ni arrancó un
+		// invitado (el reinicio cortó un thaw o un arranque entre lanzarlo y
+		// cargar). Readoptarlo como running la daba por despierta sin nadie
+		// dentro. Se deja como si no estuviera vivo: killOrphanVMMs lo mata, y
+		// una warm cuyo sello devolvió prepararReadopcion sigue warm.
+		log.Printf("reconcile: %s (%s): its VMM (pid %d) never started a guest; not re-adopting it",
+			mc.Name, shortID(mc.ID), pid)
+		if previa.selloDevuelto {
+			log.Printf("reconcile: %s (%s): its memory dump was never loaded; its seal is back and it stays warm",
+				mc.Name, shortID(mc.ID))
+		}
 		return false
 	}
 	switch {
@@ -723,11 +741,18 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 	return true
 }
 
+// estadoNoArrancado es lo que contesta el VMM (Firecracker, kling-vz y
+// kling-hv) antes de cargar un volcado o arrancar un invitado.
+const estadoNoArrancado = "Not started"
+
 // previaReadopcion es lo que readoptable necesita saber de un VMM en pausa
 // que figura despierto, mirado antes de tomar m.mu (prepararReadopcion).
 type previaReadopcion struct {
 	// sellado: su volcado sigue sellado y vale; no se reanuda.
 	sellado bool
+	// selloDevuelto: su VMM no llegó a arrancar (estadoNoArrancado) en un
+	// thaw y el sello que este retiró volvió a su sitio (restaurarSello).
+	selloDevuelto bool
 	// reanudado: se le pidió el Resume, con el resultado en errReanudar.
 	reanudado   bool
 	errReanudar error
@@ -748,9 +773,17 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 		congelada *time.Time
 	}
 	var cands []candidata
+	var sinArrancar []string
 	m.mu.RLock()
 	for id, pid := range live {
 		mc := m.byID[id]
+		// Un thaw cortado antes de cargar: el VMM no ha cargado nada, así
+		// que el volcado sigue intacto y su sello (que el thaw convirtió en
+		// la marca en curso) puede volver.
+		if mc != nil && estados[id] == estadoNoArrancado && mc.State == api.StateWarm {
+			sinArrancar = append(sinArrancar, id)
+			continue
+		}
 		// Una copia sin entregar no se reanuda: readoptable la para (S3).
 		if mc == nil || estados[id] != "Paused" || mc.State == api.StatePaused || copiaSinEntregar(mc) {
 			continue
@@ -764,7 +797,18 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 	}
 	m.mu.RUnlock()
 
-	out := make(map[string]previaReadopcion, len(cands))
+	out := make(map[string]previaReadopcion, len(cands)+len(sinArrancar))
+	for _, id := range sinArrancar {
+		dir := m.dir(id)
+		if !existe(filepath.Join(dir, marcaEnCurso)) {
+			continue
+		}
+		if err := restaurarSello(dir); err != nil {
+			log.Printf("reconcile: %s: couldn't put back the seal of a memory dump its VMM never loaded: %v", shortID(id), err)
+			continue
+		}
+		out[id] = previaReadopcion{selloDevuelto: true}
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, c := range cands {
