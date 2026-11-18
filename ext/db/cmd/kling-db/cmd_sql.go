@@ -8,6 +8,10 @@ package main
 // protocolo con pgmini, como el rol de la aplicación (o -role) y con su clave
 // del host, que no sale del proceso. -json da columnas, filas (null = NULL) y
 // la etiqueta de cada sentencia, para un programa o un agente.
+//
+// Lo que se guarda tiene tope (-max-rows y sqlMaxBytes): un SELECT sin LIMIT
+// sobre una tabla grande no se come la memoria del host. Lo que pasa del tope
+// se lee y se tira; el resultado sale marcado como truncado.
 
 import (
 	"context"
@@ -33,13 +37,17 @@ func cmdSQL(args []string) error {
 	file := fs.String("f", "", "read the SQL from this file (- = stdin) instead of the argument")
 	asJSON := fs.Bool("json", false, "print {results: [{command, columns, rows}]}; NULL is null")
 	timeout := fs.Duration("timeout", 30*time.Second, "for connecting and for the whole query")
+	maxRows := fs.Int("max-rows", defaultSQLMaxRows, "keep at most this many rows in all (the rest is read and dropped, and the result says truncated); 0 = no row limit")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	usage := `usage: kling db sql <copy> "SQL" [-role R] [-json] [-timeout 30s]   or   kling db sql <copy> -f FILE|-`
+	usage := `usage: kling db sql <copy> "SQL" [-role R] [-json] [-max-rows N] [-timeout 30s]   or   kling db sql <copy> -f FILE|-`
 	if len(pos) < 1 || len(pos) > 2 || (len(pos) == 2) == (*file != "") {
 		return usageErr("%s", usage)
+	}
+	if *maxRows < 0 {
+		return usageErr("-max-rows must be 0 or more; %s", usage)
 	}
 	sql := ""
 	if len(pos) == 2 {
@@ -65,17 +73,30 @@ func cmdSQL(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
-	return a.sql(ctx, pos[0], *owner, *role, sql, *asJSON, *timeout)
+	return a.sql(ctx, pos[0], *owner, *role, sql, *asJSON, *maxRows, *timeout)
 }
+
+const (
+	// defaultSQLMaxRows es el -max-rows por defecto.
+	defaultSQLMaxRows = 10000
+	// sqlMaxBytes es el tope de bytes de valores que se guardan, siempre.
+	sqlMaxBytes = 64 << 20
+)
 
 // sqlResult es un resultado en -json.
 type sqlResult struct {
-	Command string      `json:"command"`
-	Columns []string    `json:"columns"`
-	Rows    [][]*string `json:"rows"`
+	Command   string      `json:"command"`
+	Columns   []string    `json:"columns"`
+	Rows      [][]*string `json:"rows"`
+	Truncated bool        `json:"truncated,omitempty"`
 }
 
-func (a *app) sql(ctx context.Context, ref, owner, extraRole, sql string, asJSON bool, timeout time.Duration) error {
+// sqlExecer es lo que usa printSQL de una conexión (pgmini.Conn).
+type sqlExecer interface {
+	ExecLimited(ctx context.Context, sql string, lim pgmini.Limits) ([]pgmini.Result, error)
+}
+
+func (a *app) sql(ctx context.Context, ref, owner, extraRole, sql string, asJSON bool, maxRows int, timeout time.Duration) error {
 	if err := validOwner(owner); err != nil {
 		return err
 	}
@@ -126,14 +147,19 @@ func (a *app) sql(ctx context.Context, ref, owner, extraRole, sql string, asJSON
 		return fmt.Errorf("connecting to %s as %s: %w (kling db doctor %s says why)", mc.Name, role, err, mc.Name)
 	}
 	defer c.Close()
-	res, qerr := c.Exec(ctx, sql)
+	return a.printSQL(ctx, c, sql, asJSON, maxRows)
+}
+
+// printSQL ejecuta sql con los topes y escribe el resultado, en tabla o -json.
+func (a *app) printSQL(ctx context.Context, c sqlExecer, sql string, asJSON bool, maxRows int) error {
+	res, qerr := c.ExecLimited(ctx, sql, pgmini.Limits{MaxRows: maxRows, MaxBytes: sqlMaxBytes})
 	if asJSON {
 		out := struct {
 			Results []sqlResult `json:"results"`
 			Error   string      `json:"error,omitempty"`
 		}{Results: []sqlResult{}}
 		for _, r := range res {
-			out.Results = append(out.Results, sqlResult{Command: r.Command, Columns: orEmpty(r.Columns), Rows: orEmptyRows(r.Rows)})
+			out.Results = append(out.Results, sqlResult{Command: r.Command, Columns: orEmpty(r.Columns), Rows: orEmptyRows(r.Rows), Truncated: r.Truncated})
 		}
 		if qerr != nil {
 			out.Error = qerr.Error()
@@ -158,19 +184,24 @@ func (a *app) sql(ctx context.Context, ref, owner, extraRole, sql string, asJSON
 }
 
 // printTable escribe un resultado como psql: cabecera, filas alineadas y
-// la etiqueta; NULL sale vacío.
+// la etiqueta; NULL sale vacío. Celdas, columnas y etiqueta vienen de la base:
+// pasan por celda() para que ningún carácter de control llegue a la terminal.
 func printTable(w io.Writer, r pgmini.Result) {
 	if len(r.Columns) == 0 {
-		fmt.Fprintln(w, r.Command)
+		fmt.Fprintln(w, celda(r.Command))
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, strings.Join(r.Columns, "\t"))
+	cols := make([]string, len(r.Columns))
+	for i, c := range r.Columns {
+		cols[i] = celda(c)
+	}
+	fmt.Fprintln(tw, strings.Join(cols, "\t"))
 	for _, row := range r.Rows {
 		vals := make([]string, len(row))
 		for i, v := range row {
 			if v != nil {
-				vals[i] = strings.NewReplacer("\t", `\t`, "\n", `\n`).Replace(*v)
+				vals[i] = celda(*v)
 			}
 		}
 		fmt.Fprintln(tw, strings.Join(vals, "\t"))
@@ -182,6 +213,15 @@ func printTable(w io.Writer, r pgmini.Result) {
 	} else {
 		fmt.Fprintf(w, "(%d rows)\n", n)
 	}
+	if r.Truncated {
+		fmt.Fprintf(w, "(truncated: the server sent %s; raise -max-rows or add a LIMIT)\n", celda(r.Command))
+	}
+}
+
+// celda deja un valor en una línea (tabuladores y saltos como \t y \n) y sin
+// caracteres de control.
+func celda(s string) string {
+	return printable(strings.NewReplacer("\t", `\t`, "\n", `\n`, "\r", `\r`).Replace(s))
 }
 
 func orEmpty(s []string) []string {

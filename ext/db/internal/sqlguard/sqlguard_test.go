@@ -22,6 +22,8 @@ func TestAceptaConsultas(t *testing.T) {
 		"SELECT * FROM t FOR SHAREd",
 		"SELECT current_setting('TimeZone')",
 		"SELECT 1_000, 0x1F, 0o17, 0b101, 1e10, 2.5E+3, 3., a[1:2] FROM t",
+		"SELECT rolname FROM pg_roles",
+		"SELECT attname, n_distinct FROM pg_stats WHERE tablename = 'orders'",
 	} {
 		if err := Validate(sql); err != nil {
 			t.Errorf("%q: %v", sql, err)
@@ -116,6 +118,25 @@ func TestRechazaBateriaAdversaria(t *testing.T) {
 		// Postgres y psql cierran el comentario -- también en \r: lo que
 		// va detrás no puede escaparse al validador.
 		"SELECT 1 --\r, pg_sleep(30)",
+		// SQL en una cadena, volcados enteros y catálogos con secretos
+		"SELECT * FROM ts_stat('SELECT to_tsvector(name) FROM t')",
+		"SELECT ts_rewrite('a'::tsquery, 'SELECT t, s FROM aliases')",
+		"SELECT * FROM crosstab('SELECT 1, 2, 3') AS ct(a int, b int)",
+		"SELECT * FROM public.crosstab3('SELECT 1')",
+		"SELECT * FROM connectby('t', 'id', 'parent', '1', 0) AS c(id int)",
+		"SELECT table_to_xml('orders', true, false, '')",
+		"SELECT schema_to_xml('public', true, false, '')",
+		"SELECT database_to_xml(true, false, '')",
+		"SELECT rolname, rolpassword FROM pg_authid",
+		"SELECT * FROM pg_catalog.pg_authid",
+		"SELECT * FROM \"pg_authid\"",
+		"SELECT * FROM PG_SHADOW",
+		"SELECT umoptions FROM pg_user_mapping",
+		"SELECT * FROM pg_user_mappings",
+		"SELECT subconninfo FROM pg_subscription",
+		"SELECT stavalues1 FROM pg_statistic",
+		"SELECT * FROM pg_statistic_ext_data",
+		"SELECT data FROM pg_largeobject",
 		"SELECT 1 --\r; DELETE FROM t --",
 		"SELECT 1\r",
 	} {

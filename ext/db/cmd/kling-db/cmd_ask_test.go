@@ -403,7 +403,7 @@ func TestCeldaSinControl(t *testing.T) {
 	}
 }
 
-// La comprobación del rol rechaza CUALQUIER pertenencia salvo
+// La comprobación del rol rechaza CUALQUIER pertenencia, también
 // pg_read_all_data, con 'MEMBER' (no 'USAGE': en PG16 un GRANT ... WITH
 // INHERIT FALSE da USAGE falso pero deja hacer SET ROLE), y mira también
 // pg_auth_members directamente. La propiedad, igual, con 'MEMBER'.
@@ -416,7 +416,6 @@ func TestCheckRORolePertenencias(t *testing.T) {
 		t.Fatalf("%d pg_has_role(..., 'MEMBER'), want 3 (membership, database owner, relation owner)", n)
 	}
 	for _, want := range []string{
-		"s.rolname <> 'pg_read_all_data'",
 		"FROM pg_auth_members m WHERE m.member = r.oid AND m.roleid = s.oid",
 		"pg_has_role(r.oid, d.datdba, 'MEMBER')",
 		"pg_has_role(r.oid, c.relowner, 'MEMBER')",
@@ -425,11 +424,32 @@ func TestCheckRORolePertenencias(t *testing.T) {
 			t.Errorf("checkRORole lacks %q", want)
 		}
 	}
-	// Nada de lista de roles "peligrosos": todo lo que no sea pg_read_all_data
-	// es una pertenencia de más (app, pg_write_all_data, un rol cualquiera).
-	for _, bad := range []string{"pg_write_all_data", "pg_execute_server_program", "s.rolsuper OR"} {
+	// Nada de lista de roles "peligrosos" ni de excepciones: cualquier
+	// pertenencia es de más (app, pg_read_all_data, un rol cualquiera).
+	for _, bad := range []string{"pg_write_all_data", "pg_execute_server_program", "s.rolsuper OR", "pg_read_all_data"} {
 		if strings.Contains(q, bad) {
 			t.Errorf("checkRORole still filters memberships by a list (%q)", bad)
+		}
+	}
+}
+
+// El rol de ask no recibe pg_read_all_data (lee pg_authid y los demás
+// catálogos protegidos): SELECT en las tablas de los esquemas que no son del
+// sistema, y al de versiones anteriores se le quita.
+func TestCreateRORoleSinPgReadAllData(t *testing.T) {
+	q := fmt.Sprintf(createRORole, "kling_db_ro")
+	if strings.Contains(q, "GRANT pg_read_all_data") {
+		t.Fatal("the ask role still gets pg_read_all_data")
+	}
+	for _, want := range []string{
+		"REVOKE pg_read_all_data FROM kling_db_ro",
+		"nspname !~ '^pg_' AND nspname <> 'information_schema'",
+		"format('GRANT USAGE ON SCHEMA %I TO kling_db_ro', s)",
+		"format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO kling_db_ro', s)",
+		"ALTER ROLE kling_db_ro SET default_transaction_read_only = on",
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("createRORole lacks %q:\n%s", want, q)
 		}
 	}
 }
