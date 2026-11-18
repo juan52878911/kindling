@@ -224,7 +224,7 @@ type Manager struct {
 	// entre un arranque del daemon y el siguiente. Ver kernelHash.
 	kernelSHA huellaKernel
 	// discosBase cachea, como kernelSHA, el digest de cada ext4 de imagen
-	// (ruta → huellaKernel) que los dorados llevan en image_digest y
+	// (ruta → digestCacheado) que los dorados llevan en image_digest y
 	// base_digest. Ver digestDiscoBase.
 	discosBase sync.Map
 	// discosEnVuelo: ruta → *vueloDigest del digest que alguien está

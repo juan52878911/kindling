@@ -68,6 +68,45 @@ func TestDigestDiscoBaseUnoPorRuta(t *testing.T) {
 	}
 }
 
+// S17: una imagen reescrita con otro contenido del mismo tamaño y con su
+// mtime devuelta a la de antes no sale de la caché con el digest viejo.
+func TestDigestDiscoBaseNoSeFiaDeLaFecha(t *testing.T) {
+	m := newTestManager(t)
+	img := filepath.Join(t.TempDir(), "img.ext4")
+	if err := os.WriteFile(img, []byte("imagen A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fecha := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(img, fecha, fecha); err != nil {
+		t.Fatal(err)
+	}
+	antes, err := m.digestDiscoBase(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// El ctime de ext4 va a la resolución del reloj grueso (milisegundos):
+	// que la reescritura caiga en otro tic.
+	time.Sleep(20 * time.Millisecond)
+	if err := os.WriteFile(img, []byte("imagen B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(img, fecha, fecha); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(img)
+	if st.Size() != int64(len("imagen A")) || !st.ModTime().Equal(fecha) {
+		t.Fatalf("la prueba no reproduce el caso: tamaño %d, fecha %v", st.Size(), st.ModTime())
+	}
+	despues, err := m.digestDiscoBase(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiero, _ := digest.Tree(img)
+	if despues == antes || despues != quiero {
+		t.Fatalf("digest tras reescribir la imagen = %q; quería el del contenido nuevo %q (el viejo era %q)", despues, quiero, antes)
+	}
+}
+
 // El arranque del daemon deja calculados los digests de las imágenes de sus
 // dorados: el primer run -from ya no lee la imagen.
 func TestPrecalentarDiscosBase(t *testing.T) {

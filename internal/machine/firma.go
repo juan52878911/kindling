@@ -303,6 +303,50 @@ func (m *Manager) firmasV3Migradas() bool {
 	return err == nil
 }
 
+// ReabrirMigracionFirmas quita de la raíz del daemon root las marcas de
+// migración de firma (marcaFirmasV2, marcaFirmasV3) que rechazarían alguno de
+// los meta.json de metas: los que `kling upgrade -rollback` (o la vuelta
+// atrás de un upgrade fallido) acaba de devolver a su nombre desde su .bak,
+// con la firma vieja que el kling de antes sabe leer (F12). Sin esto, al
+// actualizar de nuevo la migración saldría por la marca y el daemon nuevo
+// rechazaría todos esos dorados por llevar una firma vieja. Sin marca, el
+// próximo arranque los vuelve a re-firmar si cuadran, como la primera vez.
+//
+// Solo cuentan los meta de metas: una firma vieja que ya estaba en la raíz
+// sin venir de un .bak no reabre nada.
+func ReabrirMigracionFirmas(root string, metas []string) error {
+	quitar := map[string]bool{}
+	for _, p := range metas {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var meta struct {
+			Signature string `json:"signature"`
+		}
+		if json.Unmarshal(b, &meta) != nil || meta.Signature == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(meta.Signature, firmaV3):
+		case strings.HasPrefix(meta.Signature, firmaV2):
+			quitar[marcaFirmasV3] = true
+		default:
+			quitar[marcaFirmasV2], quitar[marcaFirmasV3] = true, true
+		}
+	}
+	var errs []error
+	for _, marca := range []string{marcaFirmasV2, marcaFirmasV3} {
+		if !quitar[marca] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(root, "secrets", marca)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // esFork dice si el dorado name es el temporal de un fork, que no lleva los
 // digests del overlay, la memoria ni la imagen (ver la DECISIÓN en commit).
 func (m *Manager) esFork(name string) bool {
@@ -343,16 +387,8 @@ func (m *Manager) comprobarFirma(s *api.Snapshot) error {
 		if err := m.comprobarFirmaVieja(s); err != nil || !exigir {
 			return err
 		}
-		v1 := !strings.HasPrefix(s.Signature, firmaV2)
-		if v1 && m.firmasMigradas() {
-			return fmt.Errorf("%w: template %q has an old v1 signature, which does not cover its labels and limits, "+
-				"and this host already moved its templates to v2: its meta.json was put back from a copy. Recreate it:\n%s",
-				errFirma, s.Name, remedioDorado(s.Name))
-		}
-		if !v1 && m.firmasV3Migradas() {
-			return fmt.Errorf("%w: template %q has an old v2 signature, which does not cover how its copies resync, "+
-				"and this host already moved its templates to v3: its meta.json was put back from a copy. Recreate it:\n%s",
-				errFirma, s.Name, remedioDorado(s.Name))
+		if err := m.firmaViejaRepuesta(s.Name, s.Signature); err != nil {
+			return err
 		}
 		nuevo, err := m.migrarFirma(s.Name, s.Signature)
 		if err != nil {
@@ -375,6 +411,24 @@ func (m *Manager) comprobarFirma(s *api.Snapshot) error {
 	// cubre, y solo la firman commit (que lo calcula salvo en un fork) y
 	// migrarFirma (que lo calcula si faltaba). Un meta con firma v2 o v1 que
 	// alguien vuelva a poner se rechaza tras la migración (marcaFirmasV3).
+	return nil
+}
+
+// firmaViejaRepuesta rechaza la firma vieja (v1 o v2) de name si este host ya
+// migró sus dorados más allá de ella (las marcas): un meta.json con ella es
+// uno viejo vuelto a poner (su .bak, una copia), y re-firmarlo daría por
+// bueno lo que esa firma no cubre.
+func (m *Manager) firmaViejaRepuesta(name, firma string) error {
+	if !strings.HasPrefix(firma, firmaV2) && m.firmasMigradas() {
+		return fmt.Errorf("%w: template %q has an old v1 signature, which does not cover its labels and limits, "+
+			"and this host already moved its templates to v2: its meta.json was put back from a copy. Recreate it:\n%s",
+			errFirma, name, remedioDorado(name))
+	}
+	if strings.HasPrefix(firma, firmaV2) && m.firmasV3Migradas() {
+		return fmt.Errorf("%w: template %q has an old v2 signature, which does not cover how its copies resync, "+
+			"and this host already moved its templates to v3: its meta.json was put back from a copy. Recreate it:\n%s",
+			errFirma, name, remedioDorado(name))
+	}
 	return nil
 }
 
@@ -423,6 +477,12 @@ func (m *Manager) migrarFirma(name, firma string) (*api.Snapshot, error) {
 		return nil, errFirmaNoCuadra(name)
 	}
 	if err := m.comprobarFirmaVieja(s); err != nil {
+		return nil, err
+	}
+	// Lo mismo que rechaza comprobarFirma, también aquí: el arranque
+	// (migrarFirmas) llega sin pasar por ella, y con la marca v2 puesta y la
+	// v3 aún no, re-firmaba una v1 vuelta a poner (S5).
+	if err := m.firmaViejaRepuesta(name, s.Signature); err != nil {
 		return nil, err
 	}
 	dir := m.snapDir(name)

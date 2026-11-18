@@ -18,6 +18,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Published ports: an `accept` error such as EMFILE no longer stops a TCP port for good; TCP connections (1024) and UDP flows (256, least recently used evicted) are capped per port.
 - AI gateway: a client that stops reading a streamed answer no longer holds the replica; each write has a 30 s deadline.
+- Template signatures: the startup migration to v3 no longer re-signs a v1 `meta.json` on a host that already moved to v2.
+- `kling upgrade -rollback` (and the rollback of a failed upgrade) removes the signature migration markers that would reject the `meta.json` it puts back, so upgrading again re-signs those templates instead of refusing them all.
+- Image digest cache: a base image is hashed again when its inode or ctime change, not only its size and mtime.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
