@@ -17,6 +17,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - Daemon `/guest`: small calls (up to 1 MiB) have their own memory budget, so large calls held by a slow guest no longer turn every call into a 429; a decoded request keeps only what stays in memory.
+- Guest agent `GET /files`: only regular files are served; a FIFO no longer hangs the call and a device is no longer streamed with a wrong length.
 - Daemon `/metrics`: a hung sample no longer blocks every scrape; they wait up to 5 s and get the previous sample.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
