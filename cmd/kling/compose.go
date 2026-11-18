@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -234,60 +236,132 @@ type importCompose struct {
 // lineaKling corre una línea de t.Antes con este mismo binario y devuelve su
 // salida combinada. Una variable para los tests.
 var lineaKling = func(ctx context.Context, host, l string) (string, error) {
-	argv, limpiar, err := argvKling(l)
+	o, err := argvKling(l)
 	if err != nil {
 		return "", err
 	}
-	defer limpiar()
-	out, err := selfCmd(ctx, host, argv...).CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	return correrLinea(selfCmd(ctx, host, o.argv...), o)
 }
 
+// ordenKling es una línea de t.Antes lista para correr: sus argumentos, lo
+// que va en el entorno del hijo y el -env-file que se le pasa por un pipe.
+type ordenKling struct {
+	argv []string
+	// env son K=V que el hijo lee de su entorno (-e K en argv): los que no
+	// caben en una línea de -env-file.
+	env []string
+	// fichero es el contenido del -env-file; llega como /dev/fd/3.
+	fichero []byte
+}
+
+// fdEntorno es donde el hijo lee el -env-file: el primer ExtraFiles.
+const fdEntorno = "/dev/fd/3"
+
 // argvKling parte una línea de t.Antes en los argumentos de kling. El
-// entorno del servicio (contraseñas, a menudo) va en un -env-file temporal
-// (0600) y no en la línea de órdenes, que ve cualquiera con ps; limpiar lo
-// borra.
-func argvKling(l string) (argv []string, limpiar func(), err error) {
-	limpiar = func() {}
-	argv, err = shellWords(strings.TrimPrefix(l, "kling "))
+// entorno del servicio (contraseñas, a menudo) no va en la línea de órdenes,
+// que ve cualquiera con ps: va en un -env-file que el hijo lee de un pipe
+// (nunca toca el disco, así que no queda nada si se corta la orden, ni con
+// SIGHUP ni con SIGKILL), y lo que no cabe en una línea de ese fichero, en su
+// entorno.
+func argvKling(l string) (*ordenKling, error) {
+	argv, err := shellWords(strings.TrimPrefix(l, "kling "))
 	if err != nil {
-		return nil, limpiar, err
+		return nil, err
 	}
-	sin, lineas, ok := entornoAFichero(argv)
+	sin, lineas, env, ok := entornoAFichero(argv)
 	if !ok {
-		return argv, limpiar, nil
+		return &ordenKling{argv: argv}, nil
 	}
-	f, err := os.CreateTemp("", "kling-compose-env-*")
-	if err != nil {
-		return nil, limpiar, err
+	o := &ordenKling{argv: sin, env: env}
+	if len(lineas) > 0 {
+		o.fichero = []byte(strings.Join(lineas, "\n") + "\n")
+		fin := slices.Index(sin, "--")
+		if fin < 0 {
+			fin = len(sin)
+		}
+		o.argv = slices.Insert(sin, fin, "-env-file", fdEntorno)
 	}
-	limpiar = func() { os.Remove(f.Name()) }
-	_, err = f.WriteString(strings.Join(lineas, "\n") + "\n")
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	return o, nil
+}
+
+// correrLinea corre cmd con el entorno y el -env-file de o, y devuelve su
+// salida combinada.
+func correrLinea(cmd *exec.Cmd, o *ordenKling) (string, error) {
+	if len(o.env) > 0 {
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		cmd.Env = append(cmd.Env, o.env...)
 	}
-	if err != nil {
-		limpiar()
-		return nil, func() {}, err
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	var r, w *os.File
+	if o.fichero != nil {
+		var err error
+		if r, w, err = os.Pipe(); err != nil {
+			return "", err
+		}
+		cmd.ExtraFiles = []*os.File{r}
 	}
-	fin := slices.Index(sin, "--")
-	if fin < 0 {
-		fin = len(sin)
+	if err := cmd.Start(); err != nil {
+		if r != nil {
+			r.Close()
+			w.Close()
+		}
+		return "", err
 	}
-	return slices.Insert(sin, fin, "-env-file", f.Name()), limpiar, nil
+	if r != nil {
+		// El hijo tiene su copia; cerrar la nuestra hace que una escritura
+		// que el hijo no lea falle con EPIPE en vez de colgarse.
+		r.Close()
+		go func() {
+			_, _ = w.Write(o.fichero)
+			w.Close()
+		}()
+	}
+	err := cmd.Wait()
+	return strings.TrimSpace(out.String()), err
+}
+
+// reservadasDelCLI son variables que el propio kling (o lo que lanza) lee:
+// un servicio que se llame así no las recibe por el entorno del hijo, que
+// cambiaría a qué daemon habla o dónde busca su configuración.
+var reservadasDelCLI = map[string]bool{"HOME": true, "PATH": true, "TMPDIR": true, "USER": true, "LOGNAME": true,
+	"SHELL": true, "PWD": true, "TZ": true, "LANG": true, "SSH_AUTH_SOCK": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
+	"GODEBUG": true, "GOGC": true, "GOMAXPROCS": true, "GOMEMLIMIT": true, "GOTRACEBACK": true}
+
+// porEntorno dice si la variable k puede ir en el entorno del hijo.
+func porEntorno(k string) bool {
+	if k == "" || reservadasDelCLI[strings.ToUpper(k)] {
+		return false
+	}
+	for _, p := range []string{"KLING_", "XDG_", "LC_", "DYLD_", "LD_"} {
+		if strings.HasPrefix(strings.ToUpper(k), p) {
+			return false
+		}
+	}
+	for i, r := range k {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // banderasConValor son las de ordenImportCon que llevan un valor detrás.
 var banderasConValor = map[string]bool{"-name": true, "-arch": true, "-user": true, "-restart": true, "-entrypoint": true}
 
-// entornoAFichero saca los -e K=V de un kling image import: argv sin ellos y
-// las líneas de su -env-file, en el mismo orden. ok es false si no hay
-// ninguno o si alguno no cabe en una línea de -env-file tal cual (un salto
-// de línea, o espacio al final, que el fichero recortaría): entonces se
-// queda como estaba.
-func entornoAFichero(argv []string) (sin, lineas []string, ok bool) {
+// entornoAFichero saca los -e K=V de un kling image import: argv sin ellos,
+// las líneas de su -env-file y, en env, los que no caben tal cual en una
+// línea de ese fichero (un salto de línea, o espacio al final, que el
+// fichero recortaría): esos quedan en argv como -e K y el hijo los lee de su
+// entorno. Uno que tampoco puede ir por el entorno (ver porEntorno) se queda
+// en argv como estaba; los demás no le siguen. ok es false si no hay
+// ninguno que sacar.
+func entornoAFichero(argv []string) (sin, lineas, env []string, ok bool) {
 	if len(argv) < 2 || argv[0] != "image" || argv[1] != "import" {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
@@ -298,11 +372,16 @@ func entornoAFichero(argv []string) (sin, lineas []string, ok bool) {
 		case a == "-e" && i+1 < len(argv):
 			kv := argv[i+1]
 			k, _, _ := strings.Cut(kv, "=")
-			if strings.ContainsAny(kv, "\n\r") || strings.TrimSpace(kv) != kv || strings.HasPrefix(k, "#") || strings.ContainsAny(k, " \t") {
-				return nil, nil, false
-			}
-			lineas = append(lineas, kv)
 			i++
+			switch {
+			case !strings.ContainsAny(kv, "\n\r") && strings.TrimSpace(kv) == kv && !strings.HasPrefix(k, "#") && !strings.ContainsAny(k, " \t"):
+				lineas = append(lineas, kv)
+			case strings.Contains(kv, "=") && porEntorno(k):
+				sin = append(sin, "-e", k)
+				env = append(env, kv)
+			default:
+				sin = append(sin, "-e", kv)
+			}
 		case banderasConValor[a] && i+1 < len(argv):
 			sin = append(sin, a, argv[i+1])
 			i++
@@ -310,7 +389,7 @@ func entornoAFichero(argv []string) (sin, lineas []string, ok bool) {
 			sin = append(sin, a)
 		}
 	}
-	return sin, lineas, len(lineas) > 0
+	return sin, lineas, env, len(lineas) > 0 || len(env) > 0
 }
 
 // falloLinea es el error de una línea de t.Antes: lo que dijo, o el error si
@@ -322,12 +401,45 @@ func falloLinea(l, out string, err error) error {
 	return fmt.Errorf("%s: %s", l, out)
 }
 
-// crearVolumenes crea los volúmenes del proyecto; uno que ya está se
-// reutiliza, como un volumen de Docker.
-func crearVolumenes(ctx context.Context, run func(context.Context, string) (string, error), vols []string) error {
-	for _, l := range vols {
-		if out, err := run(ctx, l); err != nil && !strings.Contains(out, "exists") {
-			return falloLinea(l, out, err)
+// crearVolumenes crea los volúmenes del proyecto con sus etiquetas
+// (proyecto y fichero de compose): down -v solo borra los que las llevan.
+// Uno que ya está se reutiliza, como un volumen de Docker, salvo que sea de
+// otro proyecto: sus datos no son de este.
+func crearVolumenes(ctx context.Context, c *api.Client, t *traduccionCompose, vols []string) error {
+	if len(vols) == 0 {
+		return nil
+	}
+	hay, err := c.Volumes(ctx)
+	if err != nil {
+		return err
+	}
+	por := map[string]*api.Volume{}
+	for _, v := range hay {
+		por[v.Name] = v
+	}
+	// Un proyecto de más de maxNombreDNS que levantó un kling anterior tiene
+	// sus datos en volúmenes con el nombre viejo. Crear los nuevos vacíos
+	// los dejaría atrás sin decir nada: se para y se dice qué hacer.
+	if viejos := volumenesViejos(t); len(viejos) == len(vols) {
+		for i, n := range vols {
+			if por[viejos[i]] != nil && por[n] == nil {
+				return &errWithHint{err: fmt.Errorf("volume %s is from an older kling, which named this project %s (it is %s now)", viejos[i], t.proyectoViejo, t.Proyect),
+					hint: "keep its data: kling volume clone " + viejos[i] + " " + n + "   (or drop it: kling volume rm " + viejos[i] + ")"}
+			}
+		}
+	}
+	for _, n := range vols {
+		if v := por[n]; v != nil {
+			if otro := v.Labels[labelComposeProject]; otro != "" && otro != t.Proyect {
+				return &errWithHint{err: fmt.Errorf("projects %s and %s both name volume %s", t.Proyect, otro, n),
+					hint: "give this project another name with -p"}
+			}
+			continue
+		}
+		_, err := c.CreateVolume(ctx, api.CreateVolumeRequest{Name: n, Labels: t.etiquetas})
+		var se *api.StatusError
+		if err != nil && !(errors.As(err, &se) && se.Code == http.StatusConflict) {
+			return fmt.Errorf("volume %s: %w", n, err)
 		}
 	}
 	return nil
@@ -435,7 +547,7 @@ func composeUp(g globalesCompose, args []string) error {
 	}
 	printAvisos(t.Avisos)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), senalesUp...)
 	defer cancel()
 	endpoint := hostOf(*host)
 	c := api.NewClient(endpoint)
@@ -450,6 +562,9 @@ func composeUp(g globalesCompose, args []string) error {
 	// sustituir el proyecto, huérfanas) se decide con eso.
 	v, err := verProyecto(ctx, c, t.Proyect, true)
 	if err != nil {
+		return err
+	}
+	if _, err := v.adoptarViejo(ctx, c, t.proyectoViejo, abs); err != nil {
 		return err
 	}
 	if err := v.dueno(t.Proyect, abs); err != nil {
@@ -527,6 +642,11 @@ func composeUp(g globalesCompose, args []string) error {
 	return nil
 }
 
+// senalesUp cortan un compose up y lo deshacen. SIGHUP también (cerrar la
+// terminal): sin él, el proceso moría sin borrar su YAML temporal del grafo,
+// que lleva el entorno de los servicios.
+var senalesUp = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
 // sustituirProyecto deja listo lo que necesita el grafo de t en lugar del
 // proyecto que pueda estar levantado (v). Lo que no lo toca va antes de
 // quitarlo: un import que falla (un pull, una etiqueta que no existe) deja
@@ -536,7 +656,11 @@ func sustituirProyecto(ctx context.Context, c *api.Client, t *traduccionCompose,
 	if err := prep.importarAntes(ctx); err != nil {
 		return err
 	}
-	if quitarProyectoDe(ctx, c, t.Proyect, v.g) && v.ms != nil {
+	nombre := v.nombre
+	if nombre == "" {
+		nombre = t.Proyect
+	}
+	if quitarProyectoDe(ctx, c, nombre, v.g) && v.ms != nil {
 		quitarHuerfanasDe(ctx, c, t, v.sinGrafo(v.g))
 	} else {
 		// El grafo no se fue (o no se pudo listar): se mira de nuevo.
@@ -774,23 +898,46 @@ func composeDown(g globalesCompose, args []string) error {
 	if err != nil {
 		return err
 	}
+	viejo := nombreDNSViejo(*name)
+	if t != nil {
+		viejo = t.proyectoViejo
+	}
+	if _, err := v.adoptarViejo(ctx, c, viejo, abs); err != nil {
+		return err
+	}
 	if err := v.dueno(proyecto, abs); err != nil {
 		return err
 	}
 	if v.g == nil {
 		fmt.Printf("%s is not up\n", proyecto)
 	} else {
-		quitarProyectoDe(ctx, c, proyecto, v.g)
-		fmt.Printf("%s removed (its machines and ports)\n", proyecto)
+		quitarProyectoDe(ctx, c, v.nombre, v.g)
+		fmt.Printf("%s removed (its machines and ports)\n", v.nombre)
 	}
 	if *vols {
 		if t == nil {
 			return errors.New("-v needs the compose file (to know its volumes): run it where the compose is, or with -f")
 		}
+		// Sin la lista de máquinas no se sabe quién monta qué: con -v, mejor
+		// no borrar nada.
+		if v.errLista != nil {
+			return v.errLista
+		}
 		if err := colisionDe(t, v.ms, true); err != nil {
 			return err
 		}
-		for _, v := range volumenesDe(t) {
+		hay, err := c.Volumes(ctx)
+		if err != nil {
+			return err
+		}
+		borrar, avisos, err := volumenesABorrar(t, abs, hay)
+		if err != nil {
+			return err
+		}
+		for _, a := range avisos {
+			fmt.Fprintln(os.Stderr, a)
+		}
+		for _, v := range borrar {
 			if err := c.RemoveVolume(ctx, v); err != nil {
 				var se *api.StatusError
 				if errors.As(err, &se) && se.Code == 404 {
@@ -802,6 +949,63 @@ func composeDown(g globalesCompose, args []string) error {
 		}
 	}
 	return nil
+}
+
+// volumenesABorrar son los volúmenes del proyecto de t (fichero abs) que
+// down -v puede borrar: los que existen y llevan su etiqueta. El nombre solo
+// no basta: dos proyectos pueden dar el mismo (a con b-data y a-b con data),
+// y el otro puede estar parado, sin máquinas que lo delaten. Uno de otro
+// proyecto o de otro fichero es un error y no se borra nada; uno sin
+// etiqueta (de un kling anterior) se deja, con un aviso.
+func volumenesABorrar(t *traduccionCompose, abs string, hay []*api.Volume) (borrar, avisos []string, err error) {
+	por := map[string]*api.Volume{}
+	for _, v := range hay {
+		por[v.Name] = v
+	}
+	for _, n := range volumenesDe(t) {
+		v := por[n]
+		if v == nil {
+			continue
+		}
+		p, f := v.Labels[labelComposeProject], v.Labels[labelComposeFile]
+		switch {
+		case p == "":
+			avisos = append(avisos, avisoSinEtiqueta(n))
+		case p != t.Proyect:
+			return nil, nil, &errWithHint{err: fmt.Errorf("volume %s belongs to project %s, not %s: nothing removed", n, p, t.Proyect),
+				hint: "give this project another name with -p"}
+		case f != "" && abs != "" && f != abs:
+			return nil, nil, &errWithHint{err: fmt.Errorf("volume %s belongs to project %s of another compose file (%s): nothing removed", n, p, f),
+				hint: "kling compose -f " + comillaSh(f) + " down -v, or kling volume rm " + n}
+		default:
+			borrar = append(borrar, n)
+		}
+	}
+	for _, n := range volumenesViejos(t) {
+		if por[n] != nil {
+			avisos = append(avisos, avisoSinEtiqueta(n))
+		}
+	}
+	return borrar, avisos, nil
+}
+
+func avisoSinEtiqueta(n string) string {
+	return fmt.Sprintf("volume %s not removed: it has no project label (an older kling made it); if it is this project's: kling volume rm %s", n, n)
+}
+
+// volumenesViejos son los nombres que un kling anterior daba a los
+// volúmenes de un proyecto de más de maxNombreDNS (t.proyectoViejo).
+func volumenesViejos(t *traduccionCompose) []string {
+	if t.proyectoViejo == "" {
+		return nil
+	}
+	var out []string
+	for _, n := range volumenesDe(t) {
+		if resto, ok := strings.CutPrefix(n, t.Proyect); ok {
+			out = append(out, nombreVolumen(t.proyectoViejo+resto))
+		}
+	}
+	return out
 }
 
 // serviciosDe son los nodos del proyecto que piden args (nombres del

@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Volumes take labels (`labels` in `POST /volumes` and in `GET /volumes`); compose labels its volumes with the project and the compose file.
 - macOS: `kling doctor` warns when the kernel or `min.ext4` that `kling up` downloaded come from another release, since `kling up` never replaces them.
 - `kling-mcp gateway -max-sessions` caps the MCP sessions a tenant has open at once (default 256; without named tokens every client shares the `default` tenant).
 - `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
@@ -33,6 +34,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Warm pools: after a daemon restart, the copies of a template with an owner are readopted instead of left running orphaned while new ones are created.
 - `kling save`: a template is marked as having no guest agent only when the probe is refused, not on a timeout; forks and graphs whose agent already answered are marked as having one, and saving without an agent now warns.
 - Daemon restart: a VMM that never started a guest is no longer readopted as running (a cut thaw keeps its machine warm), and a snapshot copy that failed before being handed out is not readopted either.
+- `kling compose down -v` only removes volumes labeled with its project and compose file, so it no longer removes another project's volume with the same name, even when that project is down; volumes from an older kling are left with a warning.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
@@ -138,6 +140,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling ai serve -listen … -no-auth` refuses (403) requests whose `Host` or `Origin` is not loopback, and every `POST` must be `application/json` (415).
 - MCP gateway: the "types repaired" log line no longer includes the tool's arguments, only its name and size.
 - `POST /graphs/{ref}/snapshot`: a template name already in use gives a neutral 409 that no longer confirms another tenant's template or how to remove it.
+- `kling compose up` passes the services' environment to `image import` through a pipe instead of a temp file, and a multi-line value no longer puts the rest back on the command line; SIGHUP now cleans up like Ctrl-C.
 - `install.sh` requires a signed release when it picks the latest one, even a 0.x; an unsigned 0.x installs only when asked for with `--tag`. It runs only once fully downloaded, and curl only talks https.
 - Release workflow: the release job only downloads the asset artifacts by name, and the Homebrew tap job checks the `SHA256SUMS` signature before trusting it.
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
@@ -180,6 +183,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Compose project and service names over 24 characters end in a short hash instead of being cut, so two long names no longer become the same project; a project an older kling started is still found by `down` and `up`.
 - MCP gateway `/mcp/_all`: up to 16 idle connections per guest (was 2), so concurrent tool calls stop redialing, and tool results are written without being re-encoded.
 - Linux: setting up a machine's network runs 11 processes instead of 23 (`ip -batch`, one `sysctl`, no teardown when there is nothing): 46 to 20 ms in the lab.
 - `kling plugin install` streams the asset to disk while hashing it instead of holding it (up to 512 MiB) in memory.

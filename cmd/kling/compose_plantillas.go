@@ -355,9 +355,6 @@ func planCompose(ctx context.Context, c *api.Client, host string, t *traduccionC
 	}
 	p := &preparacionCompose{t: t, c: c, snaps: snaps, vols: volumenesDe(t),
 		run: func(ctx context.Context, l string) (string, error) { return lineaKling(ctx, host, l) }}
-	for i, v := range p.vols {
-		p.vols[i] = "kling volume create " + v
-	}
 	t.saludTCP = !slices.Contains(info.Capabilities, api.CapabilityGraphHealth)
 	if slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
 		p.ps = planPlantillas(t, snaps, daemonDeInfo(info), fresh)
@@ -398,7 +395,7 @@ func (p *preparacionCompose) borrar(ctx context.Context, nombres []string) {
 // nada (importarSinReemplazar): un fallo aquí deja el proyecto levantado
 // como estaba.
 func (p *preparacionCompose) importarAntes(ctx context.Context) error {
-	if err := crearVolumenes(ctx, p.run, p.vols); err != nil {
+	if err := crearVolumenes(ctx, p.c, p.t, p.vols); err != nil {
 		return err
 	}
 	var err error

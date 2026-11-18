@@ -482,6 +482,7 @@ kling version -json:  endpoint string
 kling version -json:  os string
 kling version -json:  vmm string
 kling version -json:  vmm_version string
+kling volume ls -json:  [].labels.x string
 kling volume ls -json:  [].name string
 kling volume ls -json:  [].path string
 kling volume ls -json:  [].size_bytes number

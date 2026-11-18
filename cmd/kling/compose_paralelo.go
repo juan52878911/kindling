@@ -37,9 +37,16 @@ func enParalelo(n, k int, f func(i int)) {
 // proyecto al empezar, de una vez y en paralelo: su grafo (nil si no existe),
 // las máquinas y, si se pidió, el Info.
 type vistaProyecto struct {
-	g    *api.Graph
-	ms   []*api.Machine
-	info *api.Info
+	// nombre es el del grafo g: el del proyecto, o el que le dio un kling
+	// anterior (adoptarViejo).
+	nombre string
+	g      *api.Graph
+	ms     []*api.Machine
+	info   *api.Info
+	// errLista es el error de List cuando no hay grafo: entonces no para la
+	// orden (no hay nada del proyecto que mirar), pero down -v no puede
+	// fiarse de una lista que no tiene.
+	errLista error
 }
 
 // enParaleloHastaFallo es enParalelo con un contexto que se cancela en el
@@ -72,7 +79,7 @@ func enParaleloHastaFallo(ctx context.Context, n, k int, f func(ctx context.Cont
 // verProyecto pregunta en paralelo lo de vistaProyecto. Un 404 del grafo no
 // es error (g queda nil).
 func verProyecto(ctx context.Context, c *api.Client, proyecto string, conInfo bool) (*vistaProyecto, error) {
-	v := &vistaProyecto{}
+	v := &vistaProyecto{nombre: proyecto}
 	var errG, errL, errI error
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -103,10 +110,47 @@ func verProyecto(ctx context.Context, c *api.Client, proyecto string, conInfo bo
 	if v.g != nil && errL != nil {
 		return nil, errL
 	}
+	v.errLista = errL
 	if errI != nil {
 		return nil, errI
 	}
 	return v, nil
+}
+
+// adoptarViejo busca, si no hay grafo con el nombre del proyecto, el que le
+// dio un kling anterior (viejo: cortado sin hash, ver nombreDNSViejo), y lo
+// toma por suyo solo si sus máquinas llevan la etiqueta de ese proyecto (y,
+// si la llevan, la de este fichero): otro proyecto puede llamarse así. Dice
+// si lo adoptó; entonces v.g y v.nombre son los de ese grafo.
+func (v *vistaProyecto) adoptarViejo(ctx context.Context, c *api.Client, viejo, abs string) (bool, error) {
+	if v.g != nil || viejo == "" || viejo == v.nombre || v.errLista != nil {
+		return false, nil
+	}
+	g, err := c.Graph(ctx, viejo)
+	var se *api.StatusError
+	if errors.As(err, &se) && se.Code == 404 {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	suyo := false
+	for _, m := range v.ms {
+		if m.Labels[api.LabelGraph] != g.ID {
+			continue
+		}
+		if m.Labels[labelComposeProject] != viejo {
+			return false, nil
+		}
+		if f := m.Labels[labelComposeFile]; f != "" && abs != "" && f != abs {
+			return false, nil
+		}
+		suyo = true
+	}
+	if suyo {
+		v.g, v.nombre = g, viejo
+	}
+	return suyo, nil
 }
 
 // dueno es comprobarDueno con lo ya preguntado.

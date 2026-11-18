@@ -736,6 +736,9 @@ type Volume struct {
 	// Snapshots cuenta sus copias guardadas, "undo" incluido. Mientras haya
 	// alguna, borrar el volumen exige pedirlo explícitamente.
 	Snapshots int `json:"snapshots,omitempty"`
+	// Labels son las de CreateVolumeRequest. Compose pone su proyecto y su
+	// fichero, y down -v solo borra los volúmenes que llevan los suyos.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // VolumeSnapshot es una copia de un volumen tomada sin escritores: el punto al
@@ -780,6 +783,9 @@ type RestoreVolumeResult struct {
 type CreateVolumeRequest struct {
 	Name    string `json:"name"`
 	SizeMiB int    `json:"size_mib,omitempty"`
+	// Labels quedan con el volumen (Volume.Labels). Un daemon anterior las
+	// ignora.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // CloneVolumeRequest clona un volumen en otro nuevo (POST /volumes/{name}/clone).
