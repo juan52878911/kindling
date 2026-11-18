@@ -850,9 +850,7 @@ func (m *Manager) drainSharesOf(id string) {
 		log.Printf("%s: live shares did not close in %s; cutting them", id, shareDrainWait)
 	}
 	run.cancel()
-	run.wg.Wait()
-	sup.soltarCuotas(run)
-	m.guardarUsoShares(id, run)
+	m.esperarCorte(id, run)
 }
 
 // stopShares corta las conexiones de id y espera a que terminen. Lo que el
@@ -867,10 +865,27 @@ func (m *Manager) stopShares(id string) {
 		return
 	}
 	run.cancel()
-	run.wg.Wait()
-	sup.soltarCuotas(run)
+	m.esperarCorte(id, run)
+}
+
+// esperarCorte espera, como mucho shareCutWait, a que terminen las goroutines
+// de run ya cortadas, y apunta lo que gastó su cuota. Sin plazo, una operación
+// atascada en el host (una carpeta en un NFS o un SMB que no contesta: la
+// llamada al sistema no vuelve, y la sesión espera a sus operaciones en vuelo)
+// dejaba colgados stop, freeze y rm. Pasado el plazo se abandonan: terminan
+// solas cuando el host conteste, y su cuota la suelta la goroutine de run.done.
+func (m *Manager) esperarCorte(id string, run *shareRun) {
+	select {
+	case <-run.done:
+	case <-time.After(shareCutWait):
+		log.Printf("%s: live shares still busy %s after cutting them (a host folder that does not answer?); not waiting for them", id, shareCutWait)
+	}
 	m.guardarUsoShares(id, run)
 }
+
+// shareCutWait es lo más que se espera a que terminen las carpetas vivas ya
+// cortadas. Variable para los tests.
+var shareCutWait = 5 * time.Second
 
 // shareDrainWait es lo más que se espera a que las carpetas vivas cierren
 // ordenadamente, al apagar o al congelar (el servidor corta a los 3 s como

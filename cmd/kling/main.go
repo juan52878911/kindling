@@ -248,7 +248,7 @@ const (
 	salidaDaemonViejo    = 3   // el daemon habla un API más viejo (api.ErrDaemonTooOld)
 	salidaDoradoObsoleto = 4   // la plantilla es de otro VMM o versión: rehacerla
 	salidaAgenteSinCap   = 5   // al agente de la imagen le falta una capacidad pedida
-	salidaInterrumpido   = 130 // Ctrl-C o SIGTERM (128 + SIGINT, como una shell)
+	salidaInterrumpido   = 130 // Ctrl-C, SIGTERM, SIGHUP o (try, import -warm) SIGPIPE (128 + SIGINT, como una shell)
 )
 
 // codigoDeSalida es el código con el que sale el CLI tras err. exec, shell y
@@ -373,11 +373,48 @@ func egressForRun(fs *flag.FlagSet, from, egress, allow string, cfg *config.Conf
 // hostOf resuelve a qué daemon hablar.
 func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
+// senalesDeCorte son las que cancelan el contexto de ctxWithSignals: Ctrl-C,
+// SIGTERM y SIGHUP (se cierra la terminal; sin ella el proceso muere sin
+// pasar por los defer que retiran las máquinas temporales).
+//
+// SIGPIPE no va aquí. Con signal.Notify para SIGPIPE, Go entrega al canal la
+// de CUALQUIER descriptor, no solo la de la salida estándar: un cliente que
+// colgaba a media respuesta (un exec cortado) apagaba el daemon entero, en
+// silencio y como un SIGTERM, y lo mismo haría con cualquier comando que
+// reenvíe sockets (run -p, port-forward). Sin Notify, un EPIPE en un socket es
+// solo un error de esa escritura, y uno en la salida estándar mata el proceso
+// como siempre.
+var senalesDeCorte = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
+// senalesDeTuberia son las de corte más SIGPIPE, para los comandos cortos que
+// solo escriben en la salida estándar y dejan una máquina temporal que retirar
+// (`kling try … | head -1`, `image import -warm`). Ver senalesDeCorte.
+var senalesDeTuberia = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE}
+
 func ctxWithSignals() (context.Context, context.CancelFunc) {
+	return ctxConSenales(senalesDeCorte)
+}
+
+// ctxWithSignalsTuberia es ctxWithSignals que además corta con una salida
+// estándar rota (ver senalesDeTuberia).
+func ctxWithSignalsTuberia() (context.Context, context.CancelFunc) {
+	return ctxConSenales(senalesDeTuberia)
+}
+
+// ctxWithSignalsServidor es el de los que sirven conexiones (el daemon,
+// kling ai serve): sin SIGPIPE, como ctxWithSignals.
+func ctxWithSignalsServidor() (context.Context, context.CancelFunc) {
+	return ctxConSenales(senalesDeCorte)
+}
+
+// ctxDelDaemon es el contexto con el que corre `kling daemon`.
+var ctxDelDaemon = ctxWithSignalsServidor
+
+func ctxConSenales(senales []os.Signal) (context.Context, context.CancelFunc) {
 	// signal.NotifyContext, apuntando que llegó la señal (codigoDeSalida).
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(ch, senales...)
 	go func() {
 		select {
 		case <-ch:
@@ -448,7 +485,7 @@ func cmdDaemon(args []string) error {
 	// Antes de atender nada: lo que dejaron las construcciones y descargas
 	// cortadas con el daemon anterior ya no es de nadie.
 	srv.BarrerTemporales()
-	ctx, stop := ctxWithSignals()
+	ctx, stop := ctxDelDaemon()
 	defer stop()
 	return srv.Listen(ctx)
 }

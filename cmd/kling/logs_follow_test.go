@@ -127,3 +127,60 @@ func TestServiceLogSource(t *testing.T) {
 		}
 	}
 }
+
+// consolaConCursor es un daemon que sirve la consola con cursor: cada consulta
+// del estado añade la página siguiente y, al acabarse, la máquina se para.
+func consolaConCursor(t *testing.T, pages []string) *api.Client {
+	t.Helper()
+	var mu sync.Mutex
+	var buf string
+	i := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		state := api.StateRunning
+		if i < len(pages) {
+			buf += pages[i]
+			i++
+		}
+		if i == len(pages) {
+			state = api.StateStopped
+		}
+		json.NewEncoder(w).Encode(api.Machine{Name: "m", State: state})
+	})
+	mux.HandleFunc("GET /machines/{ref}/logs", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		out := buf
+		if v := r.URL.Query().Get("offset"); v != "" {
+			var n int
+			fmt.Sscan(v, &n)
+			out = buf[n:]
+		}
+		w.Header().Set(api.LogOffsetHeader, fmt.Sprint(len(buf)))
+		w.Header().Set(api.LogRotationHeader, "0")
+		fmt.Fprint(w, out)
+	})
+	return fakeDaemon(t, mux)
+}
+
+// F10: con salida periódica (líneas idénticas) el ancla de newLines casaba al
+// final de la ventana y lo nuevo se descartaba. Con cursor sale todo, y una
+// línea a medias sale una vez y entera.
+func TestFollowLogsConCursorNoPierdeRepetidas(t *testing.T) {
+	c := consolaConCursor(t, []string{"tick\ntick\n", "tick\n", "tick\npar", "cial\n", "fin"})
+	src := &logSource{c: c, ref: "m"}
+	_, cur, err := c.LogsTail(context.Background(), "m", 0)
+	if err != nil || cur == nil {
+		t.Fatalf("cursor inicial: %v %v", cur, err)
+	}
+	src.cur = cur
+	var w bytes.Buffer
+	if err := followLogs(context.Background(), &w, src, nil, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if want := "tick\ntick\ntick\ntick\nparcial\nfin\n"; w.String() != want {
+		t.Fatalf("salida %q, quería %q", w.String(), want)
+	}
+}

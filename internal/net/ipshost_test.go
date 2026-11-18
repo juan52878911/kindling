@@ -67,12 +67,18 @@ func TestInvitadoNoAlcanzaLasIPsDelHost(t *testing.T) {
 
 // Un reload del cortafuegos que vacía INPUT, OUTPUT o FORWARD tras SetupHost:
 // el siguiente Setup repone lo que falta, en orden. Con las reglas en su
-// sitio, cinco -C (un centinela por juego) y nada más.
+// sitio, cinco comprobaciones (un centinela por juego: tres -C y dos -S de
+// las que van primeras) y nada más.
 func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 	f := &iptablesFalso{}
 	usarIptablesFalso(t, f)
 	var comprobaciones atomic.Int32
 	comprobarEstado = func(args []string) (bool, error) { comprobaciones.Add(1); return f.estado(args) }
+	listarDelFalso := listarTabla
+	listarTabla = func(tabla, cadena string) ([]string, error) {
+		comprobaciones.Add(1)
+		return listarDelFalso(tabla, cadena)
+	}
 
 	acceso := AccesoAgente{UIDs: []int{1000}, GIDs: []int{1000}}
 	if err := SetupHost(acceso); err != nil {
@@ -87,7 +93,7 @@ func TestAsegurarHostInputReponeTrasUnReload(t *testing.T) {
 
 	comprobaciones.Store(0)
 	if err := asegurarHostInput(); err != nil || comprobaciones.Load() != 5 {
-		t.Fatalf("con las reglas puestas: err %v, %d -C, quería 5", err, comprobaciones.Load())
+		t.Fatalf("con las reglas puestas: err %v, %d comprobaciones, quería 5", err, comprobaciones.Load())
 	}
 
 	f.input = []string{"-p tcp --dport 22 -j ACCEPT"} // lo que deja el reload

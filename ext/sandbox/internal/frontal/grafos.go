@@ -45,6 +45,8 @@ type Grafo struct {
 	State     string               `json:"state"`
 	ClaimedAt *time.Time           `json:"claimed_at,omitempty"`
 	Nodes     map[string]NodoGrafo `json:"nodes"`
+	// memMiB es lo que sus máquinas pueden ocupar en RAM, para la cuota.
+	memMiB int
 }
 
 // NodoGrafo es un nodo de un grafo reclamado. Su ID vale para
@@ -77,6 +79,9 @@ func vistaGrafo(h *hosts.Host, in plantilla.Instancia) Grafo {
 		nd := NodoGrafo{State: n.State, Ports: n.Ports}
 		if mc := in.Maquinas[nombre]; mc != nil {
 			nd.ID = h.Nombre + "/" + mc.ID
+			if ocupaRAM(mc.State) {
+				g.memMiB += memCuota(mc.MemMiB)
+			}
 		}
 		g.Nodes[nombre] = nd
 	}
@@ -263,14 +268,22 @@ func (s *Servidor) handleCrearGrafo(w http.ResponseWriter, r *http.Request) {
 	}
 	// Un grafo cuenta como un sandbox en la cuota del tenant, y por su
 	// plantilla en MaxPorPlantilla.
+	// Su memoria va al tope total como la de sus nodos: antes reservaba 0 y
+	// los grafos no sumaban nada.
+	tienen, defs := s.hostsConGrafo(r.Context(), pet.Template)
+	if len(tienen) == 0 {
+		fail(w, codigoCrear(&errSinPlantilla{pet.Template}), &errSinPlantilla{pet.Template})
+		return
+	}
+	mem := memGrafo(defs)
 	clave := claveGrafo(pet.Template)
-	if err := s.reservar(r.Context(), t, clave, 0); err != nil {
+	if err := s.reservar(r.Context(), t, clave, mem); err != nil {
 		fail(w, codigoReservar(err), err)
 		return
 	}
-	defer s.liberar(t, clave, 0)
+	defer s.liberar(t, clave, mem)
 
-	h, in, err := s.crearGrafo(r.Context(), t, pet.Template)
+	h, in, err := s.crearGrafo(r.Context(), t, pet.Template, tienen, defs)
 	if err != nil {
 		fail(w, codigoCrear(err), err)
 		return
@@ -280,9 +293,9 @@ func (s *Servidor) handleCrearGrafo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, g)
 }
 
-// crearGrafo reclama una instancia congelada de la plantilla o, si no hay
-// ninguna, levanta una nueva ya a nombre del tenant.
-func (s *Servidor) crearGrafo(ctx context.Context, t *Tenant, tpl string) (*hosts.Host, plantilla.Instancia, error) {
+// hostsConGrafo son los hosts que tienen la plantilla de grafo tpl y su
+// declaración en cada uno.
+func (s *Servidor) hostsConGrafo(ctx context.Context, tpl string) (map[string]bool, map[string]*plantilla.PlantillaGrafo) {
 	var mu sync.Mutex
 	defs := map[string]*plantilla.PlantillaGrafo{}
 	tienen := s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
@@ -295,6 +308,30 @@ func (s *Servidor) crearGrafo(ctx context.Context, t *Tenant, tpl string) (*host
 		mu.Unlock()
 		return true, nil
 	})
+	return tienen, defs
+}
+
+// memGrafo son los MiB que la cuota reserva para un grafo de estas
+// declaraciones: la mayor de las suma de sus nodos, como tamanoEfectivo (el
+// grafo puede salir de cualquiera de los hosts). Un nodo sin mem_mib cuenta
+// lo del daemon; si sale de una plantilla más grande, la cuenta exacta llega
+// al listar el grafo ya creado.
+func memGrafo(defs map[string]*plantilla.PlantillaGrafo) int {
+	mayor := 0
+	for _, p := range defs {
+		suma := 0
+		for _, n := range p.Nodes {
+			suma += memCuota(n.MemMiB)
+		}
+		mayor = max(mayor, suma)
+	}
+	return mayor
+}
+
+// crearGrafo reclama una instancia congelada de la plantilla o, si no hay
+// ninguna, levanta una nueva ya a nombre del tenant. tienen y defs son los de
+// hostsConGrafo.
+func (s *Servidor) crearGrafo(ctx context.Context, t *Tenant, tpl string, tienen map[string]bool, defs map[string]*plantilla.PlantillaGrafo) (*hosts.Host, plantilla.Instancia, error) {
 	if len(tienen) == 0 {
 		return nil, plantilla.Instancia{}, &errSinPlantilla{tpl}
 	}

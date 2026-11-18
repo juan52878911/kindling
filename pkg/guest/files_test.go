@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -68,6 +70,33 @@ func TestFilesNoSigueEnlaces(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(target); string(b) != "s" {
 		t.Fatalf("target was overwritten: %q", b)
+	}
+}
+
+// R17: GET abría sin O_NONBLOCK y solo rechazaba directorios. Una FIFO sin
+// escritor dejaba la llamada colgada al abrir, y un dispositivo como
+// /dev/zero (tamaño 0) se servía sin fin con Content-Length: 0. Ahora solo
+// se sirven ficheros normales, y abrir no espera.
+func TestFilesSoloFicherosNormales(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "tubo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{fifo, "/dev/zero"} {
+		hecho := make(chan *httptest.ResponseRecorder, 1)
+		go func() { hecho <- files(http.MethodGet, p, nil, "") }()
+		select {
+		case rec := <-hecho:
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "not a regular file") {
+				t.Errorf("GET %s: %d %.80q", p, rec.Code, rec.Body.String())
+			}
+		case <-time.After(3 * time.Second):
+			// Desatasca el open de la FIFO para no dejar la goroutine.
+			if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				w.Close()
+			}
+			t.Fatalf("GET %s no contesta", p)
+		}
 	}
 }
 

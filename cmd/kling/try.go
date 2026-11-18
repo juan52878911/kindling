@@ -100,7 +100,7 @@ func cmdTry(args []string) (int, error) {
 	c := api.NewClient(endpoint)
 	// Una referencia de Docker se importa la primera vez, como en run -image.
 	if esRefDocker(o.req.Image) {
-		ctx, stop := ctxWithSignals()
+		ctx, stop := ctxWithSignalsTuberia()
 		name, err := asegurarImagenDocker(ctx, c, o.req.Image)
 		stop()
 		if err != nil {
@@ -109,12 +109,12 @@ func cmdTry(args []string) (int, error) {
 		o.req.Image = name
 	}
 	if *asJSON {
-		ctx, stop := ctxWithSignals()
+		ctx, stop := ctxWithSignalsTuberia()
 		defer stop()
 		return runTryJSON(ctx, c, o, os.Stdout)
 	}
 	if porDefecto {
-		ctx, stop := ctxWithSignals()
+		ctx, stop := ctxWithSignalsTuberia()
 		err := imagenTryDisponible(ctx, c)
 		stop()
 		if err != nil {
@@ -122,7 +122,7 @@ func cmdTry(args []string) (int, error) {
 		}
 	}
 	if len(cmd) > 0 {
-		ctx, stop := ctxWithSignals()
+		ctx, stop := ctxWithSignalsTuberia()
 		defer stop()
 		return runTry(ctx, c, o, os.Stdout, os.Stderr)
 	}
@@ -133,7 +133,7 @@ func cmdTry(args []string) (int, error) {
 	if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stdout.Fd()) {
 		return 2, errors.New("kling try with no command opens a shell and needs a terminal; pass a command: kling try -- <cmd>")
 	}
-	ctx, stop := ctxWithSignals()
+	ctx, stop := ctxWithSignalsTuberia()
 	mc, err := tryCreate(ctx, c, o.req, os.Stderr)
 	stop()
 	if err != nil {

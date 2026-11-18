@@ -20,6 +20,10 @@ import (
 var (
 	maxConexiones    = 4096
 	maxConexionesUID = 1024
+	// plazasAdmin son las últimas de maxConexiones, que solo toman los admin
+	// (o todos, sin política): con el resto lleno por inquilinos, el admin
+	// aún entra a ver y arreglar.
+	plazasAdmin = 64
 )
 
 // sinUID es la clave de quien no cuenta por uid: admin, uid desconocido o
@@ -71,13 +75,16 @@ func (l *escuchaConTope) Accept() (net.Conn, error) {
 		}
 		ll, err := id(c)
 		llOK := err == nil
-		clave := sinUID
+		clave, admin := sinUID, true
 		// Solo los admin de la política se libran (sin resolver grupos aquí:
 		// esto corre en el bucle que acepta, una conexión tras otra).
-		if p := l.s.authz; p != nil && llOK && ll.Conocido && !p.admins[ll.UID] {
-			clave = ll.UID
+		if p := l.s.authz; p != nil {
+			admin = llOK && ll.Conocido && p.admins[ll.UID]
+			if llOK && ll.Conocido && !admin {
+				clave = ll.UID
+			}
 		}
-		if !l.tomar(clave) {
+		if !l.tomar(clave, admin) {
 			l.rechazar(c, clave)
 			continue
 		}
@@ -85,10 +92,14 @@ func (l *escuchaConTope) Accept() (net.Conn, error) {
 	}
 }
 
-func (l *escuchaConTope) tomar(clave int) bool {
+func (l *escuchaConTope) tomar(clave int, admin bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.total >= maxConexiones || (clave != sinUID && l.porUID[clave] >= maxConexionesUID) {
+	tope := maxConexiones
+	if !admin {
+		tope -= plazasAdmin
+	}
+	if l.total >= tope || (clave != sinUID && l.porUID[clave] >= maxConexionesUID) {
 		return false
 	}
 	l.total++

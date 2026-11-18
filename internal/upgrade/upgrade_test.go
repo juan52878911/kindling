@@ -1207,6 +1207,47 @@ func TestVolverAtrasCompruebaEsquemas(t *testing.T) {
 	}
 }
 
+// F12: el daemon nuevo re-firmó en v3 un dorado de firma v2 (con su .bak) y
+// dejó las marcas de migrado. Al volver atrás vuelve el meta v2 y se quita la
+// marca v3 (la v2 se queda: ese meta no es v1), para que actualizar de nuevo
+// lo re-firme en vez de rechazarlo.
+func TestVolverAtrasReabreLaMigracionDeFirmas(t *testing.T) {
+	m := nuevoMontaje(t)
+	meta := filepath.Join(m.raiz, "snapshots", "pg", "meta.json")
+	secretos := filepath.Join(m.raiz, "secrets")
+	v2 := `{"schema":1,"name":"pg","signature":"v2:abcd"}`
+	os.MkdirAll(filepath.Dir(meta), 0o700)
+	os.MkdirAll(secretos, 0o700)
+	os.WriteFile(meta, []byte(v2), 0o600)
+	os.WriteFile(filepath.Join(secretos, "signatures-v2"), []byte("1\n"), 0o600)
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.1.0" {
+			if _, err := os.Stat(meta + ".v1.bak"); os.IsNotExist(err) {
+				os.WriteFile(meta+".v1.bak", []byte(v2), 0o600)
+				os.WriteFile(meta, []byte(`{"schema":1,"name":"pg","signature":"v3:ef01"}`), 0o600)
+				os.WriteFile(filepath.Join(secretos, "signatures-v3"), []byte("1\n"), 0o600)
+			}
+		}
+		return nil
+	}
+	o := m.opciones()
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if got := leer(t, meta); got != v2 {
+		t.Fatalf("meta.json = %s, want the v2 one back", got)
+	}
+	if _, err := os.Stat(filepath.Join(secretos, "signatures-v3")); !os.IsNotExist(err) {
+		t.Errorf("signatures-v3 is still there after rolling back a v2 meta.json (%v): upgrading again would reject the template", err)
+	}
+	if _, err := os.Stat(filepath.Join(secretos, "signatures-v2")); err != nil {
+		t.Errorf("signatures-v2 went away although no v1 meta.json came back: %v", err)
+	}
+}
+
 // -force vuelve aunque el viejo no vaya a leerlo todo, y lo dice.
 func TestVolverAtrasForzadoConEsquemaNuevo(t *testing.T) {
 	m := nuevoMontaje(t)

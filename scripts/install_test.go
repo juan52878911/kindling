@@ -32,6 +32,7 @@ type releaseFalsa struct {
 	sinMinisign  bool   // minisign no está en el PATH
 	minKling     string // min_kling del manifiesto de kling-mcp
 	klingPATH    string // si no vacío, un kling en el PATH que dice esta versión
+	conWget      bool   // sin curl en el PATH: baja con un wget falso
 }
 
 type resultadoInstall struct {
@@ -127,7 +128,28 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 	// curl falso: -o DESTINO URL, sirve releases/download/<tag>/<nombre>.
 	// Se niega a bajar nada sin --proto y --proto-redir '=https': install.sh
 	// no puede caer a http ni seguir una redirección a otro protocolo.
-	escribir(t, filepath.Join(falsos, "curl"), `#!/bin/sh
+	sistema := "/usr/bin:/bin"
+	if r.conWget {
+		// wget falso con la misma regla: sin --https-only no baja nada.
+		escribir(t, filepath.Join(falsos, "wget"), `#!/bin/sh
+dest=""; url=""; https=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help) echo "  --https-only   only follow secure HTTPS links"; exit 0 ;;
+        -O) dest="$2"; shift 2 ;;
+        --https-only) https=1; shift ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+[ "$https" = 1 ] || { echo "wget sin --https-only" >&2; exit 98; }
+f="`+datos+`/${url##*/releases/download/}"
+[ -f "$f" ] || exit 8
+cp "$f" "$dest"
+`, 0o755)
+		sistema = sinDescargadores(t, filepath.Join(raiz, "sistema"))
+	} else {
+		escribir(t, filepath.Join(falsos, "curl"), `#!/bin/sh
 dest=""; url=""; proto=""; redir=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -147,6 +169,7 @@ f="`+datos+`/${url##*/releases/download/}"
 [ -f "$f" ] || exit 22
 cp "$f" "$dest"
 `, 0o755)
+	}
 	if !r.sinMinisign {
 		escribir(t, filepath.Join(falsos, "minisign"), `#!/bin/sh
 m=""; x=""
@@ -179,11 +202,48 @@ echo "Trusted comment: $(sed -n 2p "$x")"
 	}
 	todos = append(append(todos, "--prefix", res.prefijo, "--plugin-dir", res.plugins, "--no-rc"), args...)
 	cmd := exec.Command("/bin/sh", todos...)
-	cmd.Env = []string{"HOME=" + home, "PATH=" + falsos + ":/usr/bin:/bin", "LC_ALL=C"}
+	cmd.Env = []string{"HOME=" + home, "PATH=" + falsos + ":" + sistema, "LC_ALL=C"}
 	out, err := cmd.CombinedOutput()
 	res.salida = string(out)
 	res.ok = err == nil
 	return res
+}
+
+// sinDescargadores llena dir de enlaces a lo de /usr/bin y /bin salvo curl y
+// wget, para un PATH donde install.sh no encuentre el curl del sistema.
+func sinDescargadores(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"/usr/bin", "/bin"} {
+		ents, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range ents {
+			n := e.Name()
+			// Lstat y no existe(): en Ubuntu /bin es /usr/bin, y un enlace ya
+			// puesto a un ejecutable que es a su vez un enlace roto
+			// (grub-ntldr-img) no «existe» por Stat pero ocupa el nombre.
+			if _, err := os.Lstat(filepath.Join(dir, n)); n == "curl" || n == "wget" || err == nil {
+				continue
+			}
+			if err := os.Symlink(filepath.Join(d, n), filepath.Join(dir, n)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return dir
+}
+
+// Sin curl, install.sh baja con wget y solo con --https-only: una redirección
+// no puede llevar la descarga a http.
+func TestInstallWgetSoloHTTPS(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{conWget: true})
+	if !r.ok || !existe(filepath.Join(r.prefijo, "kling")) {
+		t.Fatalf("con wget no instaló:\n%s", r.salida)
+	}
 }
 
 func existe(p string) bool {
@@ -291,29 +351,42 @@ func TestInstallCeroXSinFirmaSoloConTag(t *testing.T) {
 }
 
 // Con todo dentro de main, un script cortado a medias (una descarga que se
-// corta) no ejecuta nada: ni imprime los pasos ni crea el HOME.
+// corta) no ejecuta nada: ni imprime los pasos ni crea el HOME. La última
+// línea se corta además en cada byte: cortada tras `main`, sin los
+// argumentos, tampoco puede correr (instalaría sin --tag ni --prefix).
 func TestInstallCortadoNoEjecutaNada(t *testing.T) {
 	b, err := os.ReadFile("install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fin := strings.LastIndex(string(b), "\nmain \"$@\"")
-	if fin < 0 {
+	s := strings.TrimRight(string(b), "\n")
+	fin := strings.LastIndex(s, "\n")
+	if fin < 0 || !strings.Contains(s[fin:], `main "$@"`) {
 		t.Fatal("install.sh no acaba llamando a main")
 	}
-	for _, corte := range []int{len(b) / 4, len(b) / 2, len(b) * 3 / 4, fin + 1} {
+	cortes := []int{len(b) / 4, len(b) / 2, len(b) * 3 / 4}
+	for c := fin + 1; c < len(s); c++ {
+		cortes = append(cortes, c)
+	}
+	// Un curl que falla: si algo llegara a correr, no sale a la red.
+	falsos := t.TempDir()
+	escribir(t, filepath.Join(falsos, "curl"), "#!/bin/sh\nexit 7\n", 0o755)
+	for _, corte := range cortes {
 		t.Run(fmt.Sprint(corte), func(t *testing.T) {
 			raiz := t.TempDir()
 			cortado := filepath.Join(raiz, "install.sh")
-			// Corta en un salto de línea, como una descarga parada entre paquetes.
-			c := strings.LastIndex(string(b[:corte]), "\n") + 1
+			c := corte
+			if c <= fin {
+				// Corta en un salto de línea, como una descarga parada entre paquetes.
+				c = strings.LastIndex(string(b[:corte]), "\n") + 1
+			}
 			escribir(t, cortado, string(b[:c]), 0o755)
 			home := filepath.Join(raiz, "home")
 			cmd := exec.Command("/bin/sh", cortado, "--dry-run", "--tag", tagInstall)
-			cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+			cmd.Env = []string{"HOME=" + home, "PATH=" + falsos + ":/usr/bin:/bin", "LC_ALL=C"}
 			out, _ := cmd.CombinedOutput()
 			if strings.Contains(string(out), "plataforma:") || strings.Contains(string(out), "(dry-run)") ||
-				(c == fin+1 && len(out) > 0) {
+				(c > fin && len(out) > 0 && !strings.Contains(strings.ToLower(string(out)), "syntax error")) || existe(home) {
 				t.Fatalf("cortado en el byte %d, el script hizo algo:\n%s", c, out)
 			}
 		})

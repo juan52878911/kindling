@@ -383,7 +383,10 @@ func (m *Manager) GraphSnapshot(ctx context.Context, ref, prefijo string) (*api.
 			return nil, &api.StatusError{Code: 400, Message: fmt.Sprintf("template name %q is not valid", name)}
 		}
 		if _, err := os.Stat(m.snapDir(name)); err == nil {
-			return nil, &api.StatusError{Code: 409, Message: fmt.Sprintf("template %q already exists (use another -name, or kling template rm it)", name)}
+			// Sin confirmar de quién es ni cómo borrarla (S10): los nombres de
+			// plantilla son uno por daemon, y la ocupada puede ser de otro
+			// inquilino, como en el 409 de un grafo o un commit.
+			return nil, &api.StatusError{Code: 409, Message: fmt.Sprintf("template name %q is taken: pick another -name", name)}
 		}
 	}
 	plantillas, avisos, err := m.snapshotConsistente(ctx, gid, nombre)

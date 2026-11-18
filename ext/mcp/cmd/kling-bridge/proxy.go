@@ -220,7 +220,9 @@ func (b *bridge) ensureProxyChild(r *http.Request) error {
 		sinSesiones := len(b.proxySeen) == 0
 		b.mu.Unlock()
 		if sinSesiones {
-			if env, _ := b.sessionEnv("http-mode"); huellaEnv(env) != huella {
+			// Si MMDS no contesta no se sabe si cambió nada: se deja el hijo
+			// como está. Relanzarlo con b.env lo dejaría SIN los secretos.
+			if env, _, err := b.entornoMMDS(); err == nil && huellaEnv(env) != huella {
 				motivo = "its MMDS secrets changed"
 			}
 		}

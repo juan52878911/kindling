@@ -123,6 +123,20 @@ func daemonDosMaquinas(t testing.TB, service string, addrs ...string) string {
 		// así cada instancia nueva es una máquina nueva.
 		_ = json.NewEncoder(w).Encode([]*api.Machine{})
 	})
+	// GET de una máquina: la creada, en marcha, como un daemon de verdad. El
+	// agregador lo pregunta para saber si la máquina de una conversación sigue
+	// viva.
+	mux.HandleFunc("GET /machines/{id}", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, m := range creadas {
+			if m.ID == r.PathValue("id") {
+				_ = json.NewEncoder(w).Encode(m)
+				return
+			}
+		}
+		http.Error(w, `{"error":"machine does not exist"}`, http.StatusNotFound)
+	})
 	mux.HandleFunc("/machines/{id}/guest", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(api.GuestResponse{Status: 200})
 	})

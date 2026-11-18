@@ -56,7 +56,12 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(statOf(p, fi))
 			return
 		}
-		f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		// O_NONBLOCK para que abrir una FIFO sin escritor no se quede
+		// esperando (R17): en un fichero normal no cambia nada. Y solo se
+		// sirven ficheros normales: una FIFO, un socket o un dispositivo
+		// (/dev/zero) no tienen el tamaño que diría Content-Length, y leerlos
+		// podía no acabar nunca.
+		f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			fileError(w, err)
 			return
@@ -69,6 +74,10 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		if fi.IsDir() {
 			http.Error(w, p+" is a directory", http.StatusBadRequest)
+			return
+		}
+		if !fi.Mode().IsRegular() {
+			http.Error(w, p+" is not a regular file", http.StatusBadRequest)
 			return
 		}
 		if fi.Size() > api.FileMaxDownload {

@@ -111,9 +111,7 @@ func TestAccesoAlAgenteSoloDelDaemonYDelDuenoDelSocket(t *testing.T) {
 // primero, y volver a montar no duplica nada.
 func TestSetupAccesoDeDosDaemonsNoSePisan(t *testing.T) {
 	f := &iptablesFalso{}
-	oldC, oldE := comprobarEstado, ejecutar
-	t.Cleanup(func() { comprobarEstado, ejecutar = oldC, oldE })
-	comprobarEstado, ejecutar = f.estado, f.ejecutar
+	usarIptablesFalso(t, f)
 
 	if err := setupAcceso(AccesoAgente{UIDs: []int{1000}, GIDs: []int{1000}}, 0, 0); err != nil {
 		t.Fatal(err)

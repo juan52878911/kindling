@@ -45,6 +45,10 @@ var (
 	// maxWatchesPerSession acota las rutas vigiladas por conexión (pasado el
 	// tope se suelta la menos reciente).
 	maxWatchesPerSession = watchesPorSesion
+	// maxKernelWatches acota las que van con una vigilancia del sistema
+	// (kqueue, inotify); pasado el tope, la menos reciente de ellas pasa a
+	// vigilarse por sondeo.
+	maxKernelWatches = kernelPorSesion
 	// maxDirSnapshot: un directorio con más entradas no se compara entrada a
 	// entrada (se avisa del directorio, no de cada hijo).
 	maxDirSnapshot = 20000
@@ -84,11 +88,8 @@ type rawEvent struct {
 	overflow bool
 }
 
-// Avisos de una vez por daemon: se pierden eventos o no caben más vigilancias.
-var (
-	overflowLogged atomic.Bool
-	fullLogged     atomic.Bool
-)
+// Aviso de una vez por daemon: se pierden eventos.
+var overflowLogged atomic.Bool
 
 // fingerprint es lo que se compara de un fichero vigilado tras perder eventos.
 type fingerprint struct {
@@ -122,10 +123,16 @@ type watchEntry struct {
 	cost  int64
 	id    Ident
 	hayID bool
+	// fotoDesde es cuándo se empezó a leer snap: el repaso no la relee si el
+	// directorio no ha cambiado de fecha desde bastante antes (fotoFiable).
+	fotoDesde time.Time
 	// fp es su huella al vigilarlo o al último aviso; en un directorio sin
 	// foto, lo único con lo que el repaso sabe si cambió su lista.
 	fp fingerprint
 	el *list.Element
+	// sondeo: no tiene vigilancia del sistema (no cupo) y la repasa
+	// watcher.sondear cada pollInterval.
+	sondeo bool
 }
 
 // snapEntryCost es lo que se estima que ocupa en el heap cada nombre de una
@@ -171,6 +178,14 @@ type watcher struct {
 	// polling: vigila por sondeo (pollBackend); el repaso es lo normal y no
 	// se avisa de eventos perdidos.
 	polling bool
+	// kernel y sondeadas cuentan las entradas con vigilancia del sistema y
+	// las que se vigilan por sondeo (watchEntry.sondeo). sondeoTimer repasa
+	// estas cada pollInterval mientras las haya; resyncSondeo pide al
+	// siguiente flush que lo haga, y sondeoAvisado es el log de la sesión.
+	kernel, sondeadas int
+	sondeoTimer       *time.Timer
+	resyncSondeo      bool
+	sondeoAvisado     bool
 }
 
 // newWatcher arranca la vigilancia de s para una sesión. push manda una trama
@@ -200,6 +215,9 @@ func (w *watcher) close() {
 	if w.timer != nil {
 		w.timer.Stop()
 	}
+	if w.sondeoTimer != nil {
+		w.sondeoTimer.Stop()
+	}
 	w.be.close()
 	w.entries, w.pend, w.snapOf = nil, nil, nil
 	w.snapBytes = 0
@@ -226,15 +244,27 @@ func (w *watcher) note(rel string, dir bool) {
 	for len(w.entries) >= maxWatchesPerSession {
 		w.dropLocked(w.lru.Back().Value.(*watchEntry))
 	}
-	if err := w.be.add(rel, dir); err != nil {
-		if errors.Is(err, errWatchFull) && fullLogged.CompareAndSwap(false, true) {
-			log.Printf("share %s: too many watched paths in the daemon; changes to the rest are seen after the 1 s cache and do not wake guest watchers", w.srv.dir)
-		}
-		return
+	if !w.polling && w.kernel >= maxKernelWatches {
+		w.aSondeoLocked()
 	}
-	e := &watchEntry{rel: rel, dir: dir, fp: w.fingerprint(rel)}
+	sondeo := false
+	if err := w.be.add(rel, dir); err != nil {
+		if !errors.Is(err, errWatchFull) {
+			return
+		}
+		// No caben más vigilancias del sistema (descriptores de kqueue del
+		// daemon, max_user_watches de inotify): por sondeo, en vez de
+		// olvidarla. Antes sus vigilantes del invitado no disparaban nunca.
+		sondeo = true
+	}
+	e := &watchEntry{rel: rel, dir: dir, fp: w.fingerprint(rel), sondeo: sondeo}
 	e.el = w.lru.PushFront(e)
 	w.entries[rel] = e
+	if sondeo {
+		w.sondeadaLocked()
+	} else {
+		w.kernel++
+	}
 	if !dir {
 		return
 	}
@@ -243,6 +273,7 @@ func (w *watcher) note(rel string, dir bool) {
 	// que cambie mientras tanto llega como evento; si flush lo procesa antes
 	// de que esté la foto, avisa del directorio entero y la toma él.
 	w.mu.Unlock()
+	desde := time.Now()
 	snap, id, ok := w.snapshot(rel, func(id Ident) bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -250,14 +281,14 @@ func (w *watcher) note(rel string, dir bool) {
 	})
 	w.mu.Lock()
 	if !w.closed && w.entries[rel] == e && e.snap == nil {
-		w.setSnapLocked(e, snap, id, ok)
+		w.setSnapLocked(e, snap, id, ok, desde)
 	}
 }
 
-// setSnapLocked pone snap como foto de e, si cabe en el presupuesto de la
-// sesión y ninguna otra entrada tiene ya la de ese directorio; si no, e se
-// queda sin foto.
-func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, hayID bool) {
+// setSnapLocked pone snap (leída desde desde) como foto de e, si cabe en el
+// presupuesto de la sesión y ninguna otra entrada tiene ya la de ese
+// directorio; si no, e se queda sin foto.
+func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, hayID bool, desde time.Time) {
 	w.clearSnapLocked(e)
 	if snap == nil {
 		return
@@ -269,7 +300,7 @@ func (w *watcher) setSnapLocked(e *watchEntry, snap map[string]bool, id Ident, h
 	if w.snapBytes+c > maxSnapBytes {
 		return
 	}
-	e.snap, e.cost, e.id, e.hayID = snap, c, id, hayID
+	e.snap, e.cost, e.id, e.hayID, e.fotoDesde = snap, c, id, hayID, desde
 	w.snapBytes += c
 	if hayID {
 		if w.snapOf == nil {
@@ -300,9 +331,65 @@ func (w *watcher) clearSnapLocked(e *watchEntry) {
 
 func (w *watcher) dropLocked(e *watchEntry) {
 	w.clearSnapLocked(e)
-	w.be.remove(e.rel)
+	if e.sondeo {
+		w.sondeadas--
+	} else {
+		w.be.remove(e.rel)
+		w.kernel--
+	}
 	w.lru.Remove(e.el)
 	delete(w.entries, e.rel)
+}
+
+// aSondeoLocked pasa a sondeo la entrada menos reciente de las que tienen
+// vigilancia del sistema, para dejar su sitio a una nueva: lo que el invitado
+// acaba de mirar es lo que más probablemente vigila.
+func (w *watcher) aSondeoLocked() {
+	for el := w.lru.Back(); el != nil; el = el.Prev() {
+		e := el.Value.(*watchEntry)
+		if e.sondeo {
+			continue
+		}
+		w.be.remove(e.rel)
+		w.kernel--
+		e.sondeo = true
+		w.sondeadaLocked()
+		return
+	}
+}
+
+// sondeadaLocked cuenta una entrada más por sondeo: lo dice una vez por sesión
+// y arranca el repaso si no corría.
+func (w *watcher) sondeadaLocked() {
+	w.sondeadas++
+	if !w.sondeoAvisado {
+		w.sondeoAvisado = true
+		log.Printf("share %s: a session watches more paths than the host can follow (%d); the rest are checked every %s", w.srv.dir, w.kernel, pollInterval)
+	}
+	if w.sondeoTimer == nil {
+		w.sondeoTimer = time.AfterFunc(pollInterval, w.sondear)
+	}
+}
+
+// sondear pide al flush siguiente que repase las entradas por sondeo, y se
+// vuelve a programar mientras las haya.
+func (w *watcher) sondear() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	if w.sondeadas == 0 {
+		w.sondeoTimer = nil
+		return
+	}
+	w.resyncSondeo = true
+	if w.timer == nil {
+		w.timer = time.AfterFunc(watchDebounce, w.flush)
+	} else {
+		w.timer.Reset(watchDebounce)
+	}
+	w.sondeoTimer.Reset(pollInterval)
 }
 
 // touched apunta que el invitado acaba de cambiar rel: lo que el host cuente
@@ -436,8 +523,11 @@ func (w *watcher) flush() {
 	pend := w.pend
 	w.pend = map[string]rawEvent{}
 	if w.resync {
-		w.resync = false
-		w.resyncLocked(pend)
+		w.resync, w.resyncSondeo = false, false
+		w.resyncLocked(pend, false)
+	} else if w.resyncSondeo {
+		w.resyncSondeo = false
+		w.resyncLocked(pend, true)
 	}
 	now := time.Now()
 	w.purgeEchoLocked(now)
@@ -456,6 +546,17 @@ func (w *watcher) flush() {
 		e := w.entries[ev.rel]
 		if e == nil {
 			continue
+		}
+		// La huella de ahora, antes que la foto: lo que cambie entre medias se
+		// ve en el repaso siguiente.
+		fp := w.fingerprint(ev.rel)
+		if !ev.gone && e.fp.ino != 0 && fp.ino != 0 && fp.ino != e.fp.ino {
+			// En su sitio hay otro inodo (un guardado atómico) y el sistema solo
+			// contó un cambio de atributos del viejo: inotify sigue el inodo,
+			// no el nombre, y si alguien aún lo tiene abierto no avisa de su
+			// borrado. Se trata como lo que es, otro fichero en la ruta: sin
+			// esto la vigilancia se quedaba en el viejo y no avisaba de nada más.
+			ev.gone = true
 		}
 		switch {
 		case ev.gone:
@@ -479,15 +580,14 @@ func (w *watcher) flush() {
 				add(proto.EventDelete, ev.rel)
 			}
 		case e.dir:
-			// La huella antes que la foto: lo que cambie entre medias se ve
-			// en el repaso siguiente.
-			e.fp = w.fingerprint(ev.rel)
+			e.fp = fp
+			desde := time.Now()
 			now, id, hayID := w.snapshot(ev.rel, func(id Ident) bool { return w.otraFotoLocked(e, id) })
 			if e.snap == nil || now == nil {
 				// Sin foto con la que comparar (directorio enorme, presupuesto
 				// gastado, otro nombre del mismo directorio ya la tiene): se
 				// avisa del directorio, y el invitado relee su lista.
-				w.setSnapLocked(e, now, id, hayID)
+				w.setSnapLocked(e, now, id, hayID, desde)
 				if ev.rel != "" {
 					add(proto.EventModify, ev.rel)
 				}
@@ -507,9 +607,9 @@ func (w *watcher) flush() {
 					}
 				}
 			}
-			w.setSnapLocked(e, now, id, hayID)
+			w.setSnapLocked(e, now, id, hayID, desde)
 		default:
-			e.fp = w.fingerprint(ev.rel)
+			e.fp = fp
 			add(proto.EventModify, ev.rel)
 		}
 	}
@@ -522,12 +622,16 @@ func (w *watcher) flush() {
 // resyncLocked añade a pend un evento por cada ruta vigilada que pudo cambiar
 // sin que se supiera: los directorios siempre (flush los compara con su foto y
 // solo avisa de lo que difiera), los ficheros si su huella no es la de antes, y
-// lo que ya no existe como borrado.
-func (w *watcher) resyncLocked(pend map[string]rawEvent) {
-	if !w.polling && overflowLogged.CompareAndSwap(false, true) {
+// lo que ya no existe como borrado. Con soloSondeo, solo las que se vigilan
+// por sondeo (watchEntry.sondeo).
+func (w *watcher) resyncLocked(pend map[string]rawEvent, soloSondeo bool) {
+	if !w.polling && !soloSondeo && overflowLogged.CompareAndSwap(false, true) {
 		log.Printf("share %s: the host lost change events; rescanning the %d watched paths (logged once)", w.srv.dir, len(w.entries))
 	}
 	for r, e := range w.entries {
+		if soloSondeo && !e.sondeo {
+			continue
+		}
 		if _, ok := pend[r]; ok {
 			continue
 		}
@@ -539,12 +643,28 @@ func (w *watcher) resyncLocked(pend map[string]rawEvent) {
 			// Sin foto, flush avisaría del directorio entero: por sondeo, cada
 			// pollInterval y para siempre (vite o nodemon recompilando en
 			// bucle). Si su fecha y su tamaño no cambiaron, su lista tampoco.
+		case e.dir && fingerprintOf(fi) == e.fp && fotoFiable(e, fi):
+			// Con foto, lo mismo: releerla era leer hasta 20 000 nombres de
+			// cada directorio vigilado, con w.mu tomado, cada pollInterval.
 		case e.dir:
 			pend[r] = rawEvent{rel: r, dir: true}
 		case fingerprintOf(fi) != e.fp:
 			pend[r] = rawEvent{rel: r}
 		}
 	}
+}
+
+// margenFecha es lo que se desconfía de la fecha de un directorio: en un
+// sistema de ficheros con fechas gruesas (HFS+ por segundos, FAT por dos, un
+// SMB) un cambio en el mismo tic que la foto no mueve la fecha.
+const margenFecha = 2 * time.Second
+
+// fotoFiable dice si la foto de e vale mientras la fecha del directorio (fi)
+// no cambie: se empezó a leer más de margenFecha después de esa fecha, así que
+// cualquier cambio posterior la habría movido. Si no, se relee, y la foto
+// nueva ya lo es.
+func fotoFiable(e *watchEntry, fi fs.FileInfo) bool {
+	return e.fotoDesde.Sub(fi.ModTime()) > margenFecha
 }
 
 // relPath es rel para os.Root ("" es la raíz).

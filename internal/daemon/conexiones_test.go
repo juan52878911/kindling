@@ -18,9 +18,9 @@ import (
 // y, con política, otro por uid que no es admin; la conexión de más recibe un
 // 429 y se cierra, y cerrar una deja sitio.
 func TestConexionesConTope(t *testing.T) {
-	vg, vu := maxConexiones, maxConexionesUID
-	maxConexiones, maxConexionesUID = 3, 2
-	t.Cleanup(func() { maxConexiones, maxConexionesUID = vg, vu })
+	vg, vu, va := maxConexiones, maxConexionesUID, plazasAdmin
+	maxConexiones, maxConexionesUID, plazasAdmin = 3, 2, 0
+	t.Cleanup(func() { maxConexiones, maxConexionesUID, plazasAdmin = vg, vu, va })
 
 	dir, err := os.MkdirTemp("", "kc")
 	if err != nil {
@@ -104,6 +104,28 @@ func TestConexionesConTope(t *testing.T) {
 	tope.mu.Unlock()
 	if total != 3 || deA != 2 {
 		t.Fatalf("cuenta: total %d, de a %d; quería 3 y 2", total, deA)
+	}
+}
+
+// R2 (ronda 5, relacionado): con el tope global lleno de inquilinos, el
+// admin tampoco entraba. Las últimas plazasAdmin solo las toman los admin.
+func TestConexionesPlazasDelAdmin(t *testing.T) {
+	vg, vu, va := maxConexiones, maxConexionesUID, plazasAdmin
+	maxConexiones, maxConexionesUID, plazasAdmin = 3, 3, 1
+	t.Cleanup(func() { maxConexiones, maxConexionesUID, plazasAdmin = vg, vu, va })
+	s := servidorAuthz(t, politicaDePrueba(t))
+	l := s.escuchaConTope(nil)
+	if !l.tomar(uidA, false) || !l.tomar(uidB, false) {
+		t.Fatal("los inquilinos no entran con sitio")
+	}
+	if l.tomar(uidA, false) {
+		t.Fatal("un inquilino tomó la plaza del admin")
+	}
+	if !l.tomar(sinUID, true) {
+		t.Fatal("el admin no entra en su plaza")
+	}
+	if l.tomar(sinUID, true) {
+		t.Fatal("se pasó del tope global")
 	}
 }
 

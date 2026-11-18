@@ -103,14 +103,15 @@ func TestAuditoriaGrafoLineaDeTiempo(t *testing.T) {
 	}
 }
 
-// Un nodo que no se puede leer se avisa y no para a los demás; si no se lee
-// ninguno, es un error.
+// Un nodo que no se puede leer se avisa y no para a los demás, pero acaba en
+// error (parcial); si no se lee ninguno, es un error sin registros.
 func TestAuditoriaGrafoNodoIlegible(t *testing.T) {
 	a := nuevaAuditoriaFalsa()
 	a.fallan = map[string]error{"m-db": errors.New("machine gone")}
 	var avisos bytes.Buffer
 	recs, err := auditoriaGrafo(context.Background(), a.leer, grafoAuditado(), api.CredAuditQuery{}, false, 0, &avisos)
-	if err != nil || len(recs) == 0 {
+	// F17: lo leído sale, pero con un error que deja el código distinto de 0.
+	if !errors.Is(err, errAuditoriaParcial) || len(recs) == 0 {
 		t.Fatalf("%v %v", recs, err)
 	}
 	if !strings.Contains(avisos.String(), "node db: machine gone") {

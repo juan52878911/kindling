@@ -182,6 +182,9 @@ func do(t *testing.T, h http.Handler, method, path, token string, body any) *htt
 		rd = bytes.NewReader(bs)
 	}
 	req := httptest.NewRequest(method, path, rd)
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/gateway"
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -191,12 +193,7 @@ func probeMCP(url, token string) (string, []string, error) {
 		} `json:"result"`
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&init)
-	server := init.Result.ServerInfo.Name
-	if server == "" {
-		server = "MCP server"
-	} else if v := init.Result.ServerInfo.Version; v != "" {
-		server += " v" + v
-	}
+	server := nombreServidor(init.Result.ServerInfo.Name, init.Result.ServerInfo.Version)
 
 	sid := resp.Header.Get("Mcp-Session-Id")
 	tr, err := post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
@@ -215,7 +212,8 @@ func probeMCP(url, token string) (string, []string, error) {
 	_ = json.NewDecoder(io.LimitReader(tr.Body, 8<<20)).Decode(&tl)
 	names := make([]string, 0, len(tl.Result.Tools))
 	for _, t := range tl.Result.Tools {
-		names = append(names, t.Name)
+		// Solo se enseñan (connect, migrate): van saneados.
+		names = append(names, saneado.Linea(t.Name))
 	}
 	return server, names, nil
 }
@@ -362,53 +360,139 @@ func mustJSON(v any) string {
 // patchJSON inserta una entrada en una sección de un JSON conservando el resto.
 //
 // Se copia el fichero antes de tocarlo: estas configuraciones suelen tener horas
-// de ajustes de su dueño, y kindling no es quién para arriesgarlas.
+// de ajustes de su dueño, y kindling no es quién para arriesgarlas. Por eso:
+//
+//   - se sigue el symlink (home-manager, dotfiles) y se escribe en su destino:
+//     el rename sobre la ruta del enlace lo sustituía por un fichero suelto;
+//   - el respaldo solo se crea si no existe: la segunda ejecución pisaba el
+//     original con el fichero ya parcheado por la primera;
+//   - los números se leen como json.Number: un id de más de 2^53 volvía
+//     redondeado al pasar por float64;
+//   - justo antes de escribir se relee el fichero y, si su dueño lo cambió
+//     mientras tanto (el cliente reescribe ~/.claude.json en uso), se vuelve a
+//     parchear sobre lo nuevo en vez de pisarlo con lo viejo;
+//   - la escritura es durable.Escribir y conserva los permisos que tenía.
 func patchJSON(path, section, key string, value any, hint string) error {
-	doc := map[string]any{}
-	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &doc); err != nil {
-			// errNotJSON y no el error crudo: quien llama tiene que poder
-			// distinguir "esto no se puede parchear sin romperlo" de un fallo
-			// de E/S, porque la respuesta correcta es enseñar el fragmento.
-			return fmt.Errorf("%s: %w", path, errNotJSON)
+	destino, err := filepath.EvalSymlinks(path)
+	if os.IsNotExist(err) {
+		// Ni el fichero ni (quizá) su directorio: se crea en la ruta pedida.
+		// Un symlink colgante cae aquí también y se queda como está.
+		if _, lerr := os.Lstat(path); lerr == nil {
+			return fmt.Errorf("%s is a symlink to a file that doesn't exist; not replacing it", path)
 		}
-		backup := path + ".kling-backup"
-		if err := os.WriteFile(backup, b, 0o600); err != nil {
-			return fmt.Errorf("couldn't back up %s: %w", path, err)
+		destino = path
+	} else if err != nil {
+		return err
+	}
+
+	const intentos = 3
+	for intento := 1; ; intento++ {
+		orig, existe, err := leerConfig(destino)
+		if err != nil {
+			return err
 		}
-		fmt.Printf("backup: %s\n", backup)
-	} else if !os.IsNotExist(err) {
-		return err
-	} else if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
+		perm := os.FileMode(0o600)
+		doc := map[string]any{}
+		if existe {
+			dec := json.NewDecoder(bytes.NewReader(orig))
+			dec.UseNumber()
+			if err := dec.Decode(&doc); err != nil || dec.More() {
+				// errNotJSON y no el error crudo: quien llama tiene que poder
+				// distinguir "esto no se puede parchear sin romperlo" de un
+				// fallo de E/S, porque la respuesta correcta es enseñar el
+				// fragmento.
+				return fmt.Errorf("%s: %w", path, errNotJSON)
+			}
+			if doc == nil { // el fichero era `null`
+				doc = map[string]any{}
+			}
+			if fi, err := os.Stat(destino); err == nil {
+				perm = fi.Mode().Perm()
+			}
+			if err := respaldar(destino+".kling-backup", orig); err != nil {
+				return err
+			}
+		} else if err := os.MkdirAll(filepath.Dir(destino), 0o755); err != nil {
+			return err
+		}
 
-	sec, _ := doc[section].(map[string]any)
-	if sec == nil {
-		sec = map[string]any{}
-	}
-	if _, exists := sec[key]; exists {
-		fmt.Printf("warning: %q already existed in %s; replacing it\n", key, section)
-	}
-	sec[key] = value
-	doc[section] = sec
+		sec, _ := doc[section].(map[string]any)
+		if sec == nil {
+			sec = map[string]any{}
+		}
+		_, yaEstaba := sec[key]
+		sec[key] = value
+		doc[section] = sec
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(doc); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(doc); err != nil {
+			return err
+		}
 
-	fmt.Printf("✓ %q added to %s\n\n%s\n", key, path, hint)
+		if antesDeReleer != nil {
+			antesDeReleer(destino)
+		}
+		ahora, existeAhora, err := leerConfig(destino)
+		if err != nil {
+			return err
+		}
+		if existeAhora != existe || !bytes.Equal(ahora, orig) {
+			if intento < intentos {
+				continue
+			}
+			return fmt.Errorf("%s keeps changing while I patch it; close the client and try again", path)
+		}
+		if err := durable.Escribir(destino, buf.Bytes(), perm); err != nil {
+			return err
+		}
+		if yaEstaba {
+			fmt.Printf("warning: %q already existed in %s; replaced it\n", key, section)
+		}
+		fmt.Printf("✓ %q added to %s\n\n%s\n", key, path, hint)
+		return nil
+	}
+}
+
+// antesDeReleer solo lo usan los tests, para cambiar el fichero entre la
+// lectura y la relectura de patchJSON.
+var antesDeReleer func(destino string)
+
+// leerConfig lee el fichero de configuración, distinguiendo "no existe" de un
+// error de E/S.
+func leerConfig(ruta string) ([]byte, bool, error) {
+	b, err := os.ReadFile(ruta)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
+}
+
+// respaldar guarda la copia del original solo si no hay ya una: la primera es
+// la que vale, la de antes de que kindling tocase nada.
+func respaldar(ruta string, datos []byte) error {
+	f, err := os.OpenFile(ruta, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("couldn't back up to %s: %w", ruta, err)
+	}
+	if _, err := f.Write(datos); err != nil {
+		f.Close()
+		os.Remove(ruta)
+		return fmt.Errorf("couldn't back up to %s: %w", ruta, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(ruta)
+		return fmt.Errorf("couldn't back up to %s: %w", ruta, err)
+	}
+	fmt.Printf("backup: %s\n", ruta)
 	return nil
 }
 

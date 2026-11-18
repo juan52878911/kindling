@@ -190,16 +190,27 @@ cron vale igual (o un `launchd` con `StartInterval`), con las mismas reglas del 
 - **opencode**: el CLI [opencode](https://opencode.ai) (se busca en el `PATH` y en
   `~/.opencode/bin`) hablando con MiniMax u otro modelo que tengas configurado en él
   (`-model proveedor/modelo`; por defecto `minimax-coding-plan/MiniMax-M2.7`). Se ejecuta
-  como `opencode run --pure -m <modelo> --format json`:
+  como `opencode run --pure --agent kling-db-ask -m <modelo> --format json`:
+  - **Sin herramientas.** El agente de opencode por defecto lo permite todo (bash, edit,
+    webfetch, tus MCP) sin preguntar. `ask` usa su propio agente, `kling-db-ask`, que
+    deniega todos los permisos y herramientas (también las claves que traiga tu
+    configuración) y apaga tus servidores MCP; va en `OPENCODE_CONFIG_CONTENT`, la capa
+    de más precedencia. Antes de mandar el prompt lo comprueba con `opencode debug
+    config` y `opencode debug agent`: si queda alguna herramienta activa o tu opencode
+    no sabe contestar, `ask` se niega sin llamar al modelo (usa `-provider anthropic` o
+    actualiza opencode). Probado con opencode 1.18.34: sin esto, una petición de usar
+    bash crea el fichero; con esto, al modelo no le llega ninguna herramienta.
   - `--pure`, sin plugins; **nunca** `--auto`.
   - En un directorio temporal nuevo y vacío (0700) que se borra al acabar.
   - El prompt (instrucciones, esquema y pregunta) va siempre por **stdin**, sea del
     tamaño que sea: por argumento lo vería con `ps` cualquier usuario del equipo.
   - Solo se aceptan los eventos `text` y `step_start`/`step_finish`. Si opencode intenta
-    usar una herramienta, pide un permiso o falla, `ask` aborta y mata el proceso.
-  - El entorno del proceso es **el tuyo**, sin filtrar: opencode necesita su configuración
-    y sus credenciales. opencode guarda además la sesión (el prompt y la respuesta) en su
-    propio almacén local, como en cualquier otro uso suyo.
+    usar una herramienta, pide un permiso o falla, `ask` aborta y mata el proceso. Esto es
+    detección, no la barrera: el evento de una herramienta sale cuando ya se ejecutó.
+  - El entorno del proceso es **el tuyo** (opencode necesita su configuración y sus
+    credenciales) sin las variables `KLING_*`, `PG*`, `DATABASE_URL` ni
+    `OPENCODE_PERMISSION`. opencode guarda además la sesión (el prompt y la respuesta) en
+    su propio almacén local, como en cualquier otro uso suyo.
   - De la respuesta se extrae la sentencia (bloque ` ```sql `, o el texto entero); lo
     dudoso (varias sentencias, texto suelto) lo rechaza `sqlguard`, igual que con
     Anthropic. Nada de esto relaja los pasos siguientes.
@@ -239,11 +250,15 @@ en el host y en la copia, en este orden:
 1. **La copia**, como `connect`: tuya, en marcha, `ready` y con la contraseña de su id
    en este host.
 2. **El rol de solo lectura.** Sin `-role`, `ask` crea (si falta) `kling_db_ro`: `LOGIN`,
-   sin ningún atributo de administración, miembro de `pg_read_all_data` y con
-   `default_transaction_read_only = on`. Con `-role`, el rol tiene que existir; `ask` no
+   sin ningún atributo de administración, con `SELECT` en las tablas y vistas de los
+   esquemas que no son del sistema (se repite en cada `ask`, así que cubre las tablas
+   nuevas) y con `default_transaction_read_only = on`. **No** es miembro de
+   `pg_read_all_data`: ese rol lee también los catálogos protegidos (`pg_authid` con los
+   verificadores de las claves, `pg_user_mapping`, `pg_statistic`...); al `kling_db_ro`
+   de versiones anteriores se le quita. Con `-role`, el rol tiene que existir; `ask` no
    crea ni cambia nada de él. En los dos casos se **comprueba** antes de usarlo, y se
    rechaza si es superusuario, tiene `CREATEROLE`, `CREATEDB`, `REPLICATION` o
-   `BYPASSRLS`, pertenece a **cualquier** rol que no sea `pg_read_all_data` (directa o
+   `BYPASSRLS`, pertenece a **cualquier** rol, `pg_read_all_data` incluido (directa o
    indirectamente), es dueño de la base o de alguna relación, o puede escribir en
    alguna. Nunca vale el rol de la aplicación (`app`) ni `postgres`. La pertenencia se
    mira con `pg_has_role(..., 'MEMBER')` y en `pg_auth_members`, no con `'USAGE'`: en

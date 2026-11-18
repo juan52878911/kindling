@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -313,5 +314,23 @@ func TestShortLinkBarreLosMuertos(t *testing.T) {
 	}
 	if _, err := os.Lstat(ajeno); err != nil {
 		t.Error("se llevó algo que no es un enlace corto")
+	}
+}
+
+// S16: el destino va tras "--" y uno que empieza por "-" se rechaza, para que
+// ssh no lo lea como una opción suya.
+func TestArgsSSHDestinoNoEsOpcion(t *testing.T) {
+	target, args, err := argsSSH("juan@lab/opt/kling")
+	if err != nil || target != "juan@lab" {
+		t.Fatalf("%q %v", target, err)
+	}
+	i := slices.Index(args, "--")
+	if i < 0 || i+3 >= len(args) || args[i+1] != "juan@lab" || args[i+2] != "/opt/kling" || args[i+3] != "dial-stdio" {
+		t.Fatalf("args %q", args)
+	}
+	for _, mal := range []string{"-oProxyCommand=x", "-F/tmp/c/kling", ""} {
+		if _, _, err := argsSSH(mal); err == nil || !strings.Contains(err.Error(), "invalid ssh destination") {
+			t.Errorf("%q: %v", mal, err)
+		}
 	}
 }

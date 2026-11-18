@@ -103,14 +103,19 @@ const (
 	tcpRXBufMax = 8 << 20
 	tcpTXBufMax = 6 << 20
 
-	// tcpBufPresupuesto es lo que deberían sumar como mucho los buffers TCP
-	// de la pila (recepción + envío) de todas las conexiones vivas de una VM
-	// (R7). Viven en este proceso, fuera de la memoria de la VM: con
-	// MaxTCPFlows conexiones a tcpRXBufMax + tcpTXBufMax eran hasta 7 GiB del
-	// Mac. Con pocas conexiones cada una sigue teniendo los máximos de
-	// arriba; con más, el máximo de cada una baja (topesTCP), y la
-	// autoescala de gVisor lee el máximo de la pila en cada ajuste, así que
-	// también las ya crecidas se recortan en el siguiente.
+	// tcpBufPresupuesto es lo que suman como mucho los buffers TCP de la pila
+	// (recepción + envío) de todas las conexiones vivas de una VM (R7). Viven
+	// en este proceso, fuera de la memoria de la VM: con MaxTCPFlows
+	// conexiones a tcpRXBufMax + tcpTXBufMax eran hasta 7 GiB del Mac. Con
+	// pocas conexiones cada una tiene los máximos de arriba; con más, el de
+	// cada una baja (topesTCP).
+	//
+	// Los topes se fijan en cada endpoint (ajustarEndpoints) y no solo en la
+	// pila: el forwarder da a cada conexión 1 MiB de recepción sin mirar el
+	// máximo de la pila, y la autoescala de gVisor nunca encoge un buffer ya
+	// crecido. Fijarlos apaga la autoescala; con el tope entero desde el
+	// principio no hace falta (es un límite, no memoria reservada).
+	// Las conexiones DNS por TCP van aparte: MaxDNSTCPConns con tcpBufSuelo.
 	tcpBufPresupuesto = 256 << 20
 	// tcpBufSuelo: ni con todas las conexiones ocupadas baja de esto.
 	tcpBufSuelo = 64 << 10
@@ -237,10 +242,12 @@ type Net struct {
 	// Plazas de MaxDNSUDPFlows, MaxDNSTCPConns y MaxUDPFlows.
 	dnsUDP, dnsTCP, udpFlows, tcpFlows chan struct{}
 
-	// bufMu protege bufTramo: el tramo de conexiones vivas (potencia de dos)
-	// con el que se fijaron los máximos de los buffers TCP (ajustarBuffers).
+	// bufMu protege bufTramo, el tramo de conexiones vivas (potencia de dos)
+	// con el que se fijaron los máximos de los buffers TCP (ajustarBuffers),
+	// y bufEPs, los endpoints de esas conexiones, a los que se aplican.
 	bufMu    sync.Mutex
 	bufTramo int
+	bufEPs   map[tcpip.Endpoint]struct{}
 }
 
 // topesTCP da el máximo de los buffers de recepción y envío de cada
@@ -286,6 +293,41 @@ func (n *Net) ajustarBuffers() {
 	}
 	n.bufTramo = tramo
 	_ = fijarBuffers(n.stack, tramo)
+	rx, tx := topesTCP(tramo)
+	for ep := range n.bufEPs {
+		ponerBuffers(ep, rx, tx)
+	}
+}
+
+// ponerBuffers fija los buffers de recepción y envío de ep. Bajarlos con datos
+// ya encolados no tira nada: la ventana se cierra (o el que escribe espera)
+// hasta que el encolado baja del tope nuevo.
+func ponerBuffers(ep tcpip.Endpoint, rx, tx int) {
+	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
+	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
+}
+
+// endpointTCP crea el endpoint de una conexión que ocupa plaza en tcpFlows,
+// con los topes del tramo actual, y lo apunta para los cambios de tramo.
+// soltar lo quita; hay que llamarlo antes de soltarTCP.
+func (n *Net) endpointTCP(r *tcp.ForwarderRequest, wq *waiter.Queue) (ep tcpip.Endpoint, soltar func(), err tcpip.Error) {
+	ep, err = r.CreateEndpoint(wq)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	n.bufMu.Lock()
+	defer n.bufMu.Unlock()
+	if n.bufEPs == nil {
+		n.bufEPs = map[tcpip.Endpoint]struct{}{}
+	}
+	n.bufEPs[ep] = struct{}{}
+	rx, tx := topesTCP(max(n.bufTramo, 1))
+	ponerBuffers(ep, rx, tx)
+	return ep, func() {
+		n.bufMu.Lock()
+		delete(n.bufEPs, ep)
+		n.bufMu.Unlock()
+	}, nil
 }
 
 // fijarBuffers pone en la pila los rangos de buffer TCP para vivas
@@ -726,6 +768,9 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 			r.Complete(true)
 			return
 		}
+		// Un mensaje DNS cabe en 64 KiB: el suelo basta y no cuenta en el
+		// presupuesto de las demás.
+		ponerBuffers(ep, tcpBufSuelo, tcpBufSuelo)
 		r.Complete(false)
 		n.serveDNSTCP(gonet.NewTCPConn(&wq, ep))
 		return
@@ -735,10 +780,19 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	defer n.soltarTCP()
+	// Va después del defer de soltarTCP: se quita el endpoint antes de
+	// soltar la plaza y reajustar los demás.
+	soltarEP := func() {}
+	defer func() { soltarEP() }()
+	crearEP := func(wq *waiter.Queue) (tcpip.Endpoint, tcpip.Error) {
+		ep, soltar, err := n.endpointTCP(r, wq)
+		soltarEP = soltar
+		return ep, err
+	}
 	if dst == GatewayIP && n.cfg.Graph != nil && n.cfg.Graph.Link(id.LocalPort) {
 		n.cfg.Graph.Serve(n.ctx, id.LocalPort, func() (net.Conn, error) {
 			var wq waiter.Queue
-			ep, err := r.CreateEndpoint(&wq)
+			ep, err := crearEP(&wq)
 			if err != nil {
 				r.Complete(true)
 				return nil, errors.New(err.String())
@@ -750,7 +804,7 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 	}
 	if dst == GatewayIP && n.cfg.Split != nil && n.cfg.Split.DB() {
 		var wq waiter.Queue
-		ep, err := r.CreateEndpoint(&wq)
+		ep, err := crearEP(&wq)
 		if err != nil {
 			r.Complete(true)
 			return
@@ -761,7 +815,7 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 	}
 	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.DBActivo() {
 		var wq waiter.Queue
-		ep, err := r.CreateEndpoint(&wq)
+		ep, err := crearEP(&wq)
 		if err != nil {
 			r.Complete(true)
 			return
@@ -782,7 +836,7 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	var wq waiter.Queue
-	ep, terr := r.CreateEndpoint(&wq)
+	ep, terr := crearEP(&wq)
 	if terr != nil {
 		hc.Close()
 		r.Complete(true)

@@ -239,12 +239,10 @@ func sshMultiplexArgs(target string) []string {
 
 // dialSSH levanta `ssh <destino> kling dial-stdio` y envuelve sus tuberías.
 func dialSSH(ctx context.Context, dest string) (net.Conn, error) {
-	target, remoteBin := dest, "kling"
-	if i := strings.Index(dest, "/"); i >= 0 { // ssh://host/ruta/al/kling
-		target, remoteBin = dest[:i], dest[i:]
+	target, args, err := argsSSH(dest)
+	if err != nil {
+		return nil, err
 	}
-
-	args := append(sshMultiplexArgs(target), target, remoteBin, "dial-stdio")
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 
 	stdin, err := cmd.StdinPipe()
@@ -260,6 +258,23 @@ func dialSSH(ctx context.Context, dest string) (net.Conn, error) {
 		return nil, fmt.Errorf("launching ssh to %s: %w", target, err)
 	}
 	return &pipeConn{r: stdout, w: stdin, cmd: cmd}, nil
+}
+
+// argsSSH son los argumentos de ssh para dest (host o host/ruta/al/kling).
+//
+// El destino va tras "--": sin eso, un destino que empieza por "-" (de un
+// KLING_HOST o un contexto que no escribió uno) ssh lo leería como una opción
+// suya. Y se rechaza antes, con un error que lo dice.
+func argsSSH(dest string) (target string, args []string, err error) {
+	target, remoteBin := dest, "kling"
+	if i := strings.Index(dest, "/"); i >= 0 { // ssh://host/ruta/al/kling
+		target, remoteBin = dest[:i], dest[i:]
+	}
+	if target == "" || strings.HasPrefix(target, "-") {
+		return "", nil, fmt.Errorf("invalid ssh destination %q: it must be a host, user@host or an ssh config alias", target)
+	}
+	args = append(sshMultiplexArgs(target), "--", target, remoteBin, "dial-stdio")
+	return target, args, nil
 }
 
 // pipeConn presenta un par de tuberías como si fuera una conexión de red, para

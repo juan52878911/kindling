@@ -37,16 +37,25 @@ func releaseDe(dir, destino string) string {
 }
 
 // imagenesDeRelease es, para cada imagen que `kling up` baja en un Mac, la
-// release de la que vino según su marca.
+// release de la que vino según su marca; releaseDesconocida si está pero sin
+// marca.
 func imagenesDeRelease(dir string) map[string]string {
 	out := map[string]string{}
 	for _, im := range imagenesMac("arm64") {
 		if r := releaseDe(dir, im.destino); r != "" {
 			out[im.destino] = r
+		} else if _, err := os.Stat(filepath.Join(dir, im.destino)); err == nil {
+			// Sin marca (bajada antes de que existiera, copiada de un host
+			// Linux o compilada aquí): callar daba por buena justo la más
+			// vieja.
+			out[im.destino] = releaseDesconocida
 		}
 	}
 	return out
 }
+
+// releaseDesconocida es la release de una imagen sin marca.
+const releaseDesconocida = "unknown"
 
 // checkImagenesRelease avisa de las imágenes bajadas de otra release que este
 // kling. No es un fallo: siguen arrancando; pero el kernel no recibe los
@@ -61,7 +70,11 @@ func checkImagenesRelease(deRelease map[string]string, cli, dir string) (doctorC
 	kernel := false
 	for _, im := range imagenesMac("arm64") {
 		if r, ok := deRelease[im.destino]; ok && r != cli {
-			viejas = append(viejas, im.destino+" from "+r)
+			if r == releaseDesconocida {
+				viejas = append(viejas, im.destino+" from an unknown release")
+			} else {
+				viejas = append(viejas, im.destino+" from "+r)
+			}
 			kernel = kernel || im.destino == "vmlinux"
 		}
 	}

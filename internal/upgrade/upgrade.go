@@ -697,12 +697,24 @@ func (o *Opciones) restaurar(ctx context.Context, c *copia, conEstado bool) erro
 	}
 	// Lo que el daemon nuevo migró deja su .v<N>.bak: vuelve a su nombre y la
 	// copia se quita, para que la próxima migración la haga de nuevo.
+	var metas []string
 	for _, b := range bakNuevos(c) {
 		if err := colocar(b, sinBak(b)); err != nil {
 			errs = append(errs, fmt.Errorf("restoring %s: %v", sinBak(b), err))
 			continue
 		}
 		os.Remove(b)
+		if filepath.Base(sinBak(b)) == "meta.json" {
+			metas = append(metas, sinBak(b))
+		}
+	}
+	// Un meta.json devuelto lleva la firma que el kling de antes sabe leer, y
+	// el nuevo dejó las marcas de que ya migró las firmas: sin quitarlas, al
+	// actualizar otra vez se rechazarían todos esos dorados (F12).
+	if len(metas) > 0 && c.Raiz != "" {
+		if err := machine.ReabrirMigracionFirmas(c.Raiz, metas); err != nil {
+			errs = append(errs, fmt.Errorf("reopening the template signature migration: %v", err))
+		}
 	}
 	if conEstado && c.Estado != "" && c.Raiz != "" {
 		if err := colocar(filepath.Join(c.dir, c.Estado), filepath.Join(c.Raiz, "state.json")); err != nil {

@@ -224,7 +224,7 @@ type Manager struct {
 	// entre un arranque del daemon y el siguiente. Ver kernelHash.
 	kernelSHA huellaKernel
 	// discosBase cachea, como kernelSHA, el digest de cada ext4 de imagen
-	// (ruta → huellaKernel) que los dorados llevan en image_digest y
+	// (ruta → digestCacheado) que los dorados llevan en image_digest y
 	// base_digest. Ver digestDiscoBase.
 	discosBase sync.Map
 	// discosEnVuelo: ruta → *vueloDigest del digest que alguien está
@@ -3858,19 +3858,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// La red suele seguir montada desde el Freeze (ver red.go); si no —un
 	// reinicio del daemon o del host, o el vigilante la soltó—, se rehace con
 	// el mismo índice para que la máquina conserve su IP.
-	egress, _ := knet.ParseEgress(mc.Egress)
-	netcfg := knet.Plan(mc.NetIndex, mc.ID)
-	if !m.redLista(netcfg, mc.ID) {
-		n, err := m.redParaRehacer(mc)
-		if err != nil {
-			soltarFull()
-			return nil, fmt.Errorf("rebuilding the network: %w", err)
-		}
-		netcfg = n
-		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
-			soltarFull()
-			return nil, fmt.Errorf("rebuilding the network: %w", err)
-		}
+	netcfg, errRed := m.redDelThaw(mc)
+	if errRed != nil {
+		soltarFull()
+		return nil, errRed
 	}
 	// Las aristas del nodo, si es de un grafo: si la red se rehízo, sus
 	// proxies de enlace y su resolver se fueron con ella. Idempotente. Un
@@ -4490,6 +4481,37 @@ func (m *Manager) vmmCongeladoEnDisco(id string, pid int) bool {
 	return true
 }
 
+// redDelThaw es la red con la que despierta mc: la que dejó montada el
+// Freeze si sigue en pie (redLista) o, si no, una rehecha con el mismo
+// índice.
+//
+// La conservada no pasa por Setup, que es quien comprueba las barreras del
+// host antes de dar red (knet.AsegurarHost): tras un reload del cortafuegos,
+// la máquina despertaba con el host abierto. Ahora se comprueban también, y
+// si no se pueden reponer no despierta, como en Setup.
+func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, error) {
+	netcfg := knet.Plan(mc.NetIndex, mc.ID)
+	if redConservada(m, netcfg, mc.ID) {
+		if err := asegurarBarrerasHost(); err != nil {
+			return nil, fmt.Errorf("host firewall rules: %w", err)
+		}
+		return netcfg, nil
+	}
+	n, err := m.redParaRehacer(mc)
+	if err != nil {
+		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	}
+	egress, _ := knet.ParseEgress(mc.Egress)
+	if err := m.montarRed(n, mc.ID, egress, mc.AllowDomains); err != nil {
+		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	}
+	return n, nil
+}
+
+// redConservada es redLista detrás de una variable, para los tests (en macOS
+// la red nunca se conserva).
+var redConservada = (*Manager).redLista
+
 // thawVMMViejo mata el VMM pid que dejó vivo el Freeze de mc antes de que
 // Thaw arranque el nuevo. Readoptarlo era dar por buena una VM que ya se
 // volcó y se mandó matar: moría después y la máquina quedaba running sin
@@ -4508,9 +4530,6 @@ func (m *Manager) thawVMMViejo(mc *api.Machine, pid int) error {
 }
 
 func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool) {
-	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
-	// es mejor cerrarlas que esperar a que el keepalive lo note.
-	m.stopShares(id)
 	// Dos kill de la misma máquina a la vez (un fail sin cerrojo de ciclo de
 	// vida contra un Stop) leían los dos el mismo PID; el segundo mandaba su
 	// SIGKILL cuando el primero ya lo había visto morir, y ese PID podía ser
@@ -4530,15 +4549,23 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool)
 		// Sin PID puede quedar el VMM que un Freeze dejó vivo (M1): una warm
 		// tiene PID 0 aunque su VMM siga ahí. Darlo por muerto dejaba que el
 		// Start de después lanzase otro sobre el mismo overlay.
+		m.stopShares(id)
 		return m.matarVMMDeCongelado(id)
 	}
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
-		// El servicio primero: es quien escribe en los volúmenes.
+		// El servicio primero: es quien escribe en los volúmenes y en las
+		// carpetas vivas.
 		m.stopService(mc)
 		m.flushVolume(mc, conservaDisco)
 	}
+	// Las carpetas vivas, después del servicio y antes del SIGKILL: sus
+	// sesiones van a morir con el VMM, y es mejor cerrarlas que esperar a que
+	// el keepalive lo note. Antes del servicio no: lo que este escribiera al
+	// recibir su señal de parada, y lo que el agente tuviera diferido (que sale
+	// al cerrar cada fichero), fallaba con la sesión ya cortada y se perdía.
+	m.stopShares(id)
 	senalMatar(pid)
 	defer func() {
 		if !murio {

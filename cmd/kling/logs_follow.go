@@ -18,11 +18,12 @@ import (
 
 // kling logs [-f] [-raw] <ref>.
 //
-// El daemon no tiene un flujo de la consola: solo sirve las últimas N líneas.
-// Seguirla es sondear esa ventana y escribir lo que no se había escrito. Se
-// hace así, y no con un endpoint nuevo, para que -f funcione contra cualquier
-// daemon ya desplegado: un CLI nuevo con un daemon viejo es lo normal durante
-// una actualización.
+// El daemon no tiene un flujo de la consola: se sondea. Con un daemon que da
+// cursor (X-Kling-Log-Offset) se pide solo lo escrito desde la vuelta anterior;
+// con uno anterior se pide la ventana del final y se escribe lo que no se había
+// escrito (newLines), para que -f funcione contra cualquier daemon ya
+// desplegado: un CLI nuevo con un daemon viejo es lo normal durante una
+// actualización.
 
 // followEvery es cada cuánto se pregunta; followWindow, cuántas líneas se
 // piden cada vez. Con 2000 líneas cada medio segundo solo se pierde algo si la
@@ -57,7 +58,8 @@ func cmdLogs(args []string) error {
 	defer stop()
 
 	c := api.NewClient(hostOf(*host))
-	var src logFetcher = logSource{c: c, ref: ref}
+	consola := &logSource{c: c, ref: ref}
+	var src logFetcher = consola
 	var out string
 	var err error
 	if *service {
@@ -65,7 +67,7 @@ func cmdLogs(args []string) error {
 		out, err = src.fetch(ctx)
 		out = lastLines(out, *tail)
 	} else {
-		out, err = c.Logs(ctx, ref, *tail)
+		out, consola.cur, err = c.LogsTail(ctx, ref, *tail)
 	}
 	if err != nil {
 		return err
@@ -99,16 +101,55 @@ type logFetcher interface {
 	running(ctx context.Context) (bool, string, error)
 }
 
+// logStreamer es una fuente que sabe dar solo lo nuevo (logSource.next).
+type logStreamer interface {
+	next(ctx context.Context, flush bool) (string, bool, error)
+}
+
 type logSource struct {
 	c   *api.Client
 	ref string
+	// cur es hasta dónde se ha escrito la consola; nil con un daemon que no da
+	// cursor.
+	cur *api.LogCursor
 }
 
-func (s logSource) fetch(ctx context.Context) (string, error) {
+func (s *logSource) fetch(ctx context.Context) (string, error) {
 	return s.c.Logs(ctx, s.ref, followWindow)
 }
 
-func (s logSource) running(ctx context.Context) (bool, string, error) {
+// logChunkMax es a partir de cuántos bytes una línea sin terminar se escribe
+// igual: esperar a su salto de línea dejaría parado -f con un invitado que
+// escribe sin ellos.
+const logChunkMax = 64 << 10
+
+// next devuelve lo escrito en la consola desde la vuelta anterior, solo hasta
+// la última línea completa (la que va a medias se pide otra vez en la
+// siguiente) salvo que flush lo pida todo. ok=false: el daemon no da cursor y
+// hay que comparar ventanas.
+func (s *logSource) next(ctx context.Context, flush bool) (string, bool, error) {
+	if s.cur == nil {
+		return "", false, nil
+	}
+	out, cur, err := s.c.LogsAfter(ctx, s.ref, *s.cur)
+	if err != nil {
+		return "", true, err
+	}
+	if cur == nil {
+		s.cur = nil
+		return "", false, nil
+	}
+	if !flush && len(out) < logChunkMax {
+		if i := strings.LastIndexByte(out, '\n'); i+1 < len(out) {
+			cur.Offset -= int64(len(out) - (i + 1))
+			out = out[:i+1]
+		}
+	}
+	s.cur = cur
+	return out, true, nil
+}
+
+func (s *logSource) running(ctx context.Context) (bool, string, error) {
 	mc, err := s.c.Get(ctx, s.ref)
 	if err != nil {
 		return false, "", err
@@ -165,7 +206,7 @@ func (s serviceLogSource) fetch(ctx context.Context) (string, error) {
 }
 
 func (s serviceLogSource) running(ctx context.Context) (bool, string, error) {
-	return logSource{c: s.c, ref: s.ref}.running(ctx)
+	return (&logSource{c: s.c, ref: s.ref}).running(ctx)
 }
 
 // lastLines deja las n últimas líneas de s (0 = todas).
@@ -200,15 +241,31 @@ func followLogs(ctx context.Context, w io.Writer, src logFetcher, printed []stri
 		if err != nil {
 			return err
 		}
-		out, err := src.fetch(ctx)
-		if err != nil {
-			return err
+		porCursor := false
+		if st, ok := src.(logStreamer); ok {
+			out, ok, err := st.next(ctx, !alive)
+			if err != nil {
+				return err
+			}
+			if ok {
+				porCursor = true
+				fmt.Fprint(w, out)
+				if !alive && out != "" && !strings.HasSuffix(out, "\n") {
+					fmt.Fprintln(w)
+				}
+			}
 		}
-		cur := splitLines(out)
-		for _, l := range newLines(printed, cur) {
-			fmt.Fprintln(w, l)
+		if !porCursor {
+			out, err := src.fetch(ctx)
+			if err != nil {
+				return err
+			}
+			cur := splitLines(out)
+			for _, l := range newLines(printed, cur) {
+				fmt.Fprintln(w, l)
+			}
+			printed = cur
 		}
-		printed = cur
 		if !alive {
 			fmt.Fprintf(os.Stderr, "(machine is %s; stopped following)\n", state)
 			return nil

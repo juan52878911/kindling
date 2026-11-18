@@ -359,20 +359,24 @@ type Server struct {
 	dueñoEventosUna sync.Once
 
 	// muestra es la última muestra de /metrics y cuándo se tomó (bajo
-	// muestraMu): ver muestraMetrics. muestrear es de dónde sale (nil =
+	// muestraMu): ver muestraMetrics. muestraEnCurso se cierra al acabar la
+	// que se está tomando (nil = ninguna). muestrear es de dónde sale (nil =
 	// mgr.ProcStats; los tests ponen una que cuenta).
-	muestraMu sync.Mutex
-	muestra   api.ProcStats
-	muestraEn time.Time
-	muestrear func() api.ProcStats
+	muestraMu      sync.Mutex
+	muestra        api.ProcStats
+	muestraEn      time.Time
+	muestraEnCurso chan struct{}
+	muestrear      func() api.ProcStats
 
 	// agentesVistos es, por máquina, la firma de la vida de VMM en la que su
 	// agente ya contestó (bajo agentesMu): ver agenteVisto.
 	agentesMu     sync.Mutex
 	agentesVistos map[string]string
-	// vueloGuest son los bytes de /guest en vuelo, y sesionesGuest los
-	// exec, shell y ficheros abiertos por inquilino (vuelo.go).
+	// vueloGuest son los bytes de /guest en vuelo (vueloGuestPeq, los de las
+	// llamadas pequeñas), y sesionesGuest los exec, shell y ficheros abiertos
+	// por inquilino (vuelo.go).
 	vueloGuest    cupo
+	vueloGuestPeq cupo
 	sesionesGuest cupo
 	// sondearAgente es cómo se espera al agente (nil = waitAgent; los tests
 	// ponen uno que cuenta).
@@ -1389,7 +1393,24 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		tail = n
 	}
-	out, err := s.mgr.Logs(r.PathValue("ref"), tail)
+	// offset (con rotation) sigue desde un cursor anterior: los bytes nuevos tal
+	// cual, sin releer la cola entera (kling logs -f). Las cabeceras dan el
+	// cursor siguiente también sin offset, para empezar desde un tail.
+	var out string
+	var cur machine.LogCursor
+	var err error
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil || n < 0 {
+			fail(w, http.StatusBadRequest, fmt.Errorf("invalid offset %q: must be a non-negative integer", v))
+			return
+		}
+		var b []byte
+		b, cur, err = s.mgr.LogsDesde(r.PathValue("ref"), machine.LogCursor{Offset: n, Rotacion: r.URL.Query().Get("rotation")})
+		out = string(b)
+	} else {
+		out, cur, err = s.mgr.LogsCola(r.PathValue("ref"), tail)
+	}
 	if err != nil {
 		// 404 si no hay máquina o aún no tiene consola; leerla mal es del host.
 		code := http.StatusInternalServerError
@@ -1400,6 +1421,8 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set(api.LogOffsetHeader, strconv.FormatInt(cur.Offset, 10))
+	w.Header().Set(api.LogRotationHeader, cur.Rotacion)
 	_, _ = w.Write([]byte(out))
 }
 
@@ -1693,6 +1716,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
+	res.peticionLeida()
 	mc, ok := s.mgr.Get(r.PathValue("ref"))
 	if !ok {
 		fail(w, http.StatusNotFound, errors.New("that machine doesn't exist"))

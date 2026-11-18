@@ -80,6 +80,54 @@ func TestMetricsMuestraCompartida(t *testing.T) {
 	}
 }
 
+// P4: el cerrojo de la muestra se tenía mientras se muestreaba, y una
+// lectura colgada dejaba cada scrape esperando para siempre. Ahora esperan
+// como mucho esperaMuestraMetrics y se llevan la muestra anterior; la
+// colgada sigue siendo una sola, y cuando acaba la usan los siguientes.
+func TestMetricsMuestraColgadaNoBloquea(t *testing.T) {
+	s, h := testServer(t)
+	soltar := make(chan struct{})
+	var muestras atomic.Int32
+	s.muestrear = func() api.ProcStats {
+		muestras.Add(1)
+		<-soltar
+		return api.ProcStats{Machines: []api.ProcStat{{ID: "aaaa000000000001", Name: "m", PID: 1, PSSMiB: 7}}}
+	}
+	vp, ve := plazoMuestraMetrics, esperaMuestraMetrics
+	plazoMuestraMetrics, esperaMuestraMetrics = time.Hour, 50*time.Millisecond
+	t.Cleanup(func() { plazoMuestraMetrics, esperaMuestraMetrics = vp, ve })
+
+	hechos := make(chan int, 10)
+	for range 10 {
+		go func() { hechos <- call(t, h, "GET", "/metrics", "").Code }()
+	}
+	for range 10 {
+		select {
+		case code := <-hechos:
+			if code != 200 {
+				t.Fatalf("GET /metrics = %d", code)
+			}
+		case <-time.After(5 * time.Second):
+			close(soltar)
+			t.Fatal("con la muestra colgada, /metrics no contesta")
+		}
+	}
+	if n := muestras.Load(); n != 1 {
+		t.Fatalf("con una muestra colgada se empezaron %d", n)
+	}
+	close(soltar)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(call(t, h, "GET", "/metrics", "").Body.String(), `kling_machine_pss_mib{id="aaaa000000000001"`) {
+		if time.Now().After(deadline) {
+			t.Fatal("acabada la muestra, /metrics no la usa")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := muestras.Load(); n != 1 {
+		t.Fatalf("muestras: %d", n)
+	}
+}
+
 // Los cubos del histograma van acumulados, como pide el formato de
 // Prometheus; el +Inf es la cuenta total.
 func TestEscribirTelemetriaCubosAcumulados(t *testing.T) {

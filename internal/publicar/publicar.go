@@ -74,6 +74,16 @@ const (
 	pasoMarcar    = 100 * time.Millisecond
 	// udpOcioso: un flujo UDP sin paquetes durante esto se cierra.
 	udpOcioso = 60 * time.Second
+	// topeConexiones: conexiones TCP a la vez por puerto publicado; las de
+	// más se cierran con RST en vez de abrir otro descriptor y otro marcado.
+	topeConexiones = 1024
+	// topeFlujosUDP: flujos UDP a la vez por puerto; con el tope lleno, el
+	// origen nuevo desaloja al flujo que lleva más tiempo sin paquetes.
+	topeFlujosUDP = 256
+	// esperaAcceptMax: lo más que se duerme tras un error de Accept que no es
+	// el cierre (EMFILE, ENFILE...): se reintenta en vez de dejar el puerto
+	// muerto con los clientes colgados en el backlog.
+	esperaAcceptMax = time.Second
 	// barrido: cada cuánto se quitan las publicaciones de máquinas que ya
 	// no existen y se mira la ociosidad.
 	barrido = 2 * time.Second
@@ -92,6 +102,8 @@ type Publicador struct {
 	ahora       func() time.Time
 	// plazoMarcar y barrido: ver las constantes.
 	plazoMarcar, barrido time.Duration
+	// topeTCP y topeUDP: ver topeConexiones y topeFlujosUDP.
+	topeTCP, topeUDP int
 
 	guardando sync.Mutex
 	guardados sync.WaitGroup // guardados en segundo plano aún en curso
@@ -145,6 +157,7 @@ func New(m Maquinas, ruta string, logf func(string, ...any)) *Publicador {
 		escucharUDP: func(a string) (net.PacketConn, error) { return net.ListenPacket("udp", a) },
 		ahora:       time.Now,
 		plazoMarcar: plazoMarcar, barrido: barrido,
+		topeTCP: topeConexiones, topeUDP: topeFlujosUDP,
 		por:   map[string]*maquina{},
 		ctx:   context.Background(),
 		aviso: make(chan struct{}, 1),
@@ -498,16 +511,40 @@ func (mq *maquina) cerrarConexion(ahora time.Time) {
 }
 
 func (p *Publicador) servirTCP(mq *maquina, pt *puerto) {
+	sem := make(chan struct{}, max(p.topeTCP, 1))
+	var espera time.Duration
+	lleno := false
 	for {
 		c, err := pt.ln.Accept()
 		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
+			if errors.Is(err, net.ErrClosed) {
+				return
 			}
-			return
+			// EMFILE y compañía: esperar y seguir, como net/http. Salir
+			// dejaba el listener abierto y sin nadie que aceptara.
+			if espera == 0 {
+				p.logf("publish: 127.0.0.1:%d: accept: %v (retrying)", pt.Host, err)
+				espera = pasoMarcarMin
+			} else {
+				espera = siguientePaso(espera, esperaAcceptMax)
+			}
+			time.Sleep(espera)
+			continue
+		}
+		espera = 0
+		select {
+		case sem <- struct{}{}:
+			lleno = false
+		default:
+			if !lleno {
+				p.logf("publish: 127.0.0.1:%d: %d connections open, refusing more", pt.Host, cap(sem))
+				lleno = true
+			}
+			abortar(c)
+			continue
 		}
 		go func() {
+			defer func() { <-sem }()
 			defer c.Close()
 			mq.abrirConexion(p.ahora())
 			defer func() { mq.cerrarConexion(p.ahora()) }()
@@ -692,14 +729,15 @@ func splice(a, b net.Conn) {
 // hacia el invitado, como el conntrack de un DNAT.
 func (p *Publicador) servirUDP(mq *maquina, pt *puerto) {
 	var mu sync.Mutex
-	flujos := map[string]net.Conn{}
+	flujos := map[string]*flujoUDP{}
 	defer func() {
 		mu.Lock()
 		for _, f := range flujos {
-			f.Close()
+			f.c.Close()
 		}
 		mu.Unlock()
 	}()
+	tope := max(p.topeUDP, 1)
 	buf := make([]byte, 65536)
 	for {
 		n, de, err := pt.pc.ReadFrom(buf)
@@ -720,40 +758,73 @@ func (p *Publicador) servirUDP(mq *maquina, pt *puerto) {
 			if a, ok := mc.Forwards[strconv.Itoa(pt.Guest)+"/udp"]; ok {
 				addr = a
 			}
-			f, err = net.Dial("udp", addr)
+			c, err := net.Dial("udp", addr)
 			if err != nil {
 				continue
 			}
+			f = &flujoUDP{c: c}
 			mu.Lock()
+			if len(flujos) >= tope {
+				// Desalojar al más ocioso: cerrarlo despierta su Read y su
+				// goroutine se quita sola del mapa.
+				var viejo string
+				var hace int64
+				for kk, ff := range flujos {
+					if u := ff.ultimo.Load(); viejo == "" || u < hace {
+						viejo, hace = kk, u
+					}
+				}
+				flujos[viejo].c.Close()
+				delete(flujos, viejo)
+			}
+			// La hora antes de entrar en el mapa: con ultimo a 0, otra llegada
+			// que desalojara lo elegiría como el más ocioso.
+			f.ultimo.Store(time.Now().UnixNano())
 			flujos[k] = f
 			mu.Unlock()
 			mq.abrirConexion(p.ahora())
-			go func(f net.Conn, de net.Addr) {
+			go func(f *flujoUDP, de net.Addr) {
+				b := bufsUDP.Get().(*[]byte)
 				defer func() {
+					bufsUDP.Put(b)
 					mu.Lock()
-					delete(flujos, k)
+					if flujos[k] == f {
+						delete(flujos, k)
+					}
 					mu.Unlock()
-					f.Close()
+					f.c.Close()
 					mq.cerrarConexion(p.ahora())
 				}()
-				b := make([]byte, 65536)
 				for {
-					_ = f.SetReadDeadline(time.Now().Add(udpOcioso))
-					n, err := f.Read(b)
+					_ = f.c.SetReadDeadline(time.Now().Add(udpOcioso))
+					n, err := f.c.Read(*b)
 					if err != nil {
 						return
 					}
+					f.ultimo.Store(time.Now().UnixNano())
 					mq.ultima.Store(p.ahora().UnixNano())
-					if _, err := pt.pc.WriteTo(b[:n], de); err != nil {
+					if _, err := pt.pc.WriteTo((*b)[:n], de); err != nil {
 						return
 					}
 				}
 			}(f, de)
 		}
+		f.ultimo.Store(time.Now().UnixNano())
 		mq.ultima.Store(p.ahora().UnixNano())
-		_, _ = f.Write(buf[:n])
+		_, _ = f.c.Write(buf[:n])
 	}
 }
+
+// flujoUDP es el socket de un origen hacia el invitado; ultimo (UnixNano) es
+// su último paquete en cualquier sentido, para desalojar al más ocioso.
+type flujoUDP struct {
+	c      net.Conn
+	ultimo atomic.Int64
+}
+
+// bufsUDP reutiliza los búferes de 64 KiB de los flujos: cada origen nuevo
+// pedía uno y lo soltaba a los 60 s.
+var bufsUDP = sync.Pool{New: func() any { b := make([]byte, 65536); return &b }}
 
 // ── ociosidad ────────────────────────────────────────────────────────────────
 

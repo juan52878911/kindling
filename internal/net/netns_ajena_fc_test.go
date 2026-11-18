@@ -11,18 +11,20 @@ import (
 // viva de otro daemon (mismo prefijo de id). Setup no lo derriba: falla antes
 // de tocar nada.
 func TestSetupNoDerribaLaRedDeOtroDaemon(t *testing.T) {
-	oldE, oldI, oldX, oldC := existeRed, ipsVeth, ejecutar, comprobarEstado
-	t.Cleanup(func() {
-		existeRed, ipsVeth, ejecutar, comprobarEstado = oldE, oldI, oldX, oldC
-		inputMontado.Store(false)
-	})
+	oldE, oldI := existeRed, ipsVeth
+	t.Cleanup(func() { existeRed, ipsVeth = oldE, oldI })
+	// Las reglas del host, en su sitio y en su posición, en un iptables
+	// falso: Setup las comprueba (también con iptables -S) antes de nada.
+	f := &iptablesFalso{}
+	usarIptablesFalso(t, f)
+	if err := SetupHost(AccesoAgente{}); err != nil {
+		t.Fatal(err)
+	}
 	existeRed = func(*Net) bool { return true }
 	ipsVeth = func(string) []string { return []string{"172.30.3.41"} }
 	var cmds [][]string
-	ejecutar = func(args ...string) error { cmds = append(cmds, args); return nil }
-	// Las reglas del host, en su sitio.
-	comprobarEstado = func([]string) (bool, error) { return true, nil }
-	inputMontado.Store(true)
+	delFalso := ejecutar
+	ejecutar = func(args ...string) error { cmds = append(cmds, args); return delFalso(args...) }
 
 	n := Plan(5, "deadbeef00000001")
 	err := n.Setup(EgressNone, nil, 0)

@@ -119,6 +119,20 @@ func (c *cubo) cuenta(ahora time.Time, usado time.Duration, pct int) {
 	c.base, c.t = usado, ahora
 }
 
+// perdonarPausa descuenta la CPU que el proceso gastó mientras la VM estaba
+// parada (enPausa), hasta dejar una tajada de fichas. Con la VM parada sus
+// vCPU no corren: lo que se gasta entonces es trabajo del host que parar más
+// no reduce (un snapshot, un `kling cp` grande, la pila de red). En kling-hv,
+// que cobra el proceso entero y frena solo las vCPU, ese gasto dejaba el cubo
+// siempre vacío y la VM parada sin fin con cpu_pct bajo (R8). Con el perdón,
+// tras cada parada la VM corre al menos una tajada. En kling-vz el freno para
+// el auxiliar entero y enPausa es casi 0: no cambia nada.
+func (c *cubo) perdonarPausa(enPausa, tajada time.Duration) {
+	if c.fichas < tajada && enPausa > 0 {
+		c.fichas = min(tajada, c.fichas+enPausa)
+	}
+}
+
 // decide dice qué hacer con las fichas que hay: parar la VM el tiempo de
 // ganar una tajada más lo que se debe (parar > 0), o dormir hasta la próxima
 // medida, que es cuando, gastando a vcpus núcleos, podrían acabarse.
@@ -270,6 +284,10 @@ func (s *Server) regularCPU() {
 		c      cubo
 		vmBase VM
 		reposo time.Duration // sueño de la VM ociosa, que crece (ver abajo)
+		// trasPausa: la vuelta anterior paró la VM; antesPausa es la CPU
+		// medida justo antes (ver cubo.perdonarPausa).
+		trasPausa  bool
+		antesPausa time.Duration
 	)
 	for {
 		// Si el último SIGCONT falló, el auxiliar sigue parado (congelado) y
@@ -316,7 +334,11 @@ func (s *Server) regularCPU() {
 		} else {
 			ociosa = usado-c.base < cpuMedidaMin
 			c.cuenta(ahora, usado, pct)
+			if trasPausa {
+				c.perdonarPausa(usado-antesPausa, periodo*time.Duration(pct)/100)
+			}
 		}
+		trasPausa = false
 		parar, dormir := c.decide(pct, vcpus, periodo)
 		if parar == 0 {
 			// Con la VM ociosa (no gastó ni un milisegundo desde la última
@@ -352,6 +374,7 @@ func (s *Server) regularCPU() {
 		t0 := rj.ahora()
 		rj.dormir(parar)
 		s.soltarRegulador(vm)
+		trasPausa, antesPausa = true, usado
 		s.mu.Lock()
 		s.cpuPausado += rj.ahora().Sub(t0)
 		s.mu.Unlock()

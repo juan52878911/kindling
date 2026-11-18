@@ -90,6 +90,9 @@ type falso struct {
 	sandboxesUnaVez   sync.Once
 	sandboxesColgarN  int
 	sandboxesLlamadas int
+	// sandboxesFalla hace fallar GET /sandboxes con un 500: un host que
+	// contesta a su sonda de estado pero no a la lista.
+	sandboxesFalla bool
 	// etiquetasEspera, si no es nil, para el PRIMER PUT labels (antes de
 	// aplicarlo) hasta que se cierre; antes cierra etiquetasEmpezado.
 	etiquetasEspera   chan struct{}
@@ -232,7 +235,12 @@ func (f *falso) rutas() http.Handler {
 		f.mu.Lock()
 		f.sandboxesLlamadas++
 		colgar := f.sandboxesEspera != nil && (f.sandboxesColgarN == 0 || f.sandboxesLlamadas == f.sandboxesColgarN)
+		falla := f.sandboxesFalla
 		f.mu.Unlock()
+		if falla {
+			failDaemon(w, 500, fmt.Errorf("listing timed out"))
+			return
+		}
 		if colgar {
 			f.sandboxesUnaVez.Do(func() { close(f.sandboxesEmpezado) })
 			select {

@@ -66,6 +66,7 @@ CopyStep.Name string json:(none)
 CopyStep.Part string json:(none)
 CopyStep.Size int64 json:(none)
 CopyStep.Skipped bool json:(none)
+CreateVolumeRequest.Labels map[string]string json:"labels,omitempty"
 CreateVolumeRequest.Name string json:"name"
 CreateVolumeRequest.SizeMiB int json:"size_mib,omitempty"
 CredAuditQuery.Denied bool json:(none)
@@ -349,6 +350,8 @@ Info.Version string json:"version"
 KernelMismatch.KernelSHA256 string json:"kernel_sha256"
 KernelMismatch.Kind string json:"kind"
 KernelMismatch.Name string json:"name"
+LogCursor.Offset int64 json:(none)
+LogCursor.Rotation string json:(none)
 Machine.Agent *GuestAgent json:"agent,omitempty"
 Machine.AllowDomains []string json:"allow_domains,omitempty"
 Machine.AllowExec bool json:"allow_exec,omitempty"
@@ -636,6 +639,7 @@ StuckMachine.Transition string json:"transition"
 Ulimit.Hard uint64 json:(none)
 Ulimit.Name string json:(none)
 Ulimit.Soft uint64 json:(none)
+Volume.Labels map[string]string json:"labels,omitempty"
 Volume.Name string json:"name"
 Volume.Path string json:"path"
 Volume.SizeBytes int64 json:"size_bytes"
@@ -804,6 +808,8 @@ const LabelPorts = "kling.ports"
 const LabelService = "service"
 const LayerBootParam = "kling.layer"
 const LegacyVolumeDriveID = "volume"
+const LogOffsetHeader = "X-Kling-Log-Offset"
+const LogRotationHeader = "X-Kling-Log-Rotation"
 const MachineCmdBootParam = "kling.cmd"
 const MachineCmdMMDSKey = "machine_cmd"
 const MachineEnvBootParam = "kling.env"

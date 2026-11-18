@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -17,6 +18,19 @@ import (
 	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
+
+// ServeHandler es Handler para `kling ai serve`: en TCP sin autenticación
+// (-no-auth, solo en loopback) atiende solo peticiones dirigidas a loopback y
+// de un origen de loopback (scheduler.SoloLoopback), porque escuchar en
+// loopback no basta frente a una página abierta en el navegador. En el socket
+// Unix no hace falta, y el Host que mandan los clientes no es de loopback.
+func (g *Gateway) ServeHandler(token string, tcp bool) http.Handler {
+	h := g.Handler(token)
+	if tcp && g.sched.AuthDisabled(token) {
+		return scheduler.SoloLoopback(h)
+	}
+	return h
+}
 
 // Handler expone la API. token vacío y sin tenants = sin autenticación, que
 // solo es aceptable en el socket Unix (lo decide `kling ai serve`).
@@ -61,6 +75,14 @@ func (g *Gateway) limits(h http.Handler) http.Handler {
 			// leerlo (admin rechaza antes de tocar el cuerpo).
 			limit = maxEvalBody
 		}
+		// Todos los POST llevan JSON. Exigirlo deja fuera los envíos que un
+		// navegador hace sin preguntar (formularios, text/plain).
+		if r.Method == http.MethodPost {
+			if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+				writeError(w, http.StatusUnsupportedMediaType, "invalid_request_error", "send the body as Content-Type: application/json")
+				return
+			}
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			t := scheduler.TenantFrom(r.Context())
@@ -76,6 +98,11 @@ func (g *Gateway) limits(h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
+
+// plazoEscritura: lo que puede tardar cada escritura de la respuesta del
+// proxy al cliente. Sin él, un cliente que deja de leer retiene la réplica
+// (y su sitio en la cuota) hasta que se cierre la conexión.
+var plazoEscritura = 30 * time.Second
 
 // maxEvalBody acota el cuerpo de /v1/admin/eval: ~100k commits de ejemplo.
 const maxEvalBody = 64 << 20
@@ -457,7 +484,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Copia acotada. Con streaming se vacía el búfer tras cada lectura para
 	// que cada token llegue cuando sale; sin él, al final.
-	fl, _ := w.(http.Flusher)
+	rc := http.NewResponseController(w)
+	// Sin WriteTimeout en el servidor, el plazo se queda en la conexión:
+	// quitarlo al acabar para la siguiente petición de la misma conexión.
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 	buf := make([]byte, 32<<10)
 	var n int64
 	for {
@@ -469,11 +499,14 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			n += int64(k)
+			_ = rc.SetWriteDeadline(time.Now().Add(plazoEscritura))
 			if _, werr := w.Write(buf[:k]); werr != nil {
 				return // el cliente se fue; el contexto cancela la réplica
 			}
-			if stream && fl != nil {
-				fl.Flush()
+			if stream {
+				if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+					return
+				}
 			}
 		}
 		if rerr != nil {

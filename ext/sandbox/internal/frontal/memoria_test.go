@@ -1,6 +1,7 @@
 package frontal
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -96,4 +97,69 @@ func TestPrecalentadaDeOtroSnapshotNoSeEntrega(t *testing.T) {
 	if sb := crea(t, srv, tokenAlice, CrearPeticion{Template: "node"}); sb.ID != "a/"+buena.ID {
 		t.Fatalf("expected the current prewarmed %s, got %s", buena.ID, sb.ID)
 	}
+}
+
+// Con imagen y sin mem_mib el daemon da 256 MiB: la cuota cuenta eso y no el
+// 0 de la petición. Antes, con un tope total de 512, veinte a la vez cabían.
+func TestTopeDeMemoriaCuentaElCeroDeLaImagen(t *testing.T) {
+	f := nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": f},
+		Tenant{Nombre: "alice", Token: tokenAlice, MaxMemTotalMiB: 512})
+
+	var wg sync.WaitGroup
+	codigos := make([]int, 20)
+	for i := range codigos {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp := pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base"})
+			codigos[i] = resp.StatusCode
+			resp.Body.Close()
+		}(i)
+	}
+	wg.Wait()
+	creados := 0
+	for _, c := range codigos {
+		if c == 201 {
+			creados++
+		}
+	}
+	if creados != 2 {
+		t.Fatalf("%d sandboxes of 256 MiB created under a 512 MiB limit (codes %v)", creados, codigos)
+	}
+}
+
+// Los grafos suman al tope total: reservan lo de sus nodos y, una vez
+// creados, sus máquinas cuentan. Antes reservaban 0 y no sumaban nada.
+func TestTopeDeMemoriaCuentaLosGrafos(t *testing.T) {
+	f := nuevoFalso(t)
+	guardarGrafo(t, f, plantillaAgentePG(0))
+	srv, _ := montar(t, map[string]*falso{"a": f},
+		Tenant{Nombre: "alice", Token: tokenAlice, MaxMemTotalMiB: 768})
+
+	// Dos nodos sin mem_mib: 512 MiB.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/graphs", CrearGrafoPeticion{Template: "agente-pg"}), 201)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/graphs", CrearGrafoPeticion{Template: "agente-pg"}), 429)
+	crea(t, srv, tokenAlice, CrearPeticion{Image: "base", MemMiB: 256})
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", MemMiB: 1}), 429)
+}
+
+// Un host vivo cuya lista falla ahora no se da por caído: no se sabe lo que
+// el tenant tiene ahí y el tope total falla cerrado (503). Un host que no
+// contesta ni a su sonda sí se salta, como antes.
+func TestTopeDeMemoriaHostVivoSinListaFallaCerrado(t *testing.T) {
+	a, b := nuevoFalso(t), nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": a, "b": b},
+		Tenant{Nombre: "alice", Token: tokenAlice, MaxMemTotalMiB: 4096})
+
+	b.mu.Lock()
+	b.sandboxesFalla = true
+	b.mu.Unlock()
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base"}), 503)
+	if n := a.creadas + b.creadas; n != 0 {
+		t.Fatalf("%d sandboxes created without knowing what host b holds", n)
+	}
+
+	b.srv.Close()
+	crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
 }

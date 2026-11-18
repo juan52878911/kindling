@@ -13,7 +13,7 @@ import (
 
 // newTestManager arma un Manager con lo justo para ejercitar la persistencia,
 // sin tocar KVM, red ni cgroups.
-func newTestManager(t *testing.T) *Manager {
+func newTestManager(t testing.TB) *Manager {
 	t.Helper()
 	root := t.TempDir()
 	// Lo que prepara NewManager para el registro de auditoría (credaudit.go).

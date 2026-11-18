@@ -107,3 +107,49 @@ func TestRowDescriptionTruncada(t *testing.T) {
 		t.Fatal("a RowDescription without the 18 bytes was accepted")
 	}
 }
+
+// Con tope, Exec guarda solo las primeras filas (sumando sentencias), marca
+// Truncated, conserva la etiqueta con el total y lee hasta ReadyForQuery.
+func TestExecLimitedTrunca(t *testing.T) {
+	resp := [][]byte{rowDesc("n")}
+	for i := 0; i < 5; i++ {
+		resp = append(resp, dataRow(ptr("fila")))
+	}
+	resp = append(resp, msg('C', []byte("SELECT 5\x00")),
+		rowDesc("m"), dataRow(ptr("otra")), msg('C', []byte("SELECT 1\x00")),
+		msg('Z', []byte("I")))
+	c := conPipe(t, resp...)
+	res, err := c.ExecLimited(context.Background(), "q", Limits{MaxRows: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 2 || len(res[0].Rows) != 3 || !res[0].Truncated || res[0].Command != "SELECT 5" {
+		t.Fatalf("first result = %+v", res)
+	}
+	if len(res[1].Rows) != 0 || !res[1].Truncated || res[1].Command != "SELECT 1" {
+		t.Fatalf("second result = %+v", res[1])
+	}
+}
+
+func TestExecLimitedPorBytes(t *testing.T) {
+	big := string(make([]byte, 100))
+	c := conPipe(t, rowDesc("v"), dataRow(ptr(big)), dataRow(ptr(big)), dataRow(ptr("x")),
+		msg('C', []byte("SELECT 3\x00")), msg('Z', []byte("I")))
+	res, err := c.ExecLimited(context.Background(), "q", Limits{MaxBytes: 150})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// La tercera cabría, pero tras truncar solo se guarda el principio.
+	if len(res) != 1 || len(res[0].Rows) != 1 || !res[0].Truncated {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+func TestExecSinTopeNoTrunca(t *testing.T) {
+	c := conPipe(t, rowDesc("n"), dataRow(ptr("1")), dataRow(ptr("2")),
+		msg('C', []byte("SELECT 2\x00")), msg('Z', []byte("I")))
+	res, err := c.Exec(context.Background(), "q")
+	if err != nil || len(res) != 1 || len(res[0].Rows) != 2 || res[0].Truncated {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+}

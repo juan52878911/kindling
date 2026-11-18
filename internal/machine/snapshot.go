@@ -74,19 +74,33 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 	// del resync (~320 ms con "no route to host"): se recuerda como en Freeze.
 	// Y si escucha, el dorado lo dice (ConAgente): sus copias no se entregan
 	// sin resync (S4).
+	//
+	// Solo un "nadie" claro (un RST) lo hace sin agente: un plazo agotado con
+	// el host cargado no lo prueba, y un dorado sin_agente salta el resync en
+	// TODAS sus copias. Un agente que ya contestó a /healthz (mc.Agent) no
+	// hace falta sondearlo: lo resuelve commit.
 	agente := agenteSinSondear
-	if mc, ok := m.Get(ref); ok && mc.Reachable() && mc.State == api.StateRunning {
-		agente = agenteNoEscuchaba
-		if m.agenteEscucha(ctx, mc.ID) {
+	if mc, ok := m.Get(ref); ok && mc.Agent == nil && mc.Reachable() && mc.State == api.StateRunning {
+		switch m.sondearAgente(ctx, mc.ID) {
+		case sondeoAbierto:
 			agente = agenteEscuchaba
+		case sondeoCerrado:
+			agente = agenteNoEscuchaba
 		}
 	}
 	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false, agente)
 	if err == nil {
 		snap.Warnings = append(snap.Warnings, avisos...)
+		if snap.SinAgente {
+			snap.Warnings = append(snap.Warnings, avisoSinAgente)
+		}
 	}
 	return snap, err
 }
+
+// avisoSinAgente acompaña a un dorado que nace sin agente: sus copias no se
+// resincronizan (reloj, entropía, ganchos de identidad).
+const avisoSinAgente = "nothing answered on the guest agent port when saving: copies of this template will skip the resync (clock, entropy, identity hooks)"
 
 // agenteAlGuardar es lo que kling save sabe del agente de la plantilla al
 // congelarla: si no lo sondeó (un fork, un grafo, una plantilla sin red),
@@ -138,6 +152,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		return nil, marcado(ErrNoMachine, "machine %q does not exist", ref)
 	}
 	mc = cur
+	// Sin sondeo (un fork, un grafo, o kling save con el agente ya conocido),
+	// un agente que contestó a /healthz basta para decir con_agente: sin
+	// ello, un ECONNRESET o un EOF en el resync de una copia contaba como
+	// "nadie" y la copia se entregaba sin resincronizar (S4).
+	if agente == agenteSinSondear && mc.Agent != nil {
+		agente = agenteEscuchaba
+	}
 	// Como Freeze, y con más razón: el volcado de Commit ES el mem.file del
 	// dorado, el que mapean todas las instancias futuras. Un secreto de sesión
 	// inyectado por MMDS acabaría en todas. Se mira aquí, con el cerrojo
@@ -1974,6 +1995,8 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// Un dorado de antes de globo_ritmo.go trae las estadísticas del globo
 	// cada 1 s; la copia, al de reposo.
 	ritmoGloboReposo(ctx, c)
+	// Su caudal de red, si no es el que quedó en el snapshot (red_caudal.go).
+	m.caudalTrasCargar(ctx, c, id)
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
 	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al

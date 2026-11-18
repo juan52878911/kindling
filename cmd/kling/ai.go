@@ -139,7 +139,8 @@ func aiServe(args []string) error {
 		}
 	}
 
-	ctx, stop := ctxWithSignals()
+	// Un servidor: un cliente que cuelga no lo apaga (senalesDeServidor).
+	ctx, stop := ctxWithSignalsServidor()
 	defer stop()
 	client := api.NewClient(hostOf(*host))
 	if len(flagsGiven(fs, "paused-mib")) == 0 {
@@ -172,7 +173,7 @@ func aiServe(args []string) error {
 
 	g.Start(ctx)
 	srv := &http.Server{
-		Handler:           g.Handler(token),
+		Handler:           g.ServeHandler(token, *listen != ""),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       2 * time.Minute,

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,7 +22,8 @@ func TestCheckImagenesRelease(t *testing.T) {
 		{"de otra release", ambas, "1.0.0", true, "vmlinux from v0.20.1, min.ext4 from v0.20.1"},
 		{"solo min es vieja", map[string]string{"vmlinux": "v1.0.0", "min.ext4": "v0.20.1"}, "v1.0.0", true, "min.ext4 from v0.20.1"},
 		{"de esta release", map[string]string{"vmlinux": "v1.0.0"}, "v1.0.0", false, ""},
-		{"sin marca", nil, "1.0.0", false, ""},
+		{"sin imágenes", nil, "1.0.0", false, ""},
+		{"sin marca", map[string]string{"vmlinux": releaseDesconocida}, "1.0.0", true, "vmlinux from an unknown release"},
 		{"kling de desarrollo", ambas, "dev", false, ""},
 	}
 	for _, c := range casos {
@@ -53,4 +56,22 @@ func TestDoctorChecksImagenesRelease(t *testing.T) {
 		}
 	}
 	t.Fatal("doctor no dice que el kernel es de otra release")
+}
+
+// M2: una imagen sin marca no se calla: sale como de release desconocida.
+func TestImagenesDeReleaseSinMarca(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "vmlinux"), []byte("k"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := imagenesDeRelease(dir)
+	if got["vmlinux"] != releaseDesconocida {
+		t.Fatalf("%v", got)
+	}
+	if _, ok := got["min.ext4"]; ok {
+		t.Fatalf("min.ext4 no está y salió: %v", got)
+	}
+	if c, ok := checkImagenesRelease(got, "v1.0.0", dir); !ok || !strings.Contains(c.Detail, "unknown") {
+		t.Fatalf("doctor calla: %+v", c)
+	}
 }

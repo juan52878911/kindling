@@ -410,13 +410,49 @@ func sysctlsNetns(nsIf string) []string {
 
 // restoreRules añade reglas dentro del namespace con un solo iptables-restore
 // --noflush: todas o ninguna, y un proceso en vez de uno por regla.
+//
+// Sin -w (es de la 1.6.2; una más vieja rechazaría la opción): si el cerrojo
+// de xtables está tomado (iptables-legacy con varios arranques a la vez), se
+// reintenta hasta esperaRestore. Antes fallaba al momento y con él el Setup
+// de la máquina. iptables-restore aplica cada tabla de una vez, así que un
+// intento rechazado no deja nada a medias.
 func (n *Net) restoreRules(rules [][]string) error {
-	cmd := exec.Command("ip", "netns", "exec", n.NS, "iptables-restore", "--noflush")
-	cmd.Stdin = strings.NewReader(restoreInput(rules))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("iptables-restore in %s: %v: %s", n.NS, err, strings.TrimSpace(string(out)))
+	entrada := restoreInput(rules)
+	limite := time.Now().Add(esperaRestore)
+	pausa := 20 * time.Millisecond
+	for {
+		out, err := ejecutarRestore(n.NS, entrada)
+		if err == nil {
+			return nil
+		}
+		if !cerrojoOcupado(err, out) || time.Now().After(limite) {
+			return fmt.Errorf("iptables-restore in %s: %v: %s", n.NS, err, strings.TrimSpace(string(out)))
+		}
+		time.Sleep(pausa)
+		pausa = min(2*pausa, 500*time.Millisecond)
 	}
-	return nil
+}
+
+// esperaRestore es lo que restoreRules espera al cerrojo de xtables, como el
+// -w esperaXtables de los demás iptables.
+const esperaRestore = 5 * time.Second
+
+// ejecutarRestore lanza iptables-restore --noflush en el netns ns con entrada
+// por stdin. Sustituible en tests.
+var ejecutarRestore = func(ns, entrada string) ([]byte, error) {
+	cmd := exec.Command("ip", "netns", "exec", ns, "iptables-restore", "--noflush")
+	cmd.Stdin = strings.NewReader(entrada)
+	return cmd.CombinedOutput()
+}
+
+// cerrojoOcupado dice si iptables(-restore) falló porque otro tenía el
+// cerrojo de xtables: código 4 (RESOURCE_PROBLEM) o su mensaje.
+func cerrojoOcupado(err error, out []byte) bool {
+	var salida *exec.ExitError
+	if errors.As(err, &salida) && salida.ExitCode() == 4 {
+		return true
+	}
+	return strings.Contains(string(out), "xtables lock")
 }
 
 // restoreInput es la entrada de iptables-restore para rules, agrupadas por
@@ -838,9 +874,17 @@ func paraComprobar(r []string) []string {
 	return aComprobar(r)
 }
 
-// montarEgresoHost instala las HostEgressRules que falten.
+// montarEgresoHost instala las HostEgressRules que falten, y la del agente
+// en mangle, además, la primera (ponerPrimera).
 func montarEgresoHost() error {
+	agente := reglaAgenteDesdeFuera()
 	for _, r := range HostEgressRules("") {
+		if slices.Equal(r, agente) {
+			if err := ponerPrimera(r); err != nil {
+				return err
+			}
+			continue
+		}
 		esta, err := comprobarEstado(paraComprobar(r))
 		if err != nil {
 			return err
@@ -1008,13 +1052,112 @@ func setupAcceso(a AccesoAgente, euid, egid int) error {
 		log.Printf("net: WARNING: iptables without --suppl-groups (%v): only processes whose primary group is %s reach the machines' agent",
 			err, valorOpcion(r, "--gid-owner"))
 	}
-	for comprobarRegla(sinPosicion(permisoGrupoRootViejo, "-C")) {
-		if ejecutar(permisoGrupoRootViejo...) != nil {
-			break
+	// También su variante sin --suppl-groups, la que quedaba con un iptables
+	// sin esa opción (ver arriba): abría el agente a quien tuviera el grupo
+	// root como primario.
+	for _, viejo := range [][]string{permisoGrupoRootViejo, sinSuppl(permisoGrupoRootViejo)} {
+		comprobar := slices.Clone(viejo)
+		comprobar[1] = "-C" // viejo es un -D
+		for comprobarRegla(comprobar) {
+			if ejecutar(viejo...) != nil {
+				break
+			}
 		}
 	}
-	errs = append(errs, podarAcceso(a, permisos), ponerSiFalta(salto))
+	errs = append(errs, podarAcceso(a, permisos), ponerPrimera(salto))
 	return errors.Join(errs...)
+}
+
+// ponerPrimera deja r (un -I CADENA 1) como la primera regla de su cadena.
+//
+// -C dice si una regla está, no dónde, y las dos que van así (el salto de
+// OUTPUT a cadenaAcceso y la del agente en mangle PREROUTING) solo valen
+// delante: otro cortafuegos que inserte arriba un salto a sus cadenas (ufw,
+// Calico) con un ACCEPT dentro se las saltaba con las reglas en su sitio
+// según -C. Si está pero no la primera, se quita y se vuelve a insertar; el
+// instante sin ella no abre nada que no abriera ya ir detrás.
+func ponerPrimera(r []string) error {
+	primera, err := esPrimera(r)
+	if err != nil || primera {
+		return err
+	}
+	borrar := sinPosicion(r, "-D")
+	if comprobarRegla(sinPosicion(r, "-C")) {
+		log.Printf("net: %s is no longer the first rule of its chain; moving it back to the top", strings.Join(r[1:], " "))
+	}
+	for comprobarRegla(sinPosicion(r, "-C")) {
+		if err := ejecutar(borrar...); err != nil {
+			return err
+		}
+	}
+	return ejecutar(r...)
+}
+
+// esPrimera dice si r (un -I CADENA 1, con su -t si no es filter) es la
+// primera regla de su cadena, según `iptables -S`.
+//
+// Parte cada línea por espacios: r no puede llevar argumentos con espacios
+// (un --comment "a b"), o nunca saldría igual y ponerPrimera la movería en
+// cada vuelta del vigilante.
+func esPrimera(r []string) (bool, error) {
+	tabla, cadena, espec := partirRegla(r)
+	lineas, err := listarTabla(tabla, cadena)
+	if err != nil {
+		return false, err
+	}
+	quiere := normalizarRegla(espec)
+	for _, l := range lineas {
+		f := strings.Fields(l)
+		if len(f) < 2 || f[0] != "-A" {
+			continue // el -P de la política, el -N de la cadena
+		}
+		return slices.Equal(normalizarRegla(f[2:]), quiere), nil
+	}
+	return false, nil
+}
+
+// partirRegla separa una regla "iptables [-t T] -I CADENA 1 espec..." en su
+// tabla ("filter" si no lleva), su cadena y su especificación.
+func partirRegla(r []string) (tabla, cadena string, espec []string) {
+	a := r[1:]
+	tabla = "filter"
+	if len(a) > 1 && a[0] == "-t" {
+		tabla, a = a[1], a[2:]
+	}
+	return tabla, a[1], a[3:]
+}
+
+// normalizarRegla quita lo que `iptables -S` añade al listar (el -m tcp o
+// -m udp implícito del --dport de un -p tcp o -p udp) y ordena lo que queda:
+// -S también reordena las opciones (origen y destino antes que la interfaz,
+// por ejemplo), y las dos reglas que se comparan así no se confunden con
+// otra por el orden.
+func normalizarRegla(f []string) []string {
+	out := quitarMatchImplicito(f)
+	slices.Sort(out)
+	return out
+}
+
+// quitarMatchImplicito es f sin los -m tcp y -m udp, y sin comillas.
+func quitarMatchImplicito(f []string) []string {
+	out := make([]string, 0, len(f))
+	for i := 0; i < len(f); i++ {
+		if f[i] == "-m" && i+1 < len(f) && (f[i+1] == "tcp" || f[i+1] == "udp") {
+			i++
+			continue
+		}
+		out = append(out, strings.Trim(f[i], `"`))
+	}
+	return out
+}
+
+// listarTabla devuelve `iptables -t tabla -S cadena`, una regla por línea.
+var listarTabla = func(tabla, cadena string) ([]string, error) {
+	out, err := exec.Command("iptables", "-w", esperaXtables, "-t", tabla, "-S", cadena).Output()
+	if err != nil {
+		return nil, fmt.Errorf("iptables -t %s -S %s: %w", tabla, cadena, err)
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n"), nil
 }
 
 // ponerSiFalta ejecuta r (-A o -I) si su -C dice que no está.
@@ -1213,31 +1356,52 @@ var inputMontado atomic.Bool
 // inputMu evita que dos Setup a la vez repongan las reglas los dos.
 var inputMu sync.Mutex
 
-// centinelas son, como -C, las reglas del host cuya falta delata un reload
-// del cortafuegos (`ufw reload`, `firewalld --reload`), una por juego: el
-// DROP final de INPUT, el salto de OUTPUT a cadenaAcceso, el REJECT del
+// centinelas son las comprobaciones de las reglas del host cuya falta delata
+// un reload del cortafuegos (`ufw reload`, `firewalld --reload`), una por
+// juego: la primera regla de INPUT (la última que entra: si una reposición
+// se quedó a medias, falta), el salto de OUTPUT a cadenaAcceso, el REJECT del
 // agente dentro de esa cadena, la última DROP de FORWARD y la del agente en
-// mangle.
-func centinelas(acceso AccesoAgente) [][]string {
+// mangle. El salto y la de mangle, además, en su sitio: la primera de su
+// cadena (ponerPrimera).
+func centinelas(acceso AccesoAgente) []func() (bool, error) {
 	reglas := HostInputRules()
 	_, cierre, salto := reglasAcceso(acceso, os.Geteuid(), os.Getegid())
-	return [][]string{
-		paraComprobar(reglas[len(reglas)-1]),
-		paraComprobar(salto),
-		paraComprobar(cierre[0]),
-		paraComprobar(centinelaForward()),
-		paraComprobar(reglaAgenteDesdeFuera()),
+	comprobar := func(r []string) func() (bool, error) {
+		return func() (bool, error) { return comprobarEstado(paraComprobar(r)) }
 	}
+	primera := func(r []string) func() (bool, error) {
+		return func() (bool, error) { return esPrimera(r) }
+	}
+	return []func() (bool, error){
+		comprobar(reglas[0]),
+		primera(salto),
+		comprobar(cierre[0]),
+		comprobar(centinelaForward()),
+		primera(reglaAgenteDesdeFuera()),
+	}
+}
+
+// AsegurarHost es asegurarHostInput para quien no monta una red: el
+// vigilante, con las máquinas ya en marcha, y el thaw que conserva la red del
+// freeze. Sin él, tras un reload del cortafuegos las máquinas vivas seguían
+// sin barreras hasta que otra montara la suya. Si nadie pidió SetupHost (sin
+// red en el host, macOS), no hay nada que asegurar.
+func AsegurarHost() error {
+	if accesoPedido.Load() == nil {
+		return nil
+	}
+	return asegurarHostInput()
 }
 
 // asegurarHostInput repone las reglas del host si un reload del cortafuegos
 // las borró después de SetupHost: sin ellas, un invitado con salida llega a
 // los servicios del host por su IP pública, y un contenedor o un usuario
-// local, al agente. Mira un centinela por juego (centinelas), los cinco -C a
+// local, al agente. Mira un centinela por juego (centinelas), los cinco a
 // la vez, y reinstala el juego al que le falta el suyo.
 //
 // Si SetupHost no llegó a montarlo todo, lo reintenta; si tampoco puede,
-// devuelve el error y Setup no monta la red.
+// devuelve el error y Setup no monta la red. Una reposición que falla a
+// medias cuenta igual: la siguiente vuelve a montarlo todo con SetupHost.
 func asegurarHostInput() error {
 	if !inputMontado.Load() {
 		inputMu.Lock()
@@ -1268,6 +1432,16 @@ func asegurarHostInput() error {
 	}
 	inputMu.Lock()
 	defer inputMu.Unlock()
+	if err := reponerHost(estan, acceso); err != nil {
+		inputMontado.Store(false)
+		return fmt.Errorf("%w: %v", ErrHostSinBarreras, err)
+	}
+	return nil
+}
+
+// reponerHost reinstala los juegos de reglas cuyo centinela falta (estan, en
+// el orden de centinelas).
+func reponerHost(estan []bool, acceso AccesoAgente) error {
 	if !estan[0] {
 		log.Printf("net: the host INPUT rules for the machines are gone (a firewall reload?); reinstalling them")
 		if err := setupHostInput(); err != nil {
@@ -1275,29 +1449,30 @@ func asegurarHostInput() error {
 		}
 	}
 	if !estan[1] || !estan[2] {
-		log.Printf("net: the host OUTPUT rules for the machines are gone (a firewall reload?); reinstalling them")
+		log.Printf("net: the host OUTPUT rules for the machines are gone or out of place (a firewall reload?); reinstalling them")
 		if err := setupAcceso(acceso, os.Geteuid(), os.Getegid()); err != nil {
 			return err
 		}
 	}
 	if !estan[3] || !estan[4] {
-		log.Printf("net: the host FORWARD rules for the machines are gone (a firewall reload?); reinstalling them")
+		log.Printf("net: the host FORWARD rules for the machines are gone or out of place (a firewall reload?); reinstalling them")
 		return montarEgresoHost()
 	}
 	return nil
 }
 
-// comprobarALaVez lanza los -C en paralelo: son procesos independientes que
-// solo leen, y así cuestan lo que el más lento y no la suma.
-func comprobarALaVez(reglas [][]string) ([]bool, error) {
-	estan := make([]bool, len(reglas))
-	errs := make([]error, len(reglas))
+// comprobarALaVez lanza las comprobaciones en paralelo: son procesos
+// independientes que solo leen, y así cuestan lo que el más lento y no la
+// suma.
+func comprobarALaVez(comprobaciones []func() (bool, error)) ([]bool, error) {
+	estan := make([]bool, len(comprobaciones))
+	errs := make([]error, len(comprobaciones))
 	var wg sync.WaitGroup
-	for i, r := range reglas {
+	for i, c := range comprobaciones {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			estan[i], errs[i] = comprobarEstado(r)
+			estan[i], errs[i] = c()
 		}()
 	}
 	wg.Wait()

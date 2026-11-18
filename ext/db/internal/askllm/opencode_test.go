@@ -38,7 +38,7 @@ func TestOpenCodeBloqueDeCodigo(t *testing.T) {
 	}
 	b, _ := os.ReadFile(log)
 	l := string(b)
-	for _, want := range []string{"run --pure -m " + DefaultOpenCodeModel, "--format json", "STDIN: SYS  PROMPT-Q"} {
+	for _, want := range []string{"run --pure --agent " + agenteAsk + " -m " + DefaultOpenCodeModel, "--format json", "STDIN: SYS  PROMPT-Q"} {
 		if !strings.Contains(l, want) {
 			t.Errorf("log lacks %q:\n%s", want, l)
 		}

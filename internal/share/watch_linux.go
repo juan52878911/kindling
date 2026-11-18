@@ -22,7 +22,10 @@ import (
 // watchesPorSesion es el tope de rutas vigiladas de una sesión. Las
 // vigilancias de inotify no salen de un fondo del daemon (como watchFDs en
 // macOS) sino de fs.inotify.max_user_watches.
-const watchesPorSesion = 4096
+const (
+	watchesPorSesion = 4096
+	kernelPorSesion  = watchesPorSesion
+)
 
 // Presupuesto de instancias de inotify de todo el daemon. Hay una por sesión,
 // y el kernel no las cuenta por proceso sino por uid

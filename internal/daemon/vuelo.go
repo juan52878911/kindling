@@ -79,6 +79,21 @@ var (
 	guestVueloInquilino int64 = factorMemoriaGuest * (guestRequestMaxBody + api.GuestMaxBodyCap)
 )
 
+// Carril de las llamadas pequeñas (R2 de la ronda 5). La reserva de una
+// llamada dura lo que tarde el invitado en contestar, y eso solo tiene plazo
+// de inactividad: dos inquilinos con una llamada grande cada uno ante un
+// invitado lento llenaban guestVueloMax, y desde ahí todo /guest era un 429,
+// también las llamadas JSON-RPC de pocos KiB y las del admin. Ahora lo que
+// aparta una llamada mientras no pase de guestPequena sale de un presupuesto
+// aparte (guestCarrilMax, con guestCarrilInquilino por inquilino), que las
+// grandes no tocan; la que crece más se pasa entera al general. Variables
+// para los tests.
+var (
+	guestPequena         int64 = factorMemoriaGuest << 20
+	guestCarrilMax       int64 = 64 << 20
+	guestCarrilInquilino int64 = 16 << 20
+)
+
 // factorMemoriaGuest es cuánta memoria cuesta cada byte leído: el búfer del
 // decodificador (o de io.ReadAll), que crece doblando, y la cadena que sale
 // de él. Medido con 8 peticiones de 100 MiB, el pico de heap era unas tres
@@ -90,14 +105,26 @@ var errGuestSinSitio = errors.New("the daemon has too many large guest calls in 
 
 // reservaGuest es lo que una llamada a /guest lleva apartado del cupo.
 type reservaGuest struct {
-	c     *cupo
-	clave string
-	n     int64
+	// c es el presupuesto general y peq el carril de las pequeñas (nil = sin
+	// carril). Lo apartado, n, está entero en uno de los dos: en c si
+	// enGeneral.
+	c, peq    *cupo
+	clave     string
+	n         int64
+	enGeneral bool
 }
 
 // reservaGuest abre la reserva de una llamada de clave (inquilinoDe).
 func (s *Server) reservaGuest(clave string) *reservaGuest {
-	return &reservaGuest{c: &s.vueloGuest, clave: clave}
+	return &reservaGuest{c: &s.vueloGuest, peq: &s.vueloGuestPeq, clave: clave}
+}
+
+// donde es el cupo en el que está lo apartado.
+func (r *reservaGuest) donde() *cupo {
+	if r.enGeneral || r.peq == nil {
+		return r.c
+	}
+	return r.peq
 }
 
 // tomar aparta n bytes más, o devuelve errGuestSinSitio.
@@ -105,14 +132,47 @@ func (r *reservaGuest) tomar(n int64) error {
 	if r == nil || n <= 0 {
 		return nil
 	}
-	if !r.c.tomar(r.clave, n, guestVueloMax, guestVueloInquilino) {
-		if r.clave != "" {
-			return fmt.Errorf("%w (this tenant's share is %d MiB of memory; retry when the others finish)", errGuestSinSitio, guestVueloInquilino>>20)
+	if !r.enGeneral && r.peq != nil {
+		if r.n+n <= guestPequena && r.peq.tomar(r.clave, n, guestCarrilMax, guestCarrilInquilino) {
+			r.n += n
+			return nil
 		}
-		return fmt.Errorf("%w (%d MiB of memory; retry when the others finish)", errGuestSinSitio, guestVueloMax>>20)
+		// No es pequeña (o el carril está lleno): todo al general, de una vez.
+		if !r.c.tomar(r.clave, r.n+n, guestVueloMax, guestVueloInquilino) {
+			return r.sinSitio()
+		}
+		if r.n > 0 {
+			r.peq.soltar(r.clave, r.n)
+		}
+		r.enGeneral = true
+		r.n += n
+		return nil
 	}
+	if !r.c.tomar(r.clave, n, guestVueloMax, guestVueloInquilino) {
+		return r.sinSitio()
+	}
+	r.enGeneral = true
 	r.n += n
 	return nil
+}
+
+// sinSitio es el error de una reserva que no cabe.
+func (r *reservaGuest) sinSitio() error {
+	if r.clave != "" {
+		return fmt.Errorf("%w (this tenant's share is %d MiB of memory; retry when the others finish)", errGuestSinSitio, guestVueloInquilino>>20)
+	}
+	return fmt.Errorf("%w (%d MiB of memory; retry when the others finish)", errGuestSinSitio, guestVueloMax>>20)
+}
+
+// peticionLeida rebaja lo apartado por la petición, ya decodificada, a lo
+// que de verdad sigue en memoria: la cadena del cuerpo (un byte por byte
+// leído). El búfer del decodificador, el resto de factorMemoriaGuest, ya es
+// basura, y retenerlo mientras el invitado contesta dejaba sin sitio a otros.
+func (r *reservaGuest) peticionLeida() {
+	if r == nil {
+		return
+	}
+	r.devolver(r.n - r.n/factorMemoriaGuest)
 }
 
 // devolver suelta n de lo apartado (lo que un Read apartó y no llegó).
@@ -120,7 +180,7 @@ func (r *reservaGuest) devolver(n int64) {
 	if n <= 0 {
 		return
 	}
-	r.c.soltar(r.clave, n)
+	r.donde().soltar(r.clave, n)
 	r.n -= n
 }
 
@@ -129,7 +189,7 @@ func (r *reservaGuest) soltar() {
 	if r == nil || r.n == 0 {
 		return
 	}
-	r.c.soltar(r.clave, r.n)
+	r.donde().soltar(r.clave, r.n)
 	r.n = 0
 }
 
