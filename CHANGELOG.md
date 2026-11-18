@@ -16,6 +16,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- MCP bridge (browser mode): when the shared Chromium dies, the sessions attached to it are closed so clients reconnect to a new one, instead of failing until they expire.
 - MCP bridge (http mode): the shared server is no longer restarted at random with two or more MMDS secrets, nor restarted without them when MMDS doesn't answer.
 - MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - MCP gateway `/mcp/_all`: with the primary full, a conversation keeps using the replica it scaled out to instead of starting a new one (and losing its state) on every `tools/call`.

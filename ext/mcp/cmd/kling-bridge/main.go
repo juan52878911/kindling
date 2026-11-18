@@ -407,6 +407,10 @@ type session struct {
 	reqTimeout time.Duration
 	// exitCh recibe el estado de salida si el cosechador se adelanta a Wait.
 	exitCh chan syscall.WaitStatus
+	// navegador es el Chromium compartido al que esta sesión se conectó por CDP
+	// (nil fuera del modo navegador). Si muere, vigilarNavegador cierra la
+	// sesión: sin él, sus herramientas fallan hasta que caduca por ociosa.
+	navegador *hijoVigilado
 
 	// scanErr es por que dejo de leerse la salida del servidor, cuando no fue
 	// un cierre normal. Sin esto, una linea demasiado larga se reportaba como
@@ -876,6 +880,13 @@ func (b *bridge) spawn() (*session, error) {
 	// mismos para todas las sesiones). Sin MMDS, es exactamente b.env.
 	env, secrets := b.sessionEnv(id)
 
+	// El Chromium que ensureBrowser acaba de asegurar. Si ya murió, la sesión
+	// nacería atada a un navegador muerto que vigilarNavegador ya no verá.
+	nav := b.navegadorActual()
+	if b.browser != nil && !nav.vivo() {
+		return nil, fmt.Errorf("the shared browser is not running")
+	}
+
 	// Si /reset dejó un hijo caliente y esta sesión puede adoptarlo —vivo y sin
 	// secretos que él no tenga—, se ahorra el arranque del runtime, que es lo
 	// que anulaba la ventaja del snapshot dorado. Ver warm.go. spawn corre sin
@@ -884,6 +895,7 @@ func (b *bridge) spawn() (*session, error) {
 	adopted := b.adoptWarmLocked(id, secrets)
 	b.mu.Unlock()
 	if adopted != nil {
+		adopted.navegador = nav
 		return adopted, nil
 	}
 
@@ -915,6 +927,7 @@ func (b *bridge) spawn() (*session, error) {
 		pending:    map[string]chan json.RawMessage{},
 		notes:      make(chan json.RawMessage, 32),
 		done:       make(chan struct{}),
+		navegador:  nav,
 	}
 	go s.readLoop(stdout)
 	log.Printf("session %s: MCP server started (pid %d)", s.id[:8], cmd.Process.Pid)
