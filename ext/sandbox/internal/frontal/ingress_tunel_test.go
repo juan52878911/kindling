@@ -68,6 +68,10 @@ func montarTunel(t *testing.T, anuncia bool, mod func(*Opciones)) *bancoTunel {
 			return
 		}
 		pn, _ := strconv.Atoi(r.URL.Query().Get("port"))
+		if !f.puertoExpuesto(r.PathValue("ref"), pn) {
+			failDaemon(w, 403, fmt.Errorf("port %d is not published: list it in its %s label", pn, api.LabelPorts))
+			return
+		}
 		real, ok := backend[pn]
 		if !ok {
 			failDaemon(w, 502, fmt.Errorf("nothing listens on %d", pn))
@@ -244,5 +248,34 @@ func TestIngresoSinCapacidadNoUsaTunel(t *testing.T) {
 	}
 	if b2.nTuneles() != 0 {
 		t.Fatal("SoloGuest no debe abrir túneles")
+	}
+}
+
+// declararPuerto une a kling.ports sin pisar lo que había y respeta el tope.
+func TestIngresoDeclaraPuertoSinPisar(t *testing.T) {
+	b := montarTunel(t, true, nil)
+	b.f.mu.Lock()
+	b.f.maquinas[b.sb.ID].Labels[api.LabelPorts] = "9000, 5432"
+	b.f.mu.Unlock()
+	cab := map[string]string{"Authorization": "Bearer " + tokenAlice}
+	if r, body := b.get(t, 3000, "/", cab); r.StatusCode != 200 {
+		t.Fatalf("%d %q", r.StatusCode, body)
+	}
+	b.f.mu.Lock()
+	got := b.f.maquinas[b.sb.ID].Labels[api.LabelPorts]
+	b.f.mu.Unlock()
+	if got != "9000,5432,3000" {
+		t.Fatalf("kling.ports = %q, quería 9000,5432,3000", got)
+	}
+	// Al tope: no se declara otro puerto.
+	var ps []string
+	for i := 0; i < maxPuertosDeclarados; i++ {
+		ps = append(ps, strconv.Itoa(20000+i))
+	}
+	b.f.mu.Lock()
+	b.f.maquinas[b.sb.ID].Labels[api.LabelPorts] = strings.Join(ps, ",")
+	b.f.mu.Unlock()
+	if r, _ := b.get(t, 3001, "/", cab); r.StatusCode == 200 {
+		t.Fatal("pasó con kling.ports lleno")
 	}
 }

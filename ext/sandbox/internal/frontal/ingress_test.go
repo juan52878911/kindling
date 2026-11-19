@@ -88,8 +88,22 @@ func (f *falso) rutasIngreso(m *http.ServeMux) {
 			failDaemon(w, 403, fmt.Errorf("port %d is not exposed", req.Port))
 			return
 		}
+		// Como el daemon real: solo GuestPort o los de kling.ports.
+		if !f.puertoExpuesto(r.PathValue("ref"), req.Port) {
+			failDaemon(w, 403, fmt.Errorf("port %d is not exposed: list it in its %s label", req.Port, api.LabelPorts))
+			return
+		}
 		writeJSON(w, 200, api.GuestResponse{Status: 201, Body: "via guest " + req.Path, Headers: map[string]string{"Content-Type": "text/plain"}})
 	})
+}
+
+// puertoExpuesto aplica la regla del daemon real (tunel.go, server.go): solo
+// api.GuestPort o los puertos de la etiqueta kling.ports de la máquina.
+func (f *falso) puertoExpuesto(ref string, puerto int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mc, ok := f.maquinas[ref]
+	return ok && mc.Exposes(puerto)
 }
 
 // servicioInvitado es el servidor que "escucha dentro del sandbox": enseña las
