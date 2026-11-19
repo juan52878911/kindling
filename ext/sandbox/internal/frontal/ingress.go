@@ -100,8 +100,14 @@ type entrada struct {
 	h       *hosts.Host
 	mc      *api.Machine
 	hasta   time.Time
-	puertos map[int]int // puerto del invitado -> puerto publicado en el host
+	puertos map[int]int // puerto del invitado -> puerto publicado en el host (0: /guest, puertoTunel: túnel)
+	// tunel: 0 sin mirar, 1 el host anuncia tcp-tunnel, -1 no lo anuncia.
+	tunel int
+	tr    *http.Transport // transporte por el túnel (un sandbox por transporte)
 }
+
+// puertoTunel marca en preparar que el sandbox se alcanza por el túnel TCP del núcleo.
+const puertoTunel = -1
 
 func nuevoIngreso(s *Servidor, o IngresoOpciones) (*ingreso, error) {
 	if o.Dominio == "" {
@@ -387,7 +393,7 @@ func (g *ingreso) servir(w http.ResponseWriter, r *http.Request) {
 		g.porGuest(w, r, e, puerto)
 		return
 	}
-	g.proxy(w, r, id, puerto, hp)
+	g.proxy(w, r, e, id, puerto, hp)
 }
 
 // fallo contesta cuando no se pudo ni resolver el sandbox.
@@ -499,8 +505,17 @@ func (g *ingreso) soltar(id string) {
 
 func (g *ingreso) olvidar(id string) {
 	g.mu.Lock()
+	e := g.cache[id]
 	delete(g.cache, id)
 	g.mu.Unlock()
+	if e != nil {
+		e.mu.Lock()
+		tr := e.tr
+		e.mu.Unlock()
+		if tr != nil {
+			tr.CloseIdleConnections()
+		}
+	}
 }
 
 // entrada devuelve el sandbox id (sin mirar de quién es: eso lo decide
@@ -562,7 +577,21 @@ func (g *ingreso) preparar(ctx context.Context, e *entrada, puerto int) (int, er
 	default:
 		return 0, &api.StatusError{Code: http.StatusConflict, Message: fmt.Sprintf("the sandbox is %s", e.mc.State)}
 	}
-	if !e.h.Local() || g.o.SoloGuest {
+	if g.o.SoloGuest {
+		e.puertos[puerto] = 0
+		return 0, nil
+	}
+	if e.tunel == 0 {
+		e.tunel = -1
+		if info, err := e.h.Cliente.Info(ctx); err == nil && info.Has(api.CapabilityTCPTunnel) {
+			e.tunel = 1
+		}
+	}
+	if e.tunel > 0 {
+		e.puertos[puerto] = puertoTunel
+		return puertoTunel, nil
+	}
+	if !e.h.Local() {
 		e.puertos[puerto] = 0
 		return 0, nil
 	}
@@ -601,10 +630,44 @@ func (g *ingreso) preparar(ctx context.Context, e *entrada, puerto int) (int, er
 
 // ---- proxy
 
-func (g *ingreso) proxy(w http.ResponseWriter, r *http.Request, id string, puerto, hp int) {
+// transporteTunel devuelve el transporte del sandbox, que abre cada conexión
+// con DialTCP. Los plazos van por contexto: SetDeadline del túnel no hace nada.
+func (g *ingreso) transporteTunel(e *entrada) *http.Transport {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.tr == nil {
+		h, ref := e.h, e.mc.ID
+		e.tr = &http.Transport{
+			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+				_, ps, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				pn, err := strconv.Atoi(ps)
+				if err != nil {
+					return nil, err
+				}
+				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				return h.Cliente.DialTCP(ctx, ref, pn)
+			},
+			ResponseHeaderTimeout: g.o.EsperaCabeceras,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       30 * time.Second,
+		}
+	}
+	return e.tr
+}
+
+func (g *ingreso) proxy(w http.ResponseWriter, r *http.Request, e *entrada, id string, puerto, hp int) {
 	destino := net.JoinHostPort("127.0.0.1", strconv.Itoa(hp))
+	tr := g.tr
+	if hp == puertoTunel {
+		destino = net.JoinHostPort("guest", strconv.Itoa(puerto))
+		tr = g.transporteTunel(e)
+	}
 	rp := &httputil.ReverseProxy{
-		Transport: g.tr,
+		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = destino
