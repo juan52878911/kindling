@@ -1104,6 +1104,16 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `POST /machines/{ref}/hooks` | 200 (también si fallaron) | `400` `wait`; `409` no llegó a lista sin respuesta del agente (p. ej. uno anterior); `estadoDeListo` |
 | `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy` (64 exec a la vez); `409` la máquina se congeló o paró con el exec en curso; `500`; `502` |
 | `POST /machines/{ref}/shell` | 101 | `426` sin `Upgrade`; `413`/`400` cuerpo (64 KiB); `objetivoConAgente`; `501`; `429` `guest_busy` (8 shells a la vez); `502`; `500` |
+| `POST /machines/{ref}/processes` | lo que diga el agente (2xx) | `413`/`400` cuerpo; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla; `409` la máquina se congeló o paró en curso |
+| `GET /machines/{ref}/processes` | lo que diga el agente (2xx) | `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `GET /machines/{ref}/processes/{pid}` | lo que diga el agente (2xx) | `400` `pid` no numérico; `404` no existe ese pid; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `DELETE /machines/{ref}/processes/{pid}` | lo que diga el agente (2xx) | `400` `pid` no numérico; `404` no existe ese pid; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `GET /machines/{ref}/processes/{pid}/output` | lo que diga el agente (2xx) | `400` `pid` no numérico o `wait` inválido; `404` no existe ese pid; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `POST /machines/{ref}/processes/{pid}/signal` | lo que diga el agente (2xx) | `413`/`400` cuerpo o `pid`; `404` no existe ese pid; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `POST /machines/{ref}/sessions` | lo que diga el agente (2xx) | `413`/`400` cuerpo; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `GET /machines/{ref}/sessions` | lo que diga el agente (2xx) | `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `GET /machines/{ref}/sessions/{id}` | lo que diga el agente (2xx) | `404` no existe esa sesión; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
+| `DELETE /machines/{ref}/sessions/{id}` | lo que diga el agente (2xx) | `404` no existe esa sesión; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy`; `502` el agente falla |
 | `GET /machines/{ref}/tcp` | 101 | `426` sin `Upgrade`; `400` `port` ausente o fuera de 1–65535; `403` puerto no publicado en `kling.ports` (o el del agente); `404`; `409` no corre; `429` 256 túneles abiertos en la máquina; `502` nada escucha en el puerto tras 15 s; `500` |
 | `GET` · `PUT` · `DELETE /machines/{ref}/files` | lo que diga el agente (2xx) | `400` sin `path`, tar con `..`, ruta absoluta, enlace que sale, dispositivo o duplicado; `413` > 64 MiB (o 256 MiB de bajada, 100 000 entradas en un tar); `objetivoConAgente`; `501` agente < v0.7; un 4xx del agente tal cual; un 5xx del agente, `502`; `500` |
 | `POST /shares/uploads` | 201 | `413`; `400`; `500` |
