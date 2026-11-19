@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -73,9 +74,31 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, req.Cmd[0], req.Cmd[1:]...)
-	cmd.Dir = req.Dir
-	cmd.Env = append(append([]string(nil), env...), req.Env...)
+	// Con sesión, el comando corre dentro de una shell que vuelca su cwd y su
+	// entorno finales por el descriptor 3 (sesiones.go).
+	argv, dir, baseEnv := req.Cmd, req.Dir, env
+	var cp *capturaSesion
+	if req.Session != "" {
+		ses, ok := usarSesion(req.Session)
+		if !ok {
+			return api.ExecEvent{Error: fmt.Sprintf("no session %q (expired or never created)", req.Session)}
+		}
+		baseEnv = ses.entornoDe(env)
+		if dir == "" {
+			dir = ses.dir
+		}
+		argv = []string{"sh", "-c", envolturaSesion, "sh", guionDe(req.Cmd)}
+		var err error
+		if cp, err = nuevaCaptura(); err != nil {
+			return api.ExecEvent{Error: fmt.Sprintf("session capture: %v", err)}
+		}
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Env = append(append([]string(nil), baseEnv...), req.Env...)
+	if cp != nil {
+		cmd.ExtraFiles = []*os.File{cp.pw}
+	}
 	if req.User != "" {
 		cred, home, err := credencialExec(req.User)
 		if err != nil {
@@ -85,7 +108,7 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 			if home != "" {
 				// La HOME del usuario, salvo que la pida el propio exec.
-				cmd.Env = append(setEnv(append([]string(nil), env...), "HOME", home), req.Env...)
+				cmd.Env = append(setEnv(append([]string(nil), baseEnv...), "HOME", home), req.Env...)
 			}
 		}
 	}
@@ -117,11 +140,24 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	start := time.Now()
 	exitCh, err := DefaultReaper.StartTracked(cmd)
 	if err != nil {
+		if cp != nil {
+			cp.abortar()
+		}
 		return api.ExecEvent{Error: fmt.Sprintf("could not execute %q: %v", req.Cmd[0], err)}
+	}
+	if cp != nil {
+		cp.arrancada()
 	}
 	err = WaitFor(cmd, exitCh)
 	if cmd.Process != nil {
 		DefaultReaper.Forget(cmd.Process.Pid)
+	}
+	if cp != nil {
+		// Solo si el trap llegó a escribir: un comando matado por el plazo no
+		// toca la sesión.
+		if st, ok := cp.resultado(); ok {
+			guardarEstado(req.Session, st.dir, envComoMapa(append(append([]string(nil), baseEnv...), req.Env...)), st.env)
+		}
 	}
 	stdout.flush()
 	stderr.flush()

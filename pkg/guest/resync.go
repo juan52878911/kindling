@@ -117,6 +117,10 @@ func ResyncHandler() http.HandlerFunc {
 			if n := cortarExecs(); n > 0 {
 				log.Printf("resync: stopped %d command(s) left running in the snapshot", n)
 			}
+			// Y los procesos de fondo y las sesiones: eran de otra máquina.
+			if n := limpiarProcesos(); n > 0 {
+				log.Printf("resync: stopped %d background process(es) left running in the snapshot", n)
+			}
 		}
 		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
 		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
@@ -199,7 +203,7 @@ func validarResync(req api.GuestResync) error {
 // /share conecta una carpeta del host.
 var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns", "/share",
 	api.GuestReadyPath, api.GuestHooksPath, api.GuestMemInfoPath, api.GuestServicePath, api.GuestProcsPath,
-	"/machine", api.GuestDropCachesPath}
+	"/machine", api.GuestDropCachesPath, api.GuestProcessesPath, api.GuestSessionsPath}
 
 // IsControlPath dice si p (una ruta ya limpia, con path.Clean) es una ruta de
 // control del agente y no algo que un cliente del servicio deba alcanzar.
