@@ -6,10 +6,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from kindling_sandbox import (AsyncSandbox, Client, ConfigError, NotFound, RateLimited, Sandbox,
+from kindling_sandbox import (Admin, AsyncSandbox, Forbidden, Client, ConfigError, NotFound, RateLimited, Sandbox,
                               TransportError, Unauthorized, ApiError, BadRequest)
 
-from servidor_falso import TOKEN, ServidorFalso
+from servidor_falso import TOKEN, TOKEN_USUARIO, ServidorFalso
 
 
 class Base(unittest.TestCase):
@@ -310,6 +310,56 @@ class TestConfigYToken(Base):
     def test_limpia_token_en_mensaje_del_servidor(self):
         c = Client(url=self.srv.url, token="abc123secreto")
         self.assertNotIn("abc123secreto", c._limpia("falló con abc123secreto dentro"))
+
+
+class TestAdmin(Base):
+    def setUp(self):
+        super().setUp()
+        self.adm = Admin(**self.kw)
+
+    def test_tenants_ciclo(self):
+        t = self.adm.create_tenant("ana", limits={"max_sandboxes": 3})
+        self.assertEqual((t.id, t.source, t.read_only, t.limits), ("ana", "store", False, {"max_sandboxes": 3}))
+        self.assertEqual(t.extra, {"campo_nuevo": 1})  # tolera campos nuevos
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]),
+                         {"name": "ana", "admin": False, "limits": {"max_sandboxes": 3}})
+        self.assertEqual([x.id for x in self.adm.list_tenants()], ["ana"])
+        u = self.adm.update_tenant("ana", admin=True)
+        self.assertTrue(u.admin)
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]), {"admin": True})
+        self.assertEqual(self.adm.get_tenant("ana").limits, {"max_sandboxes": 3})
+        self.adm.delete_tenant("ana")
+        with self.assertRaises(NotFound):
+            self.adm.get_tenant("ana")
+
+    def test_claves_crear_rotar_revocar(self):
+        self.adm.create_tenant("ana")
+        k = self.adm.create_key("ana")
+        self.assertTrue(k.key.startswith("ksk_" + k.id))
+        n = self.adm.rotate_key("ana", k.id, grace_minutes=5)
+        self.assertEqual((n.old_key_id, n.old_key_expires), (k.id, "en 5 min"))
+        self.assertNotEqual(n.key, k.key)
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]), {"grace_minutes": 5})
+        self.adm.rotate_key("ana", n.id)  # sin cuerpo: la gracia por defecto es del gateway
+        self.assertEqual(self.srv.estado.peticiones[-1][4], b"")
+        self.adm.revoke_key("ana", n.id)
+        fichas = self.adm.get_tenant("ana").keys
+        self.assertEqual(len(fichas), 3)
+        self.assertIsNotNone(fichas[1].revoked)
+        # La lectura no trae secretos.
+        self.assertNotIn("key", self.srv.estado.tenants["ana"])
+        with self.assertRaises(NotFound):
+            self.adm.revoke_key("ana", "nope")
+
+    def test_la_clave_no_sale_en_repr_ni_en_errores(self):
+        self.adm.create_tenant("ana")
+        k = self.adm.create_key("ana")
+        self.assertNotIn(k.key, repr(k) + str(k))
+        self.assertNotIn(TOKEN, repr(self.adm.client))
+
+    def test_sin_admin_es_forbidden(self):
+        with self.assertRaises(Forbidden):
+            Admin(url=self.srv.url, token=TOKEN_USUARIO).list_tenants()
 
 
 class TestAsync(Base):

@@ -35,6 +35,20 @@ Un `cmd` de tipo string se ejecuta con `sh -c`; un array, tal cual. `timeout` y 
 Los campos del resultado conservan los nombres del cable (`exit_code`, `retry_after`);
 los métodos son camelCase (`execStream`, con alias `exec_stream`).
 
+## Administrar inquilinos y claves
+
+Con un token de admin, `Admin` maneja `/v1/tenants` (hace falta que el gateway arranque con `-state-dir`):
+
+```js
+import { Admin } from "@kindling/sandbox";
+
+const adm = new Admin({ url: "https://gateway:8090", token: ADMIN_TOKEN });
+await adm.createTenant("ana", { limits: { max_sandboxes: 10 } });
+const clave = await adm.createKey("ana");   // clave.key solo se ve ahora
+const nueva = await adm.rotateKey("ana", clave.id, { graceMinutes: 10 });
+await adm.revokeKey("ana", nueva.id);
+```
+
 ## Errores
 
 `SandboxError` → `ConfigError`, `TransportError` (red, plazo, flujo cortado) y `ApiError`

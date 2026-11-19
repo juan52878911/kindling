@@ -174,3 +174,55 @@ class Session(_Base):
     expires_at: str = ""
     execs: int = 0
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TenantKey(_Base):
+    """Ficha de una clave de inquilino: nunca lleva el secreto."""
+    id: str = ""
+    prefix: str = ""
+    created: str = ""
+    expires: Optional[str] = None
+    revoked: Optional[str] = None
+    last_used: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Tenant(_Base):
+    """Un inquilino. `source` es «store» (editable) o «env» (`read_only`)."""
+    id: str = ""
+    name: str = ""
+    source: str = ""
+    read_only: bool = False
+    admin: bool = False
+    limits: Dict[str, int] = field(default_factory=dict)
+    created: Optional[str] = None
+    keys: List[TenantKey] = field(default_factory=list)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, j: Optional[dict]):
+        j = dict(j or {})
+        claves = [TenantKey.from_json(k) for k in j.pop("keys", None) or []]
+        obj = super().from_json(j)
+        obj.keys = claves
+        return obj
+
+
+@dataclass
+class CreatedKey(_Base):
+    """Respuesta de crear o rotar una clave: `key` es la ÚNICA vez que se ve."""
+    id: str = ""
+    prefix: str = ""
+    created: str = ""
+    expires: Optional[str] = None
+    key: str = ""
+    old_key_id: Optional[str] = None
+    old_key_expires: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __repr__(self) -> str:  # que la clave no acabe en un log por un print
+        return "CreatedKey(id=%r, prefix=%r, key=<oculta>)" % (self.id, self.prefix)
+
+    __str__ = __repr__

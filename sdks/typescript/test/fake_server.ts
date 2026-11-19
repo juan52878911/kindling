@@ -3,6 +3,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 export const TOKEN = "tok-secreto-1234";
+export const TOKEN_USER = "tok-sin-admin-1234";
 
 interface Fake {
   id: string; files: Map<string, Buffer>; info: Record<string, unknown>;
@@ -43,6 +44,53 @@ export class FakeGateway {
     const parts: Buffer[] = [];
     for await (const c of q) parts.push(c as Buffer);
     return Buffer.concat(parts);
+  }
+
+  tenants = new Map<string, Record<string, any>>();
+  keyCount = 0;
+
+  private async tenantsApi(q: http.IncomingMessage, r: http.ServerResponse, p: string[], admin: boolean) {
+    if (!admin) return this.err(r, 403, "managing tenants and keys needs an admin token", "forbidden");
+    const raw = (await this.body(q)).toString();
+    const req = raw ? JSON.parse(raw) : {};
+    this.lastBody = raw ? req : null;
+    const none = () => { r.writeHead(204); r.end(); };
+    if (p.length === 0) {
+      if (q.method === "GET") return this.json(r, 200, { tenants: [...this.tenants.values()] });
+      if (this.tenants.has(req.name)) return this.err(r, 409, "tenant already exists", "conflict");
+      const t = { id: req.name, name: req.name, source: "store", read_only: false, admin: req.admin ?? false,
+        limits: req.limits ?? {}, created: "2026-01-01T00:00:00Z", keys: [], campo_nuevo: 1 };
+      this.tenants.set(t.id, t);
+      return this.json(r, 201, t);
+    }
+    const t = this.tenants.get(decodeURIComponent(p[0]));
+    if (!t) return this.err(r, 404, "tenant not found", "not_found");
+    if (p.length === 1) {
+      if (q.method === "GET") return this.json(r, 200, t);
+      if (q.method === "PATCH") {
+        if ("admin" in req) t.admin = req.admin;
+        if ("limits" in req) t.limits = req.limits;
+        return this.json(r, 200, t);
+      }
+      if (q.method === "DELETE") { this.tenants.delete(t.id); return none(); }
+    }
+    const nueva = (vieja?: Record<string, any>) => {
+      const kid = String(++this.keyCount).padStart(12, "0");
+      const ficha: Record<string, any> = { id: kid, prefix: "ksk_" + kid, created: "2026-01-01T00:00:00Z" };
+      t.keys.push(ficha);
+      return { ...ficha, key: `ksk_${kid}_secreto`, ...(vieja && { old_key_id: vieja.id, old_key_expires: vieja.expires }) };
+    };
+    if (p[1] === "keys" && p.length === 2 && q.method === "POST") return this.json(r, 201, nueva());
+    const ficha = t.keys.find((k: any) => k.id === p[2]);
+    if (p[1] === "keys" && p.length >= 3 && !ficha) return this.err(r, 404, "key not found", "not_found");
+    if (p[1] === "keys" && p.length === 3 && q.method === "DELETE") { ficha.revoked ??= "2026-01-01T00:00:00Z"; return none(); }
+    if (p[1] === "keys" && p[3] === "rotate" && q.method === "POST") {
+      const gracia = req.grace_minutes ?? 10;
+      if (gracia < 0 || gracia > 1440) return this.err(r, 400, "grace period out of range", "bad_request");
+      ficha.expires = `en ${gracia} min`;
+      return this.json(r, 201, nueva(ficha));
+    }
+    return this.err(r, 404, "no route", "not_found");
   }
 
   /** Salida que sirve el proceso falso. */
@@ -115,12 +163,13 @@ export class FakeGateway {
     const u = new URL(q.url!, "http://x");
     this.requests.push({ method: q.method!, url: q.url!, auth: q.headers.authorization });
     if (u.pathname === "/v1/health") return this.json(r, 200, { ok: true });
-    if (q.headers.authorization !== `Bearer ${TOKEN}`) return this.err(r, 401, `token inválido: ${q.headers.authorization ?? ""}`);
+    if (q.headers.authorization !== `Bearer ${TOKEN}` && q.headers.authorization !== `Bearer ${TOKEN_USER}`) return this.err(r, 401, `token inválido: ${q.headers.authorization ?? ""}`);
     if (this.rateLimitNext > 0) {
       this.rateLimitNext--;
       return this.err(r, 429, "cuota superada", "quota_exceeded", { "Retry-After": "7" });
     }
     const p = u.pathname.split("/").filter(Boolean); // v1 sandboxes {id} {sub}
+    if (p[1] === "tenants") return this.tenantsApi(q, r, p.slice(2), q.headers.authorization === `Bearer ${TOKEN}`);
     if (p[1] === "volumes") {
       if (p.length === 2 && q.method === "GET") return this.json(r, 200, [...this.volumes.values()]);
       if (p.length === 2 && q.method === "POST") {

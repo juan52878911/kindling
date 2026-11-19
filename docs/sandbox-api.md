@@ -9,7 +9,7 @@ del código falta en la spec o sobra, o si un esquema deja de coincidir con los
 
 Todas las rutas salvo `GET /v1/health` piden `Authorization: Bearer <token>`.
 El token es el de un inquilino (sus sandboxes, grafos, plantillas y métricas) o el de
-un admin (además `GET /v1/hosts` y las métricas de todos). Sin token o con uno
+un admin (además `GET /v1/hosts`, `/v1/tenants` y las métricas de todos). Sin token o con uno
 inválido, 401 con `WWW-Authenticate: Bearer realm="kindling-sandbox"`.
 
 Los errores son JSON `{"message": "...", "code": "..."}`; el código HTTP manda y `code`
@@ -17,6 +17,35 @@ puede faltar.
 
 El id de un sandbox es `host/máquina`: la barra va sin codificar en la ruta
 (`/v1/sandboxes/h1/m-abc/exec`).
+
+## Inquilinos y claves (solo admin)
+
+Los inquilinos de `KLING_SANDBOX_TENANTS` son estáticos. Con `kling sbx gateway -state-dir D`
+(o `KLING_SANDBOX_STATE_DIR`) el gateway guarda además inquilinos y claves en
+`D/tenants.json` (0600, escritura atómica con rename y fsync) y los administra la API,
+solo con token de admin (si no, 403):
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /v1/tenants`, `GET /v1/tenants/{id}` | Lista o ve; los del entorno salen con `source: env` y `read_only: true` |
+| `POST /v1/tenants` | `{name, admin, limits}`; el nombre es el id y no cambia |
+| `PATCH /v1/tenants/{id}` | `{admin, limits}`; `limits` sustituye todos los topes |
+| `DELETE /v1/tenants/{id}` | Borra el inquilino y sus claves |
+| `POST /v1/tenants/{id}/keys` | Crea una clave (`expires_at` opcional); la devuelve UNA vez en `key` |
+| `POST /v1/tenants/{id}/keys/{kid}/rotate` | Clave nueva; la vieja vale `grace_minutes` más (10 por defecto, 0 = ya) |
+| `DELETE /v1/tenants/{id}/keys/{kid}` | Revoca al instante |
+
+Las claves (`ksk_<id>_<secreto>`) se usan como cualquier token (`Authorization: Bearer`). Del
+secreto solo se guarda un hash con sal: no se puede recuperar, y ninguna lectura ni log lo
+repite (solo el prefijo `ksk_<id>`, la creación y la último uso, volcado a disco cada minuto).
+Los topes del almacén son los mismos de `KLING_SANDBOX_TENANTS` (`max_sandboxes`, `max_shells`,
+`max_mem_mib`…) y las cuentas (sandboxes, memoria, procesos, lotes) se aplican igual. Los
+inquilinos del entorno no se pueden cambiar por la API (409) y un nombre no puede estar en
+los dos sitios (el gateway no arranca). Sin `-state-dir` las escrituras dan 501. Un admin del
+almacén no puede quitarse el rol ni borrarse (409).
+
+CLI: `kling sbx tenant ls|show|add|set|rm` y `kling sbx key new|rotate|rm`; `key new` y
+`key rotate` imprimen la clave en stdout y nada más. SDKs: `Admin` en Python y TypeScript.
 
 ## Crear en lote
 

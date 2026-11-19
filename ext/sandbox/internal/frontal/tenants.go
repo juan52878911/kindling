@@ -215,10 +215,17 @@ func (s *Servidor) handleBorrarTenant(w http.ResponseWriter, r *http.Request) {
 
 // claveCreada es la única respuesta que lleva una clave en claro.
 type claveCreada struct {
-	vistaClave
+	ID           string     `json:"id"`
+	Prefijo      string     `json:"prefix"`
+	Creada       time.Time  `json:"created"`
+	Caduca       *time.Time `json:"expires,omitempty"`
 	Clave        string     `json:"key"`
 	ViejaCaduca  *time.Time `json:"old_key_expires,omitempty"`
 	ViejaClaveID string     `json:"old_key_id,omitempty"`
+}
+
+func nuevaClaveCreada(c inquilinos.Clave, texto string) claveCreada {
+	return claveCreada{ID: c.ID, Prefijo: c.Prefijo, Creada: c.Creada, Caduca: c.Caduca, Clave: texto}
 }
 
 type pedirClave struct {
@@ -241,7 +248,7 @@ func (s *Servidor) handleCrearClave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, claveCreada{vistaClave: vistaDeClave(c), Clave: texto})
+	writeJSON(w, http.StatusCreated, nuevaClaveCreada(c, texto))
 }
 
 type pedirRotar struct {
@@ -274,8 +281,11 @@ func (s *Servidor) handleRotarClave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, claveCreada{vistaClave: vistaDeClave(nueva), Clave: texto,
-		ViejaClaveID: vieja.ID, ViejaCaduca: vieja.Caduca})
+	writeJSON(w, http.StatusCreated, func() claveCreada {
+		r := nuevaClaveCreada(nueva, texto)
+		r.ViejaClaveID, r.ViejaCaduca = vieja.ID, vieja.Caduca
+		return r
+	}())
 }
 
 func (s *Servidor) handleRevocarClave(w http.ResponseWriter, r *http.Request) {
