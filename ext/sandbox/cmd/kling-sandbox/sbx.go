@@ -65,11 +65,13 @@ func cmdSbx(args []string) error {
 		return sbxHosts(args[1:])
 	case "mcp":
 		return sbxMCP(args[1:])
+	case "e2b":
+		return sbxE2B(args[1:])
 	case "-h", "--help", "help":
 		fmt.Println(ayuda)
 		return nil
 	}
-	return fmt.Errorf("unknown subcommand %q: use gateway, template, new, ls, rm, renew, exec, cp or hosts", args[0])
+	return fmt.Errorf("unknown subcommand %q: use gateway, template, new, ls, rm, renew, exec, cp, hosts, mcp or e2b", args[0])
 }
 
 const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
@@ -87,6 +89,8 @@ const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
   sbx cp <local|-> <id>:<path> | <id>:<path> <local|->
   sbx hosts                                    the daemons behind the gateway (admin token)
   sbx mcp [-url U] [-ca PEM]                   MCP server (stdio) exposing the sandboxes as tools
+  sbx e2b [-listen A] [-domain D] [-tls-cert F -tls-key F]
+                                               E2B-compatible shim over the gateway (see docs/e2b.md)
 
 Gateway errors keep their HTTP status and Retry-After ("... (HTTP 429, retry
 after 30s)"); with -json, new and rm print them as {"error": {"status": 429,
