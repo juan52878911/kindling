@@ -1,0 +1,167 @@
+{{- if .Values.gateway.enabled }}
+{{- $tls := include "kindling-sandbox.gatewayTLS" . }}
+{{- if not .Values.gateway.hosts }}{{ fail "gateway.hosts es obligatorio con gateway.enabled=true: sin hosts el gateway usaría un daemon local que en un Pod no existe" }}{{ end }}
+{{- if and (not $tls) (not .Values.gateway.insecureListen) }}{{ fail "gateway: define gateway.tls.existingSecret, o gateway.insecureListen=true (HTTP plano; los tokens viajan en claro, solo tras un terminador TLS)" }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kindling-sandbox.gatewayName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "kindling-sandbox.gatewaySelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kindling-sandbox.gatewaySelector" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-configmap.yaml") . | sha256sum }}
+        {{- with .Values.gateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ include "kindling-sandbox.gatewayImage" . | quote }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.gateway.command | nindent 12 }}
+          args:
+            - -listen
+            - {{ printf "0.0.0.0:%d" (int .Values.gateway.containerPort) | quote }}
+            {{- if $tls }}
+            - -tls-cert
+            - /etc/kling/tls/tls.crt
+            - -tls-key
+            - /etc/kling/tls/tls.key
+            {{- else }}
+            - -insecure-listen
+            {{- end }}
+            {{- with .Values.gateway.image.defaultImage }}
+            - -image
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.abandon }}
+            - -abandon
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.limits.maxMemMiB }}
+            - -max-mem-mib
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.limits.maxVCPUs }}
+            - -max-vcpus
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.limits.maxMemTotalMiB }}
+            - -max-mem-total-mib
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.ingressDomain }}
+            - -ingress-domain
+            - {{ . | quote }}
+            {{- if $.Values.gateway.ingressSecret.name }}
+            - -ingress-secret-file
+            - /etc/kling/ingress/{{ $.Values.gateway.ingressSecret.key }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.gateway.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: KLING_CONFIG
+              value: /etc/kling/config/config.json
+            - name: KLING_SANDBOX_TENANTS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "gateway.tenants.existingSecret es obligatorio: Secret con la lista de tenants (nombre:token[:límites])" .Values.gateway.tenants.existingSecret }}
+                  key: {{ .Values.gateway.tenants.key }}
+            {{- with .Values.gateway.admins }}
+            - name: KLING_SANDBOX_ADMINS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.containerPort }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kling/config
+              readOnly: true
+            {{- if $tls }}
+            - name: tls
+              mountPath: /etc/kling/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.gateway.ingressSecret.name }}
+            - name: ingress
+              mountPath: /etc/kling/ingress
+              readOnly: true
+            {{- end }}
+            {{- if .Values.gateway.ssh.existingSecret }}
+            - name: ssh
+              mountPath: {{ .Values.gateway.ssh.mountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kindling-sandbox.gatewayName" . }}
+        {{- if $tls }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.gateway.tls.existingSecret }}
+        {{- end }}
+        {{- if .Values.gateway.ingressSecret.name }}
+        - name: ingress
+          secret:
+            secretName: {{ .Values.gateway.ingressSecret.name }}
+        {{- end }}
+        {{- if .Values.gateway.ssh.existingSecret }}
+        - name: ssh
+          secret:
+            secretName: {{ .Values.gateway.ssh.existingSecret }}
+            defaultMode: 0400
+        {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

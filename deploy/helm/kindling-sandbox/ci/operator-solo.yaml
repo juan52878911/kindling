@@ -1,0 +1,6 @@
+# Solo el operador contra un frontal externo.
+operator:
+  frontal:
+    url: https://sandbox.kindling.example.internal
+    tokenSecret:
+      name: kindling-operator-frontal

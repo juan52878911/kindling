@@ -61,6 +61,45 @@ kubectl create secret generic kindling-operator-frontal \
 kubectl apply -f ext/sandbox/deploy/deployment.yaml
 ```
 
+### Con Helm
+
+El chart `deploy/helm/kindling-sandbox` instala lo mismo (CRD, RBAC mínimo,
+operador con una réplica y `Recreate`) y, si se pide, el gateway de sandboxes.
+Los Secrets los creas tú; el chart nunca los genera.
+
+```sh
+kubectl create namespace kindling-system
+kubectl create secret generic kindling-operator-frontal -n kindling-system \
+  --from-literal=token='<token del tenant>'
+
+helm install kindling-sandbox deploy/helm/kindling-sandbox -n kindling-system \
+  --set operator.frontal.url=https://sandbox.kindling.example.internal \
+  --set operator.frontal.tokenSecret.name=kindling-operator-frontal
+```
+
+Valores principales (todos documentados en `values.yaml`):
+
+| Valor | Qué hace |
+|-------|----------|
+| `operator.frontal.url` | URL del frontal; vacío = el Service del gateway del chart. |
+| `operator.frontal.tokenSecret.{name,key}` | Secret existente con el token del tenant (obligatorio). |
+| `operator.image.{repository,tag}` | Imagen; el tag por defecto es `appVersion` del chart. |
+| `gateway.enabled` | Despliega también `kling sbx gateway` (no hay imagen oficial: `gateway.image.repository` es obligatorio). |
+| `gateway.hosts` | Mapa nombre → endpoint (`ssh://…`, `unix://…`) de los hosts de kindling; obligatorio. Las microVMs siguen fuera del clúster. |
+| `gateway.tenants.existingSecret` | Secret con `KLING_SANDBOX_TENANTS` (`nombre:token[:límites]`). |
+| `gateway.tls.existingSecret` | Secret `kubernetes.io/tls`; sin él hace falta `gateway.insecureListen=true`. |
+| `gateway.ingressDomain`, `gateway.ingressSecret` | Puertos de sandbox en `<puerto>-<id>.<dominio>` y clave de firma de los tokens de endpoint. |
+| `gateway.ingress.*` | Ingress de Kubernetes hacia el Service. |
+| `gateway.ssh.existingSecret` | Clave privada y `known_hosts` para hosts `ssh://`. |
+
+Ejemplos listos en `deploy/helm/kindling-sandbox/ci/`. Dos cosas a tener en
+cuenta: Helm instala `crds/` solo en `helm install` y no los actualiza con
+`helm upgrade` (aplica `kubectl apply -f deploy/helm/kindling-sandbox/crds/` a
+mano al subir de versión), y `crds/crd.yaml` es una copia byte a byte de
+`ext/sandbox/deploy/crd.yaml`. `scripts/helm-check.sh` (necesita `helm`;
+`kubeconform` es opcional) lo comprueba y corre `helm lint` y `helm template`
+con cada fichero de `ci/`.
+
 Fuera de un clúster (para probar contra un `kubectl proxy` local, por
 ejemplo) el binario acepta `-kube-url` y `-kube-token` en vez de la
 configuración de cuenta de servicio:

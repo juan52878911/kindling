@@ -1,0 +1,26 @@
+# Gateway con Ingress y puertos de sandbox en *.sbx.example.internal.
+gateway:
+  enabled: true
+  image:
+    repository: registry.example.internal/kindling-gateway
+    tag: v1.0.0-rc.2
+  hosts:
+    lab: ssh://kling@192.0.2.10
+  tenants:
+    existingSecret: kindling-gateway-tenants
+  tls:
+    existingSecret: kindling-gateway-tls
+  ingressDomain: sbx.example.internal
+  ingressSecret:
+    name: kindling-gateway-ingress
+  ingress:
+    enabled: true
+    className: nginx
+    host: gateway.example.internal
+    tlsSecret: kindling-gateway-ingress-tls
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+operator:
+  frontal:
+    tokenSecret:
+      name: kindling-operator-frontal
