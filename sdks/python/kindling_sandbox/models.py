@@ -116,3 +116,61 @@ class Volume(_Base):
     used_bytes: int = 0
     in_use: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ProcessInfo(_Base):
+    """Un proceso de fondo del sandbox. `state` es «running» o «exited»."""
+    pid: int = 0
+    cmd: List[str] = field(default_factory=list)
+    dir: str = ""
+    state: str = ""
+    started_at: str = ""
+    ended_at: Optional[str] = None
+    exit_code: Optional[int] = None
+    signal: str = ""
+    timed_out: bool = False
+    output_bytes: int = 0
+    output_start: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
+
+
+@dataclass
+class ProcessEvent:
+    """Una línea de la salida de un proceso. `offset` es el siguiente al trozo
+    (el que se pasa a `output(offset=...)` para continuar); `exit` solo llega
+    con `follow` cuando el proceso termina."""
+    stream: Optional[str] = None
+    data: bytes = b""
+    offset: int = 0
+    dropped: int = 0
+    exit: Optional[int] = None
+    signal: str = ""
+    error: Optional[str] = None
+
+    @classmethod
+    def from_json(cls, j: dict) -> "ProcessEvent":
+        return cls(stream=j.get("stream"), data=_b64(j.get("data")), offset=j.get("offset", 0),
+                   dropped=j.get("dropped", 0), exit=j.get("exit"), signal=j.get("signal", ""),
+                   error=j.get("error"))
+
+    @property
+    def text(self) -> str:
+        return self.data.decode("utf-8", "replace")
+
+
+@dataclass
+class Session(_Base):
+    """Sesión de exec: cwd y entorno que persisten entre comandos."""
+    id: str = ""
+    dir: str = ""
+    env: List[str] = field(default_factory=list)
+    unset: List[str] = field(default_factory=list)
+    created_at: str = ""
+    expires_at: str = ""
+    execs: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)

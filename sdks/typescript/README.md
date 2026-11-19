@@ -55,6 +55,8 @@ Se leen de `{"message","code"}` y de `Retry-After` (segundos o fecha HTTP). El t
 | `POST …/exec` (NDJSON) | `sb.execStream` | sí, con líneas partidas entre trozos |
 | `POST …/exec?wait=1` | `sb.exec` | sí |
 | `GET/PUT/DELETE …/files` | `sb.files.read/readText/write/delete`, `stat` (`stat=1`) | sí |
+| `…/processes[/{pid}[/output\|/signal]]` | `sb.processes.start/list/get({wait})/output(pid, {offset, follow})/signal/kill/delete` | sí |
+| `…/sessions[/{id}]`, `session` en exec | `sb.sessions.create/list/get/exec/delete`, `exec(cmd, {session})` | sí |
 | `POST …/shell` (`kling-shell/1`) | — | **no implementado**: upgrade a tramas binarias, fuera de alcance |
 | `POST /v1/sandboxes` con `count`/`atomic` | `Sandbox.createMany(n, {atomic})` (`.errors` = los que no salieron) | sí |
 | `/v1/volumes`, `/v1/volumes/{id}`; `volumes` al crear | `client.createVolume/getVolume/listVolumes/deleteVolume`, `Sandbox.create({volumes})` | sí |

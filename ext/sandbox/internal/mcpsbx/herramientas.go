@@ -58,6 +58,16 @@ var herramientas = []herramienta{
 			"cwd":             pStr("working directory"),
 			"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "extra environment"},
 			"timeout_seconds": pInt("kill the command after this long")})},
+	{"sandbox_exec_background", "Start a command in the background inside a sandbox and return at once with its pid. It keeps running after this call; read its output with sandbox_process_output.",
+		esquema([]string{"id", "command"}, map[string]any{"id": pID,
+			"command":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "argv, e.g. [\"python3\",\"-m\",\"http.server\"]"},
+			"cwd":             pStr("working directory"),
+			"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "extra environment"},
+			"timeout_seconds": pInt("kill the process after this long (default: runs until it ends or is deleted)")})},
+	{"sandbox_process_output", "Read the output of a background process from an offset, and its state (running or exited with its exit code). Returns next_offset: pass it back to read only what is new. Optionally wait for it to finish first.",
+		esquema([]string{"id", "pid"}, map[string]any{"id": pID, "pid": pInt("pid returned by sandbox_exec_background"),
+			"offset":       pInt("byte offset to read from (default 0 = everything still kept)"),
+			"wait_seconds": pInt("wait up to this long (max 60) for the process to end before reading")})},
 	{"sandbox_read_file", "Read a text file from a sandbox (capped).",
 		esquema([]string{"id", "path"}, map[string]any{"id": pID, "path": pStr("absolute path inside the sandbox")})},
 	{"sandbox_write_file", "Write a file inside a sandbox (overwrites).",
@@ -152,6 +162,132 @@ var manejadores = map[string]manejador{
 		}
 		sb.WriteString("--- stdout ---\n" + tope(r.Stdout, "stdout") + "\n--- stderr ---\n" + tope(r.Stderr, "stderr"))
 		return sb.String(), nil
+	},
+	"sandbox_exec_background": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct {
+			ID      string            `json:"id"`
+			Command []string          `json:"command"`
+			Cwd     string            `json:"cwd"`
+			Env     map[string]string `json:"env"`
+			Timeout int               `json:"timeout_seconds"`
+		}
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if len(in.Command) == 0 {
+			return "", errors.New("command is required")
+		}
+		body := map[string]any{"cmd": in.Command}
+		if in.Cwd != "" {
+			body["dir"] = in.Cwd
+		}
+		if len(in.Env) > 0 {
+			var env []string
+			for k, v := range in.Env {
+				env = append(env, k+"="+v)
+			}
+			body["env"] = env
+		}
+		if in.Timeout > 0 {
+			body["timeout_seconds"] = in.Timeout
+		}
+		b, _, err := llamarJSON(ctx, a, "POST", "/v1/sandboxes/"+in.ID+"/processes", body)
+		return string(b), err
+	},
+	"sandbox_process_output": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct {
+			ID          string `json:"id"`
+			PID         int    `json:"pid"`
+			Offset      int64  `json:"offset"`
+			WaitSeconds int    `json:"wait_seconds"`
+		}
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if in.PID <= 0 {
+			return "", errors.New("pid is required")
+		}
+		if in.Offset < 0 {
+			return "", errors.New("offset can't be negative")
+		}
+		base := "/v1/sandboxes/" + in.ID + "/processes/" + strconv.Itoa(in.PID)
+		if in.WaitSeconds > 0 {
+			// El gateway devuelve el estado cuando acaba o cuando vence el plazo.
+			if _, _, err := llamarJSON(ctx, a, "GET", base+"?wait="+strconv.Itoa(min(in.WaitSeconds, maxEsperaProc)), nil); err != nil {
+				return "", err
+			}
+		}
+		b, _, err := llamarJSON(ctx, a, "GET", base+"/output?offset="+strconv.FormatInt(in.Offset, 10), nil)
+		if err != nil {
+			return "", err
+		}
+		var stdout, stderr []byte
+		next, dropped := in.Offset, int64(0)
+		for _, l := range bytes.Split(b, []byte("\n")) {
+			if len(bytes.TrimSpace(l)) == 0 {
+				continue
+			}
+			var ev struct {
+				Stream  string `json:"stream"`
+				Data    []byte `json:"data"`
+				Offset  int64  `json:"offset"`
+				Dropped int64  `json:"dropped"`
+				Error   string `json:"error"`
+			}
+			if err := json.Unmarshal(l, &ev); err != nil {
+				return "", fmt.Errorf("unreadable process output: %w", err)
+			}
+			if ev.Error != "" {
+				return "", errors.New(ev.Error)
+			}
+			next = max(next, ev.Offset)
+			dropped += ev.Dropped
+			// El cuerpo ya viene acotado por maxCuerpo; tope() recorta y avisa.
+			switch ev.Stream {
+			case "stdout":
+				stdout = append(stdout, ev.Data...)
+			case "stderr":
+				stderr = append(stderr, ev.Data...)
+			}
+		}
+		// El estado va DESPUÉS de la salida: si acabó entre medias, next_offset
+		// no pasa de lo leído y la siguiente llamada trae el resto.
+		sb, _, err := llamarJSON(ctx, a, "GET", base, nil)
+		if err != nil {
+			return "", err
+		}
+		var st struct {
+			State    string `json:"state"`
+			ExitCode *int   `json:"exit_code"`
+			Signal   string `json:"signal"`
+			TimedOut bool   `json:"timed_out"`
+		}
+		if err := json.Unmarshal(sb, &st); err != nil {
+			return "", fmt.Errorf("unreadable process state: %w", err)
+		}
+		var o strings.Builder
+		fmt.Fprintf(&o, "state: %s\n", st.State)
+		if st.ExitCode != nil {
+			fmt.Fprintf(&o, "exit: %d\n", *st.ExitCode)
+		}
+		if st.Signal != "" {
+			fmt.Fprintf(&o, "signal: %s\n", st.Signal)
+		}
+		if st.TimedOut {
+			o.WriteString("timed out\n")
+		}
+		if dropped > 0 {
+			fmt.Fprintf(&o, "notice: %d bytes at the start were already discarded by the sandbox\n", dropped)
+		}
+		fmt.Fprintf(&o, "next_offset: %d\n", next)
+		o.WriteString("--- stdout ---\n" + tope(stdout, "stdout") + "\n--- stderr ---\n" + tope(stderr, "stderr"))
+		return o.String(), nil
 	},
 	"sandbox_read_file": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
 		var in struct{ ID, Path string }
@@ -248,6 +384,9 @@ func validarID(id string) error {
 	}
 	return nil
 }
+
+// maxEsperaProc es lo más que sandbox_process_output espera a que acabe.
+const maxEsperaProc = 60
 
 func tope(b []byte, que string) string {
 	if len(b) <= MaxSalida {

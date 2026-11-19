@@ -57,6 +57,9 @@ type Servidor struct {
 	mu    sync.Mutex
 	procs map[uint32]*proceso
 	pid   uint32
+	// etiquetas guarda la etiqueta (tag) de E2B de cada proceso de fondo, por
+	// sandbox+"\x00"+tag: el núcleo no conoce etiquetas.
+	etiquetas map[string]int
 }
 
 // reID es el id que el shim expone a E2B: base32 en minúsculas, seguro en una
@@ -142,6 +145,7 @@ func (s *Servidor) iniciar() {
 		s.Home = "/home/user"
 	}
 	s.procs = map[uint32]*proceso{}
+	s.etiquetas = map[string]int{}
 	m := http.NewServeMux()
 	// Plano de control.
 	m.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +168,7 @@ func (s *Servidor) iniciar() {
 	// envd: Connect RPC y ficheros.
 	m.HandleFunc("POST /process.Process/Start", s.envd(s.procStart))
 	m.HandleFunc("POST /process.Process/List", s.envd(s.procList))
+	m.HandleFunc("POST /process.Process/Connect", s.envd(s.procConnect))
 	m.HandleFunc("POST /process.Process/SendSignal", s.envd(s.procSignal))
 	m.HandleFunc("POST /process.Process/CloseStdin", s.envd(s.procCloseStdin))
 	m.HandleFunc("POST /filesystem.Filesystem/Stat", s.envd(s.fsStat))
@@ -181,7 +186,7 @@ func (s *Servidor) iniciar() {
 
 // noImplementadas son las rutas de E2B que el shim reconoce y contesta 501.
 var noImplementadas = []struct{ prefijo, motivo string }{
-	{"/process.Process/", "this process RPC is not supported by the kindling gateway (no interactive stdin, PTY or reattaching to a process)"},
+	{"/process.Process/", "this process RPC is not supported by the kindling gateway (no interactive stdin or PTY)"},
 	{"/filesystem.Filesystem/", "filesystem watchers are not supported by the kindling gateway"},
 	{"/files/compose", "file composition is not supported by the kindling gateway"},
 	{"/sandboxes/", "this E2B operation has no equivalent in the kindling gateway (pause, resume, fork, snapshots, metrics, logs, network updates)"},

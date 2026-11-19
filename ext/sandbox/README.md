@@ -91,7 +91,7 @@ Inquilinos, con sus cuotas, se dan de alta por entorno antes de arrancar el
 gateway:
 
 ```sh
-export KLING_SANDBOX_TENANTS="ana:$TOKEN_ANA:10:5,bob:$TOKEN_BOB:5"   # nombre:token[:max sandboxes[:max shells[:max mem_mib[:max vcpus[:max mem_mib total]]]]]
+export KLING_SANDBOX_TENANTS="ana:$TOKEN_ANA:10:5,bob:$TOKEN_BOB:5"   # nombre:token[:max sandboxes[:max shells[:max mem_mib[:max vcpus[:max mem_mib total[:max procesos de fondo[:max sesiones[:max lecturas follow]]]]]]]]
 export KLING_SANDBOX_ADMINS="ana"                         # quién ve los hosts y las métricas de todos
 kling sbx gateway                                         # 127.0.0.1:8090, HTTP
 kling sbx gateway -listen 0.0.0.0:8090 -tls-cert gw.pem -tls-key gw.key   # hacia la red, HTTPS
@@ -124,7 +124,8 @@ curl -H "Authorization: Bearer $ADMIN" https://gateway:8090/v1/hosts    # los da
 `kling sbx mcp` es un servidor MCP (stdio, JSON-RPC por líneas, protocolo 2025-06-18) que
 deja a un agente manejar sandboxes a través del gateway. Herramientas: `sandbox_create`
 (`template`, `ttl_seconds`, `labels`), `sandbox_list`, `sandbox_exec` (`id`, `command`,
-`cwd`, `env`, `timeout_seconds`; usa `?wait=1`), `sandbox_read_file`, `sandbox_write_file`,
+`cwd`, `env`, `timeout_seconds`; usa `?wait=1`), `sandbox_exec_background` (lanza y devuelve el `pid`),
+`sandbox_process_output` (`id`, `pid`, `offset`, `wait_seconds`: salida desde un desplazamiento, estado y `next_offset`), `sandbox_read_file`, `sandbox_write_file`,
 `sandbox_delete` y `sandbox_renew`. Un error de la API (404, 401, 429...) vuelve como
 resultado con `isError: true` y su código HTTP, no como error JSON-RPC.
 

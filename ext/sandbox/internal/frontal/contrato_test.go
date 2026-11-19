@@ -106,7 +106,9 @@ func leerFuente(t *testing.T, nombre string) string {
 }
 
 // concreta sustituye {id} por un id con la forma real host/máquina.
-func concreta(ruta string) string { return strings.ReplaceAll(ruta, "{id}", "h1/m1") }
+func concreta(ruta string) string {
+	return strings.NewReplacer("{id}", "h1/m1", "{pid}", "1", "{sid}", "s1").Replace(ruta)
+}
 
 // TestContratoRutas compara la spec con lo que el frontal sirve de verdad.
 // Sondea cada método sobre cada ruta candidata y considera "ruta existente"
@@ -187,7 +189,8 @@ func TestContratoEsquemas(t *testing.T) {
 		"Grafo": Grafo{}, "NodoGrafo": NodoGrafo{}, "CrearGrafoPeticion": CrearGrafoPeticion{},
 		"TemplateInfo": TemplateInfo{}, "TemplateHost": TemplateHost{}, "HostEstado": hosts.Estado{},
 		"Error": api.Error{}, "ExecRequest": api.ExecRequest{}, "ExecEvent": api.ExecEvent{},
-		"ExecResult": api.ExecResult{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{},
+		"ExecResult": api.ExecResult{}, "ProcessStartRequest": api.ProcessStartRequest{}, "ProcessInfo": api.ProcessInfo{},
+		"ProcessEvent": api.ProcessEvent{}, "ProcessSignalRequest": api.ProcessSignalRequest{}, "SessionRequest": api.SessionRequest{}, "Session": api.Session{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{},
 	}
 	for nombre, v := range structs {
 		declaradas, ok := sp.schemas[nombre]

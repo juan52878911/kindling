@@ -275,9 +275,10 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	id := partes[0] + "/" + partes[1]
 	accion := ""
-	if len(partes) == 3 {
+	if len(partes) >= 3 {
 		accion = partes[2]
-	} else if len(partes) > 3 {
+	}
+	if len(partes) > 3 && accion != "processes" && accion != "sessions" {
 		http.NotFound(w, r)
 		return
 	}
@@ -296,6 +297,10 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.handleEndpoint(w, r, id)
 	case accion == "files" && (r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodDelete):
 		s.handleFiles(w, r, id)
+	case accion == "processes":
+		s.despachaProcesos(w, r, id, partes[3:])
+	case accion == "sessions":
+		s.despachaSesiones(w, r, id, partes[3:])
 	case accion == "" || accion == "renew" || accion == "exec" || accion == "shell" || accion == "files" || accion == "endpoints":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:

@@ -20,7 +20,23 @@ export interface ExecEvent {
 export interface ExecOptions {
   cwd?: string; env?: Record<string, string> | string[]; /** segundos */ timeout?: number;
   stdin?: string | Uint8Array; user?: string; maxOutputBytes?: number;
+  /** id de una sesión (sandbox.sessions) cuyo cwd y entorno se usan */ session?: string;
 }
+export type ProcessStartOptions = Omit<ExecOptions, "stdin">;
+export interface ProcessInfo {
+  pid: number; cmd: string[]; dir?: string; state: "running" | "exited"; started_at: string;
+  ended_at?: string; exit_code?: number; signal?: string; timed_out?: boolean;
+  output_bytes: number; output_start?: number; [extra: string]: unknown;
+}
+export interface ProcessEvent {
+  stream: "stdout" | "stderr" | null; data: Uint8Array; text: string; /** siguiente al trozo: para reanudar */ offset: number;
+  dropped: number; exit: number | null; signal: string; error: string | null;
+}
+export interface SessionInfo {
+  id: string; dir?: string; env?: string[]; unset?: string[]; created_at: string; expires_at: string; execs: number;
+  [extra: string]: unknown;
+}
+export interface SessionOptions { id?: string; cwd?: string; env?: Record<string, string> | string[]; /** segundos */ ttl?: number }
 export interface ConnectionOptions {
   url?: string; token?: string; /** segundos; null = sin plazo */ timeout?: number | null; client?: Client;
 }
@@ -62,6 +78,16 @@ export class Client {
   getGraph(id: string): Promise<Graph>;
   listGraphs(): Promise<Graph[]>;
   deleteGraph(id: string): Promise<void>;
+  startProcess(id: string, peticion: object): Promise<ProcessInfo>;
+  listProcesses(id: string): Promise<ProcessInfo[]>;
+  getProcess(id: string, pid: number, wait?: number): Promise<ProcessInfo>;
+  signalProcess(id: string, pid: number, signal?: string): Promise<ProcessInfo>;
+  deleteProcess(id: string, pid: number): Promise<void>;
+  processOutput(id: string, pid: number, offset?: number, follow?: boolean): Promise<AsyncGenerator<Record<string, unknown>>>;
+  createSession(id: string, peticion: object): Promise<SessionInfo>;
+  listSessions(id: string): Promise<SessionInfo[]>;
+  getSession(id: string, sid: string): Promise<SessionInfo>;
+  deleteSession(id: string, sid: string): Promise<void>;
 }
 
 export class Files {
@@ -72,6 +98,24 @@ export class Files {
   stat(path: string): Promise<FileStat>;
 }
 
+export class Processes {
+  start(cmd: string | string[], opts?: ProcessStartOptions): Promise<ProcessInfo>;
+  list(): Promise<ProcessInfo[]>;
+  get(pid: number, opts?: { /** segundos */ wait?: number }): Promise<ProcessInfo>;
+  output(pid: number, opts?: { offset?: number; follow?: boolean }): AsyncGenerator<ProcessEvent>;
+  signal(pid: number, signal?: string): Promise<ProcessInfo>;
+  kill(pid: number): Promise<ProcessInfo>;
+  delete(pid: number): Promise<void>;
+}
+
+export class Sessions {
+  create(opts?: SessionOptions): Promise<SessionInfo>;
+  list(): Promise<SessionInfo[]>;
+  get(sid: string): Promise<SessionInfo>;
+  exec(sid: string, cmd: string | string[], opts?: Omit<ExecOptions, "session">): Promise<ExecResult>;
+  delete(sid: string): Promise<void>;
+}
+
 export type SandboxList = Sandbox[] & { partial: string | null };
 export type SandboxBatch = Sandbox[] & { errors: BatchError[] };
 
@@ -80,6 +124,8 @@ export class Sandbox implements AsyncDisposable {
   info: SandboxInfo;
   readonly id: string;
   readonly files: Files;
+  readonly processes: Processes;
+  readonly sessions: Sessions;
   static create(opts?: CreateOptions): Promise<Sandbox>;
   static createMany(count: number, opts?: CreateManyOptions): Promise<SandboxBatch>;
   static connect(id: string, opts?: ConnectionOptions): Promise<Sandbox>;

@@ -10,7 +10,8 @@ from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 from .errors import ConfigError, TransportError, error_para
-from .models import ExecEvent, ExecResult, FileStat, Graph, SandboxInfo, Volume
+from .models import (ExecEvent, ExecResult, FileStat, Graph, ProcessEvent, ProcessInfo, SandboxInfo,
+                     Session, Volume)
 
 ENV_URL = "KLING_SANDBOX_URL"
 ENV_TOKEN = "KLING_SANDBOX_TOKEN"
@@ -201,7 +202,7 @@ class Client:
                                  "application/json", self._plazo_exec(peticion, None))
         return self._eventos(conn, resp, ruta)
 
-    def _eventos(self, conn, resp, ruta: str) -> Iterator[ExecEvent]:
+    def _eventos(self, conn, resp, ruta: str, tipo=ExecEvent) -> Iterator[Any]:
         try:
             while True:
                 try:
@@ -214,11 +215,59 @@ class Client:
                 if not linea:
                     continue
                 try:
-                    yield ExecEvent.from_json(json.loads(linea))
+                    yield tipo.from_json(json.loads(linea))
                 except ValueError:
                     raise TransportError("%s: línea NDJSON inválida" % ruta) from None
         finally:
             conn.close()
+
+    # ---- procesos de fondo y sesiones
+
+    def start_process(self, id: str, peticion: dict) -> ProcessInfo:
+        return ProcessInfo.from_json(self._json("POST", "/v1/sandboxes/%s/processes" % id, None, peticion))
+
+    def list_processes(self, id: str) -> List[ProcessInfo]:
+        return [ProcessInfo.from_json(p) for p in
+                self._json("GET", "/v1/sandboxes/%s/processes" % id) or []]
+
+    def get_process(self, id: str, pid: int, wait: Optional[int] = None) -> ProcessInfo:
+        q = {"wait": str(int(wait))} if wait else None
+        # Con wait la lectura espera hasta ese tiempo: el timeout del cliente lo cubre.
+        t = (wait + 30) if wait else "defecto"
+        return ProcessInfo.from_json(self._json(
+            "GET", "/v1/sandboxes/%s/processes/%d" % (id, pid), q, timeout=t))
+
+    def signal_process(self, id: str, pid: int, signal: Optional[str] = None) -> ProcessInfo:
+        return ProcessInfo.from_json(self._json(
+            "POST", "/v1/sandboxes/%s/processes/%d/signal" % (id, pid), None,
+            {"signal": signal} if signal else {}))
+
+    def delete_process(self, id: str, pid: int) -> None:
+        self._json("DELETE", "/v1/sandboxes/%s/processes/%d" % (id, pid))
+
+    def process_output(self, id: str, pid: int, offset: int = 0,
+                       follow: bool = False) -> Iterator[ProcessEvent]:
+        """Iterador de ProcessEvent. El último evento lleva el `offset` desde el
+        que continuar y, si el proceso terminó, `exit`. Con `follow` la lectura
+        no tiene tope de tiempo: sigue hasta que el proceso acaba."""
+        ruta = "/v1/sandboxes/%s/processes/%d/output" % (id, pid)
+        q = {"offset": str(int(offset))}
+        if follow:
+            q["follow"] = "1"
+        conn, resp = self._abrir("GET", ruta, q, timeout=None if follow else "defecto")
+        return self._eventos(conn, resp, ruta, ProcessEvent)
+
+    def create_session(self, id: str, peticion: dict) -> Session:
+        return Session.from_json(self._json("POST", "/v1/sandboxes/%s/sessions" % id, None, peticion))
+
+    def list_sessions(self, id: str) -> List[Session]:
+        return [Session.from_json(x) for x in self._json("GET", "/v1/sandboxes/%s/sessions" % id) or []]
+
+    def get_session(self, id: str, sid: str) -> Session:
+        return Session.from_json(self._json("GET", "/v1/sandboxes/%s/sessions/%s" % (id, sid)))
+
+    def delete_session(self, id: str, sid: str) -> None:
+        self._json("DELETE", "/v1/sandboxes/%s/sessions/%s" % (id, sid))
 
     # ---- ficheros
 

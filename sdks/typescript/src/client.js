@@ -184,6 +184,30 @@ export class Client {
     }
   }
 
+  // ---- procesos de fondo y sesiones
+  startProcess(id, peticion) { return this._json("POST", `/v1/sandboxes/${id}/processes`, { cuerpo: peticion }); }
+  async listProcesses(id) { return (await this._json("GET", `/v1/sandboxes/${id}/processes`)) ?? []; }
+  getProcess(id, pid, wait) {
+    // Con wait la lectura espera hasta ese tiempo: el timeout del cliente lo cubre.
+    return this._json("GET", `/v1/sandboxes/${id}/processes/${pid}`,
+      wait ? { query: { wait: String(Math.trunc(wait)) }, timeout: wait + 30 } : {});
+  }
+  signalProcess(id, pid, signal) {
+    return this._json("POST", `/v1/sandboxes/${id}/processes/${pid}/signal`, { cuerpo: signal ? { signal } : {} });
+  }
+  async deleteProcess(id, pid) { await this._json("DELETE", `/v1/sandboxes/${id}/processes/${pid}`); }
+  /** Iterador asíncrono de eventos crudos. Con follow no hay tope de tiempo. */
+  async processOutput(id, pid, offset = 0, follow = false) {
+    const ruta = `/v1/sandboxes/${id}/processes/${pid}/output`;
+    const query = { offset: String(Math.trunc(offset)), ...(follow && { follow: "1" }) };
+    const resp = await this._abrir("GET", ruta, { query, ...(follow && { timeout: null }) });
+    return this.#eventos(resp, ruta);
+  }
+  createSession(id, peticion) { return this._json("POST", `/v1/sandboxes/${id}/sessions`, { cuerpo: peticion }); }
+  async listSessions(id) { return (await this._json("GET", `/v1/sandboxes/${id}/sessions`)) ?? []; }
+  getSession(id, sid) { return this._json("GET", `/v1/sandboxes/${id}/sessions/${sid}`); }
+  async deleteSession(id, sid) { await this._json("DELETE", `/v1/sandboxes/${id}/sessions/${sid}`); }
+
   // ---- ficheros
   async readFile(id, path) {
     const ruta = `/v1/sandboxes/${id}/files`;

@@ -72,6 +72,13 @@ type Tenant struct {
 	// sandbox nuevo, pero sí un proceso del daemon y una conexión que este
 	// frontal mantiene en pie, y ambos son un recurso que un tenant puede acaparar.
 	MaxShells int
+	// MaxProcesos y MaxSesiones acotan los procesos de fondo VIVOS y las
+	// sesiones de exec de cada sandbox del tenant; MaxSeguir, las lecturas de
+	// salida con follow abiertas a la vez en todo el tenant. 0 = el valor por
+	// defecto de procesos.go.
+	MaxProcesos int
+	MaxSesiones int
+	MaxSeguir   int
 	// MaxMemMiB y MaxVCPUs acotan lo que un sandbox de este tenant puede pedir
 	// (mem_mib y vcpus de la petición). 0 = el máximo por defecto del frontal
 	// (Opciones.MaxMemMiB / Opciones.MaxVCPUs). Sin ellos, un solo token pide una
@@ -175,6 +182,8 @@ type Servidor struct {
 	// dos propósitos con el mismo número: la cuota de Tenant.MaxShells y la
 	// métrica kling_sandbox_shell_sessions de /v1/metrics.
 	shells contadorTenant
+	// seguir cuenta las lecturas de salida de procesos con follow abiertas.
+	seguir contadorTenant
 	// metricas acumula lo que /v1/metrics no puede sacar preguntando a los
 	// daemons: cuántas creaciones ha habido y de qué tipo, y cuánto tardaron.
 	metricas metricas
@@ -263,7 +272,7 @@ func Nuevo(o Opciones) (*Servidor, error) {
 			return nil, fmt.Errorf("tenants %q and %q share a token", otro, t.Nombre)
 		}
 		tokens[t.Token] = t.Nombre
-		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 || t.MaxMemTotalMiB < 0 {
+		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxProcesos < 0 || t.MaxSesiones < 0 || t.MaxSeguir < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 || t.MaxMemTotalMiB < 0 {
 			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
 		}
 		if t.MaxMemMiB == 0 {
