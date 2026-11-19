@@ -44,6 +44,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
 ### Fixed
+- DNS resolver: waits up to 1 s for a port another resolver just released, so a live `kling egress set` no longer fails with "address already in use" on a busy host.
 
 - kling-sandbox gateway: port ingress (`<port>-<id>.<domain>`) answered 502 against a real daemon: the daemon's tunnel and `/guest` only reach ports listed in the machine's `kling.ports` label, and the gateway never added them. It now merges the port into the label (capped at 16 per sandbox) before opening the tunnel; the port stays listed after the endpoint expires (sandboxes are ephemeral). The test daemon enforces the same rule.
 - kling-sandbox E2B shim: `Process/Start` with `/bin/bash` (what every E2B SDK sends, as `-l -c CMD`) now runs through `/bin/sh` and uses bash only if `/bin/bash` exists, so `commands.run` works in images without bash; `ListDir` uses the gateway's `files?list=1` (any depth) and keeps `find -printf` as a fallback.
