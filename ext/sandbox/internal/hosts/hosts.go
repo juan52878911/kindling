@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +26,11 @@ type Host struct {
 	Endpoint string
 	Cliente  *api.Client
 }
+
+// Local dice si el daemon está en esta misma máquina (socket Unix): solo
+// entonces los puertos que publica en 127.0.0.1 son alcanzables desde aquí.
+// Con ssh:// el 127.0.0.1 es el del otro extremo.
+func (h *Host) Local() bool { return !strings.HasPrefix(h.Endpoint, "ssh://") }
 
 // Estado es lo que se sabe de un host ahora mismo.
 type Estado struct {

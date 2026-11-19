@@ -121,6 +121,10 @@ type Opciones struct {
 	CadaLimpieza time.Duration
 
 	Log *log.Logger
+
+	// Ingress configura la entrada HTTP a puertos del sandbox (ingress.go).
+	// Con IngresoDominio vacío está apagada.
+	Ingreso IngresoOpciones
 }
 
 // Servidor es el frontal. Implementa http.Handler.
@@ -133,6 +137,7 @@ type Servidor struct {
 	cada     time.Duration
 	log      *log.Logger
 	mux      *http.ServeMux
+	ingreso  *ingreso
 
 	// mu protege enVuelo y reclamos, y aparta las precalentadas que se reclaman. Las
 	// cuotas se cuentan contra lo que el daemon tiene vivo, y una creación tarda
@@ -271,6 +276,11 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		s.log = log.Default()
 	}
 	s.rutas()
+	ing, err := nuevoIngreso(s, o.Ingreso)
+	if err != nil {
+		return nil, err
+	}
+	s.ingreso = ing
 	return s, nil
 }
 
@@ -298,7 +308,16 @@ func (s *Servidor) rutas() {
 }
 
 // ServeHTTP despacha.
-func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+//
+// Con la entrada a puertos activa, una petición cuyo Host es
+// <puerto>-<id>.<dominio> va al proxy y no al mux de la API.
+func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.ingreso != nil && s.ingreso.esDeIngreso(r) {
+		s.ingreso.servir(w, r)
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 // ---- autenticación
 

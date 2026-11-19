@@ -278,9 +278,11 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.handleExec(w, r, id)
 	case accion == "shell" && r.Method == http.MethodPost:
 		s.handleShell(w, r, id)
+	case accion == "endpoints" && r.Method == http.MethodPost:
+		s.handleEndpoint(w, r, id)
 	case accion == "files" && (r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodDelete):
 		s.handleFiles(w, r, id)
-	case accion == "" || accion == "renew" || accion == "exec" || accion == "shell" || accion == "files":
+	case accion == "" || accion == "renew" || accion == "exec" || accion == "shell" || accion == "files" || accion == "endpoints":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
 		http.NotFound(w, r)

@@ -91,6 +91,10 @@ func cmdGateway(args []string) error {
 	maxMem := fs.Int("max-mem-mib", 0, "largest mem_mib a sandbox may ask for, for tenants without their own (default 4096)")
 	maxCPU := fs.Int("max-vcpus", 0, "largest vcpus a sandbox may ask for, for tenants without their own (default 4)")
 	maxTotal := fs.Int("max-mem-total-mib", 0, "largest sum of mem_mib a tenant may have alive, for tenants without their own (default: no total limit)")
+	ingDominio := fs.String("ingress-domain", "", "serve sandbox ports at <port>-<id>.<domain> (needs wildcard DNS and TLS for *.<domain>)")
+	ingSecreto := fs.String("ingress-secret-file", "", "file with the secret that signs endpoint tokens (default: random per process)")
+	ingConns := fs.Int("ingress-max-conns", 0, "most simultaneous ingress connections per sandbox (default 64)")
+	ingCab := fs.Int("ingress-max-header-bytes", 0, "largest request headers accepted through the ingress (default 32768)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -114,6 +118,19 @@ func cmdGateway(args []string) error {
 	}
 	reg := hosts.Nuevo(a.Hosts)
 
+	ing := frontal.IngresoOpciones{
+		Dominio: *ingDominio, MaxConexiones: *ingConns, MaxCabeceras: *ingCab, Esquema: "http",
+	}
+	if a.TLSCert != "" {
+		ing.Esquema = "https"
+	}
+	if *ingSecreto != "" {
+		b, err := os.ReadFile(*ingSecreto)
+		if err != nil {
+			return fmt.Errorf("-ingress-secret-file: %w", err)
+		}
+		ing.Secreto = []byte(strings.TrimSpace(string(b)))
+	}
 	srv, err := frontal.Nuevo(frontal.Opciones{
 		Hosts:            reg,
 		Tenants:          tenants,
@@ -123,6 +140,7 @@ func cmdGateway(args []string) error {
 		MaxVCPUs:         *maxCPU,
 		MaxMemTotalMiB:   *maxTotal,
 		Log:              log.New(os.Stderr, "", log.LstdFlags),
+		Ingreso:          ing,
 	})
 	if err != nil {
 		return err

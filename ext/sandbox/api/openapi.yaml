@@ -177,6 +177,43 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/endpoints:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Abre una URL HTTP/WebSocket a un puerto del sandbox
+      description: |
+        Devuelve la URL `<puerto>-<id codificado>.<dominio>` y un token que la
+        abre (salvo si es pública). Necesita el gateway con `-ingress-domain`
+        (501 si no). El token se puede mandar en `Authorization: Bearer`, en
+        `X-Kling-Endpoint-Token` o en `?kling_token=` (una vez: queda en una
+        cookie HttpOnly del subdominio). El invitado no ve el token del tenant
+        ni el del endpoint. El token no tiene estado: vale hasta que caduca.
+        Ver docs/sandbox-api.md (DNS comodín y TLS).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EndpointPeticion"
+      responses:
+        "201":
+          description: Endpoint creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Endpoint"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/exec:
     parameters:
       - $ref: "#/components/parameters/id"
@@ -522,6 +559,34 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TemplateHost"
+    EndpointPeticion:
+      type: object
+      required: [port]
+      properties:
+        port:
+          type: integer
+          description: Puerto del invitado (1-65535; el del agente no se publica)
+        ttl_seconds:
+          type: integer
+          description: Vida del endpoint, hasta 604800 (7 días). 0 = 3600
+        public:
+          type: boolean
+          description: Sin token. Se guarda en una etiqueta interna del sandbox hasta que caduca
+    Endpoint:
+      type: object
+      properties:
+        url:
+          type: string
+        port:
+          type: integer
+        token:
+          type: string
+          description: Ausente si el endpoint es público
+        public:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
     Sandbox:
       type: object
       properties:

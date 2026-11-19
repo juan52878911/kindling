@@ -100,6 +100,9 @@ type falso struct {
 	etiquetasUnaVez   sync.Once
 	// etiquetasLentas retrasa cada PUT labels que pone un tenant.
 	etiquetasLentas time.Duration
+
+	// ing es el estado de la entrada a puertos (ingress_test.go).
+	ing ingresoFalso
 }
 
 // nuevoFalso arranca un daemon falso en un socket Unix corto (macOS limita
@@ -333,6 +336,7 @@ func (f *falso) rutas() http.Handler {
 		w.WriteHeader(204)
 	})
 	f.rutasGrafos(m)
+	f.rutasIngreso(m)
 	m.HandleFunc("POST /machines/{ref}/exec", f.exec)
 	m.HandleFunc("POST /machines/{ref}/shell", f.shell)
 	m.HandleFunc("/machines/{ref}/files", f.files)
