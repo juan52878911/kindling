@@ -27,6 +27,8 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `resize` | v0.8 | `POST /machines/{ref}/resize`, `mem_max_mib` en `POST /machines` |
 | `shell` | v0.7 | `POST /machines/{ref}/shell` (protocolo `kling-shell/1`) |
 | `exec` | v0.7 | `POST /machines/{ref}/exec`, `GET/PUT/DELETE /machines/{ref}/files`, `allow_exec` y `on_ttl` en `POST /machines` |
+| `processes` | v1.0 | `POST/GET /machines/{ref}/processes`, `GET/DELETE .../processes/{pid}`, `GET .../processes/{pid}/output` (NDJSON, `?offset=`, `?follow=1`), `POST .../processes/{pid}/signal`: comandos en segundo plano con pid, estado, salida en un anillo acotado y señales; viven en el invitado (sobreviven a congelar, no a un reinicio). Ver [exec-sandbox.md](exec-sandbox.md#procesos-en-segundo-plano) |
+| `sessions` | v1.0 | `POST/GET /machines/{ref}/sessions`, `GET/DELETE .../sessions/{id}` y `session` en `POST /machines/{ref}/exec`: un cwd y un entorno que persisten entre execs. Ver [exec-sandbox.md](exec-sandbox.md#sesiones) |
 | `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
 | `image-blobs` | v0.9 | `GET/HEAD/PUT /images/{name}/blob` |
 | `guest-resync` | v0.9.1 | ninguna: el daemon resincroniza reloj y entropía del invitado tras cada restauración (ver abajo) |

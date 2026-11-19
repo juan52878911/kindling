@@ -88,6 +88,12 @@ type ExecRequest struct {
 	// de un compose), como Docker con los healthchecks. Vacío = root. Un
 	// agente anterior lo ignora.
 	User string `json:"user,omitempty"`
+	// Session corre el comando con el cwd y el entorno de esa sesión (ver
+	// Session) y la actualiza con los que tenga al terminar. Con sesión el
+	// comando corre dentro de una shell, para que `cd` y `export` cuenten:
+	// ["sh","-c",S] ejecuta S tal cual en ella, y cualquier otro argv se cita
+	// y se ejecuta como una orden. Un agente anterior ignora el campo.
+	Session string `json:"session,omitempty"`
 }
 
 // ExecUserService en ExecRequest.User es "el usuario del servicio de la

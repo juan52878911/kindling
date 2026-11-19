@@ -104,6 +104,18 @@ func main() {
 			}
 		}
 		os.Exit(code)
+	case "proc":
+		// Como exec: wait y out -f salen con el código del proceso.
+		code, xerr := cmdProc(args)
+		if xerr != nil {
+			printError(os.Stderr, xerr)
+			if code == 0 {
+				code = codigoDeSalida(xerr)
+			}
+		}
+		os.Exit(code)
+	case "session":
+		err = cmdSession(args)
 	case "shell":
 		// Como exec: el código es el de la shell remota.
 		code, xerr := cmdShell(args)

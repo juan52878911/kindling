@@ -41,7 +41,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof", api.CapabilityProcesses, api.CapabilitySessions}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -534,6 +534,16 @@ func (s *Server) rutas() []ruta {
 		{"POST /machines/{ref}/hooks", AccionMaquina, nil, s.handleHooks},
 		{"POST /machines/{ref}/exec", AccionMaquina, nil, s.handleExec},
 		{"POST /machines/{ref}/shell", AccionMaquina, nil, s.handleShell},
+		{"POST /machines/{ref}/processes", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/processes", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/processes/{pid}", AccionMaquina, nil, s.handleProcesos},
+		{"DELETE /machines/{ref}/processes/{pid}", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/processes/{pid}/output", AccionMaquina, nil, s.handleProcesos},
+		{"POST /machines/{ref}/processes/{pid}/signal", AccionMaquina, nil, s.handleProcesos},
+		{"POST /machines/{ref}/sessions", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/sessions", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/sessions/{id}", AccionMaquina, nil, s.handleProcesos},
+		{"DELETE /machines/{ref}/sessions/{id}", AccionMaquina, nil, s.handleProcesos},
 		{"GET /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
 		{"PUT /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
 		{"DELETE /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
@@ -657,14 +667,18 @@ func (c *capturaMux) Write(b []byte) (int, error) {
 // invitado. Las de consulta (GET /machines/{ref}, ready) no cuentan: un panel
 // que pregunta cada pocos segundos no debe mantenerla despierta.
 var usoDeMaquina = map[string]bool{
-	"POST /machines/{ref}/exec":    true,
-	"POST /machines/{ref}/shell":   true,
-	"GET /machines/{ref}/files":    true,
-	"PUT /machines/{ref}/files":    true,
-	"DELETE /machines/{ref}/files": true,
-	"POST /machines/{ref}/guest":   true,
-	"POST /machines/{ref}/hooks":   true,
-	"GET /machines/{ref}/logs":     false,
+	"POST /machines/{ref}/exec":                   true,
+	"POST /machines/{ref}/shell":                  true,
+	"POST /machines/{ref}/processes":              true,
+	"GET /machines/{ref}/processes/{pid}/output":  true,
+	"POST /machines/{ref}/processes/{pid}/signal": true,
+	"POST /machines/{ref}/sessions":               true,
+	"GET /machines/{ref}/files":                   true,
+	"PUT /machines/{ref}/files":                   true,
+	"DELETE /machines/{ref}/files":                true,
+	"POST /machines/{ref}/guest":                  true,
+	"POST /machines/{ref}/hooks":                  true,
+	"GET /machines/{ref}/logs":                    false,
 }
 
 // conUso envuelve h con machine.Usar (ver usoDeMaquina).

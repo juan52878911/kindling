@@ -357,6 +357,13 @@ func (a *Agent) Register(mux *http.ServeMux) {
 		ruta("/exec/stream", a.enArranque(StreamExecHandlerFunc(a.Entorno)))
 		ruta("/exec/pty", a.enArranque(ShellHandlerFunc(a.Entorno)))
 		ruta("/files", a.enArranque(FilesHandler()))
+		// Procesos de fondo y sesiones (procesos.go, sesiones.go): las dos
+		// formas de la barra final, para el mux de Go.
+		procs, ses := a.enArranque(ProcessesHandlerFunc(a.Entorno)), a.enArranque(SessionsHandler())
+		ruta(api.GuestProcessesPath, procs)
+		ruta(api.GuestProcessesPath+"/", procs)
+		ruta(api.GuestSessionsPath, ses)
+		ruta(api.GuestSessionsPath+"/", ses)
 		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
 	}
 }
