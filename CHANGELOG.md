@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `sdks/python`: stdlib-only Python SDK (`kindling_sandbox`, sync and asyncio) for the sandbox gateway `/v1` API: create/get/list/renew/delete, exec (NDJSON stream and wait), files read/write/stat/delete, typed errors, tested against a fake server that follows the spec.
 - kling-sandbox: OpenAPI 3.1 spec of the `/v1` gateway API (`ext/sandbox/api/openapi.yaml`, see `docs/sandbox-api.md`), with a contract test that fails when a route or a schema field drifts from the code.
 - `kling sbx mcp`: an MCP server (stdio) that lets an agent create, list, exec in, read/write files of, renew and delete sandboxes through the gateway's `/v1` API; the token comes from `KLING_SANDBOX_TOKEN` and never appears in output.
 - `kling sbx e2b`: an E2B-compatible shim over the sandbox gateway. It serves E2B's control plane (`POST/GET/DELETE /sandboxes`, `timeout`, `refreshes`, `connect`) and, on the same listener, each sandbox's envd (Connect RPC in JSON: `process.Process/Start` streaming, `List`, `SendSignal`; `filesystem.Filesystem/Stat`, `ListDir`, `MakeDir`, `Remove`, `Move`; `GET/POST /files`). The E2B API key maps to the tenant token, never appears in logs or errors, and unsupported operations answer a clear 501. See `docs/e2b.md`.

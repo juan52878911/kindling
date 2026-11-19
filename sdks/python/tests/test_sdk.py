@@ -1,0 +1,224 @@
+import asyncio
+import json
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from kindling_sandbox import (AsyncSandbox, Client, ConfigError, NotFound, RateLimited, Sandbox,
+                              TransportError, Unauthorized, ApiError, BadRequest)
+
+from servidor_falso import TOKEN, ServidorFalso
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.srv = ServidorFalso()
+        self.srv.__enter__()
+        self.addCleanup(self.srv.__exit__)
+        self.kw = dict(url=self.srv.url, token=TOKEN)
+
+
+class TestCiclo(Base):
+    def test_create_get_list_renew_delete(self):
+        sb = Sandbox.create(template="py", ttl=120, labels={"a": "b"}, **self.kw)
+        self.assertEqual(sb.id, "h1/m-1")
+        self.assertEqual(sb.info.extra, {"campo_nuevo": 1})
+        pet = self.srv.estado.peticiones[-1]
+        self.assertEqual(json.loads(pet[4]), {"template": "py", "ttl_seconds": 120, "labels": {"a": "b"}})
+        self.assertEqual(Sandbox.connect(sb.id, **self.kw).info.template, "py")
+        lista = Sandbox.list(**self.kw)
+        self.assertEqual([s.id for s in lista], [sb.id])
+        self.assertEqual(lista.partial, "h2: down")
+        self.assertEqual(sb.renew(900).ttl_seconds, 900)
+        sb.delete()
+        with self.assertRaises(NotFound) as cm:
+            Sandbox.connect(sb.id, **self.kw)
+        self.assertEqual(cm.exception.code, "not_found")
+        self.assertEqual(cm.exception.status, 404)
+
+    def test_id_con_barra_sin_codificar(self):
+        sb = Sandbox.create(**self.kw)
+        sb.refresh()
+        self.assertEqual(self.srv.estado.peticiones[-1][1], "/v1/sandboxes/h1/m-1")
+
+    def test_contexto_borra_al_salir(self):
+        with Sandbox.create(**self.kw) as sb:
+            self.assertIn(sb.id, self.srv.estado.sandboxes)
+        self.assertEqual(self.srv.estado.sandboxes, {})
+
+    def test_contexto_borra_si_hay_excepcion(self):
+        with self.assertRaises(RuntimeError):
+            with Sandbox.create(**self.kw):
+                raise RuntimeError("x")
+        self.assertEqual(self.srv.estado.sandboxes, {})
+
+    def test_health_sin_token(self):
+        self.assertTrue(Client(url=self.srv.url, token="").health())
+        self.assertNotIn("Authorization", self.srv.estado.peticiones[-1][3])
+
+    def test_renew_error_400(self):
+        sb = Sandbox.create(**self.kw)
+        with self.assertRaises(BadRequest):
+            sb.renew(-5)
+
+
+class TestExec(Base):
+    def setUp(self):
+        super().setUp()
+        self.sb = Sandbox.create(**self.kw)
+
+    def test_wait(self):
+        r = self.sb.exec("echo hola", cwd="/tmp", env={"A": "1"}, timeout=10, stdin="in")
+        self.assertEqual(r.exit_code, 3)
+        self.assertEqual(r.stdout, "eco:sh -c echo hola\nin")
+        self.assertEqual(r.stderr, "err\n")
+        pet = self.srv.estado.peticiones[-1]
+        self.assertEqual(pet[2], {"wait": "1"})
+        cuerpo = json.loads(pet[4])
+        self.assertEqual(cuerpo["cmd"], ["sh", "-c", "echo hola"])
+        self.assertEqual((cuerpo["dir"], cuerpo["env"], cuerpo["timeout_seconds"]), ("/tmp", ["A=1"], 10))
+
+    def test_lista_tal_cual(self):
+        r = self.sb.exec(["ls", "-l"])
+        self.assertTrue(r.stdout.startswith("eco:ls -l"))
+
+    def test_stream(self):
+        evs = list(self.sb.exec_stream(["x"]))
+        self.assertEqual([e.stream for e in evs], ["stdout", "stderr", None])
+        self.assertEqual(evs[0].text, "eco:x\n")
+        self.assertEqual(evs[-1].exit, 3)
+        self.assertEqual(evs[-1].duration_ms, 5)
+
+    def test_stream_trozos_partidos_a_mitad_de_linea(self):
+        import base64
+        l1 = (json.dumps({"stream": "stdout", "data": base64.b64encode("ñandú\n".encode()).decode()}) + "\n").encode()
+        l2 = (json.dumps({"exit": 0, "duration_ms": 1}) + "\n").encode()
+        todo = l1 + l2
+        # cortes dentro de la línea, dentro de un escape y entre las dos líneas
+        cortes = [7, 20, len(l1) - 1, len(l1), len(l1) + 3]
+        trozos, ant = [], 0
+        for c in cortes:
+            trozos.append(todo[ant:c])
+            ant = c
+        trozos.append(todo[ant:])
+        self.srv.estado.trozos_exec = trozos
+        evs = list(self.sb.exec_stream("x"))
+        self.assertEqual(len(evs), 2)
+        self.assertEqual(evs[0].text, "ñandú\n")
+        self.assertEqual(evs[1].exit, 0)
+
+    def test_stream_error_tras_200(self):
+        self.srv.estado.error_exec_tras_200 = True
+        evs = list(self.sb.exec_stream("x"))
+        self.assertEqual(evs[-1].error, "flujo cortado")
+        self.assertIsNone(evs[-1].exit)
+
+    def test_stream_error_previo_es_excepcion(self):
+        with self.assertRaises(BadRequest):
+            self.sb.exec_stream([])
+
+    def test_exec_en_sandbox_inexistente(self):
+        self.sb.delete()
+        with self.assertRaises(NotFound):
+            self.sb.exec("x")
+
+
+class TestFiles(Base):
+    def setUp(self):
+        super().setUp()
+        self.sb = Sandbox.create(**self.kw)
+
+    def test_binario_ida_y_vuelta(self):
+        datos = bytes(range(256)) * 1024 + b"\x00\xff\r\n"
+        st = self.sb.files.write("/tmp/b.bin", datos, mode=0o600, mkdir=True)
+        self.assertEqual((st.size, st.mode), (len(datos), "0600"))
+        pet = self.srv.estado.peticiones[-1]
+        self.assertEqual(pet[2], {"path": "/tmp/b.bin", "mode": "0600", "mkdir": "1"})
+        self.assertEqual(pet[3]["Content-Type"], "application/octet-stream")
+        self.assertEqual(self.sb.files.read("/tmp/b.bin"), datos)
+        self.assertEqual(self.sb.files.stat("/tmp/b.bin").size, len(datos))
+
+    def test_texto_y_delete(self):
+        self.sb.files.write("/a b/ñ.txt", "hola")
+        self.assertEqual(self.sb.files.read_text("/a b/ñ.txt"), "hola")
+        self.sb.files.delete("/a b/ñ.txt")
+        with self.assertRaises(NotFound):
+            self.sb.files.read("/a b/ñ.txt")
+
+
+class TestErrores(Base):
+    def test_429_retry_after(self):
+        self.srv.estado.rate_limit_en_create = 1
+        with self.assertRaises(RateLimited) as cm:
+            Sandbox.create(**self.kw)
+        self.assertEqual(cm.exception.retry_after, 7.0)
+        self.assertEqual(cm.exception.status, 429)
+        self.assertIsInstance(cm.exception, ApiError)
+        Sandbox.create(**self.kw)  # el siguiente pasa
+
+    def test_401(self):
+        with self.assertRaises(Unauthorized):
+            Sandbox.list(url=self.srv.url, token="otro")
+
+    def test_sin_servidor(self):
+        with self.assertRaises(TransportError):
+            Sandbox.list(url="http://127.0.0.1:1", token=TOKEN, timeout=2)
+
+    def test_url_invalida(self):
+        with self.assertRaises(ConfigError):
+            Client(url="ftp://x")
+
+
+class TestConfigYToken(Base):
+    def test_env(self):
+        old = {k: os.environ.get(k) for k in ("KLING_SANDBOX_URL", "KLING_SANDBOX_TOKEN")}
+        os.environ["KLING_SANDBOX_URL"] = self.srv.url
+        os.environ["KLING_SANDBOX_TOKEN"] = TOKEN
+        try:
+            sb = Sandbox.create()
+            self.assertTrue(sb.id)
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_token_no_sale_en_repr_ni_errores(self):
+        sb = Sandbox.create(**self.kw)
+        c = sb._client
+        for texto in (repr(c), str(c), repr(sb), repr(sb.files), repr(sb.info)):
+            self.assertNotIn(TOKEN, texto)
+        with self.assertRaises(Unauthorized) as cm:
+            Sandbox.list(url=self.srv.url, token="otro-token-xyz")
+        self.assertNotIn("otro-token-xyz", str(cm.exception) + repr(cm.exception))
+        # error de transporte
+        try:
+            Sandbox.list(url="http://127.0.0.1:1", token=TOKEN, timeout=2)
+        except TransportError as ex:
+            self.assertNotIn(TOKEN, str(ex) + repr(ex))
+
+    def test_limpia_token_en_mensaje_del_servidor(self):
+        c = Client(url=self.srv.url, token="abc123secreto")
+        self.assertNotIn("abc123secreto", c._limpia("falló con abc123secreto dentro"))
+
+
+class TestAsync(Base):
+    def test_ciclo_asincrono(self):
+        async def main():
+            async with await AsyncSandbox.create(template="py", **self.kw) as sb:
+                r = await sb.exec("x")
+                self.assertEqual(r.exit_code, 3)
+                evs = [e async for e in await sb.exec_stream(["y"])]
+                self.assertEqual(evs[-1].exit, 3)
+                await sb.files.write("/f", b"\x00\x01")
+                self.assertEqual(await sb.files.read("/f"), b"\x00\x01")
+                self.assertEqual(len(await AsyncSandbox.list(**self.kw)), 1)
+            self.assertEqual(self.srv.estado.sandboxes, {})
+        asyncio.run(main())
+
+
+if __name__ == "__main__":
+    unittest.main()
