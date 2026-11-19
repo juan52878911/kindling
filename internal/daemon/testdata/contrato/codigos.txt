@@ -39,6 +39,7 @@ GET /machines/{ref}  ←  GET /machines/nadie  →  404 not_found
 GET /machines/{ref}  ←  GET /machines/parada  →  200 -
 GET /machines/{ref}/credaudit  ←  GET /machines/nadie/credaudit  →  404 not_found
 GET /machines/{ref}/egress  ←  GET /machines/nadie/egress  →  404 not_found
+PATCH /machines/{ref}/egress  ←  PATCH /machines/nadie/egress {"egress":"none"}  →  404 not_found
 GET /machines/{ref}/files  ←  GET /machines/nadie/files?path=/x  →  404 not_found
 GET /machines/{ref}/logs  ←  GET /machines/nadie/logs  →  404 not_found
 GET /machines/{ref}/logs  ←  GET /machines/parada/logs  →  404 not_found

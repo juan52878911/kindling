@@ -128,6 +128,10 @@ func main() {
 		os.Exit(code)
 	case "cp":
 		err = cmdCp(args)
+	case "ls":
+		err = cmdLs(args)
+	case "egress":
+		err = cmdEgress(args)
 	case "sandbox":
 		err = cmdSandbox(args)
 	case "graph":
