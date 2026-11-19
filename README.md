@@ -91,6 +91,7 @@ failure; `kling help <command>` shows one command's help.
 
 Install one with `kling plugin install <name>`; every binary in a release is compatible
 with every other. Writing your own: [`docs/extensions.md`](docs/extensions.md).
+Running Claude Code, Codex CLI or Playwright inside a sandbox with the API key kept off the VM: [`docs/recetas/`](docs/recetas/README.md).
 
 ## Compatibility
 
