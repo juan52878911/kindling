@@ -185,7 +185,7 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// nombres de los otros tenants (y cuánto usan) no son de quien pregunta.
 	visibles := []Tenant{*tenantDe(r)}
 	if visibles[0].Admin {
-		visibles = s.tenants
+		visibles = s.tenantsTodos()
 	}
 
 	fmt.Fprintln(w, "# HELP kling_sandbox_machines Live sandboxes by tenant and state.")

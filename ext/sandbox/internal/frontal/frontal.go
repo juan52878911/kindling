@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -109,6 +110,10 @@ type Tenant struct {
 type Opciones struct {
 	Hosts   *hosts.Registro
 	Tenants []Tenant
+	// Almacen, si no es nil, aporta inquilinos persistentes con claves
+	// creadas por la API (/v1/tenants). Conviven con Tenants, que mandan: un
+	// nombre no puede estar en los dos.
+	Almacen *inquilinos.Almacen
 
 	// ImagenPorDefecto se usa cuando la petición no trae ni template ni image.
 	// Vacía: la petición tiene que decir una de las dos.
@@ -147,15 +152,19 @@ type Opciones struct {
 
 // Servidor es el frontal. Implementa http.Handler.
 type Servidor struct {
-	reg      *hosts.Registro
-	tenants  []Tenant
-	imagen   string
-	ttl      int
-	abandono time.Duration
-	cada     time.Duration
-	log      *log.Logger
-	mux      *http.ServeMux
-	ingreso  *ingreso
+	reg     *hosts.Registro
+	tenants []Tenant
+	almacen *inquilinos.Almacen
+	// defectos son los máximos del frontal que completan los topes a 0 de un
+	// inquilino.
+	defMem, defCPU, defTotal, defLote int
+	imagen                            string
+	ttl                               int
+	abandono                          time.Duration
+	cada                              time.Duration
+	log                               *log.Logger
+	mux                               *http.ServeMux
+	ingreso                           *ingreso
 
 	maxVolumenMiB int
 
@@ -275,30 +284,26 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxProcesos < 0 || t.MaxSesiones < 0 || t.MaxSeguir < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 || t.MaxMemTotalMiB < 0 {
 			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
 		}
-		if t.MaxMemMiB == 0 {
-			t.MaxMemMiB = maxMem
-		}
-		if t.MaxVCPUs == 0 {
-			t.MaxVCPUs = maxCPU
-		}
-		if t.MaxMemTotalMiB == 0 {
-			t.MaxMemTotalMiB = maxTotal
-		}
 		if t.MaxLote < 0 || t.MaxVolumenes < 0 {
 			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
 		}
-		if t.MaxLote == 0 || t.MaxLote > maxLote {
-			t.MaxLote = maxLote
-		}
-		tenants = append(tenants, t)
+		tenants = append(tenants, completar(t, maxMem, maxCPU, maxTotal, maxLote))
 	}
-	if len(tenants) == 0 {
+	if o.Almacen != nil {
+		for _, t := range o.Almacen.Listar() {
+			if vistos[t.Nombre] {
+				return nil, fmt.Errorf("tenant %q is both in the environment and in the tenant store", t.Nombre)
+			}
+		}
+	}
+	if len(tenants) == 0 && (o.Almacen == nil || o.Almacen.Cuantos() == 0) {
 		return nil, errors.New("no tenants configured: the frontal refuses to serve without authentication")
 	}
 	s := &Servidor{
 		reg: o.Hosts, tenants: tenants, imagen: o.ImagenPorDefecto,
 		ttl: o.TTLPorDefecto, abandono: o.Abandono, cada: o.CadaLimpieza,
 		log: o.Log, enVuelo: map[string]int{}, maxVolumenMiB: maxVol,
+		almacen: o.Almacen, defMem: maxMem, defCPU: maxCPU, defTotal: maxTotal, defLote: maxLote,
 	}
 	if s.ttl == 0 {
 		s.ttl = api.SandboxDefaultTTL
@@ -346,6 +351,7 @@ func (s *Servidor) rutas() {
 	m.Handle("POST /v1/graphs", s.auth(http.HandlerFunc(s.handleCrearGrafo)))
 	m.Handle("GET /v1/graphs", s.auth(http.HandlerFunc(s.handleListarGrafos)))
 	m.Handle("/v1/graphs/", s.auth(http.HandlerFunc(s.handleGrafo)))
+	s.rutasTenants(m)
 	s.mux = m
 }
 
@@ -376,18 +382,82 @@ func (s *Servidor) auth(h http.Handler) http.Handler {
 			authFail(w)
 			return
 		}
-		var t *Tenant
-		for i := range s.tenants {
-			if subtle.ConstantTimeCompare([]byte(got), []byte(s.tenants[i].Token)) == 1 {
-				t = &s.tenants[i]
-			}
-		}
+		t := s.resolver(got)
 		if t == nil {
 			authFail(w)
 			return
 		}
 		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claveTenant{}, t)))
 	})
+}
+
+// resolver da el tenant al que abre el token: primero los del entorno (todos
+// comparados, sin cortar) y luego las claves del almacén. nil si no abre nada.
+func (s *Servidor) resolver(tok string) *Tenant {
+	var t *Tenant
+	for i := range s.tenants {
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.tenants[i].Token)) == 1 {
+			t = &s.tenants[i]
+		}
+	}
+	if t == nil && s.almacen != nil {
+		if q, ok := s.almacen.Resolver(tok); ok {
+			v := s.deAlmacen(q)
+			t = &v
+		}
+	}
+	return t
+}
+
+// deAlmacen convierte un inquilino del almacén en Tenant, con los topes por
+// defecto del frontal ya aplicados (como hace Nuevo con los del entorno).
+func (s *Servidor) deAlmacen(q inquilinos.Inquilino) Tenant {
+	p := q.Topes
+	return completar(Tenant{
+		Nombre: q.Nombre, Admin: q.Admin,
+		MaxSandboxes: p.MaxSandboxes, MaxPorPlantilla: p.MaxPorPlantilla, MaxShells: p.MaxShells,
+		MaxProcesos: p.MaxProcesos, MaxSesiones: p.MaxSesiones, MaxSeguir: p.MaxSeguir,
+		MaxMemMiB: p.MaxMemMiB, MaxVCPUs: p.MaxVCPUs, MaxMemTotalMiB: p.MaxMemTotalMiB,
+		MaxLote: p.MaxLote, MaxVolumenes: p.MaxVolumenes,
+	}, s.defMem, s.defCPU, s.defTotal, s.defLote)
+}
+
+// completar rellena con los máximos del frontal los topes que el tenant deja a 0.
+func completar(t Tenant, maxMem, maxCPU, maxTotal, maxLote int) Tenant {
+	if t.MaxMemMiB == 0 {
+		t.MaxMemMiB = maxMem
+	}
+	if t.MaxVCPUs == 0 {
+		t.MaxVCPUs = maxCPU
+	}
+	if t.MaxMemTotalMiB == 0 {
+		t.MaxMemTotalMiB = maxTotal
+	}
+	if t.MaxLote == 0 || t.MaxLote > maxLote {
+		t.MaxLote = maxLote
+	}
+	return t
+}
+
+// tenantsTodos son los del entorno y los del almacén.
+func (s *Servidor) tenantsTodos() []Tenant {
+	out := append([]Tenant(nil), s.tenants...)
+	if s.almacen != nil {
+		for _, q := range s.almacen.Listar() {
+			out = append(out, s.deAlmacen(q))
+		}
+	}
+	return out
+}
+
+// tenantNombre busca un tenant por nombre.
+func (s *Servidor) tenantNombre(n string) *Tenant {
+	for _, t := range s.tenantsTodos() {
+		if t.Nombre == n {
+			return &t
+		}
+	}
+	return nil
 }
 
 func bearer(h string) (string, bool) {
