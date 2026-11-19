@@ -56,6 +56,8 @@ type falso struct {
 	// frontal no acumula el flujo.
 	execLibera chan struct{}
 	ultimoExec api.ExecRequest
+	// procs es el estado del daemon falso para procesos y sesiones.
+	procs procsFalsos
 	// shellIlegal: la shell falsa manda al cliente una trama que no le toca.
 	shellIlegal bool
 	// creadas cuenta los POST /sandboxes aceptados.
@@ -404,6 +406,7 @@ func (f *falso) rutas() http.Handler {
 	})
 	f.rutasGrafos(m)
 	f.rutasIngreso(m)
+	f.rutasProcesos(m)
 	m.HandleFunc("POST /machines/{ref}/exec", f.exec)
 	m.HandleFunc("POST /machines/{ref}/shell", f.shell)
 	m.HandleFunc("/machines/{ref}/files", f.files)

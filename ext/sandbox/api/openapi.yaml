@@ -291,6 +291,272 @@ paths:
           $ref: "#/components/responses/Error"
         "504":
           $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/processes:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Lanza un proceso en segundo plano
+      description: |
+        Devuelve enseguida el `pid` (del sandbox, no del SO). El proceso sigue
+        vivo aunque el cliente se desconecte; su salida se lee con
+        `/processes/{pid}/output`. Con `session` corre en el cwd y el entorno
+        de esa sesión. Tope de procesos vivos por sandbox (429).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessStartRequest"
+      responses:
+        "201":
+          description: Proceso lanzado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessInfo"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [sandboxes]
+      summary: Lista los procesos de fondo del sandbox
+      responses:
+        "200":
+          description: Procesos, vivos y terminados aún no borrados
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProcessInfo"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/processes/{pid}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: pid
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      tags: [sandboxes]
+      summary: Estado de un proceso
+      parameters:
+        - name: wait
+          in: query
+          description: Segundos (máx. 300) que espera a que el proceso termine
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Estado; sigue en `running` si no terminó en el plazo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessInfo"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [sandboxes]
+      summary: Mata el proceso si sigue vivo y lo olvida, con su salida
+      responses:
+        "204":
+          description: Borrado
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/processes/{pid}/signal:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: pid
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      tags: [sandboxes]
+      summary: Manda una señal al grupo del proceso
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessSignalRequest"
+      responses:
+        "200":
+          description: Estado tras la señal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessInfo"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/processes/{pid}/output:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: pid
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      tags: [sandboxes]
+      summary: Salida del proceso (NDJSON)
+      description: |
+        Flujo NDJSON de `ProcessEvent` desde `offset`. Cada trozo trae el
+        `offset` siguiente para reanudar. Con `follow=1` sigue hasta que el
+        proceso termina y acaba con un evento `exit`; sin él vuelca lo que hay.
+        El último evento siempre lleva el `offset` desde el que continuar. Tope
+        de lecturas con follow abiertas por inquilino (429).
+      parameters:
+        - name: offset
+          in: query
+          schema:
+            type: integer
+        - name: follow
+          in: query
+          schema:
+            type: string
+            enum: ["1"]
+      responses:
+        "200":
+          description: Flujo NDJSON
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ProcessEvent"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/sessions:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Crea una sesión de exec (cwd y entorno persistentes)
+      description: |
+        Los `exec` y procesos que pasen `session` corren con el cwd y el
+        entorno de la sesión. Tope de sesiones por sandbox (429).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionRequest"
+      responses:
+        "201":
+          description: Sesión creada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [sandboxes]
+      summary: Lista las sesiones
+      responses:
+        "200":
+          description: Sesiones
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/sessions/{sid}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: sid
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [sandboxes]
+      summary: Ver una sesión
+      responses:
+        "200":
+          description: La sesión
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [sandboxes]
+      summary: Borra una sesión
+      responses:
+        "204":
+          description: Borrada
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/shell:
     parameters:
       - $ref: "#/components/parameters/id"
@@ -859,6 +1125,123 @@ components:
           type: integer
         user:
           type: string
+        session:
+          type: string
+          description: Sesión cuyo cwd y entorno se usan (ver `/sessions`)
+    ProcessStartRequest:
+      type: object
+      required: [cmd]
+      properties:
+        cmd:
+          type: array
+          items:
+            type: string
+        dir:
+          type: string
+        env:
+          type: array
+          items:
+            type: string
+        user:
+          type: string
+        session:
+          type: string
+        timeout_seconds:
+          type: integer
+        max_output_bytes:
+          type: integer
+    ProcessInfo:
+      type: object
+      properties:
+        pid:
+          type: integer
+        cmd:
+          type: array
+          items:
+            type: string
+        dir:
+          type: string
+        state:
+          type: string
+          enum: [running, exited]
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        exit_code:
+          type: integer
+        signal:
+          type: string
+        timed_out:
+          type: boolean
+        output_bytes:
+          type: integer
+        output_start:
+          type: integer
+    ProcessEvent:
+      type: object
+      description: Una línea del flujo de salida. `data` va en base64; `offset` es el siguiente al trozo.
+      properties:
+        stream:
+          type: string
+          enum: [stdout, stderr]
+        data:
+          type: string
+          format: byte
+        offset:
+          type: integer
+        dropped:
+          type: integer
+        exit:
+          type: integer
+        signal:
+          type: string
+        error:
+          type: string
+    ProcessSignalRequest:
+      type: object
+      properties:
+        signal:
+          type: string
+          description: Nombre (TERM, KILL, HUP...); vacía = TERM
+    SessionRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        dir:
+          type: string
+        env:
+          type: array
+          items:
+            type: string
+        ttl_seconds:
+          type: integer
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+        dir:
+          type: string
+        env:
+          type: array
+          items:
+            type: string
+        unset:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        execs:
+          type: integer
     ExecEvent:
       type: object
       description: Una línea del flujo NDJSON. `data` va en base64.
