@@ -376,3 +376,21 @@ func TestCambiarEgresoVueltaAAllowlistResuelve(t *testing.T) {
 		})
 	}
 }
+
+// Un cambio de egress en caliente para el resolver y abre otro en el mismo
+// puerto acto seguido: si el puerto aún está ocupado un instante, el arranque
+// espera en vez de fallar con «address already in use».
+func TestResolverEsperaAlPuertoRecienSoltado(t *testing.T) {
+	n := redDePrueba()
+	n.NS = "kl-test-rebind"
+	n.HostIP = "127.0.83.34"
+	ocupa, err := stdnet.ListenUDP("udp4", &stdnet.UDPAddr{IP: stdnet.ParseIP(n.HostIP), Port: dnsPort})
+	if err != nil {
+		t.Skipf("no puedo ocupar %s:%d: %v", n.HostIP, dnsPort, err)
+	}
+	go func() { time.Sleep(150 * time.Millisecond); ocupa.Close() }()
+	t.Cleanup(func() { stopResolver(n.NS) })
+	if err := startDNSResolver(n, []string{"a.com"}); err != nil {
+		t.Fatalf("el resolver no esperó al puerto: %v", err)
+	}
+}

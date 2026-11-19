@@ -56,6 +56,7 @@ import (
 	stdnet "net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -256,11 +257,30 @@ func startDNSResolverModo(n *Net, domains []string, modo modoResolver) error {
 	if ip == nil {
 		return fmt.Errorf("dns resolver: invalid host IP %q", n.HostIP)
 	}
-	udp, err := stdnet.ListenUDP("udp4", &stdnet.UDPAddr{IP: ip, Port: dnsPort})
+	// Reintentos cortos si el puerto sigue ocupado: un cambio de egress en
+	// caliente (CambiarEgreso) para el resolver viejo y abre el nuevo en el
+	// mismo puerto acto seguido, y con la máquina cargada el bind puede llegar
+	// antes de que el kernel suelte el socket recién cerrado.
+	var udp *stdnet.UDPConn
+	var tcp *stdnet.TCPListener
+	var err error
+	for intento := 0; ; intento++ {
+		udp, err = stdnet.ListenUDP("udp4", &stdnet.UDPAddr{IP: ip, Port: dnsPort})
+		if err == nil || !errors.Is(err, syscall.EADDRINUSE) || intento >= dnsBindReintentos {
+			break
+		}
+		time.Sleep(dnsBindEspera)
+	}
 	if err != nil {
 		return fmt.Errorf("dns resolver: could not listen on udp %s:%d: %w", n.HostIP, dnsPort, err)
 	}
-	tcp, err := stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: ip, Port: dnsPort})
+	for intento := 0; ; intento++ {
+		tcp, err = stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: ip, Port: dnsPort})
+		if err == nil || !errors.Is(err, syscall.EADDRINUSE) || intento >= dnsBindReintentos {
+			break
+		}
+		time.Sleep(dnsBindEspera)
+	}
 	if err != nil {
 		udp.Close()
 		return fmt.Errorf("dns resolver: could not listen on tcp %s:%d: %w", n.HostIP, dnsPort, err)
@@ -290,6 +310,13 @@ func startDNSResolverModo(n *Net, domains []string, modo modoResolver) error {
 	resolversMu.Unlock()
 	return nil
 }
+
+// dnsBindReintentos y dnsBindEspera acotan la espera por un puerto que el
+// resolver anterior acaba de soltar (1 s como mucho).
+const (
+	dnsBindReintentos = 40
+	dnsBindEspera     = 25 * time.Millisecond
+)
 
 // upstreamDefecto es el resolver real al que reenvía el de cada máquina.
 // Variable solo para los tests.
