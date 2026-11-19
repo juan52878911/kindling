@@ -117,12 +117,33 @@ func diferenciaDeReglas(viejas, nuevas [][]string) (borrar, anadir [][]string) {
 			borrar = append(borrar, r)
 		}
 	}
+	cierre := claveRegla(comoBorrado(forwardCierre()))
+	anadeForward := false
 	for _, r := range nuevas {
 		if !enViejas[claveRegla(comoBorrado(r))] {
 			anadir = append(anadir, r)
+			anadeForward = anadeForward || esAltaForward(r)
+		}
+	}
+	// El DROP final de FORWARD es común a none y allowlist, pero no se puede
+	// dejar donde está: lo que se añade con -A cae DETRÁS de él y nunca
+	// casaría (el DNS y el ipset de la allowlist quedarían cortados). Se
+	// borra y se vuelve a poner en su sitio del orden nuevo.
+	if anadeForward && enViejas[cierre] && enNuevas[cierre] {
+		borrar = append(borrar, forwardCierre())
+		anadir = anadir[:0]
+		for _, r := range nuevas {
+			if k := claveRegla(comoBorrado(r)); k == cierre || !enViejas[k] {
+				anadir = append(anadir, r)
+			}
 		}
 	}
 	return borrar, anadir
+}
+
+// esAltaForward dice si r añade al final de la cadena FORWARD de filter.
+func esAltaForward(r []string) bool {
+	return len(r) >= 2 && r[0] == "-A" && r[1] == "FORWARD"
 }
 
 // dominiosEstrechan dice si algún dominio viejo ya no está cubierto por la
@@ -211,7 +232,12 @@ func (n *Net) CambiarEgreso(viejo Egress, viejosDominios []string, nuevo Egress,
 		}
 	}
 	for _, r := range anadir {
-		if !reglaPresente(n.NS, r) {
+		// Una regla que esta misma transacción borra (el DROP final de
+		// FORWARD, que se recoloca) se añade aunque esté presente ahora.
+		recolocada := slices.ContainsFunc(borrar, func(b []string) bool {
+			return claveRegla(comoBorrado(b)) == claveRegla(comoBorrado(r))
+		})
+		if recolocada || !reglaPresente(n.NS, r) {
 			tx = append(tx, r)
 		}
 	}

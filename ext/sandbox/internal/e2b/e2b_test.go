@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,8 @@ type gateway struct {
 	bloquear chan struct{} // si no es nil, /exec queda abierto hasta cerrarlo
 	eco      bool          // los errores repiten el Authorization recibido
 	fondo    *fondoFalso   // si no es nil, el gateway tiene procesos de fondo
+	sinList  bool          // files?list=1 responde 404 (gateway antiguo)
+	listados int           // peticiones files?list=1 recibidas
 }
 
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +119,17 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			j(200, map[string]any{"path": ruta, "size": len(b), "mode": "0644"})
 		case "GET":
 			b, ok := g.archivos[ruta]
+			if r.URL.Query().Get("list") == "1" {
+				g.listados++
+				if g.sinList {
+					j(404, map[string]any{"message": "no list"})
+					return
+				}
+				j(200, map[string]any{"path": ruta, "entries": []any{
+					map[string]any{"name": "a.txt", "type": "file", "size": 5, "mode": "0644", "mod_time": "2026-01-02T03:04:05Z"},
+					map[string]any{"name": "sub", "type": "dir", "size": 4096, "mode": "0755", "mod_time": "2026-01-02T03:04:05Z"}}})
+				return
+			}
 			if ruta == "/home/user/dir" {
 				j(200, map[string]any{"path": ruta, "is_dir": true, "mode": "0755", "mod_time": "2026-01-02T03:04:05Z"})
 				return
@@ -266,7 +280,7 @@ func TestFlujoSDK(t *testing.T) {
 	// Lo que llegó al gateway.
 	ex := b.gw.execs[1]
 	cmd := fmt.Sprint(ex["cmd"])
-	if cmd != "[/bin/bash -l -c echo hola]" || ex["dir"] != "/work" || ex["timeout_seconds"] != float64(60) ||
+	if want := "[/bin/sh -c " + scriptBash + " sh -l -c echo hola]"; cmd != want || ex["dir"] != "/work" || ex["timeout_seconds"] != float64(60) ||
 		fmt.Sprint(ex["env"]) != "[A=1]" {
 		t.Fatalf("exec al gateway: %v", ex)
 	}
@@ -569,5 +583,81 @@ func TestStartErrores(t *testing.T) {
 		if resp.StatusCode != 200 || len(got) < 5 || got[0] != 0x02 || !strings.Contains(string(got[5:]), `"error"`) {
 			t.Errorf("%s: %d %q", nombre, resp.StatusCode, got)
 		}
+	}
+}
+
+// El SDK de E2B lanza siempre `/bin/bash -l -c CMD`; el gateway debe recibir un
+// argv que funcione también en imágenes sin bash.
+func TestStartBashSeEnvuelve(t *testing.T) {
+	casos := []struct {
+		cmd, args string
+		envuelto  bool
+	}{
+		{"/bin/bash", `["-l","-c","echo hola"]`, true},
+		{"bash", `["-c","x"]`, true},
+		{"/bin/sh", `["-c","x"]`, false},
+		{"sleep", `["1"]`, false},
+	}
+	for _, c := range casos {
+		b := nuevoBanco(t)
+		cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/connect+json", "Connect-Timeout-Ms": "60000"}
+		resp := b.peticion(t, "POST", "/process.Process/Start", "49983-onrhqmi.e2b.test", cab,
+			strings.NewReader(string(envelope(`{"process":{"cmd":"`+c.cmd+`","args":`+c.args+`}}`))))
+		leer(t, resp)
+		var args []string
+		json.Unmarshal([]byte(c.args), &args)
+		want := append([]string{c.cmd}, args...)
+		if c.envuelto {
+			want = append([]string{"/bin/sh", "-c", scriptBash, "sh"}, args...)
+		}
+		var got []string
+		for _, a := range b.gw.execs[0]["cmd"].([]any) {
+			got = append(got, a.(string))
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: argv %q, quería %q", c.cmd, got, want)
+		}
+		if g, a := desenvolverBash(got); c.envuelto && (g != "/bin/bash" || fmt.Sprint(a) != fmt.Sprint(args)) {
+			t.Errorf("desenvolver: %q %q", g, a)
+		}
+	}
+}
+
+// El envoltorio ejecutado de verdad con el sh del sistema.
+func TestScriptBashEjecuta(t *testing.T) {
+	out, err := exec.Command("/bin/sh", "-c", scriptBash, "sh", "-l", "-c", "echo hola").CombinedOutput()
+	if err != nil || string(out) != "hola\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestListDirUsaListDelGateway(t *testing.T) {
+	b := nuevoBanco(t)
+	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/json"}
+	resp := b.peticion(t, "POST", "/filesystem.Filesystem/ListDir", "49983-onrhqmi.e2b.test", cab, strings.NewReader(`{"path":"/home/user/dir"}`))
+	var m struct{ Entries []map[string]any }
+	json.Unmarshal(leer(t, resp), &m)
+	if len(m.Entries) != 2 || m.Entries[0]["path"] != "/home/user/dir/a.txt" || m.Entries[1]["type"] != "FILE_TYPE_DIRECTORY" {
+		t.Fatalf("entradas: %v", m.Entries)
+	}
+	if b.gw.listados != 1 {
+		t.Errorf("list=1 pedido %d veces", b.gw.listados)
+	}
+	for _, e := range b.gw.execs {
+		if strings.HasPrefix(fmt.Sprint(e["cmd"]), "[find") {
+			t.Errorf("no debía usar find: %v", e)
+		}
+	}
+}
+
+func TestListDirRespaldoFind(t *testing.T) {
+	b := nuevoBanco(t)
+	b.gw.sinList = true
+	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/json"}
+	resp := b.peticion(t, "POST", "/filesystem.Filesystem/ListDir", "49983-onrhqmi.e2b.test", cab, strings.NewReader(`{"path":"/home/user/dir"}`))
+	var m struct{ Entries []map[string]any }
+	json.Unmarshal(leer(t, resp), &m)
+	if len(m.Entries) != 2 || b.gw.listados != 1 || !strings.HasPrefix(fmt.Sprint(b.gw.execs[len(b.gw.execs)-1]["cmd"]), "[find") {
+		t.Fatalf("respaldo: %v listados=%d execs=%v", m.Entries, b.gw.listados, b.gw.execs)
 	}
 }

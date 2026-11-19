@@ -15,6 +15,10 @@ package frontal
 //     queda /guest: HTTP de texto con cuerpo acotado, y el puerto tiene que
 //     estar en la etiqueta kling.ports. WebSocket da 501.
 //
+// PUERTOS. El túnel y /guest del daemon solo llegan a los puertos de kling.ports
+// (regla de seguridad que no se relaja): al preparar un puerto, el gateway lo
+// añade a esa etiqueta (declararPuerto) sin pisar los demás. Publish no lo pide.
+//
 // AUTORIZACIÓN. Bearer del tenant dueño, o un token de endpoint (ver
 // handleEndpoint) por Authorization, X-Kling-Endpoint-Token, ?kling_token= (una
 // vez: queda en una cookie HttpOnly del subdominio) o la cookie. Un endpoint
@@ -578,6 +582,9 @@ func (g *ingreso) preparar(ctx context.Context, e *entrada, puerto int) (int, er
 		return 0, &api.StatusError{Code: http.StatusConflict, Message: fmt.Sprintf("the sandbox is %s", e.mc.State)}
 	}
 	if g.o.SoloGuest {
+		if err := g.declararPuerto(ctx, e, puerto); err != nil {
+			return 0, err
+		}
 		e.puertos[puerto] = 0
 		return 0, nil
 	}
@@ -588,10 +595,16 @@ func (g *ingreso) preparar(ctx context.Context, e *entrada, puerto int) (int, er
 		}
 	}
 	if e.tunel > 0 {
+		if err := g.declararPuerto(ctx, e, puerto); err != nil {
+			return 0, err
+		}
 		e.puertos[puerto] = puertoTunel
 		return puertoTunel, nil
 	}
 	if !e.h.Local() {
+		if err := g.declararPuerto(ctx, e, puerto); err != nil {
+			return 0, err
+		}
 		e.puertos[puerto] = 0
 		return 0, nil
 	}
@@ -626,6 +639,40 @@ func (g *ingreso) preparar(ctx context.Context, e *entrada, puerto int) (int, er
 	}
 	e.puertos[puerto] = hp
 	return hp, nil
+}
+
+// maxPuertosDeclarados es el tope de puertos en kling.ports por sandbox.
+const maxPuertosDeclarados = 16
+
+// declararPuerto añade puerto a la etiqueta kling.ports de la máquina si no
+// estaba: el túnel (/tcp) y el proxy /guest del daemon solo llegan a los puertos
+// de esa etiqueta, y es una regla de seguridad que no se relaja. Lee la etiqueta
+// actual, une y escribe, sin pisar los que ya hubiera. No se quita al caducar el
+// endpoint: el sandbox es efímero. El respaldo Publish no la necesita (el daemon
+// no la mira al publicar). Se llama con e.mu tomado.
+func (g *ingreso) declararPuerto(ctx context.Context, e *entrada, puerto int) error {
+	cur, err := e.h.Cliente.Get(ctx, e.mc.ID)
+	if err != nil {
+		return deHost(e.h, err)
+	}
+	var ps []string
+	for _, p := range strings.Split(cur.Labels[api.LabelPorts], ",") {
+		p = strings.TrimSpace(p)
+		if n, err := strconv.Atoi(p); err == nil && n == puerto {
+			return nil
+		}
+		if p != "" {
+			ps = append(ps, p)
+		}
+	}
+	if len(ps) >= maxPuertosDeclarados {
+		return &api.StatusError{Code: http.StatusUnprocessableEntity, Message: fmt.Sprintf("the sandbox already exposes %d ports (the limit)", maxPuertosDeclarados)}
+	}
+	ps = append(ps, strconv.Itoa(puerto))
+	if err := e.h.Cliente.SetLabels(ctx, e.mc.ID, map[string]string{api.LabelPorts: strings.Join(ps, ",")}); err != nil {
+		return deHost(e.h, err)
+	}
+	return nil
 }
 
 // ---- proxy
