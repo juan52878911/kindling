@@ -61,6 +61,31 @@ evento, vaciada al momento (`{"stream":"stdout","data":"<base64>"}`), y al final
 `{"exit":0,"duration_ms":...}`, o `{"error":"..."}` si el flujo se corta después del 200.
 Con `?wait=1` espera y devuelve un único `ExecResult` JSON.
 
+## Procesos en segundo plano
+
+`POST /v1/sandboxes/{id}/processes` (`cmd`, `dir`, `env`, `user`, `session`,
+`timeout_seconds`, `max_output_bytes`) lanza un comando y devuelve `201` con su `pid` (el del
+sandbox). El proceso sigue vivo aunque el cliente se desconecte. Rutas hermanas:
+`GET …/processes` (lista), `GET …/processes/{pid}` (estado; `?wait=N` espera hasta N segundos,
+máx. 300), `DELETE …/processes/{pid}` (lo mata y lo olvida),
+`POST …/processes/{pid}/signal` (`{"signal":"KILL"}`, vacía = TERM) y
+`GET …/processes/{pid}/output?offset=N[&follow=1]`: NDJSON de `ProcessEvent`
+(`stream`+`data` base64, `offset` = el siguiente al trozo). El último evento lleva siempre el
+`offset` desde el que continuar y, con `follow` y el proceso terminado, `exit`. Un `offset`
+anterior a lo que conserva el sandbox se avisa con `dropped`.
+
+Topes por tenant (todos con `429`): procesos vivos por sandbox (`max_processes`, 32 por
+defecto) y lecturas con `follow` abiertas a la vez (`max_follow`, 32). Se fijan en
+`KLING_SANDBOX_TENANTS` (campos 8.º a 10.º). Como en exec, el sandbox ajeno da `404`.
+
+## Sesiones
+
+`POST /v1/sandboxes/{id}/sessions` (`id`, `dir`, `env`, `ttl_seconds`) crea una sesión; `GET`
+lista, `GET|DELETE …/sessions/{id}` la ve o la borra. Un `exec` o un proceso de fondo con
+`"session":"<id>"` corre con el directorio y el entorno de la sesión (y un `cd` o `export`
+dentro de un exec la actualiza). Tope de sesiones por sandbox: `max_sessions`, 16 por defecto
+(`429`).
+
 ## Shell interactiva
 
 `POST /v1/sandboxes/{id}/shell` con `Upgrade: kling-shell/1` cambia el protocolo

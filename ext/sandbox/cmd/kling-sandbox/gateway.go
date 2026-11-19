@@ -218,7 +218,7 @@ func nombres(m map[string]string) []string {
 // de kindling-mcp a su token.
 //
 //	KLING_SANDBOX_TOKEN=xxx                              un inquilino "default", sin tope
-//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus[:máx. mem_mib total]]]]]
+//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus[:máx. mem_mib total[:máx. procesos de fondo[:máx. sesiones[:máx. lecturas con follow]]]]]]]]
 //
 // Cada token tiene al menos 16 caracteres y no se repite entre inquilinos
 // (frontal.Nuevo se niega a arrancar si no).
@@ -238,8 +238,8 @@ func leerTenants() ([]frontal.Tenant, error) {
 		// sandboxes) no se mueven de sitio, así que una configuración escrita
 		// antes de que existiera el máximo de shells se sigue leyendo igual.
 		partes := strings.Split(t, ":")
-		if len(partes) < 2 || len(partes) > 7 || partes[0] == "" || partes[1] == "" {
-			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus[:max_mem_total_mib]]]]]", t)
+		if len(partes) < 2 || len(partes) > 10 || partes[0] == "" || partes[1] == "" {
+			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus[:max_mem_total_mib[:max_processes[:max_sessions[:max_follow]]]]]]]]", t)
 		}
 		te := frontal.Tenant{Nombre: partes[0], Token: partes[1]}
 		if len(partes) > 2 && partes[2] != "" {
@@ -276,6 +276,20 @@ func leerTenants() ([]frontal.Tenant, error) {
 				return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: max_mem_total_mib has to be a number", t)
 			}
 			te.MaxMemTotalMiB = n
+		}
+		// Procesos de fondo vivos por sandbox, sesiones por sandbox y lecturas
+		// de salida con follow abiertas por tenant (0 = el valor por defecto).
+		for i, c := range []struct {
+			nombre string
+			dst    *int
+		}{{"max_processes", &te.MaxProcesos}, {"max_sessions", &te.MaxSesiones}, {"max_follow", &te.MaxSeguir}} {
+			if len(partes) > 7+i && partes[7+i] != "" {
+				n, err := strconv.Atoi(partes[7+i])
+				if err != nil || n < 0 {
+					return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: %s has to be a number", t, c.nombre)
+				}
+				*c.dst = n
+			}
 		}
 		out = append(out, te)
 	}

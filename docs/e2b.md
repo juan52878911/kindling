@@ -109,13 +109,13 @@ se rechazan.
 
 | Operación | Estado | Traducción / motivo |
 |---|---|---|
-| `process.Process/Start` | Soportada | `POST /v1/sandboxes/{id}/exec` (NDJSON) → eventos `start`, `data` (`stdout`/`stderr`, base64) y `end` (`exitCode`, `status: "exit status N"`). `cmd`+`args`→`cmd`, `cwd`→`dir`, `envs`→`env`; `Connect-Timeout-Ms`→`timeout_seconds`. |
-| `process.Process/List` | Soportada | Procesos que el shim tiene en marcha en ese sandbox. |
-| `process.Process/SendSignal` | Soportada | Corta el flujo de exec (el gateway mata el comando); `SIGTERM` y `SIGKILL` son equivalentes, el fin sale con 143 o 137. |
+| `process.Process/Start` | Soportada | `POST /v1/sandboxes/{id}/processes` y `GET …/output?follow=1` → eventos `start` (con el pid del sandbox), `data` (`stdout`/`stderr`, base64) y `end` (`exitCode`, `status: "exit status N"` o `"signal: killed"`). `cmd`+`args`→`cmd`, `cwd`→`dir`, `envs`→`env`. El comando es un proceso de fondo del sandbox: **sigue vivo si el cliente cierra la conexión** (`commands.run(background=True)`). `Connect-Timeout-Ms` es el plazo de la conexión: al vencer, el stream acaba con `deadline_exceeded` y el comando sigue. Entregado el `end`, el proceso se borra. Con un gateway sin procesos de fondo se usa el exec atado a la petición (`POST …/exec`; ahí el comando muere con la conexión y `Connect-Timeout-Ms`→`timeout_seconds`). |
+| `process.Process/List` | Soportada | Procesos de fondo en marcha en ese sandbox (`GET …/processes`), también los lanzados por otra conexión. La `tag` solo se conoce mientras el shim no se reinicie. |
+| `process.Process/SendSignal` | Soportada | `POST …/processes/{pid}/signal` con `TERM` o `KILL`; el fin sale con 143 o 137. Solo `SIGTERM` y `SIGKILL`. |
 | `process.Process/CloseStdin` | Soportada | No-op: los comandos arrancan con stdin vacío. |
 | `process.Process/Start` con `pty` | **501** | El exec del gateway no tiene terminal; usa `kling sbx shell`. |
 | `process.Process/SendInput`, `StreamInput`, `Update` | **501** | El gateway acepta stdin solo entero al arrancar, no en vivo. |
-| `process.Process/Connect` | **501** | Un comando vive lo que dure su flujo: no se puede reenganchar. Un comando en segundo plano de E2B (`background`) muere si el cliente cierra la conexión. |
+| `process.Process/Connect` | Soportada | Vuelve a un proceso ya lanzado (por `pid` o `tag`): `start`, su salida desde el principio (lo que conserve el sandbox) y `end`. Un proceso ya terminado y entregado da `not_found`. |
 | `filesystem.Filesystem/Stat` | Soportada | `GET …/files?stat=1`. |
 | `…/ListDir` | Soportada | `find -printf` en el sandbox (necesita GNU findutils en la imagen). |
 | `…/MakeDir`, `…/Remove`, `…/Move` | Soportada | `mkdir -p`, `rm -rf`, `mv` por exec. `MakeDir` sobre un directorio existente da `already_exists`; `Remove` de `/` se rechaza. |

@@ -70,6 +70,8 @@ reconstruyéndose»; en el 429 de cuota no lo envía y `retry_after` es `None`.
 | leer / stat | `GET …/files[?stat=1]` | `files.read()`, `files.stat()` |
 | escribir | `PUT …/files` (`mode`, `mkdir`) | `files.write()` |
 | borrar fichero | `DELETE …/files` | `files.delete()` |
+| procesos de fondo | `…/processes[/{pid}[/output\|/signal]]` | `processes.start/list/get(wait=)/output(offset, follow)/signal/kill/delete` |
+| sesiones | `…/sessions[/{id}]`, `session` en exec | `sessions.create/list/get/exec/delete`, `exec(session=)` |
 | crear lote | `POST /v1/sandboxes` (`count`, `atomic`) | `Sandbox.create_many()` (`.errors`), `Client.create_sandboxes()` |
 | volúmenes | `/v1/volumes`, `/v1/volumes/{id}`; `volumes` al crear | `Client.create/get/list/delete_volume`, `Sandbox.create(volumes=[...])` |
 | grafos | `/v1/graphs`, `/v1/graphs/{id}` | `Client.*_graph(s)` (sin capa `Sandbox`) |
