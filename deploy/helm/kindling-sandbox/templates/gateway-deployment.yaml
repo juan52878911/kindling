@@ -104,6 +104,9 @@ spec:
             - -state-dir
             - {{ . | quote }}
             {{- end }}
+            {{- with .Values.gateway.console }}
+            - {{ printf "-console=%s" (toString .) | quote }}
+            {{- end }}
             {{- with $otlp.endpoint }}
             - -otlp-endpoint
             - {{ . | quote }}

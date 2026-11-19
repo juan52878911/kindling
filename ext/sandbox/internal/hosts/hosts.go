@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -63,8 +64,25 @@ type Registro struct {
 // TTLEstado es cuánto vale una lectura de capacidad antes de repetirla.
 const TTLEstado = 3 * time.Second
 
+// Opcion ajusta cómo Nuevo construye los clientes de los hosts.
+type Opcion func(*opciones)
+
+type opciones struct {
+	transporte func(http.RoundTripper) http.RoundTripper
+}
+
+// ConTransporte envuelve el transporte HTTP de cada cliente (p. ej. con
+// telemetria.Transporte para propagar el traceparent hasta los daemons).
+func ConTransporte(f func(http.RoundTripper) http.RoundTripper) Opcion {
+	return func(o *opciones) { o.transporte = f }
+}
+
 // Nuevo construye el registro a partir de endpoints con nombre.
-func Nuevo(endpoints map[string]string) *Registro {
+func Nuevo(endpoints map[string]string, opts ...Opcion) *Registro {
+	var o opciones
+	for _, f := range opts {
+		f(&o)
+	}
 	r := &Registro{estado: map[string]Estado{}, visto: map[string]time.Time{}}
 	nombres := make([]string, 0, len(endpoints))
 	for n := range endpoints {
@@ -72,7 +90,11 @@ func Nuevo(endpoints map[string]string) *Registro {
 	}
 	sort.Strings(nombres)
 	for _, n := range nombres {
-		r.hosts = append(r.hosts, &Host{Nombre: n, Endpoint: endpoints[n], Cliente: api.NewClient(endpoints[n])})
+		cl := api.NewClient(endpoints[n])
+		if o.transporte != nil {
+			cl.WrapTransport(o.transporte)
+		}
+		r.hosts = append(r.hosts, &Host{Nombre: n, Endpoint: endpoints[n], Cliente: cl})
 	}
 	return r
 }

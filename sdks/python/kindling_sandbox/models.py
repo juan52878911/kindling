@@ -50,6 +50,33 @@ class FileStat(_Base):
 
 
 @dataclass
+class FileEntry(_Base):
+    name: str = ""
+    type: str = ""
+    size: int = 0
+    mode: str = ""
+    mod_time: str = ""
+    target: str = ""
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FileList(_Base):
+    path: str = ""
+    entries: List[FileEntry] = field(default_factory=list)
+    truncated: bool = False
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, j: Optional[dict]):
+        j = dict(j or {})
+        entradas = [FileEntry.from_json(e) for e in j.pop("entries", None) or []]
+        obj = super().from_json(j)
+        obj.entries = entradas
+        return obj
+
+
+@dataclass
 class Graph(_Base):
     id: str = ""
     host: str = ""

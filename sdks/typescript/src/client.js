@@ -216,6 +216,9 @@ export class Client {
   statFile(id, path) {
     return this._json("GET", `/v1/sandboxes/${id}/files`, { query: { path, stat: "1" }, timeout: null });
   }
+  listFiles(id, path) {
+    return this._json("GET", `/v1/sandboxes/${id}/files`, { query: { path, list: "1" }, timeout: null });
+  }
   async writeFile(id, path, datos, { mode, mkdir } = {}) {
     const q = { path };
     if (mode != null) q.mode = mode.toString(8).padStart(4, "0");

@@ -101,6 +101,17 @@ test("ficheros: binario de ida y vuelta, stat, delete, mode", async () => {
   await assert.rejects(sb.files.read("/tmp/a.bin"), NotFound);
 });
 
+test("ficheros: list de un directorio", async () => {
+  const sb = await Sandbox.create(conn());
+  await sb.files.write("/d/a.txt", "x", { mkdir: true });
+  await sb.files.write("/d/b.txt", "yy");
+  await sb.files.write("/otro/c.txt", "z");
+  const ls = await sb.files.list("/d");
+  assert.match(gw.requests.at(-1)!.url, /list=1/);
+  assert.equal(ls.path, "/d");
+  assert.deepEqual(ls.entries.map((e) => [e.name, e.type, e.size]), [["a.txt", "file", 1], ["b.txt", "file", 2]]);
+});
+
 test("errores: 401, 404, 5xx genérico y red", async () => {
   await assert.rejects(Sandbox.create({ url: gw.url, token: "otro" }), Unauthorized);
   const c = new Client(conn());

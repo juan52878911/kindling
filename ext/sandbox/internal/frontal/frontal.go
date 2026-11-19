@@ -149,6 +149,10 @@ type Opciones struct {
 	// Ingress configura la entrada HTTP a puertos del sandbox (ingress.go).
 	// Con IngresoDominio vacío está apagada.
 	Ingreso IngresoOpciones
+
+	// SinConsola apaga la consola web (/console/, docs/consola.md): la ruta
+	// contesta 404. El valor cero la deja encendida.
+	SinConsola bool
 }
 
 // Servidor es el frontal. Implementa http.Handler.
@@ -166,6 +170,7 @@ type Servidor struct {
 	log                               *log.Logger
 	mux                               *http.ServeMux
 	ingreso                           *ingreso
+	sinConsola                        bool
 
 	maxVolumenMiB int
 
@@ -304,7 +309,7 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		reg: o.Hosts, tenants: tenants, imagen: o.ImagenPorDefecto,
 		ttl: o.TTLPorDefecto, abandono: o.Abandono, cada: o.CadaLimpieza,
 		log: o.Log, enVuelo: map[string]int{}, maxVolumenMiB: maxVol,
-		almacen: o.Almacen, defMem: maxMem, defCPU: maxCPU, defTotal: maxTotal, defLote: maxLote,
+		sinConsola: o.SinConsola, almacen: o.Almacen, defMem: maxMem, defCPU: maxCPU, defTotal: maxTotal, defLote: maxLote,
 	}
 	if s.ttl == 0 {
 		s.ttl = api.SandboxDefaultTTL
@@ -353,7 +358,9 @@ func (s *Servidor) rutas() {
 	m.Handle("GET /v1/graphs", s.auth(http.HandlerFunc(s.handleListarGrafos)))
 	m.Handle("/v1/graphs/", s.auth(http.HandlerFunc(s.handleGrafo)))
 	s.rutasTenants(m)
-	m.Handle(consola.Prefijo, consola.Handler()) // consola web (docs/consola.md)
+	if !s.sinConsola {
+		m.Handle(consola.Prefijo, consola.Handler()) // consola web (docs/consola.md)
+	}
 	s.mux = m
 }
 

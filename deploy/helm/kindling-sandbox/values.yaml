@@ -143,6 +143,11 @@ gateway:
       accessModes: [ReadWriteOnce]
       annotations: {}
 
+  # Consola web en /console/ (-console). Vacío = el valor por defecto del
+  # gateway: encendida con TLS o en loopback, apagada en HTTP plano fuera de
+  # loopback. "true" / "false" la fuerzan. Ver docs/consola.md.
+  console: ""
+
   # Exportación OTLP/HTTP (JSON) de trazas y métricas (-otlp-endpoint). Vacío =
   # apagado y sin coste. Ver docs/observabilidad.md.
   otlp:
