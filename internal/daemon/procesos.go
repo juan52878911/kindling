@@ -53,6 +53,17 @@ func (s *Server) proxyInvitado(w http.ResponseWriter, r *http.Request) {
 	}
 	defer soltar()
 
+	mc, code, err := s.objetivoConAgente(r.Context(), r.PathValue("ref"))
+	if err != nil {
+		fail(w, code, err)
+		return
+	}
+	s.reenviar(w, r, guestBase(mc), mc.ID, mc)
+}
+
+// reenviar manda la petición al agente en base y devuelve su respuesta tal
+// cual (en flujo). mc solo sirve para el mensaje de un agente antiguo.
+func (s *Server) reenviar(w http.ResponseWriter, r *http.Request, base, id string, mc *api.Machine) {
 	q := r.URL.Query()
 	espera := time.Duration(0)
 	if v := q.Get("wait"); v != "" {
@@ -78,17 +89,12 @@ func (s *Server) proxyInvitado(w http.ResponseWriter, r *http.Request) {
 		body = strings.NewReader(string(b))
 	}
 
-	mc, code, err := s.objetivoConAgente(r.Context(), r.PathValue("ref"))
-	if err != nil {
-		fail(w, code, err)
-		return
-	}
 	ctx := r.Context()
 	if espera > 0 {
 		// El agente no manda cabeceras hasta que acaba la espera.
 		ctx = conPlazoCabeceras(ctx, espera+execBodyGrace)
 	}
-	url := guestBase(mc) + rutaInvitado(r)
+	url := base + rutaInvitado(r)
 	if enc := q.Encode(); enc != "" {
 		url += "?" + enc
 	}
@@ -102,10 +108,10 @@ func (s *Server) proxyInvitado(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := guestClient.Do(greq)
 	if err != nil {
-		s.olvidarAgente(mc.ID)
+		s.olvidarAgente(id)
 		code := http.StatusBadGateway
 		var e error = fmt.Errorf("talking to the guest agent: %w", err)
-		if x := s.execInterrumpido(mc.ID); x != nil {
+		if x := s.execInterrumpido(id); x != nil {
 			code, e = http.StatusConflict, x
 		}
 		fail(w, code, e)
@@ -160,4 +166,3 @@ func copiarFlujo(ctx context.Context, w http.ResponseWriter, src io.Reader) {
 		}
 	}
 }
-
