@@ -219,6 +219,15 @@ dentro de ningún clúster; Kubernetes solo hace de plano de control. Ver
 `ghcr.io/juan52878911/kindling-operator:<versión de kindling>` y los manifiestos
 salen también como `kindling-operator-deploy.tar.gz` en cada release.
 
+## Documentación relacionada
+
+- [`docs/sandbox-api.md`](../../docs/sandbox-api.md): la API `/v1` del gateway y su spec
+  OpenAPI ([`api/openapi.yaml`](api/openapi.yaml)).
+- [`docs/e2b.md`](../../docs/e2b.md): `kling sbx e2b`, el shim compatible con los SDK de E2B.
+- SDKs: [Python](../../sdks/python/README.md) y [TypeScript](../../sdks/typescript/README.md).
+- [`docs/recetas/`](../../docs/recetas/README.md): Claude Code, Codex y Playwright dentro de un sandbox.
+- [`docs/kubernetes.md`](../../docs/kubernetes.md): el chart de Helm y el operador.
+
 ## Compatibilidad
 
 Todos los binarios de una release de kindling son compatibles entre sí: usa

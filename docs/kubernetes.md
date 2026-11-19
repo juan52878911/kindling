@@ -89,6 +89,8 @@ Valores principales (todos documentados en `values.yaml`):
 | `gateway.tenants.existingSecret` | Secret con `KLING_SANDBOX_TENANTS` (`nombre:token[:límites]`). |
 | `gateway.tls.existingSecret` | Secret `kubernetes.io/tls`; sin él hace falta `gateway.insecureListen=true`. |
 | `gateway.ingressDomain`, `gateway.ingressSecret` | Puertos de sandbox en `<puerto>-<id>.<dominio>` y clave de firma de los tokens de endpoint. |
+| `gateway.stateDir.path` | Directorio de estado (`-state-dir`): el almacén persistente de inquilinos y claves de `/v1/tenants`. Vacío = sin almacén (501). Un solo escritor: no admite más de una réplica. |
+| `gateway.stateDir.persistence.{enabled,size,storageClass,existingClaim}` | PVC para ese directorio (el chart lo crea con `helm.sh/resource-policy: keep`, o usa `existingClaim`); sin él es un `emptyDir` y los inquilinos se pierden al reiniciar el Pod. `gateway.stateDir.fsGroup` da permiso de escritura al usuario no root. |
 | `gateway.ingress.*` | Ingress de Kubernetes hacia el Service. |
 | `gateway.ssh.existingSecret` | Clave privada y `known_hosts` para hosts `ssh://`. |
 

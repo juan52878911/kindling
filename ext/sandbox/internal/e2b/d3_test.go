@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 )
 
 // gwBarra es un gateway falso cuyos ids llevan barra (`host/ref`), como el real.
@@ -91,7 +93,7 @@ func llamar(t *testing.T, metodo, url string, cab map[string]string, cuerpo []by
 
 func TestIDCodificado(t *testing.T) {
 	for _, gw := range []string{"h1/m-1", "sbx1", "host.local:8443/ref_larga-" + strings.Repeat("x", 60)} {
-		e := CodificarID(gw)
+		e := hosts.IDaDNS(gw)
 		if !reID.MatchString(e) || strings.ContainsAny(e, "/_-=") || e != strings.ToLower(e) {
 			t.Fatalf("%q -> %q no es seguro en ruta y DNS", gw, e)
 		}
@@ -99,7 +101,7 @@ func TestIDCodificado(t *testing.T) {
 			t.Fatalf("%q -> %q -> %q,%v", gw, e, got, ok)
 		}
 	}
-	if len("49983-"+CodificarID("h1/m-1")) > 63 {
+	if len("49983-"+hosts.IDaDNS("h1/m-1")) > 63 {
 		t.Fatal("el id típico no cabe en una etiqueta DNS")
 	}
 	for _, mal := range []string{"", "h1/m-1", "ONRHQMI", "onrhqm", "onrhqmi=", "a", strings.Repeat("a", 300)} {
@@ -121,7 +123,7 @@ func TestFlujoSoloCabeceras(t *testing.T) {
 		}
 		var sb struct{ SandboxID, EnvdAccessToken string }
 		json.Unmarshal(cuerpo, &sb)
-		if sb.SandboxID != CodificarID(id) || strings.Contains(sb.SandboxID, "/") {
+		if sb.SandboxID != hosts.IDaDNS(id) || strings.Contains(sb.SandboxID, "/") {
 			t.Fatalf("sandboxID %q", sb.SandboxID)
 		}
 		envd := map[string]string{"E2b-Sandbox-Id": sb.SandboxID, "E2b-Sandbox-Port": "49983",
@@ -186,7 +188,7 @@ func TestDebug(t *testing.T) {
 	if st, _ = llamar(t, "POST", shim.URL+"/process.Process/Start", sinToken, cuerpo); st == 200 {
 		t.Fatal("el listener principal no debe aceptar debug")
 	}
-	otro := map[string]string{"E2b-Sandbox-Id": CodificarID("h2/x-9"), "Content-Type": "application/connect+json"}
+	otro := map[string]string{"E2b-Sandbox-Id": hosts.IDaDNS("h2/x-9"), "Content-Type": "application/connect+json"}
 	if st, _ = llamar(t, "POST", dbg.URL+"/process.Process/Start", otro, cuerpo); st == 200 {
 		t.Fatal("un sandbox real sin token no debe pasar por debug")
 	}

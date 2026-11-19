@@ -26,3 +26,5 @@ Coste: el SDK habla `http://<dominio>` con el proxy (que pone el TLS), así que 
 ## Qué se ha verificado
 
 `scripts/recetas/test-dry-run.sh` ejecuta los tres `--dry-run` y un modo real con un `kling` falso: comprueba que la clave falsa no sale en la salida ni en ningún argv y que llega por stdin. **No** se ha probado contra un daemon con los agentes reales: las banderas de `claude`, `codex` y la imagen de Playwright son las que documentan sus proyectos y pueden cambiar con la versión. Los comandos `kling` están contrastados con `cmd/kling` y el test `docs_comandos_test.go`.
+
+Ver también: [sandbox-api.md](../sandbox-api.md) (la API nativa) y [e2b.md](../e2b.md).

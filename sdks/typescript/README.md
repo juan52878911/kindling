@@ -86,3 +86,6 @@ Los tests (y el servidor falso `test/fake_server.ts`) están en TypeScript y se 
 *type stripping* de Node ≥ 22.18, sin compilar; no se comprueban tipos sin `tsc`. Cubren CRUD, exec
 en flujo (trozos de 7 bytes que parten líneas y caracteres) y en espera, 429 con `Retry-After`,
 binario de ida y vuelta (200 kB), 401/404/red y la ausencia del token en repr y mensajes.
+
+Ver también: [docs/sandbox-api.md](../../docs/sandbox-api.md) (la API y su spec), el SDK de
+Python ([README](../python/README.md)) y las [recetas](../../docs/recetas/README.md).

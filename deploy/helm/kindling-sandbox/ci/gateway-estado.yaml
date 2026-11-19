@@ -1,0 +1,22 @@
+# Gateway con almacén persistente de inquilinos (-state-dir) en un PVC que crea
+# el chart.
+gateway:
+  enabled: true
+  image:
+    repository: registry.example.internal/kindling-gateway
+  hosts:
+    lab: ssh://kling@192.0.2.10
+  tenants:
+    existingSecret: kindling-gateway-tenants
+  insecureListen: true
+  stateDir:
+    path: /var/lib/kling-sandbox
+    fsGroup: 65532
+    persistence:
+      enabled: true
+      size: 200Mi
+      storageClass: standard
+operator:
+  frontal:
+    tokenSecret:
+      name: kindling-operator-frontal

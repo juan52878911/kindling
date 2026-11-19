@@ -38,8 +38,10 @@ func extension() *plugin.Builtin {
 					"  sbx new -template T [-ttl 10m] | ls | rm ID      sandboxes through the gateway\n" +
 					"  sbx exec ID -- cmd... | shell ID | cp ...        work inside one\n" +
 					"  sbx hosts                                        which daemons are behind the gateway\n" +
-					"  sbx mcp [-url U] [-ca PEM]                       MCP server (stdio) for agents",
-				Subcommands: []string{"gateway", "template", "new", "ls", "rm", "renew", "exec", "shell", "cp", "hosts", "mcp"},
+					"  sbx mcp [-url U] [-ca PEM]                       MCP server (stdio) for agents\n" +
+					"  sbx e2b [-listen ADDR] [-domain D]               E2B-compatible API in front of the gateway\n" +
+					"  sbx tenant ls|show|add|set|rm, key new|rotate|rm  tenants and their API keys",
+				Subcommands: []string{"gateway", "template", "new", "ls", "rm", "renew", "exec", "shell", "cp", "hosts", "mcp", "e2b", "tenant", "key"},
 			}},
 			Config: []plugin.ConfigKey{
 				{Key: "listen", Type: "string", Help: "address the gateway listens on (default 127.0.0.1:8090; off loopback it needs TLS or -insecure-listen)"},

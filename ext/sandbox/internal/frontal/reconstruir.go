@@ -31,6 +31,13 @@ import (
 // es solo para que un cliente no reintente antes de que tenga sentido.
 const retryAfterReconstruccion = "60"
 
+// retryAfterCuota es lo que se ofrece en el Retry-After del 429 de cuota al
+// crear: la cuota se libera cuando un sandbox del tenant se borra o vence su
+// TTL, algo que el frontal no puede predecir. Es un intervalo corto de
+// sondeo, no una promesa: el cliente puede reintentar a los pocos segundos y
+// obtendrá otro 429 mientras nada se haya liberado.
+const retryAfterCuota = "5"
+
 // reconstrucciones vigila qué pares (host, plantilla) se están reconstruyendo
 // AHORA MISMO, para no lanzar dos veces el mismo trabajo: Construir tarda
 // minutos, y una ráfaga de peticiones contra la misma plantilla rota lanzaría

@@ -56,7 +56,9 @@ el sandbox, como siempre). Es para evaluaciones y entrenamiento: un lote de 16 e
 - **Topes.** `count` va de 1 al tope del tenant (`MaxLote`) y nunca pasa del global
   (`Opciones.MaxLote`, 16 por defecto): si no, 400.
 - **Cuota.** Se cuenta el lote entero antes de crear nada (sandboxes, por plantilla, memoria
-  total): si no caben los N, 429 y no se crea ninguno.
+  total): si no caben los N, 429 y no se crea ninguno. El 429 de cuota (como el 503 de «plantilla
+  reconstruyéndose», 60 s) lleva `Retry-After` (5 s, un intervalo de sondeo: la cuota se libera
+  cuando un sandbox se borra o vence su TTL).
 - **Reparto.** El sandbox *i* empieza por el *i*-ésimo host candidato (los que tienen la
   plantilla o la imagen y contestan, por hueco libre) y pasa al siguiente si no cabe. Las
   precalentadas se reclaman como en una creación suelta. Hasta 4 creaciones a la vez.
@@ -167,3 +169,7 @@ acceso. Si nada escucha en el puerto, 502 con el puerto en el mensaje.
 simultáneas por sandbox, WebSocket incluidos: 64 (`-ingress-max-conns`, 429); espera a las
 cabeceras de la respuesta del invitado: 60 s (504). El acceso por la URL no renueva el TTL
 del sandbox: ninguna otra ruta del gateway lo hace por actividad.
+
+Ver también: [e2b.md](e2b.md) (la misma API con el protocolo de E2B), los SDKs
+([Python](../sdks/python/README.md), [TypeScript](../sdks/typescript/README.md)), las
+[recetas](recetas/README.md) y [kubernetes.md](kubernetes.md) (despliegue con Helm).

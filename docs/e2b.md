@@ -156,3 +156,7 @@ Todo lo no listado responde `404`; lo listado como **501** devuelve el error de 
   el usuario por defecto del sandbox.
 - El `endAt` y el estado salen del gateway; `paused` solo aparece si el gateway lo informa.
 - Los `Keepalive-Ping-Interval` del cliente no se atienden: el shim no emite eventos `keepalive`.
+
+Ver también: [sandbox-api.md](sandbox-api.md) (la API nativa `/v1`, con más funciones: lotes,
+volúmenes, inquilinos), los SDKs nativos ([Python](../sdks/python/README.md),
+[TypeScript](../sdks/typescript/README.md)) y las [recetas](recetas/README.md).
