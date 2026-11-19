@@ -165,7 +165,7 @@ func TestFondoStartDeProcesoQueTermina(t *testing.T) {
 	b.gw.fondo = &fondoFalso{terminaYa: true}
 	tok := (&Servidor{Clave: clave}).tokenEnvd("sbx1")
 	cab := map[string]string{"X-Access-Token": tok, "Content-Type": "application/connect+json", "Connect-Timeout-Ms": "60000"}
-	resp := b.peticion(t, "POST", "/process.Process/Start", "49983-sbx1.e2b.test", cab,
+	resp := b.peticion(t, "POST", "/process.Process/Start", "49983-onrhqmi.e2b.test", cab,
 		strings.NewReader(string(envelope(`{"process":{"cmd":"/bin/bash","args":["-c","echo hola"],"envs":{"A":"1"},"cwd":"/work"}}`))))
 	got := leer(t, resp)
 	want := string(envelope(`{"event":{"start":{"pid":1}}}`)) +
@@ -193,7 +193,7 @@ func TestFondoSobreviveALaDesconexionYSeReconecta(t *testing.T) {
 	f := &fondoFalso{}
 	b.gw.fondo = f
 	tok := (&Servidor{Clave: clave}).tokenEnvd("sbx1")
-	host := "49983-sbx1.e2b.test"
+	host := "49983-onrhqmi.e2b.test"
 	cab := map[string]string{"X-Access-Token": tok, "Content-Type": "application/connect+json"}
 	cu := map[string]string{"X-Access-Token": tok, "Content-Type": "application/json"}
 
@@ -274,7 +274,7 @@ func TestFondoPlazoDeConexionNoMataElProceso(t *testing.T) {
 	b.gw.fondo = f
 	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"),
 		"Content-Type": "application/connect+json", "Connect-Timeout-Ms": "200"}
-	resp := b.peticion(t, "POST", "/process.Process/Start", "49983-sbx1.e2b.test", cab,
+	resp := b.peticion(t, "POST", "/process.Process/Start", "49983-onrhqmi.e2b.test", cab,
 		strings.NewReader(string(envelope(`{"process":{"cmd":"sleep","args":["99"]}}`))))
 	got := string(leer(t, resp))
 	if !strings.Contains(got, `"deadline_exceeded"`) {
