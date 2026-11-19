@@ -1,0 +1,13 @@
+{
+  "name": "@kindling/sandbox",
+  "version": "0.1.0",
+  "description": "SDK de JavaScript/TypeScript para la API /v1 del gateway de sandboxes de kindling (sin dependencias).",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
+  "files": ["src", "README.md"],
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED",
+  "scripts": { "test": "node --test test/sdk.test.ts" }
+}
