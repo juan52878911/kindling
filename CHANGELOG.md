@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `docs/recetas/` and `scripts/recetas/`: recipes to run Claude Code (`claude -p`), Codex CLI (`codex exec`) and Playwright inside a sandbox, with the API key kept in the credential proxy instead of the VM; each script has `--dry-run` and a test checks no command carries the key.
 - kling-sandbox gateway: batch creation, `POST /v1/sandboxes` with `count` (capped per tenant and globally, 16 by default) spreads the sandboxes across hosts with bounded parallelism and counts the whole batch against the tenant's quotas before creating anything; `atomic: true` makes it all-or-nothing (the ones already created are removed if one fails), otherwise a partial batch answers 207 with the failures. SDKs: `Sandbox.create_many` (Python) and `Sandbox.createMany` (TypeScript).
 - kling-sandbox gateway: per-tenant volumes. `GET/POST/DELETE /v1/volumes` and `volumes: [{name, mount, read_only, clone_from}]` on sandbox creation; a tenant can't see or mount another's volume (404), and a sandbox is placed on the host that holds its existing volumes (409 when they are on different hosts). SDKs: `volumes` on create and `create/get/list/delete_volume`.
 - `sdks/typescript`: dependency-free JavaScript SDK (ESM + hand-written `.d.ts`, Node >= 18, `@kindling/sandbox`) for the sandbox gateway `/v1` API: create, get, list, delete, renew, exec (NDJSON stream and wait), files read/write/delete/stat, typed errors; tests against a fake server.
