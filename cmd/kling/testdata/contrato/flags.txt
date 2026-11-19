@@ -98,6 +98,12 @@ kling daemon:  -socket
 kling daemon:  -socket-user
 kling doctor:  -H
 kling doctor:  -json
+kling egress set:  -H
+kling egress set:  -allow
+kling egress set:  -egress
+kling egress set:  -json
+kling egress show:  -H
+kling egress show:  -json
 kling events:  -H
 kling events:  -json
 kling exec:  -H
@@ -196,6 +202,8 @@ kling logs:  -raw
 kling logs:  -service
 kling logs:  -t
 kling logs:  -tail
+kling ls:  -H
+kling ls:  -json
 kling machine hooks:  -H
 kling machine hooks:  -json
 kling machine hooks:  -wait

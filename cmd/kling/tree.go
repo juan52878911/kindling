@@ -183,8 +183,19 @@ var coreTree = []section{
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
       [-env-file F] [--] [cmd [args...]]           (Ctrl-C reaches the program)
 `},
-		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp [-mode 0644] [-json] <local|-> <ref>:<path>   copies a file into a machine
-  cp <ref>:<path> <local|->                        ... or out of it
+		{Name: "cp", Summary: "copies files and directories in and out of a machine", Usage: `  cp [-mode 0644] [-json] <local|-> <ref>:<path>   copies a file into a machine; a directory
+                                                   copies its contents (as a tar)
+  cp <ref>:<path> <local|->                        ... or out of it (a directory into a
+                                                   local directory, created if missing)
+`},
+		{Name: "ls", Summary: "lists a directory inside a machine", Usage: `  ls [-json] <ref>:<dir>                           mode, size, mtime and name of each
+                                                   entry (first 10000)
+`},
+		{Name: "egress", Summary: "changes a running machine's network policy", Subcommands: []string{"set", "show"}, MachineArgs: []string{"set", "show"}, Usage: `  egress set [-egress none|internet|allowlist]     changes the mode and/or the domains
+      [-allow dom1,dom2] [-json] <ref>             without a restart; narrowing it also
+                                                   closes open connections if the host
+                                                   has conntrack
+  egress show [-json] <ref>                        mode and what it blocked
 `},
 		{Name: "sandbox", Summary: "throwaway microVMs that run code", Subcommands: []string{"create", "ls", "renew", "fork", "rm"}, MachineArgs: []string{"renew", "fork", "rm"}, Usage: `  sandbox create [-image I | -from T] [-ttl 10m]   a throwaway microVM that runs code:
       [-name N] [-egress none|internet|allowlist]  no network by default; when idle it

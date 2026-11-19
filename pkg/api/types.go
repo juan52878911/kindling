@@ -1104,6 +1104,9 @@ const (
 	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
 	EvResized   = "machine.resized"
+	// EvEgressChanged: la política de salida de una máquina cambió (PATCH
+	// /machines/{ref}/egress).
+	EvEgressChanged = "machine.egress_changed"
 	// EvBoostEnded: la máquina volvió de su impulso de CPU de arranque a su
 	// techo configurado; el mensaje dice tras cuánto y por qué.
 	EvBoostEnded = "machine.boost_ended"

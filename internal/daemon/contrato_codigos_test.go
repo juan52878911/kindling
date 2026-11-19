@@ -103,6 +103,7 @@ var casosCodigos = []casoCodigo{
 	{"GET", "/machines/nadie/logs", ""},
 	{"GET", "/machines/nadie/credaudit", ""},
 	{"GET", "/machines/nadie/egress", ""},
+	{"PATCH", "/machines/nadie/egress", `{"egress":"none"}`},
 	{"POST", "/machines/nadie/guest", `{}`},
 	{"POST", "/machines/nadie/renew", ""},
 	{"GET", "/machines/nadie/ready", ""},

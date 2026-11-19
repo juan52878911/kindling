@@ -222,7 +222,10 @@ func cmdCp(args []string) error {
 				return err
 			}
 			if fi.IsDir() {
-				return fmt.Errorf("%s is a directory: copy a tar and unpack it with kling exec", src)
+				if *mode != "" {
+					return errors.New("-mode doesn't apply to a directory (modes travel inside the tar)")
+				}
+				return copiarDirAMaquina(ctx, c, src, dstRef, dstPath, *asJSON)
 			}
 			if *mode == "" {
 				m = uint64(fi.Mode().Perm())
@@ -244,6 +247,9 @@ func cmdCp(args []string) error {
 		return nil
 	}
 
+	if st, err := c.StatFile(ctx, srcRef, srcPath); err == nil && st.IsDir {
+		return copiarDirDeMaquina(ctx, c, srcRef, srcPath, dst, *asJSON)
+	}
 	rc, err := c.ReadFile(ctx, srcRef, srcPath)
 	if err != nil {
 		return err

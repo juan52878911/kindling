@@ -56,6 +56,7 @@ GET /store/{ns}  admin
 GET /store/{ns}/{key}  admin
 GET /volumes  admin
 GET /volumes/{name}/snapshots  admin
+PATCH /machines/{ref}/egress  machine
 POST /cow/store/grow  admin
 POST /graphs  create
 POST /graphs/{ref}/fork  graph

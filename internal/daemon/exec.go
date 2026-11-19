@@ -477,7 +477,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	defer soltar()
 	q := url.Values{}
-	for _, k := range []string{"path", "stat", "mode", "mkdir"} {
+	for _, k := range []string{"path", "stat", "mode", "mkdir", "list", "format"} {
 		if v := r.URL.Query().Get(k); v != "" {
 			q.Set(k, v)
 		}

@@ -41,7 +41,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof", api.CapabilityProcesses, api.CapabilitySessions}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof", api.CapabilityProcesses, api.CapabilitySessions, api.CapabilityEgressSet, "files-dirs"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -528,6 +528,7 @@ func (s *Server) rutas() []ruta {
 		{"GET /machines/{ref}/logs", AccionMaquina, nil, s.handleLogs},
 		{"GET /machines/{ref}/credaudit", AccionMaquina, nil, s.handleCredAudit},
 		{"GET /machines/{ref}/egress", AccionMaquina, nil, s.handleEgress},
+		{"PATCH /machines/{ref}/egress", AccionMaquina, nil, s.handleSetEgress},
 		{"POST /machines/{ref}/guest", AccionMaquina, nil, s.handleGuest},
 		{"POST /machines/{ref}/renew", AccionMaquina, nil, s.handleRenew},
 		{"GET /machines/{ref}/ready", AccionMaquina, nil, s.handleReady},
