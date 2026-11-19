@@ -29,6 +29,7 @@ type gateway struct {
 	borrados []string
 	bloquear chan struct{} // si no es nil, /exec queda abierto hasta cerrarlo
 	eco      bool          // los errores repiten el Authorization recibido
+	fondo    *fondoFalso   // si no es nil, el gateway tiene procesos de fondo
 }
 
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +40,10 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if g.eco {
 		w.WriteHeader(502)
 		fmt.Fprintf(w, `{"message":"upstream failed for %s"}`, clave)
+		return
+	}
+	if g.fondo != nil && strings.HasPrefix(r.URL.Path, "/v1/sandboxes/sbx1/processes") {
+		g.fondo.servir(w, r)
 		return
 	}
 	g.mu.Lock()
@@ -354,7 +359,7 @@ func TestNoImplementado(t *testing.T) {
 	}
 	// RPC de envd sin soporte: error Connect.
 	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/json"}
-	for _, p := range []string{"/process.Process/SendInput", "/process.Process/Connect", "/filesystem.Filesystem/WatchDir", "/filesystem.Filesystem/CreateWatcher"} {
+	for _, p := range []string{"/process.Process/SendInput", "/filesystem.Filesystem/WatchDir", "/filesystem.Filesystem/CreateWatcher"} {
 		resp := b.peticion(t, "POST", p, "49983-sbx1.e2b.test", cab, strings.NewReader(`{}`))
 		got := leer(t, resp)
 		if resp.StatusCode != 501 || !strings.Contains(string(got), `"code":"unimplemented"`) {

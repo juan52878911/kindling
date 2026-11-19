@@ -46,6 +46,11 @@ func (s *Servidor) olvidar(sandbox string) {
 			delete(s.procs, pid)
 		}
 	}
+	for k := range s.etiquetas {
+		if strings.HasPrefix(k, sandbox+"\x00") {
+			delete(s.etiquetas, k)
+		}
+	}
 }
 
 // unario lee el cuerpo JSON de una llamada unaria; devuelve false (y responde)
@@ -143,7 +148,13 @@ func (s *Servidor) procStart(w http.ResponseWriter, r *http.Request, id string) 
 		}
 		cuerpo["env"] = env
 	}
-	if ms, _ := strconv.Atoi(r.Header.Get("Connect-Timeout-Ms")); ms > 0 {
+	ms, _ := strconv.Atoi(r.Header.Get("Connect-Timeout-Ms"))
+	// Con procesos de fondo en el gateway, el comando es del sandbox y no de
+	// esta conexión (fondo.go); sin ellos se cae al exec atado a la petición.
+	if s.arrancarFondo(r, fl, id, req.Process, req.Tag, cuerpo, ms) {
+		return
+	}
+	if ms > 0 {
 		cuerpo["timeout_seconds"] = (ms + 999) / 1000
 	}
 	ctx, cancel := context.WithCancel(r.Context())
@@ -239,6 +250,7 @@ func (s *Servidor) procList(w http.ResponseWriter, r *http.Request, id string) {
 		lista = append(lista, e)
 	}
 	s.mu.Unlock()
+	lista = append(lista, s.listarFondo(r.Context(), id)...)
 	escribirJSON(w, 200, map[string]any{"processes": lista})
 }
 
@@ -263,7 +275,7 @@ func (s *Servidor) procSignal(w http.ResponseWriter, r *http.Request, id string)
 	}
 	p := s.buscar(id, req.Process)
 	if p == nil {
-		escribirErrorUnario(w, &errConnect{cNoEncontrado, "process not found"})
+		s.senalFondo(w, r, id, req.Process, sg)
 		return
 	}
 	p.senal.Store(sg)
@@ -281,8 +293,10 @@ func (s *Servidor) procCloseStdin(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	if s.buscar(id, req.Process) == nil {
-		escribirErrorUnario(w, &errConnect{cNoEncontrado, "process not found"})
-		return
+		if _, err := s.pidFondo(r.Context(), id, req.Process); err != nil {
+			escribirErrorUnario(w, s.errConnectGW(err))
+			return
+		}
 	}
 	escribirJSON(w, 200, map[string]any{})
 }
