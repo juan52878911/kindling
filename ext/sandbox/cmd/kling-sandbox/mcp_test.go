@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +60,38 @@ func gatewayFalso(t *testing.T) *httptest.Server {
 				out = strings.Repeat("x", 200<<10)
 			}
 			json.NewEncoder(w).Encode(map[string]any{"exit_code": 3, "stdout": []byte(out), "stderr": []byte("oops")})
+		case r.Method == "POST" && p == "/v1/sandboxes/lab/m1/processes":
+			var b struct {
+				Cmd []string `json:"cmd"`
+				Dir string   `json:"dir"`
+				TO  int      `json:"timeout_seconds"`
+			}
+			json.NewDecoder(r.Body).Decode(&b)
+			if len(b.Cmd) == 0 || b.Dir != "/work" || b.TO != 30 {
+				w.WriteHeader(400)
+				io.WriteString(w, `{"message":"bad process start"}`)
+				return
+			}
+			w.WriteHeader(201)
+			io.WriteString(w, `{"pid":4,"cmd":["serve"],"state":"running"}`)
+		case r.Method == "GET" && p == "/v1/sandboxes/lab/m1/processes/4":
+			if r.URL.Query().Get("wait") == "99" {
+				w.WriteHeader(400)
+				io.WriteString(w, `{"message":"wait not capped"}`)
+				return
+			}
+			io.WriteString(w, `{"pid":4,"state":"exited","exit_code":137,"signal":"KILL"}`)
+		case r.Method == "GET" && p == "/v1/sandboxes/lab/m1/processes/4/output":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			off := r.URL.Query().Get("offset")
+			if off == "5" {
+				fmt.Fprintln(w, `{"stream":"stderr","data":"Ym9vbQo=","offset":10}`)
+				fmt.Fprintln(w, `{"offset":10}`)
+				return
+			}
+			fmt.Fprintln(w, `{"stream":"stdout","data":"aG9sYQo=","offset":5}`)
+			fmt.Fprintln(w, `{"stream":"stderr","data":"Ym9vbQo=","offset":10}`)
+			fmt.Fprintln(w, `{"offset":10}`)
 		case r.Method == "PUT" && p == "/v1/sandboxes/lab/m1/files":
 			b, _ := io.ReadAll(r.Body)
 			mu.Lock()
@@ -176,7 +209,7 @@ func TestMCPPuntaAPunta(t *testing.T) {
 	for _, x := range r["result"].(map[string]any)["tools"].([]any) {
 		nombres[x.(map[string]any)["name"].(string)] = true
 	}
-	for _, n := range []string{"sandbox_create", "sandbox_list", "sandbox_exec", "sandbox_read_file", "sandbox_write_file", "sandbox_delete", "sandbox_renew"} {
+	for _, n := range []string{"sandbox_create", "sandbox_list", "sandbox_exec", "sandbox_exec_background", "sandbox_process_output", "sandbox_read_file", "sandbox_write_file", "sandbox_delete", "sandbox_renew"} {
 		if !nombres[n] {
 			t.Errorf("falta la herramienta %s", n)
 		}
@@ -196,6 +229,20 @@ func TestMCPPuntaAPunta(t *testing.T) {
 	txt := ok("sandbox_exec", map[string]any{"id": "lab/m1", "command": []string{"echo", "hola"}, "cwd": "/work", "env": map[string]string{"A": "1"}}, "exit: 3")
 	if !strings.Contains(txt, "echo hola") || !strings.Contains(txt, "oops") {
 		t.Errorf("exec: %q", txt)
+	}
+	ok("sandbox_exec_background", map[string]any{"id": "lab/m1", "command": []string{"serve"}, "cwd": "/work", "timeout_seconds": 30}, `"pid":4`)
+	txt = ok("sandbox_process_output", map[string]any{"id": "lab/m1", "pid": 4, "wait_seconds": 99}, "state: exited")
+	for _, q := range []string{"exit: 137", "signal: KILL", "next_offset: 10", "hola", "boom"} {
+		if !strings.Contains(txt, q) {
+			t.Errorf("process_output sin %q: %q", q, txt)
+		}
+	}
+	txt = ok("sandbox_process_output", map[string]any{"id": "lab/m1", "pid": 4, "offset": 5}, "next_offset: 10")
+	if strings.Contains(txt, "hola") || !strings.Contains(txt, "boom") {
+		t.Errorf("process_output con offset: %q", txt)
+	}
+	if _, e := s.llamar("sandbox_process_output", map[string]any{"id": "lab/m1"}); !e {
+		t.Error("sandbox_process_output sin pid debía fallar")
 	}
 	ok("sandbox_write_file", map[string]any{"id": "lab/m1", "path": "/a b.txt", "content": "contenido"}, "wrote 9 bytes")
 	ok("sandbox_read_file", map[string]any{"id": "lab/m1", "path": "/a b.txt"}, "contenido")
