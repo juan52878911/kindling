@@ -12,6 +12,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,9 @@ type Servidor struct {
 	Dominio string
 	// Home resuelve las rutas relativas de envd (por defecto /home/user).
 	Home string
+	// SandboxDebug es el id del gateway al que apunta el modo E2B_DEBUG (vacío:
+	// sin modo debug). Solo aplica a las peticiones de HandlerDebug.
+	SandboxDebug string
 	// Log recibe una línea por petición; nunca lleva la clave.
 	Log func(string)
 
@@ -55,7 +59,50 @@ type Servidor struct {
 	pid   uint32
 }
 
-var reID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+// reID es el id que el shim expone a E2B: base32 en minúsculas, seguro en una
+// ruta y en una etiqueta DNS. reGW es lo que se acepta como id del gateway
+// (`host/ref`, por ejemplo).
+var (
+	reID = regexp.MustCompile(`^[a-z2-7]{1,208}$`)
+	reGW = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/@=-]{0,127}$`)
+)
+
+var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// IDDebug es el id que el SDK de E2B usa con E2B_DEBUG=true.
+const IDDebug = "debug_sandbox_id"
+
+// CodificarID convierte el id del gateway (`host/ref`) en el id que ve E2B:
+// base32 minúsculas sin relleno. Es determinista y reversible, sin estado.
+// Cabe en una etiqueta DNS (`<puerto>-<id>` ≤ 63) si el id del gateway mide
+// ≤ 35 bytes; con ids más largos solo funcionan la ruta y la cabecera
+// E2b-Sandbox-Id, no el host.
+func CodificarID(gw string) string { return strings.ToLower(b32.EncodeToString([]byte(gw))) }
+
+// DecodificarID es la inversa de CodificarID; falla si no es un id codificado
+// canónico o no sale un id de gateway válido.
+func DecodificarID(e string) (string, bool) {
+	if !reID.MatchString(e) {
+		return "", false
+	}
+	b, err := b32.DecodeString(strings.ToUpper(e))
+	if err != nil || CodificarID(string(b)) != e || !reGW.Match(b) {
+		return "", false
+	}
+	return string(b), true
+}
+
+type claveCtx struct{}
+
+// HandlerDebug sirve el shim en el listener de depuración (E2B_DEBUG): ahí las
+// peticiones de envd sin id o con debug_sandbox_id van al sandbox fijado en
+// Servidor.SandboxDebug y no exigen X-Access-Token. Solo debe escuchar en
+// loopback.
+func (s *Servidor) HandlerDebug() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claveCtx{}, true)))
+	})
+}
 
 func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.once.Do(s.iniciar)
@@ -199,16 +246,21 @@ func (s *Servidor) control(h http.HandlerFunc) http.HandlerFunc {
 			errE2B(w, http.StatusUnauthorized, "invalid or missing API key (X-API-Key)")
 			return
 		}
-		if id := r.PathValue("id"); id != "" && !reID.MatchString(id) {
-			errE2B(w, http.StatusNotFound, "sandbox not found")
-			return
+		if id := r.PathValue("id"); id != "" {
+			gw, ok := DecodificarID(id)
+			if !ok {
+				errE2B(w, http.StatusNotFound, "sandbox not found")
+				return
+			}
+			r.SetPathValue("id", gw) // los manejadores trabajan con el id del gateway
 		}
 		h(w, r)
 	}
 }
 
-// idEnvd saca el sandbox al que va una petición de envd: el SDK usa el host
-// `<puerto>-<sandboxID>.<dominio>` y manda además la cabecera E2b-Sandbox-Id.
+// idEnvd saca el id de gateway del sandbox al que va una petición de envd: el
+// SDK usa el host `<puerto>-<id>.<dominio>` y manda además E2b-Sandbox-Id; con
+// E2B_SANDBOX_URL solo llega la cabecera.
 func (s *Servidor) idEnvd(r *http.Request) (string, bool) {
 	host := r.Host
 	if i := strings.IndexByte(host, ':'); i >= 0 {
@@ -217,11 +269,30 @@ func (s *Servidor) idEnvd(r *http.Request) (string, bool) {
 	if i := strings.IndexByte(host, '.'); i >= 0 {
 		host = host[:i]
 	}
-	if i := strings.IndexByte(host, '-'); i > 0 && allDigits(host[:i]) && reID.MatchString(host[i+1:]) {
-		return host[i+1:], true
+	if i := strings.IndexByte(host, '-'); i > 0 && allDigits(host[:i]) {
+		if id, ok := DecodificarID(host[i+1:]); ok {
+			return id, true
+		}
 	}
-	if id := r.Header.Get("E2b-Sandbox-Id"); reID.MatchString(id) {
+	if id, ok := DecodificarID(r.Header.Get("E2b-Sandbox-Id")); ok {
 		return id, true
+	}
+	return "", false
+}
+
+// esDebug dice si la petición llegó al listener de depuración y a qué sandbox
+// del gateway apunta (id ausente o debug_sandbox_id).
+func (s *Servidor) esDebug(r *http.Request) (string, bool) {
+	if s.SandboxDebug == "" || r.Context().Value(claveCtx{}) == nil {
+		return "", false
+	}
+	if _, ok := s.idEnvd(r); ok {
+		return "", false
+	}
+	h := r.Header.Get("E2b-Sandbox-Id")
+	host := strings.SplitN(strings.SplitN(r.Host, ":", 2)[0], ".", 2)[0]
+	if h == "" || h == IDDebug || strings.HasSuffix(host, "-"+IDDebug) {
+		return s.SandboxDebug, true
 	}
 	return "", false
 }
@@ -247,9 +318,13 @@ func (s *Servidor) envd(h func(http.ResponseWriter, *http.Request, string)) http
 				errE2B(w, st, msg)
 			}
 		}
+		if id, ok := s.esDebug(r); ok {
+			h(w, r, id)
+			return
+		}
 		id, ok := s.idEnvd(r)
 		if !ok {
-			falla(404, cNoEncontrado, "sandbox not identified: use the <port>-<sandboxID>.<domain> host or the E2b-Sandbox-Id header")
+			falla(404, cNoEncontrado, "sandbox not identified: use the <port>-<sandboxID>.<domain> host or the E2b-Sandbox-Id header with the sandboxID returned by create")
 			return
 		}
 		if !s.claveValida(r) && !(s.Clave != "" && igual(r.Header.Get("X-Access-Token"), s.tokenEnvd(id))) {
@@ -369,7 +444,7 @@ func (g gwSandbox) detalle() map[string]any {
 		md = map[string]string{}
 	}
 	return map[string]any{
-		"templateID": g.Template, "sandboxID": g.ID, "clientID": "kindling",
+		"templateID": g.Template, "sandboxID": CodificarID(g.ID), "clientID": "kindling",
 		"startedAt": g.CreatedAt, "endAt": fin,
 		"cpuCount": max(g.VCPUs, 1), "memoryMB": max(g.MemMiB, 1), "diskSizeMB": 0,
 		"metadata": md, "state": estadoE2B(g.State), "envdVersion": EnvdVersion,
@@ -411,7 +486,7 @@ func (s *Servidor) crear(w http.ResponseWriter, r *http.Request) {
 
 func (s *Servidor) sandboxCreado(g gwSandbox) map[string]any {
 	m := map[string]any{
-		"templateID": g.Template, "sandboxID": g.ID, "clientID": "kindling",
+		"templateID": g.Template, "sandboxID": CodificarID(g.ID), "clientID": "kindling",
 		"envdVersion": EnvdVersion, "envdAccessToken": s.tokenEnvd(g.ID),
 		"trafficAccessToken": nil, "domain": nil,
 	}

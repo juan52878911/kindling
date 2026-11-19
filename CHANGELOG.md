@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling sbx e2b`: works with the real E2B SDKs. Sandbox ids are exposed as reversible, stateless base32 (safe in paths and DNS labels) instead of the gateway's `host/ref`; envd is identified by the `E2b-Sandbox-Id` header alone (`E2B_SANDBOX_URL`), still requiring `X-Access-Token`; new `-debug-sandbox <gateway id>` supports `E2B_DEBUG=true` on a loopback `-envd-listen`.
 - `sdks/typescript`: dependency-free JavaScript SDK (ESM + hand-written `.d.ts`, Node >= 18, `@kindling/sandbox`) for the sandbox gateway `/v1` API: create, get, list, delete, renew, exec (NDJSON stream and wait), files read/write/delete/stat, typed errors; tests against a fake server.
 - `sdks/python`: stdlib-only Python SDK (`kindling_sandbox`, sync and asyncio) for the sandbox gateway `/v1` API: create/get/list/renew/delete, exec (NDJSON stream and wait), files read/write/stat/delete, typed errors, tested against a fake server that follows the spec.
 - kling-sandbox: OpenAPI 3.1 spec of the `/v1` gateway API (`ext/sandbox/api/openapi.yaml`, see `docs/sandbox-api.md`), with a contract test that fails when a route or a schema field drifts from the code.
