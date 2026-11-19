@@ -444,6 +444,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	if err := s.reservarN(r.Context(), t, pet.Template, memCuota(efectiva.MemMiB), n); err != nil {
 		codigo := codigoReservar(err)
 		if codigo == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", retryAfterCuota)
 			s.metricas.registrar(resultadoCuota, 0)
 		} else {
 			s.metricas.registrar(resultadoError, 0)

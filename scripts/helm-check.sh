@@ -60,6 +60,8 @@ esperar_fallo() {
 esperar_fallo "operador sin Secret de token" 
 esperar_fallo "gateway sin hosts" -f "$chart/ci/operator-solo.yaml" --set gateway.enabled=true --set gateway.image.repository=x
 esperar_fallo "gateway sin TLS ni insecureListen" -f "$chart/ci/gateway-tls.yaml" --set gateway.tls.existingSecret=
+esperar_fallo "stateDir con dos réplicas" -f "$chart/ci/gateway-estado.yaml" --set gateway.replicas=2
+esperar_fallo "stateDir.persistence sin stateDir.path" -f "$chart/ci/gateway-estado.yaml" --set gateway.stateDir.path=
 
 if [ "$fallos" -ne 0 ]; then
   echo "helm-check: $fallos fallo(s)" >&2

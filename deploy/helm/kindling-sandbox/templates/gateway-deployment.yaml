@@ -1,5 +1,9 @@
 {{- if .Values.gateway.enabled }}
 {{- $tls := include "kindling-sandbox.gatewayTLS" . }}
+{{- $sd := .Values.gateway.stateDir }}
+{{- $pvc := and $sd.path $sd.persistence.enabled }}
+{{- if and $sd.persistence.enabled (not $sd.path) }}{{ fail "gateway.stateDir.persistence.enabled exige gateway.stateDir.path" }}{{ end }}
+{{- if and $sd.path (gt (int .Values.gateway.replicas) 1) }}{{ fail "gateway.stateDir con más de una réplica: el almacén de inquilinos es un fichero de un solo escritor; usa replicas=1" }}{{ end }}
 {{- if not .Values.gateway.hosts }}{{ fail "gateway.hosts es obligatorio con gateway.enabled=true: sin hosts el gateway usaría un daemon local que en un Pod no existe" }}{{ end }}
 {{- if and (not $tls) (not .Values.gateway.insecureListen) }}{{ fail "gateway: define gateway.tls.existingSecret, o gateway.insecureListen=true (HTTP plano; los tokens viajan en claro, solo tras un terminador TLS)" }}{{ end }}
 apiVersion: apps/v1
@@ -12,6 +16,12 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: {{ .Values.gateway.replicas }}
+  {{- if $pvc }}
+  # El PVC es de un solo escritor (ReadWriteOnce): sin Recreate, la réplica
+  # nueva no arrancaría hasta que la vieja soltara el volumen.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "kindling-sandbox.gatewaySelector" . | nindent 6 }}
@@ -31,6 +41,9 @@ spec:
       {{- end }}
       securityContext:
         runAsNonRoot: true
+        {{- if and $sd.path $sd.fsGroup }}
+        fsGroup: {{ $sd.fsGroup }}
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -77,6 +90,10 @@ spec:
             - -ingress-secret-file
             - /etc/kling/ingress/{{ $.Values.gateway.ingressSecret.key }}
             {{- end }}
+            {{- end }}
+            {{- with $sd.path }}
+            - -state-dir
+            - {{ . | quote }}
             {{- end }}
             {{- with .Values.gateway.extraArgs }}
             {{- toYaml . | nindent 12 }}
@@ -132,6 +149,10 @@ spec:
               mountPath: {{ .Values.gateway.ssh.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if $sd.path }}
+            - name: state
+              mountPath: {{ $sd.path }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -151,6 +172,15 @@ spec:
           secret:
             secretName: {{ .Values.gateway.ssh.existingSecret }}
             defaultMode: 0400
+        {{- end }}
+        {{- if $sd.path }}
+        - name: state
+          {{- if $pvc }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-state" (include "kindling-sandbox.gatewayName" .)) $sd.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         {{- end }}
       {{- with .Values.gateway.nodeSelector }}
       nodeSelector:

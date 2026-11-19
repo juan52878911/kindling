@@ -62,8 +62,9 @@ adm.revoke_key("ana", nueva.id)
 `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `PayloadTooLarge`,
 `RateLimited` (429) y `ServerError` (5xx). `retry_after` (segundos) sale de la
 cabecera `Retry-After`. `TransportError`: red, plazo o flujo cortado.
-Nota: el frontal solo envía `Retry-After` hoy en el 503 de «plantilla
-reconstruyéndose»; en el 429 de cuota no lo envía y `retry_after` es `None`.
+Nota: el frontal envía `Retry-After` en el 503 de «plantilla reconstruyéndose»
+(60 s) y en el 429 de cuota al crear (5 s, un sondeo corto: la cuota se libera
+al borrarse o vencer un sandbox); en el resto `retry_after` es `None`.
 
 ## Cobertura frente a `ext/sandbox/api/openapi.yaml`
 
@@ -99,3 +100,6 @@ python3 -m unittest discover sdks/python/tests
 Corren contra un servidor falso local (`tests/servidor_falso.py`) que sigue la
 spec: NDJSON en trozos partidos a mitad de línea, 429 con `Retry-After`,
 fichero binario de ida y vuelta, y comprobación de que el token no se filtra.
+
+Ver también: [docs/sandbox-api.md](../../docs/sandbox-api.md) (la API y su spec), el SDK de
+TypeScript ([README](../typescript/README.md)) y las [recetas](../../docs/recetas/README.md).

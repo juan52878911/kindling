@@ -38,6 +38,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-sandbox gateway: the 429 for an exceeded quota when creating sandboxes (single or batch) now carries `Retry-After: 5`, declared in the OpenAPI spec like the 503 of a template being rebuilt; the SDKs expose it as `retry_after`.
+- `kling sbx`: the `e2b`, `tenant` and `key` subcommands are declared in the extension manifest, so they appear in `kling sbx` help and in the docs command check.
+- Helm chart `kindling-sandbox`: `gateway.stateDir.path` mounts the gateway's `-state-dir` (persistent tenants and keys) on an `emptyDir` or, with `gateway.stateDir.persistence.enabled`, on an optional PVC (kept on uninstall, or an existing claim); more than one gateway replica is rejected when it is set.
+- kling-sandbox: the E2B shim and the HTTP ingress share one id-to-DNS codec (`internal/hosts`); the `<port>-<id>.<domain>` URLs are unchanged.
 - Published ports: an `accept` error such as EMFILE no longer stops a TCP port for good; TCP connections (1024) and UDP flows (256, least recently used evicted) are capped per port.
 - AI gateway: a client that stops reading a streamed answer no longer holds the replica; each write has a 30 s deadline.
 - Template signatures: the startup migration to v3 no longer re-signs a v1 `meta.json` on a host that already moved to v2.

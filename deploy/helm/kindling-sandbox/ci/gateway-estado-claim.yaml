@@ -1,0 +1,19 @@
+# Gateway con -state-dir sobre un PVC existente (sin que el chart cree uno).
+gateway:
+  enabled: true
+  image:
+    repository: registry.example.internal/kindling-gateway
+  hosts:
+    lab: ssh://kling@192.0.2.10
+  tenants:
+    existingSecret: kindling-gateway-tenants
+  insecureListen: true
+  stateDir:
+    path: /var/lib/kling-sandbox
+    persistence:
+      enabled: true
+      existingClaim: kindling-gateway-estado
+operator:
+  frontal:
+    tokenSecret:
+      name: kindling-operator-frontal

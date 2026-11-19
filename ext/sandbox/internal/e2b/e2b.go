@@ -12,7 +12,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 )
 
 // API es lo que el shim necesita del cliente HTTP del gateway: hacer una
@@ -70,29 +71,24 @@ var (
 	reGW = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/@=-]{0,127}$`)
 )
 
-var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
-
 // IDDebug es el id que el SDK de E2B usa con E2B_DEBUG=true.
 const IDDebug = "debug_sandbox_id"
 
-// CodificarID convierte el id del gateway (`host/ref`) en el id que ve E2B:
-// base32 minúsculas sin relleno. Es determinista y reversible, sin estado.
-// Cabe en una etiqueta DNS (`<puerto>-<id>` ≤ 63) si el id del gateway mide
-// ≤ 35 bytes; con ids más largos solo funcionan la ruta y la cabecera
-// E2b-Sandbox-Id, no el host.
-func CodificarID(gw string) string { return strings.ToLower(b32.EncodeToString([]byte(gw))) }
-
-// DecodificarID es la inversa de CodificarID; falla si no es un id codificado
-// canónico o no sale un id de gateway válido.
+// DecodificarID deshace hosts.IDaDNS, la única codificación de ids del gateway
+// a DNS (la misma que usa la entrada HTTP): el id que ve E2B es el de gateway
+// en base32 minúsculas sin relleno, determinista y sin estado. Cabe en una
+// etiqueta (`<puerto>-<id>` ≤ 63) si el id del gateway mide ≤ 35 bytes; con ids
+// más largos solo funcionan la ruta y la cabecera E2b-Sandbox-Id, no el host.
+// Falla si no es un id codificado canónico o no sale un id de gateway válido.
 func DecodificarID(e string) (string, bool) {
 	if !reID.MatchString(e) {
 		return "", false
 	}
-	b, err := b32.DecodeString(strings.ToUpper(e))
-	if err != nil || CodificarID(string(b)) != e || !reGW.Match(b) {
+	gw, err := hosts.IDdeDNS(e)
+	if err != nil || hosts.IDaDNS(gw) != e || !reGW.MatchString(gw) {
 		return "", false
 	}
-	return string(b), true
+	return gw, true
 }
 
 type claveCtx struct{}
@@ -449,7 +445,7 @@ func (g gwSandbox) detalle() map[string]any {
 		md = map[string]string{}
 	}
 	return map[string]any{
-		"templateID": g.Template, "sandboxID": CodificarID(g.ID), "clientID": "kindling",
+		"templateID": g.Template, "sandboxID": hosts.IDaDNS(g.ID), "clientID": "kindling",
 		"startedAt": g.CreatedAt, "endAt": fin,
 		"cpuCount": max(g.VCPUs, 1), "memoryMB": max(g.MemMiB, 1), "diskSizeMB": 0,
 		"metadata": md, "state": estadoE2B(g.State), "envdVersion": EnvdVersion,
@@ -491,7 +487,7 @@ func (s *Servidor) crear(w http.ResponseWriter, r *http.Request) {
 
 func (s *Servidor) sandboxCreado(g gwSandbox) map[string]any {
 	m := map[string]any{
-		"templateID": g.Template, "sandboxID": CodificarID(g.ID), "clientID": "kindling",
+		"templateID": g.Template, "sandboxID": hosts.IDaDNS(g.ID), "clientID": "kindling",
 		"envdVersion": EnvdVersion, "envdAccessToken": s.tokenEnvd(g.ID),
 		"trafficAccessToken": nil, "domain": nil,
 	}

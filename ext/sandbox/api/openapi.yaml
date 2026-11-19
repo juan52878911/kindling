@@ -147,9 +147,11 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
         "429":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/ErrorConReintento"
         "502":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/ErrorConReintento"
   /v1/sandboxes/{id}:
     parameters:
       - $ref: "#/components/parameters/id"
@@ -1101,6 +1103,22 @@ components:
   responses:
     Error:
       description: Error. El código HTTP manda; `message` es para personas.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ErrorConReintento:
+      description: |
+        Error con `Retry-After` (segundos). En el 429 de cuota al crear es un
+        intervalo corto de sondeo (5): la cuota se libera cuando un sandbox
+        se borra o vence su TTL, y el frontal no puede predecir cuándo. En el
+        503 de plantilla reconstruyéndose son 60 (el 503 de cuota que no se
+        puede contar, con un host sin contestar, no lo lleva).
+      headers:
+        Retry-After:
+          description: Segundos que esperar antes de reintentar.
+          schema:
+            type: integer
       content:
         application/json:
           schema:
