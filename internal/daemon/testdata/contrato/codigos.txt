@@ -14,7 +14,9 @@ DELETE /machines/{ref}  ←  DELETE /machines/nadie  →  404 not_found
 DELETE /machines/{ref}/credentials/{env}  ←  DELETE /machines/parada/credentials/FOO  →  404 not_found
 DELETE /machines/{ref}/credentials/{env}  ←  DELETE /machines/parada/credentials/mal-env  →  400 bad_request
 DELETE /machines/{ref}/files  ←  DELETE /machines/nadie/files?path=/x  →  404 not_found
+DELETE /machines/{ref}/processes/{pid}  ←  DELETE /machines/nadie/processes/5  →  404 not_found
 DELETE /machines/{ref}/publish  ←  DELETE /machines/nadie/publish  →  404 not_found
+DELETE /machines/{ref}/sessions/{id}  ←  DELETE /machines/nadie/sessions/s1  →  404 not_found
 DELETE /registries/{host}  ←  DELETE /registries/nada.example  →  404 not_found
 DELETE /sandboxes/{ref}  ←  DELETE /sandboxes/nadie  →  404 not_found
 DELETE /snapshots/{name}  ←  DELETE /snapshots/nada  →  404 not_found
@@ -40,7 +42,13 @@ GET /machines/{ref}/egress  ←  GET /machines/nadie/egress  →  404 not_found
 GET /machines/{ref}/files  ←  GET /machines/nadie/files?path=/x  →  404 not_found
 GET /machines/{ref}/logs  ←  GET /machines/nadie/logs  →  404 not_found
 GET /machines/{ref}/logs  ←  GET /machines/parada/logs  →  404 not_found
+GET /machines/{ref}/processes  ←  GET /machines/nadie/processes  →  404 not_found
+GET /machines/{ref}/processes/{pid}  ←  GET /machines/nadie/processes/5  →  404 not_found
+GET /machines/{ref}/processes/{pid}  ←  GET /machines/nadie/processes/uno  →  400 bad_request
+GET /machines/{ref}/processes/{pid}/output  ←  GET /machines/nadie/processes/5/output  →  404 not_found
 GET /machines/{ref}/ready  ←  GET /machines/nadie/ready  →  404 not_found
+GET /machines/{ref}/sessions  ←  GET /machines/nadie/sessions  →  404 not_found
+GET /machines/{ref}/sessions/{id}  ←  GET /machines/nadie/sessions/s1  →  404 not_found
 GET /metrics  ←  GET /metrics  →  200 -
 GET /oci/blobs/{digest}  ←  GET /oci/blobs/malo  →  400 bad_request
 GET /procstats  ←  GET /procstats  →  200 -
@@ -86,11 +94,14 @@ POST /machines/{ref}/mmds  ←  POST /machines/parada/mmds {}  →  409 conflict
 POST /machines/{ref}/pause  ←  POST /machines/dormida/pause  →  409 conflict
 POST /machines/{ref}/pause  ←  POST /machines/nadie/pause  →  404 not_found
 POST /machines/{ref}/pause  ←  POST /machines/parada/pause  →  409 conflict
+POST /machines/{ref}/processes  ←  POST /machines/nadie/processes {"cmd":["true"]}  →  404 not_found
+POST /machines/{ref}/processes/{pid}/signal  ←  POST /machines/nadie/processes/5/signal {}  →  404 not_found
 POST /machines/{ref}/publish  ←  POST /machines/nadie/publish {}  →  404 not_found
 POST /machines/{ref}/renew  ←  POST /machines/nadie/renew  →  404 not_found
 POST /machines/{ref}/resize  ←  POST /machines/nadie/resize {"mem_mib":  →  400 bad_request
 POST /machines/{ref}/resize  ←  POST /machines/nadie/resize {"mem_mib":512}  →  404 not_found
 POST /machines/{ref}/resize  ←  POST /machines/parada/resize {"mem_mib":512}  →  400 bad_request
+POST /machines/{ref}/sessions  ←  POST /machines/nadie/sessions {}  →  404 not_found
 POST /machines/{ref}/shell  ←  POST /machines/nadie/shell  →  426 upgrade_required
 POST /machines/{ref}/squeeze  ←  POST /machines/dormida/squeeze  →  409 conflict
 POST /machines/{ref}/squeeze  ←  POST /machines/nadie/squeeze  →  404 not_found
