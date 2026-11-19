@@ -101,10 +101,13 @@ kling doctor:  -json
 kling events:  -H
 kling events:  -json
 kling exec:  -H
+kling exec:  -d
 kling exec:  -e
 kling exec:  -env-file
 kling exec:  -i
+kling exec:  -json
 kling exec:  -max-output
+kling exec:  -s
 kling exec:  -timeout
 kling exec:  -w
 kling graph audit:  -H
@@ -214,6 +217,20 @@ kling plugins install:  -from
 kling plugins install:  -insecure
 kling plugins install:  -sha256
 kling plugins rm:  -dir
+kling proc ls:  -H
+kling proc ls:  -json
+kling proc ls:  -q
+kling proc out:  -H
+kling proc out:  -f
+kling proc out:  -next
+kling proc out:  -offset
+kling proc rm:  -H
+kling proc signal:  -H
+kling proc signal:  -s
+kling proc status:  -H
+kling proc status:  -json
+kling proc wait:  -H
+kling proc wait:  -timeout
 kling ps:  -H
 kling ps:  -a
 kling ps:  -json
@@ -295,6 +312,17 @@ kling save:  -json
 kling save:  -replace
 kling save:  -wait
 kling save:  -warm
+kling session create:  -H
+kling session create:  -e
+kling session create:  -env-file
+kling session create:  -id
+kling session create:  -json
+kling session create:  -ttl
+kling session create:  -w
+kling session ls:  -H
+kling session ls:  -json
+kling session rm:  -H
+kling session show:  -H
 kling shell:  -H
 kling shell:  -e
 kling shell:  -env-file

@@ -96,12 +96,15 @@ func cmdExec(args []string) (int, error) {
 	dir := fs.String("w", "", "working directory inside the machine")
 	timeout := fs.Duration("timeout", 0, "kill the command after this long (default 5m, max 1h)")
 	maxOut := fs.Int("max-output", 0, "bytes of stdout and of stderr to keep (default 8 MiB, max 64 MiB)")
+	detach := fs.Bool("d", false, "run in the background: print the pid and return (see kling proc)")
+	asJSON := fs.Bool("json", false, "with -d, print the process as JSON instead of the pid")
+	session := fs.String("s", "", "run in this session: its cwd and env, and what the command changes of them stays (kling session create)")
 	if err := parseFlags(fs, args); err != nil {
 		return codigoDeSalida(err), err
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		return 2, errUso("usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <machine|sandbox> [--] <cmd> [args...]")
+		return 2, errUso("usage: kling exec [-i] [-d] [-s SESSION] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <machine|sandbox> [--] <cmd> [args...]")
 	}
 	ref, cmd := rest[0], rest[1:]
 	if cmd[0] == "--" {
@@ -119,6 +122,16 @@ func cmdExec(args []string) (int, error) {
 	if *timeout > 0 && req.TimeoutSeconds == 0 {
 		req.TimeoutSeconds = 1
 	}
+	if *detach {
+		if *stdin {
+			return 2, errUso("exec -d can't take -i: a background process reads from /dev/null")
+		}
+		return lanzarEnSegundoPlano(api.NewClient(hostOf(*host)), ref, req, *session, *asJSON)
+	}
+	if *asJSON {
+		return 2, errUso("exec -json only goes with -d")
+	}
+	req.Session = *session
 	if *stdin {
 		b, err := io.ReadAll(io.LimitReader(os.Stdin, api.ExecMaxStdin+1))
 		if err != nil {
