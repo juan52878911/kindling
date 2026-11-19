@@ -33,6 +33,9 @@ class AsyncFiles:
     async def stat(self, path):
         return await _hilo(self._f.stat, path)
 
+    async def list(self, path):
+        return await _hilo(self._f.list, path)
+
 
 class AsyncProcesses:
     def __init__(self, procs):

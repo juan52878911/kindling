@@ -484,6 +484,16 @@ func TestFilesPassthrough(t *testing.T) {
 	if st := decodifica[api.FileStat](t, resp); st.Size != 9 {
 		t.Fatalf("stat: %+v", st)
 	}
+	// Listado: solo las entradas directas del directorio.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "PUT", "/v1/sandboxes/"+sb.ID+"/files?path=/w/sub/b.txt", []byte("b")), 200)
+	resp = pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/w&list=1", nil)
+	esperaCodigo(t, resp, 200)
+	if ls := decodifica[api.FileList](t, resp); ls.Path != "/w" || len(ls.Entries) != 1 || ls.Entries[0].Name != "a.txt" || ls.Entries[0].Size != 9 {
+		t.Fatalf("list: %+v", ls)
+	}
+	// Otro inquilino no lista el directorio de un sandbox ajeno.
+	esperaCodigo(t, pide(t, srv, tokenBob, "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/w&list=1", nil), 404)
+	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/w&list=1", nil), 401)
 	esperaCodigo(t, pide(t, srv, tokenAlice, "DELETE", base, nil), 204)
 	esperaCodigo(t, pide(t, srv, tokenAlice, "GET", base, nil), 404)
 	esperaCodigo(t, pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/files", nil), 400)

@@ -34,10 +34,12 @@ y el mismo id de traza queda en la auditoría (`trace_id`).
 
 **Hacia los daemons.** El contexto de cada petición lleva la traza, y `telemetria.Transporte` es el
 `http.RoundTripper` que la inyecta como `traceparent` en las llamadas salientes (probado contra un
-servidor falso). **Limitación actual:** `pkg/api.Client` no deja cambiar su transporte desde fuera, así
-que el gateway todavía no lo instala en los clientes de los hosts; el daemon tampoco lee `traceparent`.
-Falta un gancho aditivo en `pkg/api` (p. ej. un envoltorio de transporte en `NewClient`) y usarlo en
-`internal/hosts`; hasta entonces la traza llega al gateway y a su auditoría, no al daemon.
+servidor falso). Con `-otlp-endpoint` activo, el gateway instala ese transporte en los clientes de los
+hosts (`hosts.Nuevo(..., hosts.ConTransporte(telemetria.Transporte))`, sobre el gancho aditivo
+`api.Client.WrapTransport`), así que cada llamada al daemon lleva `traceparent` con el trace-id de la
+petición y el span del gateway. El daemon no exporta spans: si llega un `traceparent` bien formado, lo
+añade a la línea de log de los errores de petición (`… traceparent=00-<trace>-<span>-01`), para casar
+esa línea con la traza. Sin OTLP no se propaga nada.
 
 **Lotes y colector caído.** Los spans van a una cola acotada (2048); un envío cada 5 s o cada 256
 spans, con plazo de 5 s. Encolar nunca bloquea: con la cola llena, o si el colector no responde o

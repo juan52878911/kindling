@@ -3,7 +3,7 @@
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from .client import Client
-from .models import ExecEvent, ExecResult, FileStat, ProcessEvent, ProcessInfo, SandboxInfo, Session
+from .models import ExecEvent, ExecResult, FileList, FileStat, ProcessEvent, ProcessInfo, SandboxInfo, Session
 
 
 class SandboxList(list):
@@ -68,6 +68,10 @@ class Files:
 
     def stat(self, path: str) -> FileStat:
         return self._c.stat_file(self._id, path)
+
+    def list(self, path: str) -> FileList:
+        """Lista un directorio del sandbox (`GET …/files?list=1`)."""
+        return self._c.list_files(self._id, path)
 
 
 class Processes:

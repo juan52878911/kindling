@@ -34,9 +34,13 @@ Plantillas
  { catálogo de /v1/templates }
 ```
 
-«Listar» ficheros ejecuta `ls -la` en el sandbox (la API no tiene listado de directorios).
+«Listar» usa `GET /v1/sandboxes/{id}/files?list=1&path=…` (tipo, modo, tamaño y nombre de cada entrada;
+avisa si el listado se truncó).
 
-## Limitaciones
+## Bandera `-console`
 
-La ruta se registra siempre; la bandera `-console` para apagarla vive en
-`cmd/kling-sandbox/gateway*.go` y queda pendiente.
+`kling sbx gateway -console[=true|false]` decide si se sirve `/console/` (apagada: 404).
+Por defecto está **encendida si el gateway escucha con TLS o en loopback** y **apagada si escucha en
+HTTP plano fuera de loopback** (`-insecure-listen`), porque la consola maneja tokens de inquilino. Una
+bandera explícita manda sobre el valor por defecto. En el chart: `gateway.console` (`""` = valor por
+defecto, `"true"` / `"false"` lo fuerzan); ojo, con `gateway.insecureListen` el defecto es apagada.

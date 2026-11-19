@@ -362,6 +362,13 @@ class Manejador(BaseHTTPRequestHandler):
             modo = q.get("mode", "0644")
             st.ficheros[clave] = (cuerpo, modo)
             return self._json(200, {"path": path, "size": len(cuerpo), "mode": modo, "is_dir": False})
+        if m == "GET" and q.get("list") == "1":
+            pref = path.rstrip("/") + "/"
+            ents = [{"name": p[len(pref):], "type": "file", "size": len(v[0]), "mode": v[1],
+                     "mod_time": "2026-01-01T00:00:00Z"}
+                    for (s2, p), v in sorted(st.ficheros.items())
+                    if s2 == sid and p.startswith(pref) and "/" not in p[len(pref):]]
+            return self._json(200, {"path": path, "entries": ents, "nuevo": 1})
         if clave not in st.ficheros:
             return self._err(404, "no such file", "not_found")
         datos, modo = st.ficheros[clave]

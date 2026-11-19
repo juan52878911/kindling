@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,7 @@ type falso struct {
 	endpoint string
 
 	mu        sync.Mutex
+	trazas    []string // Traceparent de las peticiones recibidas
 	maquinas  map[string]*api.Machine
 	snapshots []string
 	// snapAnot son las anotaciones de cada snapshot (por nombre), donde vive la
@@ -132,7 +134,15 @@ func nuevoFalso(t *testing.T) *falso {
 	}
 	f := &falso{t: t, endpoint: sock, maquinas: map[string]*api.Machine{},
 		ficheros: map[string][]byte{}, libreMiB: 4096, imagenes: []string{"base"}}
-	f.srv = httptest.NewUnstartedServer(f.rutas())
+	rutas := f.rutas()
+	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tp := r.Header.Get("Traceparent"); tp != "" {
+			f.mu.Lock()
+			f.trazas = append(f.trazas, tp)
+			f.mu.Unlock()
+		}
+		rutas.ServeHTTP(w, r)
+	}))
 	f.srv.Listener = ln
 	f.srv.Start()
 	t.Cleanup(f.srv.Close)
@@ -574,6 +584,18 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	switch r.Method {
 	case http.MethodGet:
+		if q.Get("list") == "1" {
+			pref := strings.TrimRight(q.Get("path"), "/") + "/"
+			lista := api.FileList{Path: q.Get("path"), Entries: []api.FileEntry{}}
+			for k, v := range f.ficheros {
+				if p, ok := strings.CutPrefix(k, r.PathValue("ref")+":"+pref); ok && !strings.Contains(p, "/") {
+					lista.Entries = append(lista.Entries, api.FileEntry{Name: p, Type: "file", Size: int64(len(v)), Mode: "0644"})
+				}
+			}
+			sort.Slice(lista.Entries, func(i, j int) bool { return lista.Entries[i].Name < lista.Entries[j].Name })
+			writeJSON(w, 200, lista)
+			return
+		}
 		b, ok := f.ficheros[clave]
 		if !ok {
 			failDaemon(w, 404, fmt.Errorf("no such file"))

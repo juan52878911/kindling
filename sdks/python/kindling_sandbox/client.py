@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 from .errors import ConfigError, TransportError, error_para
-from .models import (ExecEvent, ExecResult, FileStat, Graph, ProcessEvent, ProcessInfo, SandboxInfo,
+from .models import (ExecEvent, ExecResult, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, SandboxInfo,
                      Session, Volume)
 
 ENV_URL = "KLING_SANDBOX_URL"
@@ -279,6 +279,10 @@ class Client:
     def stat_file(self, id: str, path: str) -> FileStat:
         return FileStat.from_json(self._json(
             "GET", "/v1/sandboxes/%s/files" % id, {"path": path, "stat": "1"}))
+
+    def list_files(self, id: str, path: str) -> FileList:
+        return FileList.from_json(self._json(
+            "GET", "/v1/sandboxes/%s/files" % id, {"path": path, "list": "1"}))
 
     def write_file(self, id: str, path: str, datos: bytes, mode: Optional[int] = None,
                    mkdir: bool = False) -> FileStat:

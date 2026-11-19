@@ -103,6 +103,7 @@ export class Files {
   }
   delete(path) { return this.#c.deleteFile(this.#id, path); }
   stat(path) { return this.#c.statFile(this.#id, path); }
+  list(path) { return this.#c.listFiles(this.#id, path); }
 }
 
 export class Sandbox {

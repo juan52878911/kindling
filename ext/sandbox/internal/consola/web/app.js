@@ -161,11 +161,13 @@ function vistaDetalle(id) {
   var subir = el('button', { text: 'Subir' });
   var fo = el('pre');
   ls.addEventListener('click', function () {
-    api('POST', '/sandboxes/' + id + '/exec', { cmd: ['ls', '-la', ruta.value] }).then(function (r) { return r.text(); })
-      .then(function (t) {
-        fo.textContent = '';
-        t.split('\n').forEach(function (l) { if (l) { var ev = JSON.parse(l); if (ev.data) fo.appendChild(document.createTextNode(deb64(ev.data))); } });
-      }, function (e) { fo.textContent = e.message; });
+    json('GET', '/sandboxes/' + id + '/files?list=1&path=' + encodeURIComponent(ruta.value)).then(function (d) {
+      var lineas = (d.entries || []).map(function (f) {
+        return f.type.charAt(0) + ' ' + f.mode + ' ' + String(f.size).padStart(10) + '  ' + f.name + (f.target ? ' -> ' + f.target : '');
+      });
+      if (d.truncated) lineas.push('… (listado truncado)');
+      fo.textContent = lineas.join('\n') || '(vacío)';
+    }, function (e) { fo.textContent = e.message; });
   });
   bajar.addEventListener('click', function () {
     api('GET', '/sandboxes/' + id + '/files?path=' + encodeURIComponent(ruta.value)).then(function (r) { return r.blob(); })

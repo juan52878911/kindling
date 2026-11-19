@@ -6,6 +6,8 @@ export interface SandboxInfo {
   [extra: string]: unknown;
 }
 export interface FileStat { path: string; size: number; mode: string; is_dir: boolean; mod_time: string; [extra: string]: unknown }
+export interface FileEntry { name: string; type: string; size: number; mode: string; mod_time: string; target?: string; [extra: string]: unknown }
+export interface FileList { path: string; entries: FileEntry[]; truncated?: boolean; [extra: string]: unknown }
 export interface Graph { id: string; host: string; template: string; state: string; claimed_at: string; nodes: Record<string, unknown>; [extra: string]: unknown }
 
 export interface ExecResult {
@@ -97,6 +99,7 @@ export class Client {
   execStream(id: string, peticion: Record<string, unknown>): Promise<AsyncGenerator<Record<string, unknown>>>;
   readFile(id: string, path: string): Promise<Uint8Array>;
   statFile(id: string, path: string): Promise<FileStat>;
+  listFiles(id: string, path: string): Promise<FileList>;
   writeFile(id: string, path: string, datos: Uint8Array | string, o?: { mode?: number; mkdir?: boolean }): Promise<FileStat>;
   deleteFile(id: string, path: string): Promise<void>;
   createVolume(name: string, o?: { size_mib?: number; clone_from?: string; host?: string }): Promise<VolumeInfo>;
@@ -125,6 +128,7 @@ export class Files {
   write(path: string, data: string | Uint8Array, o?: { mode?: number; mkdir?: boolean }): Promise<FileStat>;
   delete(path: string): Promise<void>;
   stat(path: string): Promise<FileStat>;
+  list(path: string): Promise<FileList>;
 }
 
 export class Processes {

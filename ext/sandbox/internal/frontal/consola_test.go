@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/consola"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 )
 
 func servidorConsola(t *testing.T) *Servidor {
@@ -84,5 +85,28 @@ func TestConsolaHTMLNoCargaDeFuera(t *testing.T) {
 	}
 	if strings.Contains(string(b), "<script>") || strings.Contains(string(b), "style=") {
 		t.Error("script o estilo en línea: la CSP lo bloquearía")
+	}
+}
+
+// Con SinConsola la ruta no se registra: /console/ contesta 404.
+func TestConsolaApagada(t *testing.T) {
+	s := &Servidor{sinConsola: true}
+	s.rutas()
+	for _, p := range []string{"/console/", "/console/app.js"} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest("GET", p, nil))
+		if w.Code != 404 {
+			t.Errorf("%s con la consola apagada: %d", p, w.Code)
+		}
+	}
+	// Por el constructor también: Opciones.SinConsola llega al servidor.
+	n, err := Nuevo(Opciones{Hosts: hosts.Nuevo(nil), Tenants: []Tenant{{Nombre: "x", Token: tokenAlice}}, SinConsola: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	n.ServeHTTP(w, httptest.NewRequest("GET", "/console/", nil))
+	if w.Code != 404 {
+		t.Errorf("Nuevo con SinConsola: %d", w.Code)
 	}
 }
