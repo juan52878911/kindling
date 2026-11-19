@@ -372,6 +372,11 @@ type Server struct {
 	// agente ya contestó (bajo agentesMu): ver agenteVisto.
 	agentesMu     sync.Mutex
 	agentesVistos map[string]string
+	// tuneles cuenta los túneles TCP (tunel.go) abiertos por máquina.
+	tuneles    tunelesAbiertos
+	topesTunel topesTunel
+	thaw       func(ctx context.Context, id string) (*api.Machine, error) // solo tests
+
 	// vueloGuest son los bytes de /guest en vuelo (vueloGuestPeq, los de las
 	// llamadas pequeñas), y sesionesGuest los exec, shell y ficheros abiertos
 	// por inquilino (vuelo.go).
@@ -535,6 +540,7 @@ func (s *Server) rutas() []ruta {
 		{"POST /machines/{ref}/hooks", AccionMaquina, nil, s.handleHooks},
 		{"POST /machines/{ref}/exec", AccionMaquina, nil, s.handleExec},
 		{"POST /machines/{ref}/shell", AccionMaquina, nil, s.handleShell},
+		{"GET /machines/{ref}/tcp", AccionMaquina, nil, s.handleTCP},
 		{"POST /machines/{ref}/processes", AccionMaquina, nil, s.handleProcesos},
 		{"GET /machines/{ref}/processes", AccionMaquina, nil, s.handleProcesos},
 		{"GET /machines/{ref}/processes/{pid}", AccionMaquina, nil, s.handleProcesos},
@@ -670,6 +676,7 @@ func (c *capturaMux) Write(b []byte) (int, error) {
 var usoDeMaquina = map[string]bool{
 	"POST /machines/{ref}/exec":                   true,
 	"POST /machines/{ref}/shell":                  true,
+	"GET /machines/{ref}/tcp":                     true,
 	"POST /machines/{ref}/processes":              true,
 	"GET /machines/{ref}/processes/{pid}/output":  true,
 	"POST /machines/{ref}/processes/{pid}/signal": true,
