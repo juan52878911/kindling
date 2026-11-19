@@ -240,7 +240,8 @@ func (s *Servidor) listarFondo(ctx context.Context, id string) []map[string]any 
 		if p.State != "running" || len(p.Cmd) == 0 {
 			continue
 		}
-		cfg := procConfig{Cmd: p.Cmd[0], Args: p.Cmd[1:]}
+		c0, a0 := desenvolverBash(p.Cmd)
+		cfg := procConfig{Cmd: c0, Args: a0}
 		if p.Dir != "" {
 			cfg.Cwd = &p.Dir
 		}

@@ -131,7 +131,7 @@ se rechazan.
 
 | Operación | Estado | Traducción / motivo |
 |---|---|---|
-| `process.Process/Start` | Soportada | `POST /v1/sandboxes/{id}/processes` y `GET …/output?follow=1` → eventos `start` (con el pid del sandbox), `data` (`stdout`/`stderr`, base64) y `end` (`exitCode`, `status: "exit status N"` o `"signal: killed"`). `cmd`+`args`→`cmd`, `cwd`→`dir`, `envs`→`env`. El comando es un proceso de fondo del sandbox: **sigue vivo si el cliente cierra la conexión** (`commands.run(background=True)`). `Connect-Timeout-Ms` es el plazo de la conexión: al vencer, el stream acaba con `deadline_exceeded` y el comando sigue. Entregado el `end`, el proceso se borra. Con un gateway sin procesos de fondo se usa el exec atado a la petición (`POST …/exec`; ahí el comando muere con la conexión y `Connect-Timeout-Ms`→`timeout_seconds`). |
+| `process.Process/Start` | Soportada | `POST /v1/sandboxes/{id}/processes` y `GET …/output?follow=1` → eventos `start` (con el pid del sandbox), `data` (`stdout`/`stderr`, base64) y `end` (`exitCode`, `status: "exit status N"` o `"signal: killed"`). `cmd`+`args`→`cmd` (si `cmd` es `/bin/bash` o `bash`, que es lo que lanzan los SDK como `-l -c CMD`, el gateway recibe `/bin/sh -c '…' sh <args>`: usa `/bin/bash` si existe y, si no, `/bin/sh` con los mismos args sin `-l`, para imágenes sin bash; cualquier otro `cmd` va tal cual), `cwd`→`dir`, `envs`→`env`. El comando es un proceso de fondo del sandbox: **sigue vivo si el cliente cierra la conexión** (`commands.run(background=True)`). `Connect-Timeout-Ms` es el plazo de la conexión: al vencer, el stream acaba con `deadline_exceeded` y el comando sigue. Entregado el `end`, el proceso se borra. Con un gateway sin procesos de fondo se usa el exec atado a la petición (`POST …/exec`; ahí el comando muere con la conexión y `Connect-Timeout-Ms`→`timeout_seconds`). |
 | `process.Process/List` | Soportada | Procesos de fondo en marcha en ese sandbox (`GET …/processes`), también los lanzados por otra conexión. La `tag` solo se conoce mientras el shim no se reinicie. |
 | `process.Process/SendSignal` | Soportada | `POST …/processes/{pid}/signal` con `TERM` o `KILL`; el fin sale con 143 o 137. Solo `SIGTERM` y `SIGKILL`. |
 | `process.Process/CloseStdin` | Soportada | No-op: los comandos arrancan con stdin vacío. |
@@ -139,7 +139,7 @@ se rechazan.
 | `process.Process/SendInput`, `StreamInput`, `Update` | **501** | El gateway acepta stdin solo entero al arrancar, no en vivo. |
 | `process.Process/Connect` | Soportada | Vuelve a un proceso ya lanzado (por `pid` o `tag`): `start`, su salida desde el principio (lo que conserve el sandbox) y `end`. Un proceso ya terminado y entregado da `not_found`. |
 | `filesystem.Filesystem/Stat` | Soportada | `GET …/files?stat=1`. |
-| `…/ListDir` | Soportada | `find -printf` en el sandbox (necesita GNU findutils en la imagen). |
+| `…/ListDir` | Soportada | `GET …/files?list=1` del gateway (baja por los subdirectorios hasta `depth`); si el gateway no lo tiene o el listado viene truncado, cae a `find -printf` en el sandbox (necesita GNU findutils, no busybox). |
 | `…/MakeDir`, `…/Remove`, `…/Move` | Soportada | `mkdir -p`, `rm -rf`, `mv` por exec. `MakeDir` sobre un directorio existente da `already_exists`; `Remove` de `/` se rechaza. |
 | `…/WatchDir`, `CreateWatcher`, `GetWatcherEvents`, `RemoveWatcher` | **501** | El gateway no tiene notificaciones de ficheros. |
 | `GET /files?path=` | Soportada | `GET /v1/sandboxes/{id}/files`. Las rutas relativas cuelgan de `-home`. |
