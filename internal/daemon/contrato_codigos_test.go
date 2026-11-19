@@ -111,6 +111,7 @@ var casosCodigos = []casoCodigo{
 	{"POST", "/machines/nadie/exec", `{"cmd":["true"]}`},
 	{"POST", "/machines/nadie/exec", `{`},
 	{"POST", "/machines/nadie/shell", ""},
+	{"GET", "/machines/nadie/tcp?port=80", ""},
 	{"POST", "/machines/nadie/processes", `{"cmd":["true"]}`},
 	{"GET", "/machines/nadie/processes", ""},
 	{"GET", "/machines/nadie/processes/5", ""},

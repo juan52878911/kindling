@@ -42,6 +42,7 @@ GET /machines/{ref}/processes/{pid}/output  machine
 GET /machines/{ref}/ready  machine
 GET /machines/{ref}/sessions  machine
 GET /machines/{ref}/sessions/{id}  machine
+GET /machines/{ref}/tcp  machine
 GET /metrics  list
 GET /oci/blobs/{digest}  admin
 GET /procstats  admin

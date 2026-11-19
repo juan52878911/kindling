@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Daemon: `GET /machines/{ref}/tcp?port=N` (`Upgrade: kling-tcp/1`, capability `tcp-tunnel`) tunnels raw bytes to a published guest port (`kling.ports`), waking a frozen machine; 256 tunnels per machine, 10 min idle timeout. `pkg/api`: `(*Client).DialTCP(ctx, ref, port)` returns the connection over the unix or SSH transport, so WebSocket and binary reach remote hosts.
 - Helm chart `deploy/helm/kindling-sandbox`: the Kubernetes operator (CRD, minimal RBAC, single replica) and, optionally, the sandbox gateway (external hosts, tenants/TLS from existing Secrets, optional Ingress and `-ingress-domain`); `scripts/helm-check.sh` lints and templates it with each `ci/` values file and checks `crds/` against `ext/sandbox/deploy/`.
 - kling-sandbox gateway: background processes and sessions in the `/v1` API. `POST/GET /v1/sandboxes/{id}/processes`, `GET|DELETE …/processes/{pid}`, `POST …/processes/{pid}/signal`, `GET …/processes/{pid}/output?offset=&follow=1` (NDJSON) and `POST/GET/DELETE …/sessions[/{id}]`, with `session` on exec; same owner check as exec and files (another tenant's sandbox is a 404), per-tenant caps (running processes and sessions per sandbox, concurrent `follow` reads; fields 8 to 10 of `KLING_SANDBOX_TENANTS`; 429) and the spec in `openapi.yaml`.
 - `sdks/python` and `sdks/typescript`: `sandbox.processes.start/list/get/output(follow)/signal/kill/delete` and `sandbox.sessions.create/list/get/exec/delete`, `session=` on exec.

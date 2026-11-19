@@ -50,6 +50,7 @@ GET /machines/{ref}/processes/{pid}/output  ←  GET /machines/nadie/processes/5
 GET /machines/{ref}/ready  ←  GET /machines/nadie/ready  →  404 not_found
 GET /machines/{ref}/sessions  ←  GET /machines/nadie/sessions  →  404 not_found
 GET /machines/{ref}/sessions/{id}  ←  GET /machines/nadie/sessions/s1  →  404 not_found
+GET /machines/{ref}/tcp  ←  GET /machines/nadie/tcp?port=80  →  426 upgrade_required
 GET /metrics  ←  GET /metrics  →  200 -
 GET /oci/blobs/{digest}  ←  GET /oci/blobs/malo  →  400 bad_request
 GET /procstats  ←  GET /procstats  →  200 -
