@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kindling-sandbox"
+version = "0.1.0"
+description = "SDK de Python (solo biblioteca estándar) para la API /v1 del gateway de sandboxes de kindling"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+packages = ["kindling_sandbox"]

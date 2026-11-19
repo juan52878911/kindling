@@ -133,6 +133,15 @@ func TestLeerTenantsConAdmins(t *testing.T) {
 	if ts, err = leerTenants(); err != nil || ts[0].MaxMemTotalMiB != 8192 {
 		t.Fatalf("total limit: %+v %v", ts, err)
 	}
+	// Del 8.º al 10.º: procesos de fondo, sesiones y lecturas con follow.
+	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:10:5:2048:2:8192:7:3:9")
+	if ts, err = leerTenants(); err != nil || ts[0].MaxProcesos != 7 || ts[0].MaxSesiones != 3 || ts[0].MaxSeguir != 9 {
+		t.Fatalf("process limits: %+v %v", ts, err)
+	}
+	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:::::::x")
+	if _, err := leerTenants(); err == nil {
+		t.Fatal("expected an error for a bad max_processes")
+	}
 	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:10:5:mucho")
 	if _, err := leerTenants(); err == nil {
 		t.Fatal("expected an error for a bad max_mem_mib")

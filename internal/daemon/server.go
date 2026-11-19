@@ -41,7 +41,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof", api.CapabilityProcesses, api.CapabilitySessions, api.CapabilityEgressSet, "files-dirs"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -372,6 +372,11 @@ type Server struct {
 	// agente ya contestó (bajo agentesMu): ver agenteVisto.
 	agentesMu     sync.Mutex
 	agentesVistos map[string]string
+	// tuneles cuenta los túneles TCP (tunel.go) abiertos por máquina.
+	tuneles    tunelesAbiertos
+	topesTunel topesTunel
+	thaw       func(ctx context.Context, id string) (*api.Machine, error) // solo tests
+
 	// vueloGuest son los bytes de /guest en vuelo (vueloGuestPeq, los de las
 	// llamadas pequeñas), y sesionesGuest los exec, shell y ficheros abiertos
 	// por inquilino (vuelo.go).
@@ -528,12 +533,24 @@ func (s *Server) rutas() []ruta {
 		{"GET /machines/{ref}/logs", AccionMaquina, nil, s.handleLogs},
 		{"GET /machines/{ref}/credaudit", AccionMaquina, nil, s.handleCredAudit},
 		{"GET /machines/{ref}/egress", AccionMaquina, nil, s.handleEgress},
+		{"PATCH /machines/{ref}/egress", AccionMaquina, nil, s.handleSetEgress},
 		{"POST /machines/{ref}/guest", AccionMaquina, nil, s.handleGuest},
 		{"POST /machines/{ref}/renew", AccionMaquina, nil, s.handleRenew},
 		{"GET /machines/{ref}/ready", AccionMaquina, nil, s.handleReady},
 		{"POST /machines/{ref}/hooks", AccionMaquina, nil, s.handleHooks},
 		{"POST /machines/{ref}/exec", AccionMaquina, nil, s.handleExec},
 		{"POST /machines/{ref}/shell", AccionMaquina, nil, s.handleShell},
+		{"GET /machines/{ref}/tcp", AccionMaquina, nil, s.handleTCP},
+		{"POST /machines/{ref}/processes", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/processes", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/processes/{pid}", AccionMaquina, nil, s.handleProcesos},
+		{"DELETE /machines/{ref}/processes/{pid}", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/processes/{pid}/output", AccionMaquina, nil, s.handleProcesos},
+		{"POST /machines/{ref}/processes/{pid}/signal", AccionMaquina, nil, s.handleProcesos},
+		{"POST /machines/{ref}/sessions", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/sessions", AccionMaquina, nil, s.handleProcesos},
+		{"GET /machines/{ref}/sessions/{id}", AccionMaquina, nil, s.handleProcesos},
+		{"DELETE /machines/{ref}/sessions/{id}", AccionMaquina, nil, s.handleProcesos},
 		{"GET /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
 		{"PUT /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
 		{"DELETE /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
@@ -657,14 +674,19 @@ func (c *capturaMux) Write(b []byte) (int, error) {
 // invitado. Las de consulta (GET /machines/{ref}, ready) no cuentan: un panel
 // que pregunta cada pocos segundos no debe mantenerla despierta.
 var usoDeMaquina = map[string]bool{
-	"POST /machines/{ref}/exec":    true,
-	"POST /machines/{ref}/shell":   true,
-	"GET /machines/{ref}/files":    true,
-	"PUT /machines/{ref}/files":    true,
-	"DELETE /machines/{ref}/files": true,
-	"POST /machines/{ref}/guest":   true,
-	"POST /machines/{ref}/hooks":   true,
-	"GET /machines/{ref}/logs":     false,
+	"POST /machines/{ref}/exec":                   true,
+	"POST /machines/{ref}/shell":                  true,
+	"GET /machines/{ref}/tcp":                     true,
+	"POST /machines/{ref}/processes":              true,
+	"GET /machines/{ref}/processes/{pid}/output":  true,
+	"POST /machines/{ref}/processes/{pid}/signal": true,
+	"POST /machines/{ref}/sessions":               true,
+	"GET /machines/{ref}/files":                   true,
+	"PUT /machines/{ref}/files":                   true,
+	"DELETE /machines/{ref}/files":                true,
+	"POST /machines/{ref}/guest":                  true,
+	"POST /machines/{ref}/hooks":                  true,
+	"GET /machines/{ref}/logs":                    false,
 }
 
 // conUso envuelve h con machine.Usar (ver usoDeMaquina).

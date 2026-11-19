@@ -1,0 +1,21 @@
+kindling-sandbox {{ .Chart.AppVersion }} instalado en el namespace {{ .Release.Namespace }}.
+
+{{- if .Values.operator.enabled }}
+
+Operador: {{ include "kindling-sandbox.operatorName" . }}  ->  {{ include "kindling-sandbox.frontalURL" . }}
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "kindling-sandbox.operatorName" . }}
+  kubectl get crd sandboxes.sandbox.kindling.dev
+{{- end }}
+{{- if .Values.gateway.enabled }}
+
+Gateway: servicio {{ include "kindling-sandbox.gatewayName" . }}:{{ .Values.gateway.service.port }} · hosts: {{ keys .Values.gateway.hosts | sortAlpha | join ", " }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kindling-sandbox.gatewayName" . }} {{ .Values.gateway.service.port }}:{{ .Values.gateway.service.port }}
+{{- if not (include "kindling-sandbox.gatewayTLS" .) }}
+
+AVISO: el gateway sirve HTTP plano (insecureListen): los tokens viajan en claro.
+{{- end }}
+{{- end }}
+
+Los Secrets (token del operador, tenants, TLS) los pones tú: el chart no los crea.
+Los CRDs de crds/ solo los instala `helm install`; `helm upgrade` no los actualiza
+(ver docs/kubernetes.md).

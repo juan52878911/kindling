@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -72,6 +73,13 @@ type Tenant struct {
 	// sandbox nuevo, pero sí un proceso del daemon y una conexión que este
 	// frontal mantiene en pie, y ambos son un recurso que un tenant puede acaparar.
 	MaxShells int
+	// MaxProcesos y MaxSesiones acotan los procesos de fondo VIVOS y las
+	// sesiones de exec de cada sandbox del tenant; MaxSeguir, las lecturas de
+	// salida con follow abiertas a la vez en todo el tenant. 0 = el valor por
+	// defecto de procesos.go.
+	MaxProcesos int
+	MaxSesiones int
+	MaxSeguir   int
 	// MaxMemMiB y MaxVCPUs acotan lo que un sandbox de este tenant puede pedir
 	// (mem_mib y vcpus de la petición). 0 = el máximo por defecto del frontal
 	// (Opciones.MaxMemMiB / Opciones.MaxVCPUs). Sin ellos, un solo token pide una
@@ -87,6 +95,11 @@ type Tenant struct {
 	// sandboxes medianos; es opt-in porque contarlo lista los hosts en cada
 	// creación y solo suma los que contestan.
 	MaxMemTotalMiB int
+	// MaxLote es el mayor "count" de una creación en lote; 0 = el del frontal
+	// (Opciones.MaxLote). Nunca pasa del global.
+	MaxLote int
+	// MaxVolumenes es cuántos volúmenes puede tener el tenant (0 = sin tope).
+	MaxVolumenes int
 	// Admin ve lo que es del operador y no de un tenant: /v1/hosts (los
 	// endpoints de los daemons) y las métricas de TODOS los tenants. Sin él,
 	// /v1/hosts es un 403 y /v1/metrics solo enseña las series del que llama.
@@ -97,6 +110,10 @@ type Tenant struct {
 type Opciones struct {
 	Hosts   *hosts.Registro
 	Tenants []Tenant
+	// Almacen, si no es nil, aporta inquilinos persistentes con claves
+	// creadas por la API (/v1/tenants). Conviven con Tenants, que mandan: un
+	// nombre no puede estar en los dos.
+	Almacen *inquilinos.Almacen
 
 	// ImagenPorDefecto se usa cuando la petición no trae ni template ni image.
 	// Vacía: la petición tiene que decir una de las dos.
@@ -112,6 +129,12 @@ type Opciones struct {
 	// MaxMemTotalMiB es la suma máxima de mem_mib vivos por tenant para los que
 	// no traen la suya. 0 = sin tope total salvo el que traiga cada tenant.
 	MaxMemTotalMiB int
+	// MaxLote es el tope GLOBAL de "count" en POST /v1/sandboxes; ningún tenant
+	// lo supera. 0 = MaxLotePorDefecto.
+	MaxLote int
+	// MaxVolumenMiB es el mayor size_mib de un volumen nuevo; 0 =
+	// MaxVolumenMiBPorDefecto.
+	MaxVolumenMiB int
 
 	// Abandono es cuánto puede llevar un sandbox sin usarse antes de que la
 	// limpieza lo borre. Es el segundo plazo, distinto del TTL: el TTL lo
@@ -121,18 +144,29 @@ type Opciones struct {
 	CadaLimpieza time.Duration
 
 	Log *log.Logger
+
+	// Ingress configura la entrada HTTP a puertos del sandbox (ingress.go).
+	// Con IngresoDominio vacío está apagada.
+	Ingreso IngresoOpciones
 }
 
 // Servidor es el frontal. Implementa http.Handler.
 type Servidor struct {
-	reg      *hosts.Registro
-	tenants  []Tenant
-	imagen   string
-	ttl      int
-	abandono time.Duration
-	cada     time.Duration
-	log      *log.Logger
-	mux      *http.ServeMux
+	reg     *hosts.Registro
+	tenants []Tenant
+	almacen *inquilinos.Almacen
+	// defectos son los máximos del frontal que completan los topes a 0 de un
+	// inquilino.
+	defMem, defCPU, defTotal, defLote int
+	imagen                            string
+	ttl                               int
+	abandono                          time.Duration
+	cada                              time.Duration
+	log                               *log.Logger
+	mux                               *http.ServeMux
+	ingreso                           *ingreso
+
+	maxVolumenMiB int
 
 	// mu protege enVuelo y reclamos, y aparta las precalentadas que se reclaman. Las
 	// cuotas se cuentan contra lo que el daemon tiene vivo, y una creación tarda
@@ -157,6 +191,8 @@ type Servidor struct {
 	// dos propósitos con el mismo número: la cuota de Tenant.MaxShells y la
 	// métrica kling_sandbox_shell_sessions de /v1/metrics.
 	shells contadorTenant
+	// seguir cuenta las lecturas de salida de procesos con follow abiertas.
+	seguir contadorTenant
 	// metricas acumula lo que /v1/metrics no puede sacar preguntando a los
 	// daemons: cuántas creaciones ha habido y de qué tipo, y cuánto tardaron.
 	metricas metricas
@@ -182,6 +218,7 @@ var nombreValido = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 const (
 	MaxMemMiBPorDefecto = 4096
 	MaxVCPUsPorDefecto  = 4
+	MaxLotePorDefecto   = 16
 )
 
 // minToken es la longitud mínima de un token de tenant. Uno corto se adivina
@@ -201,6 +238,17 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	}
 	if o.MaxMemMiB < 0 || o.MaxVCPUs < 0 || o.MaxMemTotalMiB < 0 {
 		return nil, errors.New("default mem_mib and vcpus limits can't be negative")
+	}
+	if o.MaxLote < 0 || o.MaxVolumenMiB < 0 {
+		return nil, errors.New("MaxLote and MaxVolumenMiB can't be negative")
+	}
+	maxLote := o.MaxLote
+	if maxLote == 0 {
+		maxLote = MaxLotePorDefecto
+	}
+	maxVol := o.MaxVolumenMiB
+	if maxVol == 0 {
+		maxVol = MaxVolumenMiBPorDefecto
 	}
 	maxMem, maxCPU, maxTotal := o.MaxMemMiB, o.MaxVCPUs, o.MaxMemTotalMiB
 	if maxMem == 0 {
@@ -233,27 +281,29 @@ func Nuevo(o Opciones) (*Servidor, error) {
 			return nil, fmt.Errorf("tenants %q and %q share a token", otro, t.Nombre)
 		}
 		tokens[t.Token] = t.Nombre
-		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 || t.MaxMemTotalMiB < 0 {
+		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxProcesos < 0 || t.MaxSesiones < 0 || t.MaxSeguir < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 || t.MaxMemTotalMiB < 0 {
 			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
 		}
-		if t.MaxMemMiB == 0 {
-			t.MaxMemMiB = maxMem
+		if t.MaxLote < 0 || t.MaxVolumenes < 0 {
+			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
 		}
-		if t.MaxVCPUs == 0 {
-			t.MaxVCPUs = maxCPU
-		}
-		if t.MaxMemTotalMiB == 0 {
-			t.MaxMemTotalMiB = maxTotal
-		}
-		tenants = append(tenants, t)
+		tenants = append(tenants, completar(t, maxMem, maxCPU, maxTotal, maxLote))
 	}
-	if len(tenants) == 0 {
+	if o.Almacen != nil {
+		for _, t := range o.Almacen.Listar() {
+			if vistos[t.Nombre] {
+				return nil, fmt.Errorf("tenant %q is both in the environment and in the tenant store", t.Nombre)
+			}
+		}
+	}
+	if len(tenants) == 0 && (o.Almacen == nil || o.Almacen.Cuantos() == 0) {
 		return nil, errors.New("no tenants configured: the frontal refuses to serve without authentication")
 	}
 	s := &Servidor{
 		reg: o.Hosts, tenants: tenants, imagen: o.ImagenPorDefecto,
 		ttl: o.TTLPorDefecto, abandono: o.Abandono, cada: o.CadaLimpieza,
-		log: o.Log, enVuelo: map[string]int{},
+		log: o.Log, enVuelo: map[string]int{}, maxVolumenMiB: maxVol,
+		almacen: o.Almacen, defMem: maxMem, defCPU: maxCPU, defTotal: maxTotal, defLote: maxLote,
 	}
 	if s.ttl == 0 {
 		s.ttl = api.SandboxDefaultTTL
@@ -271,6 +321,11 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		s.log = log.Default()
 	}
 	s.rutas()
+	ing, err := nuevoIngreso(s, o.Ingreso)
+	if err != nil {
+		return nil, err
+	}
+	s.ingreso = ing
 	return s, nil
 }
 
@@ -290,15 +345,27 @@ func (s *Servidor) rutas() {
 	// Las rutas por sandbox se despachan a mano: el id lleva una barra dentro
 	// ("host/máquina") y el ServeMux no deja que un comodín la contenga.
 	m.Handle("/v1/sandboxes/", s.auth(http.HandlerFunc(s.handleSandbox)))
+	m.Handle("/v1/volumes", s.auth(http.HandlerFunc(s.handleVolumenes)))
+	m.Handle("/v1/volumes/", s.auth(http.HandlerFunc(s.handleVolumenes)))
 	// Grafos precalentados (grafos.go): reclamar, listar, ver y soltar.
 	m.Handle("POST /v1/graphs", s.auth(http.HandlerFunc(s.handleCrearGrafo)))
 	m.Handle("GET /v1/graphs", s.auth(http.HandlerFunc(s.handleListarGrafos)))
 	m.Handle("/v1/graphs/", s.auth(http.HandlerFunc(s.handleGrafo)))
+	s.rutasTenants(m)
 	s.mux = m
 }
 
 // ServeHTTP despacha.
-func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+//
+// Con la entrada a puertos activa, una petición cuyo Host es
+// <puerto>-<id>.<dominio> va al proxy y no al mux de la API.
+func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.ingreso != nil && s.ingreso.esDeIngreso(r) {
+		s.ingreso.servir(w, r)
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 // ---- autenticación
 
@@ -315,18 +382,82 @@ func (s *Servidor) auth(h http.Handler) http.Handler {
 			authFail(w)
 			return
 		}
-		var t *Tenant
-		for i := range s.tenants {
-			if subtle.ConstantTimeCompare([]byte(got), []byte(s.tenants[i].Token)) == 1 {
-				t = &s.tenants[i]
-			}
-		}
+		t := s.resolver(got)
 		if t == nil {
 			authFail(w)
 			return
 		}
 		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claveTenant{}, t)))
 	})
+}
+
+// resolver da el tenant al que abre el token: primero los del entorno (todos
+// comparados, sin cortar) y luego las claves del almacén. nil si no abre nada.
+func (s *Servidor) resolver(tok string) *Tenant {
+	var t *Tenant
+	for i := range s.tenants {
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.tenants[i].Token)) == 1 {
+			t = &s.tenants[i]
+		}
+	}
+	if t == nil && s.almacen != nil {
+		if q, ok := s.almacen.Resolver(tok); ok {
+			v := s.deAlmacen(q)
+			t = &v
+		}
+	}
+	return t
+}
+
+// deAlmacen convierte un inquilino del almacén en Tenant, con los topes por
+// defecto del frontal ya aplicados (como hace Nuevo con los del entorno).
+func (s *Servidor) deAlmacen(q inquilinos.Inquilino) Tenant {
+	p := q.Topes
+	return completar(Tenant{
+		Nombre: q.Nombre, Admin: q.Admin,
+		MaxSandboxes: p.MaxSandboxes, MaxPorPlantilla: p.MaxPorPlantilla, MaxShells: p.MaxShells,
+		MaxProcesos: p.MaxProcesos, MaxSesiones: p.MaxSesiones, MaxSeguir: p.MaxSeguir,
+		MaxMemMiB: p.MaxMemMiB, MaxVCPUs: p.MaxVCPUs, MaxMemTotalMiB: p.MaxMemTotalMiB,
+		MaxLote: p.MaxLote, MaxVolumenes: p.MaxVolumenes,
+	}, s.defMem, s.defCPU, s.defTotal, s.defLote)
+}
+
+// completar rellena con los máximos del frontal los topes que el tenant deja a 0.
+func completar(t Tenant, maxMem, maxCPU, maxTotal, maxLote int) Tenant {
+	if t.MaxMemMiB == 0 {
+		t.MaxMemMiB = maxMem
+	}
+	if t.MaxVCPUs == 0 {
+		t.MaxVCPUs = maxCPU
+	}
+	if t.MaxMemTotalMiB == 0 {
+		t.MaxMemTotalMiB = maxTotal
+	}
+	if t.MaxLote == 0 || t.MaxLote > maxLote {
+		t.MaxLote = maxLote
+	}
+	return t
+}
+
+// tenantsTodos son los del entorno y los del almacén.
+func (s *Servidor) tenantsTodos() []Tenant {
+	out := append([]Tenant(nil), s.tenants...)
+	if s.almacen != nil {
+		for _, q := range s.almacen.Listar() {
+			out = append(out, s.deAlmacen(q))
+		}
+	}
+	return out
+}
+
+// tenantNombre busca un tenant por nombre.
+func (s *Servidor) tenantNombre(n string) *Tenant {
+	for _, t := range s.tenantsTodos() {
+		if t.Nombre == n {
+			return &t
+		}
+	}
+	return nil
 }
 
 func bearer(h string) (string, bool) {

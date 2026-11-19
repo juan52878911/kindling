@@ -10,6 +10,8 @@ package guest
 //	GET    /files?path=/abs/ruta&stat=1   api.FileStat en JSON
 //	PUT    /files?path=...&mode=0644[&mkdir=1]   escribe el cuerpo
 //	DELETE /files?path=...                 borra un fichero o un directorio vacío
+//	GET    /files?path=/dir&list=1         api.FileList (ver files_tar.go)
+//	GET|PUT /files?path=/dir&format=tar    un directorio como tar
 //
 // El último componente de la ruta no se sigue si es un enlace (O_NOFOLLOW): el
 // invitado es de usar y tirar y es root, así que no protege nada DENTRO, pero
@@ -44,8 +46,21 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if f := r.URL.Query().Get("format"); f != "" && f != "tar" {
+		http.Error(w, fmt.Sprintf("unknown format %q (use tar)", f), http.StatusBadRequest)
+		return
+	}
+	tarMode := r.URL.Query().Get("format") == "tar"
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Query().Get("list") == "1" {
+			listDir(w, p)
+			return
+		}
+		if tarMode {
+			serveTar(w, p)
+			return
+		}
 		if r.URL.Query().Get("stat") == "1" {
 			fi, err := os.Lstat(p)
 			if err != nil {
@@ -90,6 +105,10 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, io.LimitReader(f, api.FileMaxDownload))
 
 	case http.MethodPut:
+		if tarMode {
+			putTar(w, r, p)
+			return
+		}
 		mode := os.FileMode(0o644)
 		if s := r.URL.Query().Get("mode"); s != "" {
 			n, err := strconv.ParseUint(s, 8, 32)

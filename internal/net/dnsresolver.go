@@ -144,9 +144,10 @@ const (
 
 type dnsResolver struct {
 	modo     modoResolver
-	ns       string   // netns de esta microVM (para ipset add dentro de él)
-	set      string   // nombre del ipset de esta microVM
-	allowed  []string // dominios permitidos, normalizados (minúsculas, sin punto final)
+	ns       string // netns de esta microVM (para ipset add dentro de él)
+	set      string // nombre del ipset de esta microVM
+	allowMu  sync.RWMutex
+	allowed  []string // dominios permitidos, normalizados (minúsculas, sin punto final); allowMu
 	upstream string   // resolver real al que reenviamos (DNSResolver:53)
 	udp      *stdnet.UDPConn
 	tcp      *stdnet.TCPListener
@@ -787,6 +788,8 @@ func (b *tokenBucket) allow() bool {
 
 func (r *dnsResolver) isAllowed(name string) bool {
 	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	r.allowMu.RLock()
+	defer r.allowMu.RUnlock()
 	for _, d := range r.allowed {
 		if name == d || strings.HasSuffix(name, "."+d) {
 			return true
@@ -977,4 +980,24 @@ func respondError(query []byte, rcode byte) []byte {
 	binary.BigEndian.PutUint16(resp[8:10], 0)  // NSCOUNT
 	binary.BigEndian.PutUint16(resp[10:12], 0) // ARCOUNT
 	return resp
+}
+
+// fijarDominios sustituye la lista de dominios permitidos del resolver de ns
+// (cambio de egress en caliente). false si ese netns no tiene resolver.
+func fijarDominios(ns string, domains []string) bool {
+	resolversMu.Lock()
+	r := resolvers[ns]
+	resolversMu.Unlock()
+	if r == nil {
+		return false
+	}
+	r.allowMu.Lock()
+	r.allowed = normalizeDomains(domains)
+	r.allowMu.Unlock()
+	// Lo sembrado hasta ahora puede ser de un dominio que ya no vale: que el
+	// resolver vuelva a sembrar lo que haga falta.
+	r.seedMu.Lock()
+	r.seeded = make(map[string]time.Time)
+	r.seedMu.Unlock()
+	return true
 }

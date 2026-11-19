@@ -10,7 +10,9 @@ DELETE /images/{name}  admin
 DELETE /machines/{ref}  machine
 DELETE /machines/{ref}/credentials/{env}  machine
 DELETE /machines/{ref}/files  machine
+DELETE /machines/{ref}/processes/{pid}  machine
 DELETE /machines/{ref}/publish  machine
+DELETE /machines/{ref}/sessions/{id}  machine
 DELETE /registries/{host}  admin
 DELETE /sandboxes/{ref}  machine
 DELETE /snapshots/{name}  snapshot.write
@@ -34,7 +36,13 @@ GET /machines/{ref}/credaudit  machine
 GET /machines/{ref}/egress  machine
 GET /machines/{ref}/files  machine
 GET /machines/{ref}/logs  machine
+GET /machines/{ref}/processes  machine
+GET /machines/{ref}/processes/{pid}  machine
+GET /machines/{ref}/processes/{pid}/output  machine
 GET /machines/{ref}/ready  machine
+GET /machines/{ref}/sessions  machine
+GET /machines/{ref}/sessions/{id}  machine
+GET /machines/{ref}/tcp  machine
 GET /metrics  list
 GET /oci/blobs/{digest}  admin
 GET /procstats  admin
@@ -49,6 +57,7 @@ GET /store/{ns}  admin
 GET /store/{ns}/{key}  admin
 GET /volumes  admin
 GET /volumes/{name}/snapshots  admin
+PATCH /machines/{ref}/egress  machine
 POST /cow/store/grow  admin
 POST /graphs  create
 POST /graphs/{ref}/fork  graph
@@ -65,9 +74,12 @@ POST /machines/{ref}/guest  machine
 POST /machines/{ref}/hooks  machine
 POST /machines/{ref}/mmds  machine
 POST /machines/{ref}/pause  machine
+POST /machines/{ref}/processes  machine
+POST /machines/{ref}/processes/{pid}/signal  machine
 POST /machines/{ref}/publish  machine
 POST /machines/{ref}/renew  machine
 POST /machines/{ref}/resize  machine
+POST /machines/{ref}/sessions  machine
 POST /machines/{ref}/shell  machine
 POST /machines/{ref}/squeeze  machine
 POST /machines/{ref}/start  machine

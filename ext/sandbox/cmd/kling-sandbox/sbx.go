@@ -63,16 +63,24 @@ func cmdSbx(args []string) error {
 		os.Exit(code)
 	case "hosts":
 		return sbxHosts(args[1:])
+	case "tenant", "tenants":
+		return sbxTenant(args[1:])
+	case "key", "keys":
+		return sbxKey(args[1:])
+	case "mcp":
+		return sbxMCP(args[1:])
+	case "e2b":
+		return sbxE2B(args[1:])
 	case "-h", "--help", "help":
 		fmt.Println(ayuda)
 		return nil
 	}
-	return fmt.Errorf("unknown subcommand %q: use gateway, template, new, ls, rm, renew, exec, cp or hosts", args[0])
+	return fmt.Errorf("unknown subcommand %q: use gateway, template, new, ls, rm, renew, exec, cp, hosts, tenant, key, mcp or e2b", args[0])
 }
 
 const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
 
-  sbx gateway [-listen 127.0.0.1:8090] [-tls-cert C -tls-key K] [-insecure-listen]
+  sbx gateway [-listen 127.0.0.1:8090] [-tls-cert C -tls-key K] [-insecure-listen] [-state-dir D]
                                                serves the sandbox API (HTTPS, or plain
                                                HTTP only on loopback unless -insecure-listen)
   sbx template apply -f tpl.json               builds the recipe into a golden snapshot
@@ -84,6 +92,13 @@ const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
   sbx shell <id>                               an interactive terminal inside
   sbx cp <local|-> <id>:<path> | <id>:<path> <local|->
   sbx hosts                                    the daemons behind the gateway (admin token)
+  sbx tenant ls|show <id>|add <id> [-admin] [-max_sandboxes N ...]|set <id> [...]|rm <id>
+                                               persistent tenants (admin token; needs gateway -state-dir)
+  sbx key new <tenant> [-expires T] | rotate <tenant> <key-id> [-grace 10m] | rm <tenant> <key-id>
+                                               tenant keys; new and rotate print the key once on stdout
+  sbx mcp [-url U] [-ca PEM]                   MCP server (stdio) exposing the sandboxes as tools
+  sbx e2b [-listen A] [-domain D] [-tls-cert F -tls-key F]
+                                               E2B-compatible shim over the gateway (see docs/e2b.md)
 
 Gateway errors keep their HTTP status and Retry-After ("... (HTTP 429, retry
 after 30s)"); with -json, new and rm print them as {"error": {"status": 429,

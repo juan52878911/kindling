@@ -26,6 +26,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/frontal"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
 )
 
@@ -91,6 +92,11 @@ func cmdGateway(args []string) error {
 	maxMem := fs.Int("max-mem-mib", 0, "largest mem_mib a sandbox may ask for, for tenants without their own (default 4096)")
 	maxCPU := fs.Int("max-vcpus", 0, "largest vcpus a sandbox may ask for, for tenants without their own (default 4)")
 	maxTotal := fs.Int("max-mem-total-mib", 0, "largest sum of mem_mib a tenant may have alive, for tenants without their own (default: no total limit)")
+	ingDominio := fs.String("ingress-domain", "", "serve sandbox ports at <port>-<id>.<domain> (needs wildcard DNS and TLS for *.<domain>)")
+	ingSecreto := fs.String("ingress-secret-file", "", "file with the secret that signs endpoint tokens (default: random per process)")
+	ingConns := fs.Int("ingress-max-conns", 0, "most simultaneous ingress connections per sandbox (default 64)")
+	ingCab := fs.Int("ingress-max-header-bytes", 0, "largest request headers accepted through the ingress (default 32768)")
+	estado := fs.String("state-dir", os.Getenv("KLING_SANDBOX_STATE_DIR"), "directory for the persistent tenant store (tenants and keys managed through /v1/tenants); empty = store off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -108,21 +114,43 @@ func cmdGateway(args []string) error {
 		a.TLSCert, a.TLSKey = *tlsCert, *tlsKey
 	}
 
+	var almacen *inquilinos.Almacen
+	if *estado != "" {
+		if almacen, err = inquilinos.Abrir(*estado, inquilinos.Opciones{}); err != nil {
+			return fmt.Errorf("-state-dir: %w", err)
+		}
+		defer almacen.Cerrar()
+	}
 	tenants, err := leerTenants()
-	if err != nil {
+	if err != nil && (almacen == nil || almacen.Cuantos() == 0 || !errors.Is(err, errSinTenants)) {
 		return err
 	}
 	reg := hosts.Nuevo(a.Hosts)
 
+	ing := frontal.IngresoOpciones{
+		Dominio: *ingDominio, MaxConexiones: *ingConns, MaxCabeceras: *ingCab, Esquema: "http",
+	}
+	if a.TLSCert != "" {
+		ing.Esquema = "https"
+	}
+	if *ingSecreto != "" {
+		b, err := os.ReadFile(*ingSecreto)
+		if err != nil {
+			return fmt.Errorf("-ingress-secret-file: %w", err)
+		}
+		ing.Secreto = []byte(strings.TrimSpace(string(b)))
+	}
 	srv, err := frontal.Nuevo(frontal.Opciones{
 		Hosts:            reg,
 		Tenants:          tenants,
+		Almacen:          almacen,
 		ImagenPorDefecto: *imagen,
 		Abandono:         a.Reap,
 		MaxMemMiB:        *maxMem,
 		MaxVCPUs:         *maxCPU,
 		MaxMemTotalMiB:   *maxTotal,
 		Log:              log.New(os.Stderr, "", log.LstdFlags),
+		Ingreso:          ing,
 	})
 	if err != nil {
 		return err
@@ -141,7 +169,11 @@ func cmdGateway(args []string) error {
 	}
 	hsrv := servidorHTTP(srv)
 
-	log.Printf("sandbox gateway on %s · %d tenant(s) · hosts: %s", ln.Addr(), len(tenants), strings.Join(nombres(a.Hosts), ", "))
+	n := len(tenants)
+	if almacen != nil {
+		n += almacen.Cuantos()
+	}
+	log.Printf("sandbox gateway on %s · %d tenant(s) · hosts: %s", ln.Addr(), n, strings.Join(nombres(a.Hosts), ", "))
 	for _, e := range reg.Estados(ctx) {
 		if e.Vivo {
 			log.Printf("  %s: kindling %s, %d machine(s), %d MiB available", e.Nombre, e.Version, e.Maquinas, e.DisponibleMB)
@@ -200,12 +232,14 @@ func nombres(m map[string]string) []string {
 // de kindling-mcp a su token.
 //
 //	KLING_SANDBOX_TOKEN=xxx                              un inquilino "default", sin tope
-//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus[:máx. mem_mib total]]]]]
+//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus[:máx. mem_mib total[:máx. procesos de fondo[:máx. sesiones[:máx. lecturas con follow]]]]]]]]
 //
 // Cada token tiene al menos 16 caracteres y no se repite entre inquilinos
 // (frontal.Nuevo se niega a arrancar si no).
 //
 //	KLING_SANDBOX_ADMINS=ana                             tenants que ven /v1/hosts y las métricas de todos
+var errSinTenants = errors.New("no tenants: set KLING_SANDBOX_TOKEN (or KLING_SANDBOX_TENANTS) before serving, or use -state-dir with a store that has tenants")
+
 func leerTenants() ([]frontal.Tenant, error) {
 	var out []frontal.Tenant
 	if v := os.Getenv("KLING_SANDBOX_TOKEN"); v != "" {
@@ -220,8 +254,8 @@ func leerTenants() ([]frontal.Tenant, error) {
 		// sandboxes) no se mueven de sitio, así que una configuración escrita
 		// antes de que existiera el máximo de shells se sigue leyendo igual.
 		partes := strings.Split(t, ":")
-		if len(partes) < 2 || len(partes) > 7 || partes[0] == "" || partes[1] == "" {
-			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus[:max_mem_total_mib]]]]]", t)
+		if len(partes) < 2 || len(partes) > 10 || partes[0] == "" || partes[1] == "" {
+			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus[:max_mem_total_mib[:max_processes[:max_sessions[:max_follow]]]]]]]]", t)
 		}
 		te := frontal.Tenant{Nombre: partes[0], Token: partes[1]}
 		if len(partes) > 2 && partes[2] != "" {
@@ -259,10 +293,24 @@ func leerTenants() ([]frontal.Tenant, error) {
 			}
 			te.MaxMemTotalMiB = n
 		}
+		// Procesos de fondo vivos por sandbox, sesiones por sandbox y lecturas
+		// de salida con follow abiertas por tenant (0 = el valor por defecto).
+		for i, c := range []struct {
+			nombre string
+			dst    *int
+		}{{"max_processes", &te.MaxProcesos}, {"max_sessions", &te.MaxSesiones}, {"max_follow", &te.MaxSeguir}} {
+			if len(partes) > 7+i && partes[7+i] != "" {
+				n, err := strconv.Atoi(partes[7+i])
+				if err != nil || n < 0 {
+					return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: %s has to be a number", t, c.nombre)
+				}
+				*c.dst = n
+			}
+		}
 		out = append(out, te)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no tenants: set KLING_SANDBOX_TOKEN (or KLING_SANDBOX_TENANTS) before serving")
+		return nil, errSinTenants
 	}
 	// Los admins ven /v1/hosts y las métricas de todos los tenants.
 	for _, n := range strings.Split(os.Getenv("KLING_SANDBOX_ADMINS"), ",") {

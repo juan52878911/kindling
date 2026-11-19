@@ -95,3 +95,35 @@ pasa y llega el certificado real; SNI no listado cierra; IP directa (sin pasar p
 resolver) no sale; ClientHello con 0xfe0d cierra; ClientHello partido en varios
 segmentos TCP se lee entero; un nombre permitido que resuelve a una IP privada no se
 conecta; UDP 443 no sale.
+
+## Cambio en caliente
+
+`PATCH /machines/{ref}/egress` (`kling egress set`) cambia el modo y/o los
+dominios de una máquina sin reiniciarla; el cambio persiste y sobrevive a un
+reinicio del daemon (queda en `Machine.egress` y `Machine.allow_domains`) y se
+anota en el log y como evento `machine.egress_changed`.
+
+- Las reglas que dependen del modo (FORWARD y NAT del netns) se cambian con UN
+  `iptables-restore --noflush`: borra las del modo viejo que el nuevo no tiene y
+  añade las que faltan, tabla a tabla y de una vez, sin una ventana abierta
+  entre medias. Lo común (forwardBase, DNAT de entrada, topes de mangle) no se
+  toca. Sin `iptables-restore` en el host se rechaza (409), no se hace a medias.
+- `none` → `allowlist`: la red ya existe en todos los modos (netns, veth y
+  resolver de `none`); se crea el ipset, el resolver pasa a modo allowlist y se
+  cambian las reglas. `allowlist` → otro: se para el resolver y se borra el ipset.
+- `allowlist` → `allowlist` con otra lista: solo cambia la lista del resolver; si
+  se retira un dominio, el ipset se vacía y se resiembra con la lista nueva (una
+  IP de un dominio que sigue permitido vuelve a entrar con su próxima consulta
+  DNS o con el sembrado inicial).
+- **Conexiones ya abiertas**: la regla `ESTABLISHED,RELATED` las dejaría vivir.
+  Si el cambio permite menos que antes (a `none`, de `internet` a `allowlist`, o
+  una lista con menos dominios) y el host tiene `conntrack`, se borran las
+  entradas que el invitado originó (`conntrack -D --orig-src`), también las de
+  destinos que siguen permitidos: el cliente reconecta. Sin `conntrack` el cambio
+  solo afecta a las conexiones nuevas, y la respuesta lo dice
+  (`narrowed: true`, `connections_closed: false`).
+- Máquinas sin red montada (paradas, congeladas con la red soltada): solo se
+  anota la política (`applied: next_start`); vale al arrancar o descongelar.
+- Se rechazan con 409 los nodos de un grafo (sus aristas dependen del modo) y
+  las máquinas con credenciales si el modo nuevo no es allowlist (el proxy solo
+  funciona en ese modo). En macOS el cambio en caliente no está hecho (409).

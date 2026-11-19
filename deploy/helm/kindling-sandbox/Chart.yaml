@@ -1,0 +1,9 @@
+apiVersion: v2
+name: kindling-sandbox
+description: Operador de Kubernetes (CRD Sandbox) y, opcionalmente, gateway de sandboxes de kindling
+type: application
+version: 0.1.0
+# Tag por defecto de las imágenes; debe coincidir con la release de kindling desplegada.
+appVersion: "v1.0.0-rc.2"
+home: https://github.com/juan52878911/kindling
+keywords: [kindling, sandbox, microvm, operator]

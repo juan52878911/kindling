@@ -1,0 +1,179 @@
+# Valores del chart kindling-sandbox.
+#
+# El chart instala el operador de Kubernetes (CRD `Sandbox`) y, si se pide, el
+# gateway de sandboxes. Las microVMs NUNCA corren en el clúster: el gateway
+# reparte sandboxes entre hosts de kindling externos (gateway.hosts).
+
+# Sobrescriben el nombre del chart / de los recursos.
+nameOverride: ""
+fullnameOverride: ""
+
+# Secretos para bajar las imágenes de un registro privado.
+imagePullSecrets: []
+
+serviceAccount:
+  # Crea la ServiceAccount del operador.
+  create: true
+  # Si está vacío, se usa el nombre del operador (o "default" con create=false).
+  name: ""
+  annotations: {}
+
+rbac:
+  # Crea el ClusterRole y ClusterRoleBinding mínimos del operador (Sandbox y
+  # sandboxes/status). Ponlo a false solo si los gestionas aparte.
+  create: true
+
+# ---------------------------------------------------------------------------
+# Operador. Siempre una réplica y estrategia Recreate: sin lease de liderazgo,
+# dos operadores pueden crear dos veces el sandbox de un mismo objeto.
+# ---------------------------------------------------------------------------
+operator:
+  enabled: true
+  image:
+    repository: ghcr.io/juan52878911/kindling-operator
+    # Vacío = appVersion del chart. Operador y frontal viajan en la misma release.
+    tag: ""
+    pullPolicy: IfNotPresent
+  frontal:
+    # URL del frontal (gateway) que usa el operador (KLING_SANDBOX_URL). Vacío
+    # = el Service del gateway de este chart (exige gateway.enabled=true).
+    # Un frontal externo NO puede ser localhost: el Pod tiene que alcanzar el
+    # host por red.
+    url: ""
+    # Secret EXISTENTE con el token de un tenant del frontal (obligatorio).
+    #   kubectl create secret generic kindling-operator-frontal \
+    #     -n <namespace> --from-literal=token='<token del tenant>'
+    tokenSecret:
+      name: ""
+      key: token
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------
+# Gateway (opcional). `kling sbx gateway` en un Deployment que habla con los
+# hosts de kindling externos. No hay imagen oficial: construye una que lleve el
+# binario `kling` (y `ssh` si usas hosts ssh://) y pon su repositorio aquí.
+# ---------------------------------------------------------------------------
+gateway:
+  enabled: false
+  replicas: 1
+  image:
+    repository: ""     # obligatorio con enabled=true
+    tag: ""            # vacío = appVersion
+    pullPolicy: IfNotPresent
+    # Imagen de sandbox por defecto cuando la petición no trae plantilla ni
+    # imagen (bandera -image). Vacío = la del propio gateway.
+    defaultImage: ""
+  # Comando de arranque de la imagen del gateway; se le añaden las banderas.
+  command: ["kling", "sbx", "gateway"]
+  # Puerto en el que escucha el contenedor (-listen 0.0.0.0:<puerto>).
+  containerPort: 8090
+
+  # Hosts de kindling a los que reparte sandboxes: nombre -> endpoint
+  # (ssh://usuario@host, unix:///ruta.sock, ...). Obligatorio. Se escribe en
+  # extensions.sandbox.hosts del config.json del gateway.
+  hosts: {}
+  #  lab: ssh://kling@192.0.2.10
+  #  lab2: ssh://kling@192.0.2.11
+
+  # Tenants: Secret EXISTENTE cuya clave contiene
+  # KLING_SANDBOX_TENANTS = nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus[:máx. mem_mib total]]]]],...
+  tenants:
+    existingSecret: ""
+    key: tenants
+  # Tenants que ven /v1/hosts y las métricas de todos (KLING_SANDBOX_ADMINS).
+  admins: []
+
+  # TLS: Secret EXISTENTE de tipo kubernetes.io/tls (tls.crt, tls.key). Vacío =
+  # HTTP plano, que exige insecureListen=true (los tokens viajan en claro:
+  # úsalo solo detrás de un terminador TLS de confianza).
+  tls:
+    existingSecret: ""
+  insecureListen: false
+
+  # Abandono: tiempo sin uso antes de destruir un sandbox (-abandon, p. ej.
+  # "24h"). Vacío = el del gateway (24h).
+  abandon: ""
+  # Claves opcionales de extensions.sandbox del config (duraciones tipo "5m").
+  reap: ""
+  idle: ""
+  # URL pública con la que el gateway se anuncia (extensions.sandbox.url).
+  url: ""
+  # Topes para tenants sin los suyos (0 = el valor por defecto del gateway).
+  limits:
+    maxMemMiB: 0
+    maxVCPUs: 0
+    maxMemTotalMiB: 0
+
+  # Ingress de puertos de sandbox en <puerto>-<id>.<dominio> (-ingress-domain).
+  # Exige DNS comodín y TLS para *.<dominio>.
+  ingressDomain: ""
+  # Secret EXISTENTE con la clave que firma los tokens de endpoint
+  # (-ingress-secret-file). Sin él, es aleatoria por proceso (con más de una
+  # réplica, los tokens de una no valen en otra: usa uno o una sola réplica).
+  ingressSecret:
+    name: ""
+    key: secret
+
+  # Directorio de estado del gateway (-state-dir): el almacén persistente de
+  # inquilinos y claves que se gestiona por /v1/tenants (`kling sbx tenant`).
+  # Vacío = sin almacén (esa API contesta 501) y solo valen los tenants del
+  # Secret. Es un fichero de un solo escritor: con path no se admite más de
+  # una réplica. Sin persistence es un emptyDir, que se pierde al reiniciar
+  # el Pod; para conservar inquilinos y claves, activa el PVC.
+  stateDir:
+    path: ""            # p. ej. /var/lib/kling-sandbox
+    # fsGroup del Pod para que el usuario de la imagen (no root) escriba en el
+    # volumen. 0 = no se fija.
+    fsGroup: 0
+    persistence:
+      enabled: false
+      # PVC EXISTENTE; vacío = el chart crea <gateway>-state.
+      existingClaim: ""
+      size: 100Mi
+      storageClass: ""  # vacío = la de por defecto del clúster
+      accessModes: [ReadWriteOnce]
+      annotations: {}
+
+  # Claves SSH para hosts ssh://: Secret EXISTENTE (clave privada y
+  # known_hosts) montado de solo lectura en mountPath. El HOME del usuario de
+  # la imagen tiene que apuntar al directorio padre.
+  ssh:
+    existingSecret: ""
+    mountPath: /home/kling/.ssh
+
+  service:
+    type: ClusterIP
+    port: 8090
+
+  # Ingress de Kubernetes hacia el Service. Si el gateway sirve HTTPS, la
+  # anotación para hablar TLS con el backend depende de tu controlador.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""           # host de la API; obligatorio con enabled=true
+    tlsSecret: ""      # Secret TLS del Ingress (también para *.ingressDomain)
+    annotations: {}
+
+  # Banderas y variables de entorno adicionales, tal cual.
+  extraArgs: []
+  extraEnv: []
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

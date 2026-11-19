@@ -1,0 +1,71 @@
+{{- if .Values.operator.enabled }}
+# Una sola réplica y Recreate, a propósito: el operador no tiene lease de
+# liderazgo, y dos reconciliando el mismo Sandbox pueden crear su sandbox dos
+# veces. Por eso replicas no es un valor.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kindling-sandbox.operatorName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kindling-sandbox.operatorSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kindling-sandbox.operatorSelector" . | nindent 8 }}
+      {{- with .Values.operator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kindling-sandbox.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ include "kindling-sandbox.operatorImage" . | quote }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          env:
+            - name: KLING_SANDBOX_URL
+              value: {{ include "kindling-sandbox.frontalURL" . | quote }}
+            - name: KLING_SANDBOX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "operator.frontal.tokenSecret.name es obligatorio: Secret con el token de un tenant del frontal" .Values.operator.frontal.tokenSecret.name }}
+                  key: {{ .Values.operator.frontal.tokenSecret.key }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

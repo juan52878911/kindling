@@ -1,0 +1,32 @@
+{{- if and .Values.operator.enabled .Values.rbac.create }}
+# Permisos mínimos del operador: Sandbox y su subrecurso status, en todo el
+# clúster (el operador hace un único watch cluster-wide), y nada más.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kindling-sandbox.operatorName" . }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["sandbox.kindling.dev"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["sandbox.kindling.dev"]
+    resources: ["sandboxes/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kindling-sandbox.operatorName" . }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kindling-sandbox.operatorName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kindling-sandbox.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

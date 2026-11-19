@@ -1,0 +1,12 @@
+# Gateway en HTTP plano (TLS lo termina otro), sin operador.
+operator:
+  enabled: false
+gateway:
+  enabled: true
+  insecureListen: true
+  image:
+    repository: registry.example.internal/kindling-gateway
+  hosts:
+    lab: ssh://kling@192.0.2.10
+  tenants:
+    existingSecret: kindling-gateway-tenants

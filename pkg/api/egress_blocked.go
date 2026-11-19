@@ -96,3 +96,42 @@ func (c *Client) EgressBlocked(ctx context.Context, ref string) (*EgressBlocked,
 	}
 	return &out, nil
 }
+
+// CapabilityEgressSet: PATCH /machines/{ref}/egress cambia el modo y los
+// dominios de una máquina sin reiniciarla.
+const CapabilityEgressSet = "egress-set"
+
+// EgressRequest es el cuerpo de PATCH /machines/{ref}/egress. Egress vacío
+// conserva el modo; AllowDomains vacío conserva la lista (con allowlist ya
+// activo) y es un error si el modo nuevo es allowlist y no hay lista previa.
+type EgressRequest struct {
+	Egress       string   `json:"egress,omitempty"`
+	AllowDomains []string `json:"allow_domains,omitempty"`
+}
+
+// Valores de EgressPolicy.Applied.
+const (
+	EgressAppliedLive      = "live"       // la red de la máquina ya está reprogramada
+	EgressAppliedNextStart = "next_start" // sin red montada: vale en el próximo arranque
+	EgressAppliedUnchanged = "unchanged"  // ya era esa política
+)
+
+// EgressPolicy es la política de salida resultante de un PATCH.
+type EgressPolicy struct {
+	Egress       string   `json:"egress"`
+	AllowDomains []string `json:"allow_domains,omitempty"`
+	Applied      string   `json:"applied"`
+	// Narrowed: el cambio permite menos que antes. ConnectionsClosed dice si,
+	// además, se cortaron las conexiones que el invitado ya tenía abiertas;
+	// con Narrowed y sin ConnectionsClosed (el host no tiene `conntrack`) solo
+	// las conexiones nuevas quedan bajo la política nueva.
+	Narrowed          bool `json:"narrowed,omitempty"`
+	ConnectionsClosed bool `json:"connections_closed,omitempty"`
+}
+
+// SetEgress cambia la política de salida de una máquina (capacidad
+// "egress-set").
+func (c *Client) SetEgress(ctx context.Context, ref string, r EgressRequest) (*EgressPolicy, error) {
+	var out EgressPolicy
+	return &out, c.do(ctx, http.MethodPatch, "/machines/"+url.PathEscape(ref)+"/egress", r, &out)
+}

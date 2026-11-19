@@ -88,6 +88,12 @@ type ExecRequest struct {
 	// de un compose), como Docker con los healthchecks. Vacío = root. Un
 	// agente anterior lo ignora.
 	User string `json:"user,omitempty"`
+	// Session corre el comando con el cwd y el entorno de esa sesión (ver
+	// Session) y la actualiza con los que tenga al terminar. Con sesión el
+	// comando corre dentro de una shell, para que `cd` y `export` cuenten:
+	// ["sh","-c",S] ejecuta S tal cual en ella, y cualquier otro argv se cita
+	// y se ejecuta como una orden. Un agente anterior ignora el campo.
+	Session string `json:"session,omitempty"`
 }
 
 // ExecUserService en ExecRequest.User es "el usuario del servicio de la
@@ -128,6 +134,40 @@ type FileStat struct {
 	Mode    string    `json:"mode"` // octal, p. ej. "0644"
 	IsDir   bool      `json:"is_dir,omitempty"`
 	ModTime time.Time `json:"mod_time"`
+}
+
+// Topes de los directorios (aditivo): entradas de un listado y de un tar.
+const (
+	FileListMax       = 10000
+	FileTarMaxEntries = 100000
+)
+
+// FileEntry es una entrada de GET /machines/{ref}/files?list=1.
+type FileEntry struct {
+	Name    string    `json:"name"`
+	Type    string    `json:"type"` // file, dir, symlink u other
+	Size    int64     `json:"size"`
+	Mode    string    `json:"mode"` // octal, p. ej. "0644"
+	ModTime time.Time `json:"mod_time"`
+	Target  string    `json:"target,omitempty"` // destino de un enlace
+}
+
+// FileList es el listado de un directorio. Truncated dice que había más de
+// FileListMax entradas y solo se devuelven las primeras.
+type FileList struct {
+	Path      string      `json:"path"`
+	Entries   []FileEntry `json:"entries"`
+	Truncated bool        `json:"truncated,omitempty"`
+}
+
+// TarResult es la respuesta de PUT /machines/{ref}/files?format=tar: lo que se
+// extrajo.
+type TarResult struct {
+	Entries  int   `json:"entries"`
+	Files    int   `json:"files"`
+	Dirs     int   `json:"dirs"`
+	Symlinks int   `json:"symlinks"`
+	Bytes    int64 `json:"bytes"`
 }
 
 // SandboxRequest crea un sandbox: una microVM de usar y tirar con ejecución
@@ -303,6 +343,54 @@ func (c *Client) WriteFile(ctx context.Context, ref, path string, mode uint32, m
 		return nil, statusErrorFrom(resp)
 	}
 	var st FileStat
+	return &st, json.NewDecoder(resp.Body).Decode(&st)
+}
+
+// ListFiles lista un directorio de dentro de la máquina (capacidad "files").
+func (c *Client) ListFiles(ctx context.Context, ref, path string) (*FileList, error) {
+	var out FileList
+	u := machineFileURL(ref, path, url.Values{"list": {"1"}})
+	return &out, c.do(ctx, http.MethodGet, u[len("http://kling"):], nil, &out)
+}
+
+// ReadTar abre un directorio de dentro de la máquina como tar. Quien llama
+// cierra el lector.
+func (c *Client) ReadTar(ctx context.Context, ref, path string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, machineFileURL(ref, path, url.Values{"format": {"tar"}}), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.long.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		return nil, statusErrorFrom(resp)
+	}
+	return resp.Body, nil
+}
+
+// WriteTar extrae el tar r dentro del directorio path de la máquina.
+func (c *Client) WriteTar(ctx context.Context, ref, path string, mkdir bool, r io.Reader) (*TarResult, error) {
+	q := url.Values{"format": {"tar"}}
+	if mkdir {
+		q.Set("mkdir", "1")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, machineFileURL(ref, path, q), r)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	resp, err := c.long.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, statusErrorFrom(resp)
+	}
+	var st TarResult
 	return &st, json.NewDecoder(resp.Body).Decode(&st)
 }
 

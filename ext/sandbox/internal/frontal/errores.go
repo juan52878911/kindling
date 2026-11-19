@@ -51,24 +51,29 @@ type conPublico interface{ publico() string }
 // código propio, ese manda: un 507 o un 409 del daemon significan algo concreto
 // para quien llama y aplastarlos con un 502 perdería justo eso.
 func fail(w http.ResponseWriter, code int, err error) {
+	code, msg := codigoYMensaje(code, err)
+	writeJSON(w, code, api.Error{Message: msg})
+}
+
+// codigoYMensaje es lo que fail contesta: el código final y el mensaje que ve
+// el cliente (sin endpoints ni errores de red en los 5xx). Un lote lo usa
+// también para describir cada fallo suelto.
+func codigoYMensaje(code int, err error) (int, string) {
 	if p, ok := err.(conPublico); ok {
 		if code >= 500 {
 			log.Printf("frontal: %d: %v", code, err)
 		}
-		writeJSON(w, code, api.Error{Message: p.publico()})
-		return
+		return code, p.publico()
 	}
 	var se *api.StatusError
 	if errors.As(err, &se) && se.Code != 0 {
-		writeJSON(w, se.Code, api.Error{Message: err.Error()})
-		return
+		return se.Code, err.Error()
 	}
 	if code < 500 {
-		writeJSON(w, code, api.Error{Message: err.Error()})
-		return
+		return code, err.Error()
 	}
 	log.Printf("frontal: %d: %v", code, err)
-	writeJSON(w, code, api.Error{Message: mensajeGenerico(code, err)})
+	return code, mensajeGenerico(code, err)
 }
 
 // mensajeGenerico describe un 5xx sin datos internos: qué hosts fallaron y

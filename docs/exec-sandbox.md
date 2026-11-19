@@ -104,7 +104,7 @@ elige su egress (sin red por defecto).
 ## kling exec
 
 ```sh
-kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] <cmd> [args...]
+kling exec [-i] [-d [-json]] [-s SESIÓN] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] <cmd> [args...]
 ```
 
 - `cmd` es argv, sin shell. Para tuberías: `kling exec sb -- sh -c '...'`.
@@ -123,6 +123,75 @@ kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] 
   no muere por eso: se descarta lo que sobra y kling avisa.
 - Una máquina congelada se descongela sola; una recién arrancada se espera hasta
   que su agente escucha.
+- `-d` lanza el comando en segundo plano y escribe su pid (ver más abajo); `-s`
+  lo corre en una sesión.
+
+## Procesos en segundo plano
+
+`kling exec` ata el comando a la conexión: si `kling` se va, se mata el grupo. Para un
+servidor, una compilación larga o un `tail -f` que se quiere mirar luego, `-d` lo
+desacopla:
+
+```sh
+pid=$(kling exec -d sb -- python3 -m http.server 8000)   # imprime el pid y vuelve
+kling proc ls sb                                          # PID, estado, salida, comando
+kling proc out -f sb $pid                                 # sigue la salida hasta que acabe
+kling proc out -offset 4096 -next sb $pid                 # lo que hay desde el byte 4096
+kling proc wait -timeout 2m sb $pid; echo $?              # espera; sale con su código (124 si vence)
+kling proc signal -s INT sb $pid                          # TERM por defecto; va a todo el grupo
+kling proc rm sb $pid                                     # lo mata si vive y lo olvida
+```
+
+- El proceso es del **agente del invitado**, no de quien lo lanzó. No hay plazo salvo
+  que se pida (`-timeout`); `-max-output` es el tamaño del anillo de salida (1 MiB por
+  defecto, máximo 16 MiB), no un tope de lo que produce.
+- La salida (stdout y stderr juntos, cada trozo marcado con su flujo) se guarda en un
+  **anillo acotado**: si se pasa, se descarta lo más viejo. `proc out` pide desde un
+  desplazamiento (`-offset`; `-next` imprime por dónde seguir) y avisa de lo
+  descartado. stdout y stderr llegan por tuberías distintas, así que su orden relativo
+  es el de llegada, no una garantía.
+- Topes por máquina: 32 procesos vivos (el siguiente da 429) y 64 en la tabla; al
+  llenarse se olvida el terminado más antiguo.
+- Un proceso terminado sigue en la tabla, con su código y su salida, hasta que se borra
+  o lo desaloja uno nuevo. Matado por una señal, `proc status` dice cuál y el código es
+  128+n, como en una shell.
+- **Congelar y descongelar los conserva**: viven en la memoria del invitado, y la
+  máquina se descongela con el primer `kling proc …`. **Un reinicio no** (`kling stop` y
+  `kling start`) y tampoco una copia de un snapshot (`sandbox fork`, `run -from`):
+  el /resync de la copia mata lo que corría al volcar, porque era de otra máquina.
+- Como `exec`, solo existe en máquinas con `allow_exec`, y solo el host la alcanza.
+
+## Sesiones
+
+Cada `kling exec` es un proceso nuevo: un `cd` o un `export` muere con él. Una sesión
+guarda el directorio y el entorno entre comandos:
+
+```sh
+kling session create -id dev -w /work sb
+kling exec -s dev sb -- sh -c 'cd src && export MODE=test'
+kling exec -s dev sb -- sh -c 'pwd; echo $MODE'          # /work/src  test
+kling session show sb dev                                 # dir y variables que añade o quita
+kling session rm sb dev
+```
+
+- Con `-s` el comando corre dentro de una shell (`sh` ha de existir en la imagen): `sh
+  -c 'script'` ejecuta el guion tal cual en ella, para que `cd`, `export` y `unset`
+  cuenten, y cualquier otro argv se cita y se ejecuta como una orden. Al salir (incluso
+  con `exit N`, sin cambiar su código) la shell vuelca su `pwd` y su `env -0` por un
+  descriptor aparte, el 3, que no es el stdout del comando: el agente lo lee y lo guarda.
+  `env -0` hace falta (coreutils o busybox reciente).
+- La sesión guarda lo que **cambia** respecto al entorno base del invitado (variables
+  añadidas o modificadas, y las quitadas), no una copia entera; el `-e` de un exec solo
+  vale para ese exec, salvo que el propio comando lo cambie.
+- Si dos execs corren a la vez en la misma sesión, gana el último en acabar. Un comando
+  matado por su plazo no toca la sesión. `kling exec -d -s` arranca el proceso con el
+  estado de la sesión pero **no** la actualiza.
+- Caducan por inactividad (`-ttl`, 1 h por defecto, máximo 24 h; cada exec la renueva),
+  hasta 64 por máquina. Viven en el agente: sobreviven a congelar y descongelar, no a
+  un reinicio ni a una copia de un snapshot.
+- Un agente anterior a esta función ignora `session` en un exec y lo corre sin estado;
+  las rutas `/sessions` y `/processes` sí contestan 501 con el aviso de reconstruir la
+  imagen. `GET /version` anuncia las capacidades `processes` y `sessions`.
 
 ## kling shell
 
@@ -170,6 +239,22 @@ es un enlace simbólico.
 Las rutas, los límites y el formato del flujo están en [`api.md`](api.md#exec-y-ficheros).
 Desde Go, `pkg/api`: `Client.Exec`, `ReadFile`, `WriteFile`, `StatFile`,
 `RemoveFile`, `CreateSandbox`, `Sandboxes`, `RenewSandbox`, `RemoveSandbox`.
+
+Procesos de fondo y sesiones (rutas del daemon bajo `/machines/{ref}`):
+
+| Ruta | Qué hace |
+|---|---|
+| `POST /processes` (`ProcessStartRequest`) | lanza; 201 con `ProcessInfo` y su pid |
+| `GET /processes` | lista |
+| `GET /processes/{pid}[?wait=SEG]` | estado; con `wait` espera a que acabe (tope 10 min; si no acaba, devuelve `running`) |
+| `GET /processes/{pid}/output?offset=N[&follow=1]` | NDJSON de `ProcessEvent`: trozos con su `offset` siguiente, `dropped` si el anillo descartó lo pedido, latidos vacíos cada 10 s con `follow`, y un `exit` al final |
+| `POST /processes/{pid}/signal` (`{"signal":"TERM"}`) | señal al grupo; 409 si ya acabó |
+| `DELETE /processes/{pid}` | mata y olvida |
+| `POST/GET /sessions`, `GET/DELETE /sessions/{id}` | sesiones (`SessionRequest`, `Session`) |
+
+`POST /machines/{ref}/exec` acepta `"session": "<id>"`. Desde Go: `StartProcess`,
+`Processes`, `Process`, `ProcessOutput`, `SignalProcess`, `RemoveProcess`,
+`CreateSession`, `Sessions`, `GetSession`, `RemoveSession`.
 
 ## Bajo carga
 

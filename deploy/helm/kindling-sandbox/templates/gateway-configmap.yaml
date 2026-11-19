@@ -1,0 +1,22 @@
+{{- if .Values.gateway.enabled }}
+# config.json del gateway ($KLING_CONFIG): los hosts de kindling a los que
+# reparte sandboxes. Formato: extensions.sandbox.hosts = "nombre=endpoint,...".
+{{- $hosts := list }}
+{{- range $name, $endpoint := .Values.gateway.hosts }}
+{{- $hosts = append $hosts (printf "%s=%s" $name $endpoint) }}
+{{- end }}
+{{- $ext := dict "hosts" (join "," (sortAlpha $hosts)) }}
+{{- if .Values.gateway.reap }}{{- $_ := set $ext "reap" .Values.gateway.reap }}{{- end }}
+{{- if .Values.gateway.idle }}{{- $_ := set $ext "idle" .Values.gateway.idle }}{{- end }}
+{{- if .Values.gateway.url }}{{- $_ := set $ext "url" .Values.gateway.url }}{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kindling-sandbox.gatewayName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {{- dict "extensions" (dict "sandbox" $ext) | toPrettyJson | nindent 4 }}
+{{- end }}

@@ -1,0 +1,51 @@
+{{- if and .Values.gateway.enabled .Values.gateway.ingress.enabled }}
+# Entrada HTTP(S) hacia el gateway: la API en gateway.ingress.host y, si hay
+# gateway.ingressDomain, los puertos de los sandboxes en *.<ingressDomain>.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "kindling-sandbox.gatewayName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+  {{- with .Values.gateway.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.gateway.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.gateway.ingress.tlsSecret }}
+  tls:
+    - secretName: {{ .Values.gateway.ingress.tlsSecret }}
+      hosts:
+        - {{ required "gateway.ingress.host es obligatorio con gateway.ingress.enabled" .Values.gateway.ingress.host | quote }}
+        {{- with .Values.gateway.ingressDomain }}
+        - {{ printf "*.%s" . | quote }}
+        {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ required "gateway.ingress.host es obligatorio con gateway.ingress.enabled" .Values.gateway.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "kindling-sandbox.gatewayName" . }}
+                port:
+                  name: http
+    {{- with .Values.gateway.ingressDomain }}
+    - host: {{ printf "*.%s" . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "kindling-sandbox.gatewayName" $ }}
+                port:
+                  name: http
+    {{- end }}
+{{- end }}

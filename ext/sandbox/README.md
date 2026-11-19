@@ -91,7 +91,7 @@ Inquilinos, con sus cuotas, se dan de alta por entorno antes de arrancar el
 gateway:
 
 ```sh
-export KLING_SANDBOX_TENANTS="ana:$TOKEN_ANA:10:5,bob:$TOKEN_BOB:5"   # nombre:token[:max sandboxes[:max shells[:max mem_mib[:max vcpus[:max mem_mib total]]]]]
+export KLING_SANDBOX_TENANTS="ana:$TOKEN_ANA:10:5,bob:$TOKEN_BOB:5"   # nombre:token[:max sandboxes[:max shells[:max mem_mib[:max vcpus[:max mem_mib total[:max procesos de fondo[:max sesiones[:max lecturas follow]]]]]]]]
 export KLING_SANDBOX_ADMINS="ana"                         # quién ve los hosts y las métricas de todos
 kling sbx gateway                                         # 127.0.0.1:8090, HTTP
 kling sbx gateway -listen 0.0.0.0:8090 -tls-cert gw.pem -tls-key gw.key   # hacia la red, HTTPS
@@ -117,6 +117,43 @@ Y lo que ve un operador:
 curl -H "Authorization: Bearer $TOK" https://gateway:8090/v1/metrics    # Prometheus (sin admin, solo las series propias)
 curl -H "Authorization: Bearer $TOK" https://gateway:8090/v1/templates  # qué hay construido, y dónde
 curl -H "Authorization: Bearer $ADMIN" https://gateway:8090/v1/hosts    # los daemons y sus endpoints (solo admin)
+```
+
+## Servidor MCP para agentes
+
+`kling sbx mcp` es un servidor MCP (stdio, JSON-RPC por líneas, protocolo 2025-06-18) que
+deja a un agente manejar sandboxes a través del gateway. Herramientas: `sandbox_create`
+(`template`, `ttl_seconds`, `labels`), `sandbox_list`, `sandbox_exec` (`id`, `command`,
+`cwd`, `env`, `timeout_seconds`; usa `?wait=1`), `sandbox_exec_background` (lanza y devuelve el `pid`),
+`sandbox_process_output` (`id`, `pid`, `offset`, `wait_seconds`: salida desde un desplazamiento, estado y `next_offset`), `sandbox_read_file`, `sandbox_write_file`,
+`sandbox_delete` y `sandbox_renew`. Un error de la API (404, 401, 429...) vuelve como
+resultado con `isError: true` y su código HTTP, no como error JSON-RPC.
+
+La salida de `sandbox_exec` (stdout y stderr por separado) y los ficheros leídos se
+recortan a 64 KiB con un aviso `[truncated: ...]`. La URL sale de `-url`, `$KLING_SANDBOX_URL`
+o `sandbox.url`; el token de `$KLING_SANDBOX_TOKEN` o `sandbox.token` (no hay flag para el
+token: se vería en `ps`) y nunca se escribe en salida, errores ni logs. Para un gateway con
+CA propia: `-ca ca.pem` o `$KLING_SANDBOX_CA`.
+
+```sh
+claude mcp add sandbox -e KLING_SANDBOX_URL=https://gateway:8090 -e KLING_SANDBOX_TOKEN=... -- kling sbx mcp
+```
+
+O en `.mcp.json` (usa la expansión de variables de Claude Code para no escribir el token):
+
+```json
+{
+  "mcpServers": {
+    "sandbox": {
+      "command": "kling",
+      "args": ["sbx", "mcp"],
+      "env": {
+        "KLING_SANDBOX_URL": "https://gateway:8090",
+        "KLING_SANDBOX_TOKEN": "${KLING_SANDBOX_TOKEN}"
+      }
+    }
+  }
+}
 ```
 
 ## Grafos precalentados
@@ -181,6 +218,15 @@ dentro de ningún clúster; Kubernetes solo hace de plano de control. Ver
 [`docs/kubernetes.md`](../../docs/kubernetes.md). La imagen es
 `ghcr.io/juan52878911/kindling-operator:<versión de kindling>` y los manifiestos
 salen también como `kindling-operator-deploy.tar.gz` en cada release.
+
+## Documentación relacionada
+
+- [`docs/sandbox-api.md`](../../docs/sandbox-api.md): la API `/v1` del gateway y su spec
+  OpenAPI ([`api/openapi.yaml`](api/openapi.yaml)).
+- [`docs/e2b.md`](../../docs/e2b.md): `kling sbx e2b`, el shim compatible con los SDK de E2B.
+- SDKs: [Python](../../sdks/python/README.md) y [TypeScript](../../sdks/typescript/README.md).
+- [`docs/recetas/`](../../docs/recetas/README.md): Claude Code, Codex y Playwright dentro de un sandbox.
+- [`docs/kubernetes.md`](../../docs/kubernetes.md): el chart de Helm y el operador.
 
 ## Compatibilidad
 

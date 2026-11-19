@@ -159,15 +159,43 @@ var coreTree = []section{
 	{title: "INSIDE A MACHINE", cmds: []plugin.Command{
 		{Name: "exec", Summary: "runs a command inside, streaming its output", MachineArgs: []string{""}, Usage: `  exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming
       <ref> [--] <cmd> [args...]                   its output; exits with its code
+      [-d [-json]]                                 -d: in the background; prints the pid
+      [-s SESSION]                                 -s: in a session (cwd and env persist)
       [-e K] [-env-file F]                         secrets: from this env or a file
       [-max-output BYTES]                          (K=V shows in ps); -max-output: per
                                                    stream (default 8 MiB)
 `},
+		{Name: "proc", Summary: "background processes inside (start with exec -d)", Subcommands: []string{"ls", "status", "out", "wait", "signal", "rm"}, MachineArgs: []string{"ls", "status", "out", "wait", "signal", "rm"}, Usage: `  proc ls [-q] [-json] <ref>                       lists them: pid, state, exit, output
+  proc status [-json] <ref> <pid>                  state and exit code
+  proc out [-f] [-offset N] [-next] <ref> <pid>    its output, from an offset; -f follows
+                                                   until it ends and exits with its code
+  proc wait [-timeout D] <ref> <pid>               waits for it; exits with its code
+                                                   (124 on timeout)
+  proc signal [-s TERM] <ref> <pid>                signals its whole process group
+  proc rm <ref> <pid>                              kills it if running; forgets it
+`},
+		{Name: "session", Summary: "named cwd and env that persist across execs", Subcommands: []string{"create", "ls", "show", "rm"}, MachineArgs: []string{"create", "ls", "show", "rm"}, Usage: `  session create [-id ID] [-w DIR] [-ttl 1h]       a cwd and env that kling exec -s ID keeps
+      [-e K=V] [-env-file F] [-json] <ref>         between commands (cd, export)
+  session ls [-json] <ref>                         lists them
+  session show <ref> <id>                          its cwd and env as JSON
+  session rm <ref> <id>                            forgets it
+`},
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
       [-env-file F] [--] [cmd [args...]]           (Ctrl-C reaches the program)
 `},
-		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp [-mode 0644] [-json] <local|-> <ref>:<path>   copies a file into a machine
-  cp <ref>:<path> <local|->                        ... or out of it
+		{Name: "cp", Summary: "copies files and directories in and out of a machine", Usage: `  cp [-mode 0644] [-json] <local|-> <ref>:<path>   copies a file into a machine; a directory
+                                                   copies its contents (as a tar)
+  cp <ref>:<path> <local|->                        ... or out of it (a directory into a
+                                                   local directory, created if missing)
+`},
+		{Name: "ls", Summary: "lists a directory inside a machine", Usage: `  ls [-json] <ref>:<dir>                           mode, size, mtime and name of each
+                                                   entry (first 10000)
+`},
+		{Name: "egress", Summary: "changes a running machine's network policy", Subcommands: []string{"set", "show"}, MachineArgs: []string{"set", "show"}, Usage: `  egress set [-egress none|internet|allowlist]     changes the mode and/or the domains
+      [-allow dom1,dom2] [-json] <ref>             without a restart; narrowing it also
+                                                   closes open connections if the host
+                                                   has conntrack
+  egress show [-json] <ref>                        mode and what it blocked
 `},
 		{Name: "sandbox", Summary: "throwaway microVMs that run code", Subcommands: []string{"create", "ls", "renew", "fork", "rm"}, MachineArgs: []string{"renew", "fork", "rm"}, Usage: `  sandbox create [-image I | -from T] [-ttl 10m]   a throwaway microVM that runs code:
       [-name N] [-egress none|internet|allowlist]  no network by default; when idle it

@@ -1,0 +1,25 @@
+{{- if and .Values.gateway.enabled .Values.gateway.stateDir.path .Values.gateway.stateDir.persistence.enabled (not .Values.gateway.stateDir.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-state" (include "kindling-sandbox.gatewayName" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  annotations:
+    # Borrar el release no debe llevarse los inquilinos y sus claves.
+    helm.sh/resource-policy: keep
+    {{- with .Values.gateway.stateDir.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.gateway.stateDir.persistence.accessModes | nindent 4 }}
+  {{- with .Values.gateway.stateDir.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.stateDir.persistence.size }}
+{{- end }}

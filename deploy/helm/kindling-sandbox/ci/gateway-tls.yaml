@@ -1,0 +1,23 @@
+# Operador + gateway con TLS, tenants desde Secret y dos hosts.
+gateway:
+  enabled: true
+  image:
+    repository: registry.example.internal/kindling-gateway
+  hosts:
+    lab: ssh://kling@192.0.2.10
+    lab2: unix:///run/kling.sock
+  tenants:
+    existingSecret: kindling-gateway-tenants
+  admins: [ana]
+  tls:
+    existingSecret: kindling-gateway-tls
+  abandon: 12h
+  limits:
+    maxMemMiB: 2048
+    maxVCPUs: 2
+  ssh:
+    existingSecret: kindling-gateway-ssh
+operator:
+  frontal:
+    tokenSecret:
+      name: kindling-operator-frontal
