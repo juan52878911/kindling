@@ -1,0 +1,25 @@
+{{- if and .Values.gateway.enabled .Values.gateway.audit.path .Values.gateway.audit.persistence.enabled (not .Values.gateway.audit.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-audit" (include "kindling-sandbox.gatewayName" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kindling-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  annotations:
+    # Borrar el release no debe llevarse el registro de auditoría.
+    helm.sh/resource-policy: keep
+    {{- with .Values.gateway.audit.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.gateway.audit.persistence.accessModes | nindent 4 }}
+  {{- with .Values.gateway.audit.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.audit.persistence.size }}
+{{- end }}

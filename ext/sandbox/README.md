@@ -227,6 +227,7 @@ salen también como `kindling-operator-deploy.tar.gz` en cada release.
 - SDKs: [Python](../../sdks/python/README.md) y [TypeScript](../../sdks/typescript/README.md).
 - [`docs/recetas/`](../../docs/recetas/README.md): Claude Code, Codex y Playwright dentro de un sandbox.
 - [`docs/kubernetes.md`](../../docs/kubernetes.md): el chart de Helm y el operador.
+- [`docs/observabilidad.md`](../../docs/observabilidad.md): trazas y métricas OTLP y auditoría por inquilino del gateway.
 
 ## Compatibilidad
 

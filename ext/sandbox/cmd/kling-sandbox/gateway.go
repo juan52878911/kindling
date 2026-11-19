@@ -97,6 +97,7 @@ func cmdGateway(args []string) error {
 	ingConns := fs.Int("ingress-max-conns", 0, "most simultaneous ingress connections per sandbox (default 64)")
 	ingCab := fs.Int("ingress-max-header-bytes", 0, "largest request headers accepted through the ingress (default 32768)")
 	estado := fs.String("state-dir", os.Getenv("KLING_SANDBOX_STATE_DIR"), "directory for the persistent tenant store (tenants and keys managed through /v1/tenants); empty = store off")
+	obsFlags := banderasObservabilidad(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -167,7 +168,13 @@ func cmdGateway(args []string) error {
 	if err != nil {
 		return err
 	}
-	hsrv := servidorHTTP(srv)
+	obs, cerrarObs, err := observabilidad(srv, srv.Identificar, srv.MetricasTexto, obsFlags)
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	defer cerrarObs()
+	hsrv := servidorHTTP(obs)
 
 	n := len(tenants)
 	if almacen != nil {

@@ -1,0 +1,28 @@
+# Gateway con exportación OTLP y registro de auditoría en un PVC que crea el
+# chart.
+gateway:
+  enabled: true
+  image:
+    repository: registry.example.internal/kindling-gateway
+  hosts:
+    lab: ssh://kling@192.0.2.10
+  tenants:
+    existingSecret: kindling-gateway-tenants
+  insecureListen: true
+  otlp:
+    endpoint: http://otel-collector.observability:4318
+    metricsInterval: 15s
+    headersSecret:
+      name: kindling-otlp-headers
+  audit:
+    path: /var/log/kling-audit
+    maxMiB: 16
+    keep: 3
+    fsGroup: 65532
+    persistence:
+      enabled: true
+      size: 500Mi
+operator:
+  frontal:
+    tokenSecret:
+      name: kindling-operator-frontal
