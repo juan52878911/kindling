@@ -116,17 +116,27 @@ func TestBuffersTCPDeLasConexionesVivas(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	var total int64
-	conexiones := 0
-	for _, ep := range r.n.stack.RegisteredEndpoints() {
-		te, ok := ep.(*tcp.Endpoint)
-		// Fuera: los listeners propios de la pasarela (MMDS) y el DNS.
-		if !ok || te.EndpointState() == tcp.StateListen || te.TransportEndpointInfo.ID.LocalPort == 53 {
-			continue
+	// CreateEndpoint registra el endpoint en la pila antes de que endpointTCP
+	// le ponga los topes: la última conexión aceptada puede verse un instante
+	// con el MiB de recepción que le da el forwarder. Se mide hasta que todas
+	// tengan su tope; si el exceso no se va en el plazo, es un fallo de verdad.
+	medir := func() (total int64, conexiones int) {
+		for _, ep := range r.n.stack.RegisteredEndpoints() {
+			te, ok := ep.(*tcp.Endpoint)
+			// Fuera: los listeners propios de la pasarela (MMDS) y el DNS.
+			if !ok || te.EndpointState() == tcp.StateListen || te.TransportEndpointInfo.ID.LocalPort == 53 {
+				continue
+			}
+			so := te.SocketOptions()
+			total += so.GetReceiveBufferSize() + so.GetSendBufferSize()
+			conexiones++
 		}
-		so := te.SocketOptions()
-		total += so.GetReceiveBufferSize() + so.GetSendBufferSize()
-		conexiones++
+		return total, conexiones
+	}
+	total, conexiones := medir()
+	for limite := time.Now().Add(5 * time.Second); (total > tcpBufPresupuesto || conexiones < MaxTCPFlows) && time.Now().Before(limite); {
+		time.Sleep(10 * time.Millisecond)
+		total, conexiones = medir()
 	}
 	t.Logf("%d connections: %d MiB of TCP buffers in all (budget %d MiB)", conexiones, total>>20, tcpBufPresupuesto>>20)
 	if total > tcpBufPresupuesto {
