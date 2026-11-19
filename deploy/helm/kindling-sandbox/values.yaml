@@ -143,6 +143,42 @@ gateway:
       accessModes: [ReadWriteOnce]
       annotations: {}
 
+  # Consola web en /console/ (-console). Vacío = el valor por defecto del
+  # gateway: encendida con TLS o en loopback, apagada en HTTP plano fuera de
+  # loopback. "true" / "false" la fuerzan. Ver docs/consola.md.
+  console: ""
+
+  # Exportación OTLP/HTTP (JSON) de trazas y métricas (-otlp-endpoint). Vacío =
+  # apagado y sin coste. Ver docs/observabilidad.md.
+  otlp:
+    endpoint: ""          # p. ej. http://otel-collector.observability:4318
+    metricsInterval: ""   # cada cuánto se exporta /v1/metrics; vacío = 30s
+    # Secret EXISTENTE con OTEL_EXPORTER_OTLP_HEADERS ("k=v,k2=v2"), para un
+    # colector que pide token. Vacío = sin cabeceras.
+    headersSecret:
+      name: ""
+      key: headers
+
+  # Registro de auditoría por inquilino (-audit-dir): una línea JSON por acción
+  # con efecto, fichero rotado 0600, consultable en GET /v1/audit. Vacío =
+  # apagado. Sin persistence es un emptyDir (se pierde al reiniciar el Pod);
+  # el chart no deja escribir en otro sitio porque el sistema de ficheros es de
+  # solo lectura.
+  audit:
+    path: ""            # p. ej. /var/log/kling-audit
+    maxMiB: 0           # tamaño de rotación; 0 = 8
+    keep: 0             # ficheros rotados que se guardan; 0 = 5
+    # fsGroup del Pod para que el usuario de la imagen escriba en el volumen
+    # (solo si stateDir no fija ya uno). 0 = no se fija.
+    fsGroup: 0
+    persistence:
+      enabled: false
+      existingClaim: ""   # PVC EXISTENTE; vacío = el chart crea <gateway>-audit
+      size: 1Gi
+      storageClass: ""
+      accessModes: [ReadWriteOnce]
+      annotations: {}
+
   # Claves SSH para hosts ssh://: Secret EXISTENTE (clave privada y
   # known_hosts) montado de solo lectura en mountPath. El HOME del usuario de
   # la imagen tiene que apuntar al directorio padre.

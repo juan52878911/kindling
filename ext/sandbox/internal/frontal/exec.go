@@ -152,6 +152,15 @@ func (s *Servidor) handleFiles(w http.ResponseWriter, r *http.Request, id string
 			writeJSON(w, http.StatusOK, st)
 			return
 		}
+		if q.Get("list") == "1" {
+			ls, err := cl.ListFiles(r.Context(), mc.ID, path)
+			if err != nil {
+				fail(w, http.StatusBadGateway, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, ls)
+			return
+		}
 		rc, err := cl.ReadFile(r.Context(), mc.ID, path)
 		if err != nil {
 			fail(w, http.StatusBadGateway, err)

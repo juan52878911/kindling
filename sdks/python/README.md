@@ -82,7 +82,7 @@ al borrarse o vencer un sandbox); en el resto `retry_after` es `None`.
 | exec (flujo NDJSON) | `POST …/exec` | `Sandbox.exec_stream()` |
 | exec (`?wait=1`) | `POST …/exec?wait=1` | `Sandbox.exec()` |
 | shell interactivo | `POST …/shell` (`kling-shell/1`) | **no implementado** (upgrade a tramas binarias; fuera del alcance de B1) |
-| leer / stat | `GET …/files[?stat=1]` | `files.read()`, `files.stat()` |
+| leer / stat / listar | `GET …/files[?stat=1\|?list=1]` | `files.read()`, `files.stat()`, `files.list()` |
 | escribir | `PUT …/files` (`mode`, `mkdir`) | `files.write()` |
 | borrar fichero | `DELETE …/files` | `files.delete()` |
 | procesos de fondo | `…/processes[/{pid}[/output\|/signal]]` | `processes.start/list/get(wait=)/output(offset, follow)/signal/kill/delete` |

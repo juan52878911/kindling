@@ -623,7 +623,7 @@ paths:
           type: string
     get:
       tags: [sandboxes]
-      summary: Descarga un fichero, o con `stat=1` sus metadatos
+      summary: Descarga un fichero, con `stat=1` sus metadatos, o con `list=1` el listado del directorio
       parameters:
         - name: stat
           in: query
@@ -631,9 +631,15 @@ paths:
           schema:
             type: string
             enum: ["1"]
+        - name: list
+          in: query
+          description: "`1` para listar el directorio `path` (FileList JSON)"
+          schema:
+            type: string
+            enum: ["1"]
       responses:
         "200":
-          description: Contenido (se corta en 256 MiB) o FileStat
+          description: Contenido (se corta en 256 MiB), FileStat o FileList
           content:
             application/octet-stream:
               schema:
@@ -641,7 +647,9 @@ paths:
                 format: binary
             application/json:
               schema:
-                $ref: "#/components/schemas/FileStat"
+                oneOf:
+                  - $ref: "#/components/schemas/FileStat"
+                  - $ref: "#/components/schemas/FileList"
         "400":
           $ref: "#/components/responses/Error"
         "401":
@@ -1559,6 +1567,34 @@ components:
         mod_time:
           type: string
           format: date-time
+    FileEntry:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [file, dir, symlink, other]
+        size:
+          type: integer
+        mode:
+          type: string
+        mod_time:
+          type: string
+          format: date-time
+        target:
+          type: string
+    FileList:
+      type: object
+      properties:
+        path:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileEntry"
+        truncated:
+          type: boolean
     NodoGrafo:
       type: object
       properties:

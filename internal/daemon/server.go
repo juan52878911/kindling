@@ -915,6 +915,26 @@ func failCon(w http.ResponseWriter, code int, err error, msg string) {
 	writeJSON(w, code, api.Error{Message: msg, Code: codigoDeError(code, err)})
 }
 
+// trazaDe devuelve " traceparent=<valor>" si la petición trae un traceparent
+// W3C bien formado (lo pone el gateway cuando exporta trazas), para poder casar
+// una línea del log con su traza; vacío si no. Solo se acepta la forma
+// 00-<32 hex>-<16 hex>-<2 hex>: lo demás no entra al log (inyección de líneas).
+func trazaDe(r *http.Request) string {
+	v := r.Header.Get("Traceparent")
+	if len(v) != 55 || v[2] != '-' || v[35] != '-' || v[52] != '-' {
+		return ""
+	}
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case i == 2 || i == 35 || i == 52:
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return ""
+		}
+	}
+	return " traceparent=" + v
+}
+
 // failInterno es fail para errores que pueden llevar datos internos del host:
 // rutas bajo s.root (un *os.PathError) u otras cadenas que se pasan en
 // internos (la IP del invitado). El admin los ve tal cual; a un inquilino le
@@ -924,7 +944,7 @@ func (s *Server) failInterno(w http.ResponseWriter, r *http.Request, code int, e
 		fail(w, code, err)
 		return
 	}
-	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	log.Printf("%s %s: %v%s", r.Method, r.URL.Path, err, trazaDe(r))
 	failCon(w, code, err, publico+" (the daemon log has the details)")
 }
 

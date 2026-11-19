@@ -2,6 +2,13 @@
 {{- $tls := include "kindling-sandbox.gatewayTLS" . }}
 {{- $sd := .Values.gateway.stateDir }}
 {{- $pvc := and $sd.path $sd.persistence.enabled }}
+{{- $au := .Values.gateway.audit }}
+{{- $otlp := .Values.gateway.otlp }}
+{{- $apvc := and $au.path $au.persistence.enabled }}
+{{- if and $au.persistence.enabled (not $au.path) }}{{ fail "gateway.audit.persistence.enabled exige gateway.audit.path" }}{{ end }}
+{{- if and $apvc (gt (int .Values.gateway.replicas) 1) }}{{ fail "gateway.audit.persistence con más de una réplica: el PVC es ReadWriteOnce y cada réplica escribe su propio registro; usa replicas=1 o deja el registro en emptyDir" }}{{ end }}
+{{- if and $au.path $sd.path (eq $au.path $sd.path) }}{{ fail "gateway.audit.path y gateway.stateDir.path no pueden ser el mismo directorio" }}{{ end }}
+{{- if and $otlp.endpoint (not (regexMatch "^https?://[^/]+" $otlp.endpoint)) }}{{ fail "gateway.otlp.endpoint debe ser http(s)://host:puerto (OTLP/HTTP)" }}{{ end }}
 {{- if and $sd.persistence.enabled (not $sd.path) }}{{ fail "gateway.stateDir.persistence.enabled exige gateway.stateDir.path" }}{{ end }}
 {{- if and $sd.path (gt (int .Values.gateway.replicas) 1) }}{{ fail "gateway.stateDir con más de una réplica: el almacén de inquilinos es un fichero de un solo escritor; usa replicas=1" }}{{ end }}
 {{- if not .Values.gateway.hosts }}{{ fail "gateway.hosts es obligatorio con gateway.enabled=true: sin hosts el gateway usaría un daemon local que en un Pod no existe" }}{{ end }}
@@ -43,6 +50,8 @@ spec:
         runAsNonRoot: true
         {{- if and $sd.path $sd.fsGroup }}
         fsGroup: {{ $sd.fsGroup }}
+        {{- else if and $au.path $au.fsGroup }}
+        fsGroup: {{ $au.fsGroup }}
         {{- end }}
         seccompProfile:
           type: RuntimeDefault
@@ -95,6 +104,29 @@ spec:
             - -state-dir
             - {{ . | quote }}
             {{- end }}
+            {{- with .Values.gateway.console }}
+            - {{ printf "-console=%s" (toString .) | quote }}
+            {{- end }}
+            {{- with $otlp.endpoint }}
+            - -otlp-endpoint
+            - {{ . | quote }}
+            {{- with $otlp.metricsInterval }}
+            - -otlp-metrics-interval
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with $au.path }}
+            - -audit-dir
+            - {{ . | quote }}
+            {{- with $au.maxMiB }}
+            - -audit-max-mib
+            - {{ . | quote }}
+            {{- end }}
+            {{- with $au.keep }}
+            - -audit-keep
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.gateway.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -109,6 +141,13 @@ spec:
             {{- with .Values.gateway.admins }}
             - name: KLING_SANDBOX_ADMINS
               value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if and $otlp.endpoint $otlp.headersSecret.name }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $otlp.headersSecret.name }}
+                  key: {{ $otlp.headersSecret.key }}
             {{- end }}
             {{- with .Values.gateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -153,6 +192,10 @@ spec:
             - name: state
               mountPath: {{ $sd.path }}
             {{- end }}
+            {{- if $au.path }}
+            - name: audit
+              mountPath: {{ $au.path }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -178,6 +221,15 @@ spec:
           {{- if $pvc }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-state" (include "kindling-sandbox.gatewayName" .)) $sd.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- if $au.path }}
+        - name: audit
+          {{- if $apvc }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-audit" (include "kindling-sandbox.gatewayName" .)) $au.persistence.existingClaim }}
           {{- else }}
           emptyDir: {}
           {{- end }}

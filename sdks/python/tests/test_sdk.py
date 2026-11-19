@@ -247,6 +247,15 @@ class TestFiles(Base):
         self.assertEqual(self.sb.files.read("/tmp/b.bin"), datos)
         self.assertEqual(self.sb.files.stat("/tmp/b.bin").size, len(datos))
 
+    def test_list(self):
+        self.sb.files.write("/d/a.txt", "x", mkdir=True)
+        self.sb.files.write("/d/b.txt", "yy", mode=0o600)
+        ls = self.sb.files.list("/d")
+        self.assertEqual(ls.path, "/d")
+        self.assertEqual([(e.name, e.type, e.size) for e in ls.entries], [("a.txt", "file", 1), ("b.txt", "file", 2)])
+        self.assertEqual(ls.entries[1].mode, "0600")
+        self.assertEqual(ls.extra, {"nuevo": 1})
+
     def test_texto_y_delete(self):
         self.sb.files.write("/a b/ñ.txt", "hola")
         self.assertEqual(self.sb.files.read_text("/a b/ñ.txt"), "hola")

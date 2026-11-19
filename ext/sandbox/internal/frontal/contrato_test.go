@@ -197,7 +197,7 @@ func TestContratoEsquemas(t *testing.T) {
 		"CrearTenantPeticion": pedirTenant{}, "CambiarTenantPeticion": cambiarTenant{},
 		"CrearClavePeticion": pedirClave{}, "RotarClavePeticion": pedirRotar{}, "ClaveCreada": claveCreada{},
 		"ExecResult": api.ExecResult{}, "ProcessStartRequest": api.ProcessStartRequest{}, "ProcessInfo": api.ProcessInfo{},
-		"ProcessEvent": api.ProcessEvent{}, "ProcessSignalRequest": api.ProcessSignalRequest{}, "SessionRequest": api.SessionRequest{}, "Session": api.Session{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{},
+		"ProcessEvent": api.ProcessEvent{}, "ProcessSignalRequest": api.ProcessSignalRequest{}, "SessionRequest": api.SessionRequest{}, "Session": api.Session{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{}, "FileList": api.FileList{}, "FileEntry": api.FileEntry{},
 	}
 	for nombre, v := range structs {
 		declaradas, ok := sp.schemas[nombre]
@@ -234,7 +234,7 @@ func TestContratoDeclaraLoPrometido(t *testing.T) {
 	}
 	for _, s := range []string{
 		"scheme: bearer", "application/x-ndjson", "name: wait", "Upgrade: kling-shell/1",
-		"name: path", "name: stat", "name: mode", "name: mkdir", "67108864", "WWW-Authenticate",
+		"name: path", "name: stat", "name: list", "name: mode", "name: mkdir", "67108864", "WWW-Authenticate",
 	} {
 		if !strings.Contains(b, s) {
 			t.Errorf("la spec no contiene %q", s)

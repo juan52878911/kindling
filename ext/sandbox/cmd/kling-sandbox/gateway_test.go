@@ -165,3 +165,22 @@ func TestServidorHTTPConPlazosYTopes(t *testing.T) {
 		t.Fatalf("WriteTimeout %s would cut shells and long execs", s.WriteTimeout)
 	}
 }
+
+func TestConsolaPorDefecto(t *testing.T) {
+	for _, c := range []struct {
+		listen         string
+		tls, val, dada bool
+		quiere         bool
+	}{
+		{"127.0.0.1:8090", false, true, false, true},
+		{"0.0.0.0:8090", true, true, false, true},
+		{":8090", false, true, false, false},
+		{"10.0.0.5:8090", false, true, false, false},
+		{"10.0.0.5:8090", false, true, true, true},   // -console explícito manda
+		{"127.0.0.1:8090", true, false, true, false}, // -console=false
+	} {
+		if got := consolaPorDefecto(c.listen, c.tls, c.val, c.dada); got != c.quiere {
+			t.Errorf("%+v: %v", c, got)
+		}
+	}
+}

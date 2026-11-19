@@ -28,6 +28,7 @@ import (
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/telemetria"
 )
 
 // escuchar abre el puerto del gateway. Los tokens de inquilino y de admin
@@ -81,6 +82,16 @@ func soloLoopback(addr string) bool {
 	return true
 }
 
+// consolaPorDefecto decide si se sirve /console/. Si -console se dio
+// explícitamente, manda; si no, se enciende con TLS o en loopback y se apaga
+// en HTTP plano fuera de loopback (la consola maneja tokens de inquilino).
+func consolaPorDefecto(listen string, tls, valor, pedida bool) bool {
+	if pedida {
+		return valor
+	}
+	return tls || soloLoopback(listen)
+}
+
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("sbx gateway", flag.ExitOnError)
 	listen := fs.String("listen", "", "address to listen on (default sandbox.listen, or 127.0.0.1:8090)")
@@ -97,6 +108,8 @@ func cmdGateway(args []string) error {
 	ingConns := fs.Int("ingress-max-conns", 0, "most simultaneous ingress connections per sandbox (default 64)")
 	ingCab := fs.Int("ingress-max-header-bytes", 0, "largest request headers accepted through the ingress (default 32768)")
 	estado := fs.String("state-dir", os.Getenv("KLING_SANDBOX_STATE_DIR"), "directory for the persistent tenant store (tenants and keys managed through /v1/tenants); empty = store off")
+	consolaFlag := fs.Bool("console", true, "serve the web console at /console/ (default: on when listening with TLS or on loopback, off for plain HTTP outside loopback; -console=false turns it off, -console turns it on)")
+	obsFlags := banderasObservabilidad(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -125,7 +138,15 @@ func cmdGateway(args []string) error {
 	if err != nil && (almacen == nil || almacen.Cuantos() == 0 || !errors.Is(err, errSinTenants)) {
 		return err
 	}
-	reg := hosts.Nuevo(a.Hosts)
+	var optsHosts []hosts.Opcion
+	if *obsFlags.endpoint != "" {
+		// Con OTLP activo el traceparent de cada petición viaja hasta el daemon.
+		optsHosts = append(optsHosts, hosts.ConTransporte(telemetria.Transporte))
+	}
+	reg := hosts.Nuevo(a.Hosts, optsHosts...)
+	pedida := false
+	fs.Visit(func(f *flag.Flag) { pedida = pedida || f.Name == "console" })
+	conConsola := consolaPorDefecto(a.Listen, a.TLSCert != "", *consolaFlag, pedida)
 
 	ing := frontal.IngresoOpciones{
 		Dominio: *ingDominio, MaxConexiones: *ingConns, MaxCabeceras: *ingCab, Esquema: "http",
@@ -151,6 +172,7 @@ func cmdGateway(args []string) error {
 		MaxMemTotalMiB:   *maxTotal,
 		Log:              log.New(os.Stderr, "", log.LstdFlags),
 		Ingreso:          ing,
+		SinConsola:       !conConsola,
 	})
 	if err != nil {
 		return err
@@ -167,7 +189,13 @@ func cmdGateway(args []string) error {
 	if err != nil {
 		return err
 	}
-	hsrv := servidorHTTP(srv)
+	obs, cerrarObs, err := observabilidad(srv, srv.Identificar, srv.MetricasTexto, obsFlags)
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	defer cerrarObs()
+	hsrv := servidorHTTP(obs)
 
 	n := len(tenants)
 	if almacen != nil {

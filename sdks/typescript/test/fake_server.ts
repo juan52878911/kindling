@@ -249,6 +249,12 @@ export class FakeGateway {
           s.files.set(path, b);
           return this.json(r, 200, { path, size: b.length, mode: u.searchParams.get("mode") ?? "0644", is_dir: false, mod_time: "2026-01-01T00:00:00Z" });
         }
+        if (q.method === "GET" && u.searchParams.get("list") === "1") {
+          const pref = path.replace(/\/+$/, "") + "/";
+          const entries = [...s.files].filter(([p]) => p.startsWith(pref) && !p.slice(pref.length).includes("/"))
+            .map(([p, b]) => ({ name: p.slice(pref.length), type: "file", size: b.length, mode: "0644", mod_time: "2026-01-01T00:00:00Z" }));
+          return this.json(r, 200, { path, entries });
+        }
         const f = s.files.get(path);
         if (!f) return this.err(r, 404, `no existe ${path}`, "not_found");
         if (q.method === "GET") {

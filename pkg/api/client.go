@@ -86,6 +86,19 @@ func NewClient(endpoint string) *Client {
 	return c
 }
 
+// WrapTransport envuelve el transporte de HTTP del cliente (el normal y el de
+// las operaciones largas) con f, por ejemplo para propagar un traceparent o
+// medir las llamadas. Llámalo antes de usar el cliente; no es seguro
+// concurrentemente con peticiones en curso. f recibe el transporte actual
+// (que ya comprueba la versión de la API y añade el token) y devuelve el nuevo.
+func (c *Client) WrapTransport(f func(http.RoundTripper) http.RoundTripper) {
+	if f == nil {
+		return
+	}
+	c.http.Transport = f(c.http.Transport)
+	c.long.Transport = f(c.long.Transport)
+}
+
 // sinRedirecciones devuelve la respuesta 3xx tal cual; doWith la trata como
 // error.
 func sinRedirecciones(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }

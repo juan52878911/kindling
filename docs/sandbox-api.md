@@ -157,12 +157,14 @@ token del tenant solo se acepta por cabecera. Sin credencial, 401 (igual para un
 que no existe); credencial válida de quien no es dueño, 404. El invitado nunca recibe
 `Authorization`, el token de endpoint ni la cookie `kling_ep` (las demás cookies pasan).
 
-**Transporte.** Contra un host local al gateway (socket Unix) se publica el puerto del
-invitado en el daemon (`api.Publish`) la primera vez y se hace de proxy inverso a ese
-puerto: cuerpos binarios, SSE y WebSocket. Contra un host `ssh://` el `127.0.0.1` publicado
-sería el del otro extremo, y solo queda `POST /machines/{ref}/guest` del daemon: HTTP de
-texto, cuerpos de hasta 1 MiB, el puerto tiene que estar en la etiqueta `kling.ports` de la
-máquina y un WebSocket da 501. Un sandbox congelado se despierta (`thaw`) en el primer
+**Transporte.** Si el daemon del host anuncia `tcp-tunnel` (sea local o `ssh://`), el
+gateway hace de proxy inverso sobre `api.DialTCP` (`GET /machines/{ref}/tcp`, upgrade
+`kling-tcp/1`) con el transporte del cliente, unix o ssh: cuerpos binarios sin tope de
+tamaño, SSE y WebSocket funcionan también contra hosts `ssh://`. Sin la capacidad (daemon
+anterior): un host local publica el puerto del invitado (`api.Publish`) y hace proxy a
+`127.0.0.1`; uno `ssh://` cae a `POST /machines/{ref}/guest` (HTTP de texto, cuerpos de
+hasta 1 MiB, el puerto tiene que estar en la etiqueta `kling.ports` y un WebSocket da 501).
+Un sandbox congelado se despierta (`thaw`) en el primer
 acceso. Si nada escucha en el puerto, 502 con el puerto en el mensaje.
 
 **Topes.** Cabeceras de la petición: 32 KiB (`-ingress-max-header-bytes`, 431); conexiones
