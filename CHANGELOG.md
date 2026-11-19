@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling sbx mcp`: an MCP server (stdio) that lets an agent create, list, exec in, read/write files of, renew and delete sandboxes through the gateway's `/v1` API; the token comes from `KLING_SANDBOX_TOKEN` and never appears in output.
 - Volumes take labels (`labels` in `POST /volumes` and in `GET /volumes`); compose labels its volumes with the project and the compose file.
 - macOS: `kling doctor` warns when the kernel or `min.ext4` that `kling up` downloaded come from another release, since `kling up` never replaces them.
 - `kling-mcp gateway -max-sessions` caps the MCP sessions a tenant has open at once (default 256; without named tokens every client shares the `default` tenant).

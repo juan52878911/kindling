@@ -63,6 +63,8 @@ func cmdSbx(args []string) error {
 		os.Exit(code)
 	case "hosts":
 		return sbxHosts(args[1:])
+	case "mcp":
+		return sbxMCP(args[1:])
 	case "-h", "--help", "help":
 		fmt.Println(ayuda)
 		return nil
@@ -84,6 +86,7 @@ const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
   sbx shell <id>                               an interactive terminal inside
   sbx cp <local|-> <id>:<path> | <id>:<path> <local|->
   sbx hosts                                    the daemons behind the gateway (admin token)
+  sbx mcp [-url U] [-ca PEM]                   MCP server (stdio) exposing the sandboxes as tools
 
 Gateway errors keep their HTTP status and Retry-After ("... (HTTP 429, retry
 after 30s)"); with -json, new and rm print them as {"error": {"status": 429,
