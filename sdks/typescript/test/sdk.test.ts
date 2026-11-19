@@ -163,3 +163,48 @@ test("create con volúmenes y CRUD de volúmenes", async () => {
   await c.deleteVolume("datos");
   await assert.rejects(c.getVolume("datos"), NotFound);
 });
+
+test("procesos de fondo: start / list / get con wait / signal / delete", async () => {
+  const sb = await Sandbox.create(conn());
+  const p = await sb.processes.start("sleep 9", { cwd: "/w", env: { A: "1" }, timeout: 30, session: "dev" });
+  assert.deepEqual([p.pid, p.state], [1, "running"]);
+  assert.deepEqual(gw.lastBody, { cmd: ["sh", "-c", "sleep 9"], dir: "/w", env: ["A=1"], timeout_seconds: 30, session: "dev" });
+  assert.equal((await sb.processes.list()).length, 1);
+  const fin = await sb.processes.get(p.pid, { wait: 5 });
+  assert.deepEqual([fin.state, fin.exit_code], ["exited", 0]);
+  assert.match(gw.requests.at(-1)!.url, /\?wait=5$/);
+  const q = await sb.processes.start(["x"]);
+  assert.equal((await sb.processes.signal(q.pid)).signal, "TERM");
+  assert.equal((await sb.processes.kill(q.pid)).signal, "KILL");
+  assert.deepEqual(gw.lastBody, { signal: "KILL" });
+  await sb.processes.delete(p.pid);
+  await assert.rejects(sb.processes.get(p.pid), NotFound);
+  await assert.rejects(sb.processes.start([]), (e: any) => e.status === 400);
+});
+
+test("procesos de fondo: output con offset y follow, con líneas partidas", async () => {
+  const sb = await Sandbox.create(conn());
+  const p = await sb.processes.start(["x"]);
+  const evs = [];
+  for await (const ev of sb.processes.output(p.pid, { follow: true })) evs.push(ev);
+  assert.equal(evs.map((e) => e.text).join(""), "hola\nmundo\n");
+  assert.deepEqual([evs.at(-1)!.exit, evs.at(-1)!.offset], [0, 11]);
+  const resto = [];
+  for await (const ev of sb.processes.output(p.pid, { offset: 5 })) resto.push(ev);
+  assert.equal(resto.map((e) => e.text).join(""), "mundo\n");
+  assert.equal(resto.at(-1)!.exit, null); // sin follow no hay exit
+  assert.match(gw.requests.at(-1)!.url, /offset=5$/);
+});
+
+test("sesiones: create / exec / list / delete", async () => {
+  const sb = await Sandbox.create(conn());
+  const se = await sb.sessions.create({ id: "dev", cwd: "/w", env: { A: "1" }, ttl: 60 });
+  assert.deepEqual([se.id, se.dir, se.env], ["dev", "/w", ["A=1"]]);
+  assert.deepEqual(gw.lastBody, { id: "dev", dir: "/w", env: ["A=1"], ttl_seconds: 60 });
+  const r = await sb.sessions.exec("dev", "pwd");
+  assert.equal(r.exit_code, 3);
+  assert.equal((await sb.sessions.list()).length, 1);
+  await sb.sessions.delete("dev");
+  await assert.rejects(sb.sessions.get("dev"), NotFound);
+  await sb.exec("pwd", { session: "dev" }); // exec normal con sesión
+});

@@ -4,7 +4,10 @@ import type { AddressInfo } from "node:net";
 
 export const TOKEN = "tok-secreto-1234";
 
-interface Fake { id: string; files: Map<string, Buffer>; info: Record<string, unknown> }
+interface Fake {
+  id: string; files: Map<string, Buffer>; info: Record<string, unknown>;
+  procs: Map<number, Record<string, any>>; sessions: Map<string, Record<string, any>>;
+}
 
 export class FakeGateway {
   sandboxes = new Map<string, Fake>();
@@ -42,6 +45,72 @@ export class FakeGateway {
     return Buffer.concat(parts);
   }
 
+  /** Salida que sirve el proceso falso. */
+  procOutput = "hola\nmundo\n";
+
+  private async processes(q: http.IncomingMessage, r: http.ServerResponse, u: URL, s: Fake, resto: string[]) {
+    if (resto.length === 0) {
+      if (q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString() || "{}");
+        this.lastBody = req;
+        if (!Array.isArray(req.cmd) || !req.cmd.length) return this.err(r, 400, "cmd is required", "bad_request");
+        const proc = { pid: s.procs.size + 1, cmd: req.cmd, state: "running", started_at: "2026-01-01T00:00:00Z", output_bytes: 0 };
+        s.procs.set(proc.pid, proc);
+        return this.json(r, 201, proc);
+      }
+      return this.json(r, 200, [...s.procs.values()]);
+    }
+    const proc = s.procs.get(Number(resto[0]));
+    if (!proc) return this.err(r, 404, "no such process", "not_found");
+    const sub = resto[1];
+    if (!sub && q.method === "GET") {
+      if (u.searchParams.get("wait")) Object.assign(proc, { state: "exited", exit_code: 0 });
+      return this.json(r, 200, proc);
+    }
+    if (!sub && q.method === "DELETE") { s.procs.delete(proc.pid); r.writeHead(204); return r.end(); }
+    if (sub === "signal" && q.method === "POST") {
+      const req = JSON.parse((await this.body(q)).toString() || "{}");
+      this.lastBody = req;
+      Object.assign(proc, { state: "exited", signal: req.signal ?? "TERM" });
+      return this.json(r, 200, proc);
+    }
+    if (sub === "output" && q.method === "GET") {
+      const off = Number(u.searchParams.get("offset") ?? 0);
+      const datos = Buffer.from(this.procOutput).subarray(off);
+      r.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      const tramo = (b: Buffer, o: number) => JSON.stringify({ stream: "stdout", data: b.toString("base64"), offset: o }) + "\n";
+      if (datos.length) {
+        // Se parte una línea por la mitad para ejercitar el reensamblado.
+        const l = tramo(datos.subarray(0, 6), off + Math.min(6, datos.length));
+        r.write(l.slice(0, 10)); await new Promise((ok) => setTimeout(ok, 5)); r.write(l.slice(10));
+        if (datos.length > 6) r.write(tramo(datos.subarray(6), off + datos.length));
+      }
+      const fin: Record<string, unknown> = { offset: Buffer.byteLength(this.procOutput) };
+      if (u.searchParams.get("follow") === "1") fin.exit = 0;
+      return r.end(JSON.stringify(fin) + "\n");
+    }
+    return this.err(r, 405, "no");
+  }
+
+  private async sessions(q: http.IncomingMessage, r: http.ServerResponse, s: Fake, resto: string[]) {
+    if (resto.length === 0) {
+      if (q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString() || "{}");
+        this.lastBody = req;
+        const se = { id: req.id ?? `s${s.sessions.size + 1}`, dir: req.dir ?? "", env: req.env ?? [], execs: 0,
+          created_at: "2026-01-01T00:00:00Z", expires_at: "2026-01-01T01:00:00Z" };
+        s.sessions.set(se.id, se);
+        return this.json(r, 201, se);
+      }
+      return this.json(r, 200, [...s.sessions.values()]);
+    }
+    const se = s.sessions.get(resto[0]);
+    if (!se) return this.err(r, 404, "no such session", "not_found");
+    if (q.method === "GET") return this.json(r, 200, se);
+    if (q.method === "DELETE") { s.sessions.delete(se.id); r.writeHead(204); return r.end(); }
+    return this.err(r, 405, "no");
+  }
+
   private async handle(q: http.IncomingMessage, r: http.ServerResponse) {
     const u = new URL(q.url!, "http://x");
     this.requests.push({ method: q.method!, url: q.url!, auth: q.headers.authorization });
@@ -77,7 +146,7 @@ export class FakeGateway {
             if (this.batchFailFrom && i >= this.batchFailFrom) { errors.push({ index: i, status: 500, error: "boom" }); continue; }
             const id = `sbx-${++this.n}`;
             const info = { id, host: "h1", state: "running" };
-            this.sandboxes.set(id, { id, files: new Map(), info });
+            this.sandboxes.set(id, { id, files: new Map(), info, procs: new Map(), sessions: new Map() });
             ok.push(info);
           }
           if (req.atomic && errors.length) {
@@ -91,7 +160,7 @@ export class FakeGateway {
         const info = { id, host: "h1", template: req.template ?? "base", image: "img", state: "running", vcpus: 1, mem_mib: 256,
           egress: "none", on_ttl: "delete", ttl_seconds: ttl, created_at: "2026-01-01T00:00:00Z", last_used_at: "2026-01-01T00:00:00Z",
           expires_at: "2026-01-01T00:05:00Z", labels: req.labels ?? {}, campo_nuevo: 1 };
-        this.sandboxes.set(id, { id, files: new Map(), info });
+        this.sandboxes.set(id, { id, files: new Map(), info, procs: new Map(), sessions: new Map() });
         return this.json(r, 201, info);
       }
       if (q.method === "GET") return this.json(r, 200, [...this.sandboxes.values()].map((s) => s.info), { "X-Kindling-Partial": "host2" });
@@ -121,6 +190,8 @@ export class FakeGateway {
         for (const c of this.streamChunks) { r.write(c); await new Promise((ok) => setTimeout(ok, 5)); }
         return r.end();
       }
+      if (sub === "processes") return this.processes(q, r, u, s, p.slice(4));
+      if (sub === "sessions") return this.sessions(q, r, s, p.slice(4));
       if (sub === "files") {
         const path = u.searchParams.get("path");
         if (!path) return this.err(r, 400, "falta path");

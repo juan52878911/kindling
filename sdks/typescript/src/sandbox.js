@@ -28,7 +28,7 @@ function evento(j) {
   };
 }
 
-function peticionExec(cmd, { cwd, env, timeout, stdin, user, maxOutputBytes } = {}) {
+function peticionExec(cmd, { cwd, env, timeout, stdin, user, maxOutputBytes, session } = {}) {
   const p = { cmd: typeof cmd === "string" ? ["sh", "-c", cmd] : [...cmd] }; // un string es una línea de shell
   if (cwd) p.dir = cwd;
   if (env) p.env = Array.isArray(env) ? [...env] : Object.entries(env).map(([k, v]) => `${k}=${v}`);
@@ -36,7 +36,59 @@ function peticionExec(cmd, { cwd, env, timeout, stdin, user, maxOutputBytes } = 
   if (timeout) p.timeout_seconds = Math.trunc(timeout);
   if (maxOutputBytes) p.max_output_bytes = Math.trunc(maxOutputBytes);
   if (user) p.user = user;
+  if (session) p.session = session;
   return p;
+}
+
+function evProceso(j) {
+  const data = b64(j.data);
+  return {
+    stream: j.stream ?? null, data, text: utf8(data), offset: j.offset ?? 0, dropped: j.dropped ?? 0,
+    exit: j.exit ?? null, signal: j.signal ?? "", error: j.error ?? null,
+  };
+}
+
+const lista = (env) => (Array.isArray(env) ? [...env] : Object.entries(env).map(([k, v]) => `${k}=${v}`));
+
+/** Procesos de fondo de un sandbox: sobreviven a la conexión del cliente. */
+export class Processes {
+  #c; #id;
+  constructor(client, id) { this.#c = client; this.#id = id; }
+  /** Lanza y vuelve enseguida con el pid. `cmd` string → `sh -c`. */
+  start(cmd, opts) { return this.#c.startProcess(this.#id, peticionExec(cmd, { ...opts, stdin: undefined })); }
+  list() { return this.#c.listProcesses(this.#id); }
+  /** Estado; con `wait` (segundos) espera a que termine, y si no sigue «running». */
+  get(pid, { wait } = {}) { return this.#c.getProcess(this.#id, pid, wait); }
+  /** Iterador asíncrono de eventos desde `offset`; con `follow` hasta que termine. El último lleva el offset de reanudación. */
+  async *output(pid, { offset = 0, follow = false } = {}) {
+    const it = await this.#c.processOutput(this.#id, pid, offset, follow);
+    for await (const j of it) yield evProceso(j);
+  }
+  /** Señal al grupo del proceso (por defecto TERM). */
+  signal(pid, signal) { return this.#c.signalProcess(this.#id, pid, signal); }
+  kill(pid) { return this.signal(pid, "KILL"); }
+  delete(pid) { return this.#c.deleteProcess(this.#id, pid); }
+}
+
+/** Sesiones de exec: cwd y entorno que persisten entre comandos. */
+export class Sessions {
+  #c; #id;
+  constructor(client, id) { this.#c = client; this.#id = id; }
+  create({ id, cwd, env, ttl } = {}) {
+    const p = {};
+    if (id) p.id = id;
+    if (cwd) p.dir = cwd;
+    if (env) p.env = lista(env);
+    if (ttl) p.ttl_seconds = Math.trunc(ttl);
+    return this.#c.createSession(this.#id, p);
+  }
+  list() { return this.#c.listSessions(this.#id); }
+  get(sid) { return this.#c.getSession(this.#id, sid); }
+  /** Como Sandbox.exec, dentro de la sesión `sid`. */
+  async exec(sid, cmd, opts) {
+    return resultado(await this.#c.execWait(this.#id, peticionExec(cmd, { ...opts, session: sid })));
+  }
+  delete(sid) { return this.#c.deleteSession(this.#id, sid); }
 }
 
 /** Ficheros de un sandbox: `await sb.files.read("/etc/hostname")`. */
@@ -59,6 +111,8 @@ export class Sandbox {
     this.info = info;
     this.#client = client;
     this.files = new Files(client, info.id);
+    this.processes = new Processes(client, info.id);
+    this.sessions = new Sessions(client, info.id);
   }
   get id() { return this.info.id; }
   toString() { return `Sandbox(id=${JSON.stringify(this.info.id)}, state=${JSON.stringify(this.info.state)})`; }
