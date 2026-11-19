@@ -45,6 +45,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling egress set` back to `allowlist` after `none` left the guest without DNS and
+  without allowed destinations: the final `FORWARD` DROP is shared by both modes, so
+  the live change kept it in place and the allowlist's DNS/ipset ACCEPT rules were
+  appended behind it and never matched. The DROP is now removed and re-added last.
 - Exec sessions lost their environment where `env -0` is not supported (BSD/macOS `env`, old busybox). The guest agent now dumps the environment itself (it re-executes its own binary with `KLING_ENVDUMP=1`), falling back to `awk` and then `env -0`.
 - kling-sandbox gateway: the 429 for an exceeded quota when creating sandboxes (single or batch) now carries `Retry-After: 5`, declared in the OpenAPI spec like the 503 of a template being rebuilt; the SDKs expose it as `retry_after`.
 - `kling sbx`: the `e2b`, `tenant` and `key` subcommands are declared in the extension manifest, so they appear in `kling sbx` help and in the docs command check.

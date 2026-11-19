@@ -271,7 +271,7 @@ func startDNSResolverModo(n *Net, domains []string, modo modoResolver) error {
 		ns:       n.NS,
 		set:      n.setName(),
 		allowed:  normalizeDomains(domains),
-		upstream: DNSResolver + ":53",
+		upstream: upstreamDefecto,
 		udp:      udp,
 		tcp:      tcp,
 		quit:     make(chan struct{}),
@@ -290,6 +290,10 @@ func startDNSResolverModo(n *Net, domains []string, modo modoResolver) error {
 	resolversMu.Unlock()
 	return nil
 }
+
+// upstreamDefecto es el resolver real al que reenvía el de cada máquina.
+// Variable solo para los tests.
+var upstreamDefecto = DNSResolver + ":53"
 
 // stopResolver para y desregistra el resolver de un netns, si lo hay.
 func stopResolver(ns string) {
