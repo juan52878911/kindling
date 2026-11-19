@@ -137,7 +137,7 @@ func (s *Servidor) procStart(w http.ResponseWriter, r *http.Request, id string) 
 		fl.fin(&errConnect{cInvalido, "process.cmd is required"})
 		return
 	}
-	cuerpo := map[string]any{"cmd": append([]string{req.Process.Cmd}, req.Process.Args...)}
+	cuerpo := map[string]any{"cmd": envolverBash(req.Process.Cmd, req.Process.Args)}
 	if req.Process.Cwd != nil && *req.Process.Cwd != "" {
 		cuerpo["dir"] = *req.Process.Cwd
 	}
@@ -370,6 +370,30 @@ func (s *Servidor) stat(ctx context.Context, id, ruta string) (map[string]any, e
 	return entrada(ruta, st.IsDir, st.Size, modoNumero(st.Mode), st.ModTime), nil
 }
 
+// scriptBash es el envoltorio de /bin/bash: el SDK de E2B lanza cada comando
+// como `/bin/bash -l -c CMD` y el envd real siempre trae bash, pero las
+// imágenes de kindling no. Se usa bash si existe y, si no, /bin/sh con los
+// mismos argumentos salvo `-l` (busybox no siempre lo acepta).
+const scriptBash = `if [ -x /bin/bash ]; then exec /bin/bash "$@"; fi; if [ "$1" = -l ]; then shift; fi; exec /bin/sh "$@"`
+
+// envolverBash arma el argv que se manda al gateway. Solo /bin/bash y bash se
+// envuelven; cualquier otro cmd va tal cual.
+func envolverBash(cmd string, args []string) []string {
+	if cmd == "/bin/bash" || cmd == "bash" {
+		return append([]string{"/bin/sh", "-c", scriptBash, "sh"}, args...)
+	}
+	return append([]string{cmd}, args...)
+}
+
+// desenvolverBash deshace envolverBash para que List devuelva lo que pidió el
+// cliente.
+func desenvolverBash(cmd []string) (string, []string) {
+	if len(cmd) >= 4 && cmd[0] == "/bin/sh" && cmd[1] == "-c" && cmd[2] == scriptBash && cmd[3] == "sh" {
+		return "/bin/bash", cmd[4:]
+	}
+	return cmd[0], cmd[1:]
+}
+
 type execResultado struct {
 	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
@@ -429,6 +453,11 @@ func (s *Servidor) fsListDir(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	depth := max(req.Depth, 1)
+	if entradas, err := s.listarGW(r.Context(), id, ruta, int(depth)); err == nil {
+		escribirJSON(w, 200, map[string]any{"entries": entradas})
+		return
+	}
+	// Respaldo: gateway sin files?list=1 (o con un listado truncado).
 	out, errOut, code, err := s.ejecutar(r.Context(), id, "find", ruta, "-mindepth", "1",
 		"-maxdepth", strconv.FormatUint(uint64(depth), 10), "-printf", `%y\t%s\t%m\t%T@\t%p\n`)
 	if err != nil {
@@ -451,6 +480,48 @@ func (s *Servidor) fsListDir(w http.ResponseWriter, r *http.Request, id string) 
 		entradas = append(entradas, entrada(c[4], c[0] == "d", size, uint32(modo), time.Unix(int64(seg), 0)))
 	}
 	escribirJSON(w, 200, map[string]any{"entries": entradas})
+}
+
+// gwListado es la respuesta de files?list=1 (api.FileList del gateway).
+type gwListado struct {
+	Entries []struct {
+		Name    string    `json:"name"`
+		Type    string    `json:"type"`
+		Size    int64     `json:"size"`
+		Mode    string    `json:"mode"`
+		ModTime time.Time `json:"mod_time"`
+	} `json:"entries"`
+	Truncated bool `json:"truncated"`
+}
+
+var errListado = errors.New("gateway listing unavailable")
+
+// listarGW lista ruta con GET files?list=1 del gateway, bajando por los
+// subdirectorios hasta depth. Falla con errListado si el gateway no lo
+// soporta o el listado viene truncado, para que el llamador use find.
+func (s *Servidor) listarGW(ctx context.Context, id, ruta string, depth int) ([]map[string]any, error) {
+	var ls gwListado
+	if err := s.llamarGW(ctx, "GET", rutaSB(id)+"/files?list=1&path="+url.QueryEscape(ruta), nil, &ls); err != nil {
+		return nil, errListado
+	}
+	if ls.Truncated {
+		return nil, errListado
+	}
+	out := []map[string]any{}
+	for _, e := range ls.Entries {
+		p := path.Join(ruta, e.Name)
+		modo, _ := strconv.ParseUint(e.Mode, 8, 32)
+		dir := e.Type == "dir"
+		out = append(out, entrada(p, dir, e.Size, uint32(modo), e.ModTime))
+		if dir && depth > 1 {
+			sub, err := s.listarGW(ctx, id, p, depth-1)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, sub...)
+		}
+	}
+	return out, nil
 }
 
 func (s *Servidor) fsMakeDir(w http.ResponseWriter, r *http.Request, id string) {
