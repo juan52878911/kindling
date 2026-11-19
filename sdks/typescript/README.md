@@ -56,6 +56,8 @@ Se leen de `{"message","code"}` y de `Retry-After` (segundos o fecha HTTP). El t
 | `POST …/exec?wait=1` | `sb.exec` | sí |
 | `GET/PUT/DELETE …/files` | `sb.files.read/readText/write/delete`, `stat` (`stat=1`) | sí |
 | `POST …/shell` (`kling-shell/1`) | — | **no implementado**: upgrade a tramas binarias, fuera de alcance |
+| `POST /v1/sandboxes` con `count`/`atomic` | `Sandbox.createMany(n, {atomic})` (`.errors` = los que no salieron) | sí |
+| `/v1/volumes`, `/v1/volumes/{id}`; `volumes` al crear | `client.createVolume/getVolume/listVolumes/deleteVolume`, `Sandbox.create({volumes})` | sí |
 | `/v1/graphs` (GET, POST, GET/DELETE `{id}`) | `client.createGraph/getGraph/listGraphs/deleteGraph` | sí, solo a nivel `Client` |
 
 ## Pruebas

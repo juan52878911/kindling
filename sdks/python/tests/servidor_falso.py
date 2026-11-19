@@ -23,6 +23,8 @@ class Estado:
         self.rate_limit_en_create = 0  # cuántos POST /v1/sandboxes devolver 429
         self.trozos_exec = None  # lista de bytes a escribir tal cual en el flujo
         self.error_exec_tras_200 = False
+        self.volumenes = {}
+        self.lote_falla_desde = 0  # en un lote, los índices >= esto fallan (500)
 
 
 class Manejador(BaseHTTPRequestHandler):
@@ -74,6 +76,8 @@ class Manejador(BaseHTTPRequestHandler):
                     st.rate_limit_en_create -= 1
                     return self._err(429, "sandbox quota exceeded", None, {"Retry-After": "7"})
                 req = json.loads(cuerpo or b"{}")
+                if "count" in req:
+                    return self._lote(req)
                 st.n += 1
                 sid = "h1/m-%d" % st.n
                 sb = {"id": sid, "host": "h1", "template": req.get("template", ""),
@@ -81,6 +85,8 @@ class Manejador(BaseHTTPRequestHandler):
                       "labels": req.get("labels") or {}, "campo_nuevo": 1}
                 st.sandboxes[sid] = sb
                 return self._json(201, sb, {"Location": "/v1/sandboxes/" + sid})
+        if p == "/v1/volumes" or p.startswith("/v1/volumes/"):
+            return self._volumenes(m, p[len("/v1/volumes"):].strip("/"), cuerpo)
         if p.startswith("/v1/sandboxes/"):
             resto = p[len("/v1/sandboxes/"):]
             for suf in ("/renew", "/exec", "/files"):
@@ -110,6 +116,49 @@ class Manejador(BaseHTTPRequestHandler):
             if accion == "files":
                 return self._files(m, sid, q, cuerpo)
         self._err(404, "no route", "not_found")
+
+    def _lote(self, req):
+        st = self.server.estado
+        ok, errores = [], []
+        for i in range(req["count"]):
+            if st.lote_falla_desde and i >= st.lote_falla_desde:
+                errores.append({"index": i, "status": 500, "error": "boom"})
+                continue
+            st.n += 1
+            sid = "h1/m-%d" % st.n
+            st.sandboxes[sid] = {"id": sid, "host": "h1", "state": "running"}
+            ok.append(st.sandboxes[sid])
+        if req.get("atomic") and errores:
+            for sb in ok:
+                del st.sandboxes[sb["id"]]
+            return self._err(500, "boom", None)
+        out = {"sandboxes": ok}
+        if errores:
+            out["errors"] = errores
+        return self._json(207 if errores else 201, out)
+
+    def _volumenes(self, m, nombre, cuerpo):
+        st = self.server.estado
+        if not nombre and m == "GET":
+            return self._json(200, list(st.volumenes.values()))
+        if not nombre and m == "POST":
+            req = json.loads(cuerpo)
+            if req["name"] in st.volumenes:
+                return self._err(409, "exists", None)
+            v = {"name": req["name"], "host": req.get("host", "h1"),
+                 "size_mib": req.get("size_mib", 64), "used_bytes": 0, "in_use": False}
+            st.volumenes[v["name"]] = v
+            return self._json(201, v)
+        if nombre not in st.volumenes:
+            return self._err(404, "no volume %r" % nombre, "not_found")
+        if m == "GET":
+            return self._json(200, st.volumenes[nombre])
+        if m == "DELETE":
+            del st.volumenes[nombre]
+            self.send_response(204)
+            self.end_headers()
+            return
+        self._err(405, "no", None)
 
     def _exec(self, q, req):
         st = self.server.estado

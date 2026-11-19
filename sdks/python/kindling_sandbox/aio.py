@@ -5,7 +5,7 @@ from typing import Optional
 
 from .client import Client
 from .errors import NotFound
-from .sandbox import Sandbox
+from .sandbox import Sandbox, SandboxBatch
 
 _FIN = object()
 
@@ -53,6 +53,13 @@ class AsyncSandbox:
     @classmethod
     async def create(cls, *a, **k) -> "AsyncSandbox":
         return cls(await _hilo(Sandbox.create, *a, **k))
+
+    @classmethod
+    async def create_many(cls, *a, **k):
+        lote = await _hilo(Sandbox.create_many, *a, **k)
+        out = SandboxBatch(cls(s) for s in lote)
+        out.errors = lote.errors
+        return out
 
     @classmethod
     async def connect(cls, id, **k) -> "AsyncSandbox":

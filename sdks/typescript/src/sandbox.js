@@ -70,13 +70,29 @@ export class Sandbox {
   }
 
   /** `ttl` en segundos. */
-  static async create({ template, ttl, image, on_ttl, egress, allow_domains, mem_mib, vcpus, labels, ...conn } = {}) {
+  /** `volumes`: [{ name, mount, read_only, clone_from }] de volúmenes del inquilino (Client.createVolume). */
+  static async create({ template, ttl, image, on_ttl, egress, allow_domains, mem_mib, vcpus, labels, volumes, ...conn } = {}) {
     const c = Sandbox.#cliente(conn);
     const info = await c.createSandbox({
       template, image, ttl_seconds: ttl, on_ttl, egress,
       allow_domains: allow_domains?.length ? [...allow_domains] : undefined, mem_mib, vcpus, labels,
+      volumes: volumes?.length ? volumes.map((v) => ({ ...v })) : undefined,
     });
     return new Sandbox(info, c);
+  }
+  /**
+   * Crea `count` sandboxes iguales (evaluaciones, RL). Array de Sandbox con `.errors`
+   * (los que no salieron; solo sin `atomic`). Con `atomic: true` es todo o nada: si uno
+   * falla se borran los demás y se lanza la excepción. Un lote solo monta volúmenes read_only.
+   */
+  static async createMany(count, { atomic = false, template, ttl, image, on_ttl, egress, allow_domains, mem_mib, vcpus, labels, volumes, ...conn } = {}) {
+    const c = Sandbox.#cliente(conn);
+    const { sandboxes, errors } = await c.createSandboxes(count, {
+      atomic, template, image, ttl_seconds: ttl, on_ttl, egress,
+      allow_domains: allow_domains?.length ? [...allow_domains] : undefined, mem_mib, vcpus, labels,
+      volumes: volumes?.length ? volumes.map((v) => ({ ...v })) : undefined,
+    });
+    return Object.assign(sandboxes.map((i) => new Sandbox(i, c)), { errors });
   }
   static async connect(id, conn = {}) {
     const c = Sandbox.#cliente(conn);

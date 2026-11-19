@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 from .errors import ConfigError, TransportError, error_para
-from .models import ExecEvent, ExecResult, FileStat, Graph, SandboxInfo
+from .models import ExecEvent, ExecResult, FileStat, Graph, SandboxInfo, Volume
 
 ENV_URL = "KLING_SANDBOX_URL"
 ENV_TOKEN = "KLING_SANDBOX_TOKEN"
@@ -149,6 +149,19 @@ class Client:
         cuerpo = {k: v for k, v in peticion.items() if v is not None}
         return SandboxInfo.from_json(self._json("POST", "/v1/sandboxes", cuerpo=cuerpo))
 
+    def create_sandboxes(self, count: int, atomic: bool = False, **peticion):
+        """Crea un lote (`count`). Devuelve (lista de SandboxInfo, errores).
+
+        Cada error es {"index", "status", "error"} de un sandbox que no salió
+        (solo sin `atomic`: con `atomic` un fallo lanza la excepción de la API
+        y no queda nada creado)."""
+        cuerpo = {k: v for k, v in peticion.items() if v is not None}
+        cuerpo["count"] = count
+        if atomic:
+            cuerpo["atomic"] = True
+        j = self._json("POST", "/v1/sandboxes", cuerpo=cuerpo) or {}
+        return [SandboxInfo.from_json(x) for x in j.get("sandboxes") or []], j.get("errors") or []
+
     def get_sandbox(self, id: str) -> SandboxInfo:
         return SandboxInfo.from_json(self._json("GET", "/v1/sandboxes/" + id))
 
@@ -231,6 +244,23 @@ class Client:
 
     def delete_file(self, id: str, path: str) -> None:
         self._json("DELETE", "/v1/sandboxes/%s/files" % id, {"path": path})
+
+    # ---- volúmenes
+
+    def create_volume(self, name: str, size_mib: Optional[int] = None,
+                      clone_from: Optional[str] = None, host: Optional[str] = None) -> Volume:
+        cuerpo = {k: v for k, v in dict(name=name, size_mib=size_mib, clone_from=clone_from,
+                                        host=host).items() if v is not None}
+        return Volume.from_json(self._json("POST", "/v1/volumes", cuerpo=cuerpo))
+
+    def get_volume(self, name: str) -> Volume:
+        return Volume.from_json(self._json("GET", "/v1/volumes/" + name))
+
+    def list_volumes(self) -> List[Volume]:
+        return [Volume.from_json(x) for x in self._json("GET", "/v1/volumes") or []]
+
+    def delete_volume(self, name: str) -> None:
+        self._json("DELETE", "/v1/volumes/" + name)
 
     # ---- grafos
 

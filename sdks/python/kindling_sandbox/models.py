@@ -106,3 +106,13 @@ class ExecResult:
     @property
     def stderr(self) -> str:
         return self.stderr_bytes.decode("utf-8", "replace")
+
+
+@dataclass
+class Volume(_Base):
+    name: str = ""
+    host: str = ""
+    size_mib: int = 0
+    used_bytes: int = 0
+    in_use: bool = False
+    extra: Dict[str, Any] = field(default_factory=dict)

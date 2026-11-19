@@ -8,6 +8,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- kling-sandbox gateway: batch creation, `POST /v1/sandboxes` with `count` (capped per tenant and globally, 16 by default) spreads the sandboxes across hosts with bounded parallelism and counts the whole batch against the tenant's quotas before creating anything; `atomic: true` makes it all-or-nothing (the ones already created are removed if one fails), otherwise a partial batch answers 207 with the failures. SDKs: `Sandbox.create_many` (Python) and `Sandbox.createMany` (TypeScript).
+- kling-sandbox gateway: per-tenant volumes. `GET/POST/DELETE /v1/volumes` and `volumes: [{name, mount, read_only, clone_from}]` on sandbox creation; a tenant can't see or mount another's volume (404), and a sandbox is placed on the host that holds its existing volumes (409 when they are on different hosts). SDKs: `volumes` on create and `create/get/list/delete_volume`.
 - `sdks/typescript`: dependency-free JavaScript SDK (ESM + hand-written `.d.ts`, Node >= 18, `@kindling/sandbox`) for the sandbox gateway `/v1` API: create, get, list, delete, renew, exec (NDJSON stream and wait), files read/write/delete/stat, typed errors; tests against a fake server.
 - `sdks/python`: stdlib-only Python SDK (`kindling_sandbox`, sync and asyncio) for the sandbox gateway `/v1` API: create/get/list/renew/delete, exec (NDJSON stream and wait), files read/write/stat/delete, typed errors, tested against a fake server that follows the spec.
 - kling-sandbox: OpenAPI 3.1 spec of the `/v1` gateway API (`ext/sandbox/api/openapi.yaml`, see `docs/sandbox-api.md`), with a contract test that fails when a route or a schema field drifts from the code.

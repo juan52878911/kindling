@@ -18,6 +18,42 @@ puede faltar.
 El id de un sandbox es `host/máquina`: la barra va sin codificar en la ruta
 (`/v1/sandboxes/h1/m-abc/exec`).
 
+## Crear en lote
+
+`POST /v1/sandboxes` con `"count": N` crea N sandboxes iguales y responde
+`{"sandboxes": [...], "errors": [...]}` (también con `count: 1`; sin `count` la respuesta es
+el sandbox, como siempre). Es para evaluaciones y entrenamiento: un lote de 16 en una llamada.
+
+- **Topes.** `count` va de 1 al tope del tenant (`MaxLote`) y nunca pasa del global
+  (`Opciones.MaxLote`, 16 por defecto): si no, 400.
+- **Cuota.** Se cuenta el lote entero antes de crear nada (sandboxes, por plantilla, memoria
+  total): si no caben los N, 429 y no se crea ninguno.
+- **Reparto.** El sandbox *i* empieza por el *i*-ésimo host candidato (los que tienen la
+  plantilla o la imagen y contestan, por hueco libre) y pasa al siguiente si no cabe. Las
+  precalentadas se reclaman como en una creación suelta. Hasta 4 creaciones a la vez.
+- **`atomic: true`** es todo o nada: tras el primer fallo no se empieza ninguno más, se borran
+  los ya creados (y los volúmenes que el lote clonó) y la respuesta es el error de ese fallo.
+- **Sin `atomic`**, un lote parcial es **207** con los creados y un `errors` con
+  `{index, status, error}` por cada uno que falló; si fallan todos, el error del primero.
+
+## Volúmenes
+
+Los volúmenes son del tenant: otro tenant no los ve ni los monta (404, igual que si no
+existieran). Cada uno vive en **un host**, y un sandbox solo monta volúmenes del host donde
+corre.
+
+- `POST /v1/volumes` `{name, size_mib?, clone_from?, host?}` crea uno vacío o clon de otro
+  propio (en su host); `GET /v1/volumes`, `GET /v1/volumes/{name}` y
+  `DELETE /v1/volumes/{name}` (409 si está montado). Nombres `[a-z0-9_-]`, hasta 41.
+- `POST /v1/sandboxes` acepta `volumes: [{name, mount, read_only, clone_from}]`. El volumen
+  tiene que existir (si no, 404) o crearse al vuelo con `clone_from`. Uno existente **fija el
+  host**; dos en hosts distintos son 409 con el motivo. Un volumen en escritura lo monta un
+  solo sandbox a la vez (409 del daemon): un lote solo admite `read_only` y no admite
+  `clone_from`.
+- Dueño: el nombre en el daemon lleva un prefijo derivado del tenant y la etiqueta `tenant`.
+  El núcleo no copia etiquetas al clonar, así que un clon se reconoce por el prefijo solo.
+- `MaxVolumenes` por tenant (429) y `MaxVolumenMiB` global acotan lo que se crea.
+
 ## Streaming de exec
 
 `POST /v1/sandboxes/{id}/exec` responde `application/x-ndjson`: una línea JSON por

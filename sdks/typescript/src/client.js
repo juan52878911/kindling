@@ -109,6 +109,13 @@ export class Client {
     const cuerpo = Object.fromEntries(Object.entries(peticion).filter(([, v]) => v !== undefined && v !== null));
     return this._json("POST", "/v1/sandboxes", { cuerpo });
   }
+  /** Lote: devuelve `{ sandboxes, errors }` (errors solo sin `atomic`: lote parcial). */
+  async createSandboxes(count, { atomic = false, ...peticion } = {}) {
+    const cuerpo = { ...Object.fromEntries(Object.entries(peticion).filter(([, v]) => v !== undefined && v !== null)), count };
+    if (atomic) cuerpo.atomic = true;
+    const j = (await this._json("POST", "/v1/sandboxes", { cuerpo })) ?? {};
+    return { sandboxes: j.sandboxes ?? [], errors: j.errors ?? [] };
+  }
   getSandbox(id) { return this._json("GET", "/v1/sandboxes/" + id); }
   async listSandboxes() {
     const resp = await this._abrir("GET", "/v1/sandboxes");
@@ -199,6 +206,15 @@ export class Client {
   async deleteFile(id, path) {
     await this._json("DELETE", `/v1/sandboxes/${id}/files`, { query: { path }, timeout: null });
   }
+
+  // ---- volúmenes
+  createVolume(name, { size_mib, clone_from, host } = {}) {
+    const cuerpo = Object.fromEntries(Object.entries({ name, size_mib, clone_from, host }).filter(([, v]) => v !== undefined && v !== null));
+    return this._json("POST", "/v1/volumes", { cuerpo });
+  }
+  getVolume(name) { return this._json("GET", "/v1/volumes/" + name); }
+  async listVolumes() { return (await this._json("GET", "/v1/volumes")) ?? []; }
+  async deleteVolume(name) { await this._json("DELETE", "/v1/volumes/" + name); }
 
   // ---- grafos
   createGraph(template) { return this._json("POST", "/v1/graphs", { cuerpo: { template } }); }

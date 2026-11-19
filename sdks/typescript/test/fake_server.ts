@@ -9,6 +9,10 @@ interface Fake { id: string; files: Map<string, Buffer>; info: Record<string, un
 export class FakeGateway {
   sandboxes = new Map<string, Fake>();
   n = 0;
+  volumes = new Map<string, Record<string, unknown>>();
+  /** En un lote, los índices >= esto fallan. */
+  batchFailFrom = 0;
+  lastBody: any = null;
   /** Trozos del flujo NDJSON de exec; cada uno se escribe por separado (puede partir líneas). */
   streamChunks: string[] = [];
   rateLimitNext = 0;
@@ -48,9 +52,40 @@ export class FakeGateway {
       return this.err(r, 429, "cuota superada", "quota_exceeded", { "Retry-After": "7" });
     }
     const p = u.pathname.split("/").filter(Boolean); // v1 sandboxes {id} {sub}
+    if (p[1] === "volumes") {
+      if (p.length === 2 && q.method === "GET") return this.json(r, 200, [...this.volumes.values()]);
+      if (p.length === 2 && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString());
+        this.lastBody = req;
+        if (this.volumes.has(req.name)) return this.err(r, 409, "ya existe");
+        const v = { name: req.name, host: req.host ?? "h1", size_mib: req.size_mib ?? 64, used_bytes: 0, in_use: false };
+        this.volumes.set(req.name, v);
+        return this.json(r, 201, v);
+      }
+      const v = this.volumes.get(p[2]);
+      if (!v) return this.err(r, 404, `no volume ${p[2]}`, "not_found");
+      if (q.method === "GET") return this.json(r, 200, v);
+      if (q.method === "DELETE") { this.volumes.delete(p[2]); r.writeHead(204); return r.end(); }
+    }
     if (p[1] === "sandboxes" && p.length === 2) {
       if (q.method === "POST") {
         const req = JSON.parse((await this.body(q)).toString() || "{}");
+        this.lastBody = req;
+        if (req.count !== undefined) {
+          const ok: unknown[] = [], errors: unknown[] = [];
+          for (let i = 0; i < req.count; i++) {
+            if (this.batchFailFrom && i >= this.batchFailFrom) { errors.push({ index: i, status: 500, error: "boom" }); continue; }
+            const id = `sbx-${++this.n}`;
+            const info = { id, host: "h1", state: "running" };
+            this.sandboxes.set(id, { id, files: new Map(), info });
+            ok.push(info);
+          }
+          if (req.atomic && errors.length) {
+            for (const s of ok as { id: string }[]) this.sandboxes.delete(s.id);
+            return this.err(r, 500, "boom");
+          }
+          return this.json(r, errors.length ? 207 : 201, errors.length ? { sandboxes: ok, errors } : { sandboxes: ok });
+        }
         const id = `sbx-${++this.n}`;
         const ttl = req.ttl_seconds ?? 300;
         const info = { id, host: "h1", template: req.template ?? "base", image: "img", state: "running", vcpus: 1, mem_mib: 256,

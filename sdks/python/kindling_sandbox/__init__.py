@@ -5,8 +5,8 @@ from .client import Client
 from .errors import (ApiError, BadRequest, Conflict, ConfigError, Forbidden, NotFound,
                      PayloadTooLarge, RateLimited, SandboxError, ServerError, TransportError,
                      Unauthorized)
-from .models import ExecEvent, ExecResult, FileStat, Graph, SandboxInfo
-from .sandbox import Files, Sandbox, SandboxList
+from .models import ExecEvent, ExecResult, FileStat, Graph, SandboxInfo, Volume
+from .sandbox import Files, Sandbox, SandboxBatch, SandboxList
 
 __version__ = "0.1.0"
 __all__ = [n for n in dir() if not n.startswith("_")]

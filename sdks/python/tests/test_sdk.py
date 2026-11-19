@@ -20,6 +20,48 @@ class Base(unittest.TestCase):
         self.kw = dict(url=self.srv.url, token=TOKEN)
 
 
+class TestLoteYVolumenes(Base):
+    def test_create_many_manda_count_y_atomic(self):
+        lote = Sandbox.create_many(3, template="py", atomic=True, **self.kw)
+        self.assertEqual([s.id for s in lote], ["h1/m-1", "h1/m-2", "h1/m-3"])
+        self.assertEqual(lote.errors, [])
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]),
+                         {"template": "py", "count": 3, "atomic": True})
+
+    def test_lote_parcial_trae_errores(self):
+        self.srv.estado.lote_falla_desde = 2
+        lote = Sandbox.create_many(4, **self.kw)
+        self.assertEqual(len(lote), 2)
+        self.assertEqual([e["index"] for e in lote.errors], [2, 3])
+
+    def test_lote_atomico_que_falla_lanza_y_no_deja_nada(self):
+        self.srv.estado.lote_falla_desde = 1
+        with self.assertRaises(ApiError):
+            Sandbox.create_many(3, atomic=True, **self.kw)
+        self.assertEqual(self.srv.estado.sandboxes, {})
+
+    def test_create_con_volumenes(self):
+        Sandbox.create(volumes=[{"name": "datos", "mount": "/data", "read_only": True}], **self.kw)
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]),
+                         {"volumes": [{"name": "datos", "mount": "/data", "read_only": True}]})
+
+    def test_crud_de_volumenes(self):
+        c = Client(**self.kw)
+        v = c.create_volume("datos", size_mib=128, host="h1")
+        self.assertEqual((v.name, v.size_mib, v.host), ("datos", 128, "h1"))
+        self.assertEqual([x.name for x in c.list_volumes()], ["datos"])
+        self.assertEqual(c.get_volume("datos").name, "datos")
+        c.delete_volume("datos")
+        with self.assertRaises(NotFound):
+            c.get_volume("datos")
+
+    def test_async(self):
+        async def f():
+            lote = await AsyncSandbox.create_many(2, **self.kw)
+            return [s.id for s in lote], lote.errors
+        self.assertEqual(asyncio.run(f()), (["h1/m-1", "h1/m-2"], []))
+
+
 class TestCiclo(Base):
     def test_create_get_list_renew_delete(self):
         sb = Sandbox.create(template="py", ttl=120, labels={"a": "b"}, **self.kw)

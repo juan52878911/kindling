@@ -8,7 +8,7 @@ import { FakeGateway, TOKEN } from "./fake_server.ts";
 const gw = new FakeGateway();
 before(() => gw.start());
 after(() => gw.stop());
-beforeEach(() => { gw.streamChunks = []; gw.rateLimitNext = 0; gw.requests = []; });
+beforeEach(() => { gw.batchFailFrom = 0; gw.streamChunks = []; gw.rateLimitNext = 0; gw.requests = []; });
 const conn = () => ({ url: gw.url, token: TOKEN });
 
 test("create / get / list / renew / delete", async () => {
@@ -135,4 +135,31 @@ test("configuración por entorno", async () => {
     if (antes[0] === undefined) delete process.env.KLING_SANDBOX_URL;
     if (antes[1] === undefined) delete process.env.KLING_SANDBOX_TOKEN;
   }
+});
+
+test("lote: count, atomic y lote parcial", async () => {
+  const lote = await Sandbox.createMany(3, { template: "py", atomic: true, ...conn() });
+  assert.equal(lote.length, 3);
+  assert.deepEqual(lote.errors, []);
+  assert.deepEqual(gw.lastBody, { template: "py", count: 3, atomic: true });
+  gw.batchFailFrom = 2;
+  const parcial = await Sandbox.createMany(4, conn());
+  assert.equal(parcial.length, 2);
+  assert.deepEqual(parcial.errors.map((e) => e.index), [2, 3]);
+  const antes = gw.sandboxes.size;
+  gw.batchFailFrom = 1;
+  await assert.rejects(Sandbox.createMany(3, { atomic: true, ...conn() }), ServerError);
+  assert.equal(gw.sandboxes.size, antes); // nada queda creado
+});
+
+test("create con volúmenes y CRUD de volúmenes", async () => {
+  await Sandbox.create({ volumes: [{ name: "datos", mount: "/data", read_only: true }], ...conn() });
+  assert.deepEqual(gw.lastBody, { volumes: [{ name: "datos", mount: "/data", read_only: true }] });
+  const c = new Client(conn());
+  const v = await c.createVolume("datos", { size_mib: 128, host: "h1" });
+  assert.deepEqual([v.name, v.size_mib, v.host], ["datos", 128, "h1"]);
+  assert.equal((await c.listVolumes()).length, 1);
+  assert.equal((await c.getVolume("datos")).name, "datos");
+  await c.deleteVolume("datos");
+  await assert.rejects(c.getVolume("datos"), NotFound);
 });

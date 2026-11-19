@@ -1,6 +1,6 @@
 """API de alto nivel síncrona: Sandbox, Files."""
 
-from typing import Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from .client import Client
 from .models import ExecEvent, ExecResult, FileStat, SandboxInfo
@@ -9,6 +9,11 @@ from .models import ExecEvent, ExecResult, FileStat, SandboxInfo
 class SandboxList(list):
     """Lista de Sandbox; `partial` trae la cabecera X-Kindling-Partial (hosts caídos)."""
     partial: Optional[str] = None
+
+
+class SandboxBatch(list):
+    """Lista de Sandbox de un lote; `errors` son los que no salieron (sin `atomic`)."""
+    errors: list = []
 
 
 def _cliente(client, url, token, timeout) -> Client:
@@ -83,16 +88,45 @@ class Sandbox:
                image: Optional[str] = None, on_ttl: Optional[str] = None,
                egress: Optional[str] = None, allow_domains: Optional[Sequence[str]] = None,
                mem_mib: Optional[int] = None, vcpus: Optional[int] = None,
-               labels: Optional[Dict[str, str]] = None, url: Optional[str] = None,
+               labels: Optional[Dict[str, str]] = None,
+               volumes: Optional[Sequence[Dict[str, Any]]] = None, url: Optional[str] = None,
                token: Optional[str] = None, timeout: Optional[float] = 60.0,
                client: Optional[Client] = None) -> "Sandbox":
-        """`ttl` en segundos."""
+        """`ttl` en segundos. `volumes`: [{"name", "mount", "read_only", "clone_from"}]
+        con volúmenes del inquilino (ver Client.create_volume)."""
         c = _cliente(client, url, token, timeout)
         info = c.create_sandbox(template=template, image=image, ttl_seconds=ttl, on_ttl=on_ttl,
                                 egress=egress,
                                 allow_domains=list(allow_domains) if allow_domains else None,
-                                mem_mib=mem_mib, vcpus=vcpus, labels=labels)
+                                mem_mib=mem_mib, vcpus=vcpus, labels=labels,
+                                volumes=[dict(v) for v in volumes] if volumes else None)
         return cls(info, c)
+
+    @classmethod
+    def create_many(cls, count: int, template: Optional[str] = None, ttl: Optional[int] = None, *,
+                    atomic: bool = False, image: Optional[str] = None,
+                    on_ttl: Optional[str] = None, egress: Optional[str] = None,
+                    allow_domains: Optional[Sequence[str]] = None,
+                    mem_mib: Optional[int] = None, vcpus: Optional[int] = None,
+                    labels: Optional[Dict[str, str]] = None,
+                    volumes: Optional[Sequence[Dict[str, Any]]] = None,
+                    url: Optional[str] = None, token: Optional[str] = None,
+                    timeout: Optional[float] = 300.0,
+                    client: Optional[Client] = None) -> SandboxBatch:
+        """Crea `count` sandboxes iguales de una vez (evaluaciones, RL).
+
+        Con `atomic=True` es todo o nada: si uno falla se borran los demás y se
+        lanza la excepción. Sin él, un lote parcial devuelve los que salieron y
+        `.errors` dice cuáles no. Un lote solo monta volúmenes `read_only`."""
+        c = _cliente(client, url, token, timeout)
+        infos, errores = c.create_sandboxes(
+            count, atomic=atomic, template=template, image=image, ttl_seconds=ttl, on_ttl=on_ttl,
+            egress=egress, allow_domains=list(allow_domains) if allow_domains else None,
+            mem_mib=mem_mib, vcpus=vcpus, labels=labels,
+            volumes=[dict(v) for v in volumes] if volumes else None)
+        out = SandboxBatch(cls(i, c) for i in infos)
+        out.errors = errores
+        return out
 
     @classmethod
     def connect(cls, id: str, *, url=None, token=None, timeout: Optional[float] = 60.0,

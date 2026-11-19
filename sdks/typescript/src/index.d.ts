@@ -27,7 +27,13 @@ export interface ConnectionOptions {
 export interface CreateOptions extends ConnectionOptions {
   template?: string; /** segundos */ ttl?: number; image?: string; on_ttl?: string; egress?: string;
   allow_domains?: string[]; mem_mib?: number; vcpus?: number; labels?: Record<string, string>;
+  /** Volúmenes del inquilino a montar. */
+  volumes?: VolumeMount[];
 }
+export interface VolumeMount { name: string; mount: string; read_only?: boolean; /** crea `name` clonando este volumen propio */ clone_from?: string }
+export interface CreateManyOptions extends CreateOptions { /** todo o nada */ atomic?: boolean }
+export interface BatchError { index: number; status: number; error: string }
+export interface VolumeInfo { name: string; host: string; size_mib: number; used_bytes: number; in_use: boolean; [extra: string]: unknown }
 
 export class Client {
   constructor(opts?: { url?: string; token?: string; timeout?: number | null; fetch?: typeof fetch });
@@ -37,6 +43,7 @@ export class Client {
   templates(): Promise<unknown[]>;
   metrics(): Promise<string>;
   createSandbox(peticion: Record<string, unknown>): Promise<SandboxInfo>;
+  createSandboxes(count: number, peticion?: Record<string, unknown> & { atomic?: boolean }): Promise<{ sandboxes: SandboxInfo[]; errors: BatchError[] }>;
   getSandbox(id: string): Promise<SandboxInfo>;
   listSandboxes(): Promise<{ sandboxes: SandboxInfo[]; partial: string | null }>;
   deleteSandbox(id: string): Promise<void>;
@@ -47,6 +54,10 @@ export class Client {
   statFile(id: string, path: string): Promise<FileStat>;
   writeFile(id: string, path: string, datos: Uint8Array | string, o?: { mode?: number; mkdir?: boolean }): Promise<FileStat>;
   deleteFile(id: string, path: string): Promise<void>;
+  createVolume(name: string, o?: { size_mib?: number; clone_from?: string; host?: string }): Promise<VolumeInfo>;
+  getVolume(name: string): Promise<VolumeInfo>;
+  listVolumes(): Promise<VolumeInfo[]>;
+  deleteVolume(name: string): Promise<void>;
   createGraph(template: string): Promise<Graph>;
   getGraph(id: string): Promise<Graph>;
   listGraphs(): Promise<Graph[]>;
@@ -62,6 +73,7 @@ export class Files {
 }
 
 export type SandboxList = Sandbox[] & { partial: string | null };
+export type SandboxBatch = Sandbox[] & { errors: BatchError[] };
 
 export class Sandbox implements AsyncDisposable {
   constructor(info: SandboxInfo, client: Client);
@@ -69,6 +81,7 @@ export class Sandbox implements AsyncDisposable {
   readonly id: string;
   readonly files: Files;
   static create(opts?: CreateOptions): Promise<Sandbox>;
+  static createMany(count: number, opts?: CreateManyOptions): Promise<SandboxBatch>;
   static connect(id: string, opts?: ConnectionOptions): Promise<Sandbox>;
   static list(opts?: ConnectionOptions): Promise<SandboxList>;
   refresh(): Promise<this>;
