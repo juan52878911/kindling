@@ -37,8 +37,9 @@ func extension() *plugin.Builtin {
 					"  sbx template apply -f tpl.json | ls | rebuild N  recipes that become golden snapshots\n" +
 					"  sbx new -template T [-ttl 10m] | ls | rm ID      sandboxes through the gateway\n" +
 					"  sbx exec ID -- cmd... | shell ID | cp ...        work inside one\n" +
-					"  sbx hosts                                        which daemons are behind the gateway",
-				Subcommands: []string{"gateway", "template", "new", "ls", "rm", "renew", "exec", "shell", "cp", "hosts"},
+					"  sbx hosts                                        which daemons are behind the gateway\n" +
+					"  sbx mcp [-url U] [-ca PEM]                       MCP server (stdio) for agents",
+				Subcommands: []string{"gateway", "template", "new", "ls", "rm", "renew", "exec", "shell", "cp", "hosts", "mcp"},
 			}},
 			Config: []plugin.ConfigKey{
 				{Key: "listen", Type: "string", Help: "address the gateway listens on (default 127.0.0.1:8090; off loopback it needs TLS or -insecure-listen)"},

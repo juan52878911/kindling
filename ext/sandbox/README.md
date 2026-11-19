@@ -119,6 +119,42 @@ curl -H "Authorization: Bearer $TOK" https://gateway:8090/v1/templates  # qué h
 curl -H "Authorization: Bearer $ADMIN" https://gateway:8090/v1/hosts    # los daemons y sus endpoints (solo admin)
 ```
 
+## Servidor MCP para agentes
+
+`kling sbx mcp` es un servidor MCP (stdio, JSON-RPC por líneas, protocolo 2025-06-18) que
+deja a un agente manejar sandboxes a través del gateway. Herramientas: `sandbox_create`
+(`template`, `ttl_seconds`, `labels`), `sandbox_list`, `sandbox_exec` (`id`, `command`,
+`cwd`, `env`, `timeout_seconds`; usa `?wait=1`), `sandbox_read_file`, `sandbox_write_file`,
+`sandbox_delete` y `sandbox_renew`. Un error de la API (404, 401, 429...) vuelve como
+resultado con `isError: true` y su código HTTP, no como error JSON-RPC.
+
+La salida de `sandbox_exec` (stdout y stderr por separado) y los ficheros leídos se
+recortan a 64 KiB con un aviso `[truncated: ...]`. La URL sale de `-url`, `$KLING_SANDBOX_URL`
+o `sandbox.url`; el token de `$KLING_SANDBOX_TOKEN` o `sandbox.token` (no hay flag para el
+token: se vería en `ps`) y nunca se escribe en salida, errores ni logs. Para un gateway con
+CA propia: `-ca ca.pem` o `$KLING_SANDBOX_CA`.
+
+```sh
+claude mcp add sandbox -e KLING_SANDBOX_URL=https://gateway:8090 -e KLING_SANDBOX_TOKEN=... -- kling sbx mcp
+```
+
+O en `.mcp.json` (usa la expansión de variables de Claude Code para no escribir el token):
+
+```json
+{
+  "mcpServers": {
+    "sandbox": {
+      "command": "kling",
+      "args": ["sbx", "mcp"],
+      "env": {
+        "KLING_SANDBOX_URL": "https://gateway:8090",
+        "KLING_SANDBOX_TOKEN": "${KLING_SANDBOX_TOKEN}"
+      }
+    }
+  }
+}
+```
+
 ## Grafos precalentados
 
 Un entorno entero —el sandbox del agente con su Postgres, por ejemplo— se precalienta
