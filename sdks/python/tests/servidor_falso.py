@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 TOKEN = "tok-secreto-de-prueba"
+TOKEN_USUARIO = "tok-sin-admin-de-prueba"
 
 
 class Estado:
@@ -28,6 +29,8 @@ class Estado:
         self.procesos = {}  # (id, pid) -> dict
         self.salida_proc = b"hola\nmundo\n"
         self.sesiones = {}  # (id, sid) -> dict
+        self.tenants = {}  # nombre -> dict (con "keys": [ficha])
+        self.claves = {}  # texto en claro -> (tenant, id)
         self.lote_falla_desde = 0  # en un lote, los índices >= esto fallan (500)
 
 
@@ -66,11 +69,15 @@ class Manejador(BaseHTTPRequestHandler):
         st.peticiones.append((self.command, u.path, q, dict(self.headers), cuerpo))
         if u.path == "/v1/health":
             return self._json(200, {"ok": True})
-        if self.headers.get("Authorization") != "Bearer " + TOKEN:
+        if self.headers.get("Authorization") not in ("Bearer " + TOKEN, "Bearer " + TOKEN_USUARIO):
             return self._err(401, "invalid token", "unauthorized",
                              {"WWW-Authenticate": 'Bearer realm="kindling-sandbox"'})
         p = u.path
         m = self.command
+        if p == "/v1/tenants" or p.startswith("/v1/tenants/"):
+            if self.headers.get("Authorization") != "Bearer " + TOKEN:
+                return self._err(403, "managing tenants and keys needs an admin token", "forbidden")
+            return self._tenants(m, p[len("/v1/tenants"):].strip("/"), cuerpo)
         if p == "/v1/sandboxes":
             if m == "GET":
                 return self._json(200, list(st.sandboxes.values()),
@@ -249,6 +256,72 @@ class Manejador(BaseHTTPRequestHandler):
             return
         self._err(405, "no", None)
 
+    def _tenants(self, m, resto, cuerpo):
+        st = self.server.estado
+        partes = resto.split("/") if resto else []
+        req = json.loads(cuerpo) if cuerpo else {}
+        if not partes:
+            if m == "GET":
+                return self._json(200, {"tenants": list(st.tenants.values())})
+            if m == "POST":
+                if req.get("name") in st.tenants:
+                    return self._err(409, "tenant already exists", "conflict")
+                t = {"id": req["name"], "name": req["name"], "source": "store", "read_only": False,
+                     "admin": req.get("admin", False), "limits": req.get("limits") or {},
+                     "created": "2026-01-01T00:00:00Z", "keys": [], "campo_nuevo": 1}
+                st.tenants[t["id"]] = t
+                return self._json(201, t)
+        t = st.tenants.get(partes[0]) if partes else None
+        if t is None:
+            return self._err(404, "tenant not found", "not_found")
+        if len(partes) == 1:
+            if m == "GET":
+                return self._json(200, t)
+            if m == "PATCH":
+                if "admin" in req:
+                    t["admin"] = req["admin"]
+                if "limits" in req:
+                    t["limits"] = req["limits"]
+                return self._json(200, t)
+            if m == "DELETE":
+                del st.tenants[partes[0]]
+                self.send_response(204)
+                self.end_headers()
+                return
+        if len(partes) >= 2 and partes[1] == "keys":
+            if len(partes) == 2 and m == "POST":
+                return self._clave_nueva(t, req.get("expires_at"))
+            kid = partes[2] if len(partes) > 2 else ""
+            ficha = next((k for k in t["keys"] if k["id"] == kid), None)
+            if len(partes) > 2 and ficha is None:
+                return self._err(404, "key not found", "not_found")
+            if len(partes) == 3 and m == "DELETE":
+                ficha.setdefault("revoked", "2026-01-01T00:00:00Z")
+                self.send_response(204)
+                self.end_headers()
+                return
+            if len(partes) == 4 and partes[3] == "rotate" and m == "POST":
+                gracia = req.get("grace_minutes", 10)
+                if gracia < 0 or gracia > 1440:
+                    return self._err(400, "grace period out of range", "bad_request")
+                ficha["expires"] = "en %d min" % gracia
+                return self._clave_nueva(t, None, vieja=ficha)
+        self._err(404, "no route", "not_found")
+
+    def _clave_nueva(self, t, caduca, vieja=None):
+        st = self.server.estado
+        kid = "%012x" % (len(st.claves) + 1)
+        texto = "ksk_%s_secreto%d" % (kid, len(st.claves) + 1)
+        ficha = {"id": kid, "prefix": "ksk_" + kid, "created": "2026-01-01T00:00:00Z"}
+        if caduca:
+            ficha["expires"] = caduca
+        t["keys"].append(ficha)
+        st.claves[texto] = (t["id"], kid)
+        r = dict(ficha, key=texto)
+        if vieja is not None:
+            r["old_key_id"], r["old_key_expires"] = vieja["id"], vieja["expires"]
+        return self._json(201, r)
+
     def _exec(self, q, req):
         st = self.server.estado
         if not req.get("cmd"):
@@ -307,7 +380,7 @@ class Manejador(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-    do_GET = do_POST = do_PUT = do_DELETE = _despachar
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _despachar
 
 
 class ServidorFalso:

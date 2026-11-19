@@ -51,6 +51,35 @@ export interface CreateManyOptions extends CreateOptions { /** todo o nada */ at
 export interface BatchError { index: number; status: number; error: string }
 export interface VolumeInfo { name: string; host: string; size_mib: number; used_bytes: number; in_use: boolean; [extra: string]: unknown }
 
+export type TenantLimits = Partial<Record<"max_sandboxes" | "max_per_template" | "max_shells" | "max_processes" | "max_sessions" | "max_follow" | "max_mem_mib" | "max_vcpus" | "max_mem_total_mib" | "max_batch" | "max_volumes", number>>;
+export interface TenantKey { id: string; prefix: string; created: string; expires?: string; revoked?: string; last_used?: string; [extra: string]: unknown }
+export interface TenantInfo { id: string; name: string; source: "store" | "env"; read_only: boolean; admin: boolean; limits: TenantLimits; created?: string; keys: TenantKey[]; [extra: string]: unknown }
+
+/** Respuesta de crear o rotar una clave; `key` (la clave en claro) solo se ve aquí y no sale en inspect ni JSON. */
+export class CreatedKey {
+  readonly id: string;
+  readonly prefix: string;
+  readonly created: string;
+  readonly expires?: string;
+  readonly old_key_id?: string;
+  readonly old_key_expires?: string;
+  readonly key: string;
+}
+
+/** `/v1/tenants`: inquilinos y claves del gateway. Pide un token de admin (si no, `Forbidden`). */
+export class Admin {
+  constructor(opts?: { url?: string; token?: string; timeout?: number | null; fetch?: typeof fetch; client?: Client });
+  readonly client: Client;
+  listTenants(): Promise<TenantInfo[]>;
+  getTenant(id: string): Promise<TenantInfo>;
+  createTenant(name: string, o?: { admin?: boolean; limits?: TenantLimits }): Promise<TenantInfo>;
+  updateTenant(id: string, o?: { admin?: boolean; limits?: TenantLimits }): Promise<TenantInfo>;
+  deleteTenant(id: string): Promise<void>;
+  createKey(tenant: string, o?: { expiresAt?: string }): Promise<CreatedKey>;
+  rotateKey(tenant: string, keyId: string, o?: { graceMinutes?: number }): Promise<CreatedKey>;
+  revokeKey(tenant: string, keyId: string): Promise<void>;
+}
+
 export class Client {
   constructor(opts?: { url?: string; token?: string; timeout?: number | null; fetch?: typeof fetch });
   readonly url: string;

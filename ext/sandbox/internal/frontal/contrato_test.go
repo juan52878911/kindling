@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -107,6 +108,9 @@ func leerFuente(t *testing.T, nombre string) string {
 
 // concreta sustituye {id} por un id con la forma real host/máquina.
 func concreta(ruta string) string {
+	if strings.HasPrefix(ruta, "/v1/tenants") { // aquí el id no lleva barra
+		return strings.NewReplacer("{id}", "t1", "{kid}", "k1").Replace(ruta)
+	}
 	return strings.NewReplacer("{id}", "h1/m1", "{pid}", "1", "{sid}", "s1").Replace(ruta)
 }
 
@@ -130,7 +134,7 @@ func TestContratoRutas(t *testing.T) {
 	}
 	// Patrones registrados en el mux (frontal.go).
 	reMux := regexp.MustCompile(`m\.Handle(?:Func)?\("(?:([A-Z]+) )?(/v1/[^"]*)"`)
-	for _, m := range reMux.FindAllStringSubmatch(leerFuente(t, "frontal.go"), -1) {
+	for _, m := range reMux.FindAllStringSubmatch(leerFuente(t, "frontal.go")+leerFuente(t, "tenants.go"), -1) {
 		p := m[2]
 		if strings.HasSuffix(p, "/") { // subárbol despachado a mano: {id}
 			candidatas[p+"{id}"] = true
@@ -189,6 +193,9 @@ func TestContratoEsquemas(t *testing.T) {
 		"Grafo": Grafo{}, "NodoGrafo": NodoGrafo{}, "CrearGrafoPeticion": CrearGrafoPeticion{},
 		"TemplateInfo": TemplateInfo{}, "TemplateHost": TemplateHost{}, "HostEstado": hosts.Estado{},
 		"Error": api.Error{}, "ExecRequest": api.ExecRequest{}, "ExecEvent": api.ExecEvent{},
+		"Tenant": vistaTenant{}, "ClaveTenant": vistaClave{}, "TopesTenant": inquilinos.Topes{},
+		"CrearTenantPeticion": pedirTenant{}, "CambiarTenantPeticion": cambiarTenant{},
+		"CrearClavePeticion": pedirClave{}, "RotarClavePeticion": pedirRotar{}, "ClaveCreada": claveCreada{},
 		"ExecResult": api.ExecResult{}, "ProcessStartRequest": api.ProcessStartRequest{}, "ProcessInfo": api.ProcessInfo{},
 		"ProcessEvent": api.ProcessEvent{}, "ProcessSignalRequest": api.ProcessSignalRequest{}, "SessionRequest": api.SessionRequest{}, "Session": api.Session{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{},
 	}

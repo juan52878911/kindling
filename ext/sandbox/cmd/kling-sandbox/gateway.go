@@ -26,6 +26,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/frontal"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
 )
 
@@ -95,6 +96,7 @@ func cmdGateway(args []string) error {
 	ingSecreto := fs.String("ingress-secret-file", "", "file with the secret that signs endpoint tokens (default: random per process)")
 	ingConns := fs.Int("ingress-max-conns", 0, "most simultaneous ingress connections per sandbox (default 64)")
 	ingCab := fs.Int("ingress-max-header-bytes", 0, "largest request headers accepted through the ingress (default 32768)")
+	estado := fs.String("state-dir", os.Getenv("KLING_SANDBOX_STATE_DIR"), "directory for the persistent tenant store (tenants and keys managed through /v1/tenants); empty = store off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -112,8 +114,15 @@ func cmdGateway(args []string) error {
 		a.TLSCert, a.TLSKey = *tlsCert, *tlsKey
 	}
 
+	var almacen *inquilinos.Almacen
+	if *estado != "" {
+		if almacen, err = inquilinos.Abrir(*estado, inquilinos.Opciones{}); err != nil {
+			return fmt.Errorf("-state-dir: %w", err)
+		}
+		defer almacen.Cerrar()
+	}
 	tenants, err := leerTenants()
-	if err != nil {
+	if err != nil && (almacen == nil || almacen.Cuantos() == 0 || !errors.Is(err, errSinTenants)) {
 		return err
 	}
 	reg := hosts.Nuevo(a.Hosts)
@@ -134,6 +143,7 @@ func cmdGateway(args []string) error {
 	srv, err := frontal.Nuevo(frontal.Opciones{
 		Hosts:            reg,
 		Tenants:          tenants,
+		Almacen:          almacen,
 		ImagenPorDefecto: *imagen,
 		Abandono:         a.Reap,
 		MaxMemMiB:        *maxMem,
@@ -159,7 +169,11 @@ func cmdGateway(args []string) error {
 	}
 	hsrv := servidorHTTP(srv)
 
-	log.Printf("sandbox gateway on %s · %d tenant(s) · hosts: %s", ln.Addr(), len(tenants), strings.Join(nombres(a.Hosts), ", "))
+	n := len(tenants)
+	if almacen != nil {
+		n += almacen.Cuantos()
+	}
+	log.Printf("sandbox gateway on %s · %d tenant(s) · hosts: %s", ln.Addr(), n, strings.Join(nombres(a.Hosts), ", "))
 	for _, e := range reg.Estados(ctx) {
 		if e.Vivo {
 			log.Printf("  %s: kindling %s, %d machine(s), %d MiB available", e.Nombre, e.Version, e.Maquinas, e.DisponibleMB)
@@ -224,6 +238,8 @@ func nombres(m map[string]string) []string {
 // (frontal.Nuevo se niega a arrancar si no).
 //
 //	KLING_SANDBOX_ADMINS=ana                             tenants que ven /v1/hosts y las métricas de todos
+var errSinTenants = errors.New("no tenants: set KLING_SANDBOX_TOKEN (or KLING_SANDBOX_TENANTS) before serving, or use -state-dir with a store that has tenants")
+
 func leerTenants() ([]frontal.Tenant, error) {
 	var out []frontal.Tenant
 	if v := os.Getenv("KLING_SANDBOX_TOKEN"); v != "" {
@@ -294,7 +310,7 @@ func leerTenants() ([]frontal.Tenant, error) {
 		out = append(out, te)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no tenants: set KLING_SANDBOX_TOKEN (or KLING_SANDBOX_TENANTS) before serving")
+		return nil, errSinTenants
 	}
 	// Los admins ven /v1/hosts y las métricas de todos los tenants.
 	for _, n := range strings.Split(os.Getenv("KLING_SANDBOX_ADMINS"), ",") {

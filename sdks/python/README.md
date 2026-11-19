@@ -42,6 +42,20 @@ with Sandbox.create(template="python", ttl=600) as sb:   # se borra al salir
 - Cliente de bajo nivel: `Client` (`health`, `hosts`, `templates`, `metrics`,
   grafos `create_graph/get_graph/list_graphs/delete_graph`).
 
+## Administrar inquilinos y claves
+
+Con un token de admin, `Admin` maneja `/v1/tenants` (hace falta que el gateway arranque con `-state-dir`):
+
+```python
+from kindling_sandbox import Admin
+
+adm = Admin(url="https://gateway:8090", token=ADMIN_TOKEN)
+adm.create_tenant("ana", limits={"max_sandboxes": 10})
+clave = adm.create_key("ana")      # clave.key solo se ve ahora
+nueva = adm.rotate_key("ana", clave.id, grace_minutes=10)
+adm.revoke_key("ana", nueva.id)
+```
+
 ## Errores
 
 `ApiError(status, message, code, retry_after)` y sus subclases `BadRequest`,

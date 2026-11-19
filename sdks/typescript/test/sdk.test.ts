@@ -2,13 +2,13 @@ import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { inspect } from "node:util";
 import { randomBytes } from "node:crypto";
-import { Client, Sandbox, NotFound, Unauthorized, RateLimited, ApiError, ServerError, TransportError, ConfigError } from "../src/index.js";
-import { FakeGateway, TOKEN } from "./fake_server.ts";
+import { Admin, Client, Sandbox, Forbidden, NotFound, Unauthorized, RateLimited, ApiError, ServerError, TransportError, ConfigError } from "../src/index.js";
+import { FakeGateway, TOKEN, TOKEN_USER } from "./fake_server.ts";
 
 const gw = new FakeGateway();
 before(() => gw.start());
 after(() => gw.stop());
-beforeEach(() => { gw.batchFailFrom = 0; gw.streamChunks = []; gw.rateLimitNext = 0; gw.requests = []; });
+beforeEach(() => { gw.tenants.clear(); gw.batchFailFrom = 0; gw.streamChunks = []; gw.rateLimitNext = 0; gw.requests = []; });
 const conn = () => ({ url: gw.url, token: TOKEN });
 
 test("create / get / list / renew / delete", async () => {
@@ -207,4 +207,47 @@ test("sesiones: create / exec / list / delete", async () => {
   await sb.sessions.delete("dev");
   await assert.rejects(sb.sessions.get("dev"), NotFound);
   await sb.exec("pwd", { session: "dev" }); // exec normal con sesión
+});
+
+test("admin: ciclo de inquilinos", async () => {
+  const adm = new Admin(conn());
+  const t = await adm.createTenant("ana", { limits: { max_sandboxes: 3 } });
+  assert.deepEqual([t.id, t.source, t.read_only, t.limits], ["ana", "store", false, { max_sandboxes: 3 }]);
+  assert.equal(t.campo_nuevo, 1); // campos nuevos se toleran
+  assert.deepEqual(gw.lastBody, { name: "ana", admin: false, limits: { max_sandboxes: 3 } });
+  assert.deepEqual((await adm.listTenants()).map((x) => x.id), ["ana"]);
+  assert.equal((await adm.updateTenant("ana", { admin: true })).admin, true);
+  assert.deepEqual(gw.lastBody, { admin: true });
+  assert.deepEqual((await adm.getTenant("ana")).limits, { max_sandboxes: 3 });
+  await adm.deleteTenant("ana");
+  await assert.rejects(adm.getTenant("ana"), NotFound);
+});
+
+test("admin: claves crear, rotar y revocar", async () => {
+  const adm = new Admin(conn());
+  await adm.createTenant("ana");
+  const k = await adm.createKey("ana");
+  assert.match(k.key, new RegExp(`^ksk_${k.id}_`));
+  const n = await adm.rotateKey("ana", k.id, { graceMinutes: 5 });
+  assert.deepEqual([n.old_key_id, n.old_key_expires], [k.id, "en 5 min"]);
+  assert.notEqual(n.key, k.key);
+  assert.deepEqual(gw.lastBody, { grace_minutes: 5 });
+  await adm.rotateKey("ana", n.id);
+  assert.equal(gw.lastBody, null); // sin cuerpo: la gracia por defecto es del gateway
+  await assert.rejects(adm.rotateKey("ana", n.id, { graceMinutes: 99999 }), ApiError);
+  await adm.revokeKey("ana", n.id);
+  const fichas = (await adm.getTenant("ana")).keys;
+  assert.equal(fichas.length, 3);
+  assert.ok(fichas[1].revoked);
+  assert.equal(JSON.stringify(fichas).includes("secreto"), false); // la lectura no trae secretos
+  await assert.rejects(adm.revokeKey("ana", "nope"), NotFound);
+});
+
+test("admin: la clave no sale en inspect ni en JSON; no-admin es Forbidden", async () => {
+  const adm = new Admin(conn());
+  await adm.createTenant("ana");
+  const k = await adm.createKey("ana");
+  assert.equal((inspect(k) + JSON.stringify(k) + String(k)).includes(k.key), false);
+  assert.equal(inspect(adm.client).includes(TOKEN), false);
+  await assert.rejects(new Admin({ url: gw.url, token: TOKEN_USER }).listTenants(), Forbidden);
 });

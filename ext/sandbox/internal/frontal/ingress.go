@@ -26,7 +26,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -438,10 +437,8 @@ func (g *ingreso) autorizar(mc *api.Machine, id string, puerto int, tok string) 
 		return no()
 	}
 	var dueno string
-	for i := range g.s.tenants { // sin cortar: tiempo constante, como auth
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(g.s.tenants[i].Token)) == 1 {
-			dueno = g.s.tenants[i].Nombre
-		}
+	if t := g.s.resolver(tok); t != nil { // tiempo constante, como auth
+		dueno = t.Nombre
 	}
 	if dueno == "" {
 		c, ok := g.verificar(tok)
@@ -450,10 +447,8 @@ func (g *ingreso) autorizar(mc *api.Machine, id string, puerto int, tok string) 
 		}
 		dueno = c.Tenant
 	}
-	for i := range g.s.tenants {
-		if g.s.tenants[i].Nombre == dueno && esSandboxDe(mc, &g.s.tenants[i]) {
-			return 0, nil
-		}
+	if t := g.s.tenantNombre(dueno); t != nil && esSandboxDe(mc, t) {
+		return 0, nil
 	}
 	// Token válido de quien no es dueño: la misma respuesta que un id que no existe.
 	return http.StatusNotFound, noSandbox(id)

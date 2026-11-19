@@ -16,6 +16,7 @@ tags:
   - name: graphs
   - name: volumes
   - name: ops
+  - name: tenants
 paths:
   /v1/health:
     get:
@@ -851,6 +852,234 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+  /v1/tenants:
+    get:
+      tags: [tenants]
+      summary: Inquilinos del gateway (solo token de admin)
+      description: |
+        Los del almacén (`source: store`) y los de `KLING_SANDBOX_TENANTS`
+        (`source: env`, `read_only: true`). Nunca devuelve claves ni hashes.
+      responses:
+        "200":
+          description: Lista
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Tenant"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [tenants]
+      summary: Crea un inquilino en el almacén (sin claves; solo admin)
+      description: Pide que el gateway arranque con `-state-dir`; si no, 501.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrearTenantPeticion"
+      responses:
+        "201":
+          description: Creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/tenants/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Nombre del inquilino (no cambia nunca)
+        schema:
+          type: string
+    get:
+      tags: [tenants]
+      summary: Ve un inquilino (solo admin)
+      responses:
+        "200":
+          description: El inquilino, con la ficha de sus claves
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [tenants]
+      summary: Cambia admin y/o topes de un inquilino del almacén (solo admin)
+      description: |
+        `limits` sustituye todos los topes (los omitidos vuelven a 0). Los del
+        entorno son de solo lectura (409), y un admin no puede quitarse el rol.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CambiarTenantPeticion"
+      responses:
+        "200":
+          description: Cambiado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [tenants]
+      summary: Borra un inquilino del almacén y todas sus claves (solo admin)
+      description: Sus sandboxes siguen vivos hasta su TTL; sin clave nadie los alcanza.
+      responses:
+        "204":
+          description: Borrado
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/tenants/{id}/keys:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [tenants]
+      summary: Crea una clave; la devuelve UNA sola vez (solo admin)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrearClavePeticion"
+      responses:
+        "201":
+          description: La clave en claro está en `key` y no se puede volver a leer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaveCreada"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/tenants/{id}/keys/{kid}/rotate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: kid
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [tenants]
+      summary: Rota una clave (solo admin)
+      description: |
+        Crea una clave nueva y deja la vieja válida `grace_minutes` más (10 por
+        defecto, máximo 1440; 0 = deja de valer ya).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotarClavePeticion"
+      responses:
+        "201":
+          description: La clave nueva en claro (una sola vez) y cuándo caduca la vieja
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaveCreada"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/tenants/{id}/keys/{kid}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: kid
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [tenants]
+      summary: Revoca una clave al instante (solo admin; repetirlo no falla)
+      responses:
+        "204":
+          description: Revocada
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     bearer:
@@ -1346,4 +1575,124 @@ components:
       required: [template]
       properties:
         template:
+          type: string
+    TopesTenant:
+      type: object
+      description: Topes del inquilino; 0 u omitido = el valor por defecto del gateway
+      properties:
+        max_sandboxes:
+          type: integer
+        max_per_template:
+          type: integer
+        max_shells:
+          type: integer
+        max_processes:
+          type: integer
+        max_sessions:
+          type: integer
+        max_follow:
+          type: integer
+        max_mem_mib:
+          type: integer
+        max_vcpus:
+          type: integer
+        max_mem_total_mib:
+          type: integer
+        max_batch:
+          type: integer
+        max_volumes:
+          type: integer
+    ClaveTenant:
+      type: object
+      description: Ficha de una clave (sin el secreto ni su hash)
+      properties:
+        id:
+          type: string
+        prefix:
+          type: string
+        created:
+          type: string
+          format: date-time
+        expires:
+          type: string
+          format: date-time
+        revoked:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        source:
+          type: string
+          enum: [store, env]
+        read_only:
+          type: boolean
+        admin:
+          type: boolean
+        limits:
+          $ref: "#/components/schemas/TopesTenant"
+        created:
+          type: string
+          format: date-time
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaveTenant"
+    CrearTenantPeticion:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Letras, dígitos, '.', '_' y '-'; es el id y no cambia
+        admin:
+          type: boolean
+        limits:
+          $ref: "#/components/schemas/TopesTenant"
+    CambiarTenantPeticion:
+      type: object
+      properties:
+        admin:
+          type: boolean
+        limits:
+          $ref: "#/components/schemas/TopesTenant"
+    CrearClavePeticion:
+      type: object
+      properties:
+        expires_at:
+          type: string
+          format: date-time
+    RotarClavePeticion:
+      type: object
+      properties:
+        grace_minutes:
+          type: integer
+    ClaveCreada:
+      type: object
+      description: Única respuesta que lleva una clave en claro
+      properties:
+        id:
+          type: string
+        prefix:
+          type: string
+        created:
+          type: string
+          format: date-time
+        expires:
+          type: string
+          format: date-time
+        key:
+          type: string
+          description: Clave en claro (`ksk_…`); no se vuelve a poder leer
+        old_key_expires:
+          type: string
+          format: date-time
+        old_key_id:
           type: string
