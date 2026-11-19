@@ -111,7 +111,10 @@ func (f *fakeRed) vio(sub string) bool {
 
 func redDePrueba() *Net {
 	n := Plan(7, "aabbccdd-0000")
-	n.HostIP = "127.0.0.1" // el resolver de verdad escucha ahí
+	// El resolver de verdad escucha ahí. No en 127.0.0.1: go test ./... corre
+	// paquetes a la vez y otro puede tener un resolver en 127.0.0.1:5333 (el
+	// puerto es fijo); en Linux todo 127.0.0.0/8 es loopback.
+	n.HostIP = "127.0.83.33"
 	return n
 }
 
