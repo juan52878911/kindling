@@ -39,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/sandbox/internal/consola"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -352,6 +353,7 @@ func (s *Servidor) rutas() {
 	m.Handle("GET /v1/graphs", s.auth(http.HandlerFunc(s.handleListarGrafos)))
 	m.Handle("/v1/graphs/", s.auth(http.HandlerFunc(s.handleGrafo)))
 	s.rutasTenants(m)
+	m.Handle(consola.Prefijo, consola.Handler()) // consola web (docs/consola.md)
 	s.mux = m
 }
 
