@@ -6,6 +6,7 @@ provocar un 429, trozos NDJSON partidos y demás.
 
 import base64
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,9 @@ class Estado:
         self.trozos_exec = None  # lista de bytes a escribir tal cual en el flujo
         self.error_exec_tras_200 = False
         self.volumenes = {}
+        self.procesos = {}  # (id, pid) -> dict
+        self.salida_proc = b"hola\nmundo\n"
+        self.sesiones = {}  # (id, sid) -> dict
         self.lote_falla_desde = 0  # en un lote, los índices >= esto fallan (500)
 
 
@@ -89,6 +93,13 @@ class Manejador(BaseHTTPRequestHandler):
             return self._volumenes(m, p[len("/v1/volumes"):].strip("/"), cuerpo)
         if p.startswith("/v1/sandboxes/"):
             resto = p[len("/v1/sandboxes/"):]
+            mp = re.match(r"^(.+?)/(processes|sessions)((?:/.*)?)$", resto)
+            if mp:
+                if mp.group(1) not in st.sandboxes:
+                    return self._err(404, "sandbox %s not found" % mp.group(1), "not_found")
+                if mp.group(2) == "processes":
+                    return self._procesos(m, mp.group(1), mp.group(3).strip("/"), q, cuerpo)
+                return self._sesiones(m, mp.group(1), mp.group(3).strip("/"), cuerpo)
             for suf in ("/renew", "/exec", "/files"):
                 if resto.endswith(suf):
                     sid, accion = resto[:-len(suf)], suf[1:]
@@ -116,6 +127,84 @@ class Manejador(BaseHTTPRequestHandler):
             if accion == "files":
                 return self._files(m, sid, q, cuerpo)
         self._err(404, "no route", "not_found")
+
+    def _procesos(self, m, sid, resto, q, cuerpo):
+        st = self.server.estado
+        if not resto:
+            if m == "POST":
+                req = json.loads(cuerpo or b"{}")
+                if not req.get("cmd"):
+                    return self._err(400, "cmd is required", "bad_request")
+                pid = len([k for k in st.procesos if k[0] == sid]) + 1
+                p = {"pid": pid, "cmd": req["cmd"], "state": "running", "output_bytes": 0,
+                     "started_at": "2026-01-01T00:00:00Z", "session": req.get("session", "")}
+                st.procesos[(sid, pid)] = p
+                return self._json(201, p)
+            return self._json(200, [v for k, v in st.procesos.items() if k[0] == sid])
+        partes = resto.split("/")
+        clave = (sid, int(partes[0]))
+        if clave not in st.procesos:
+            return self._err(404, "no such process", "not_found")
+        p = st.procesos[clave]
+        sub = partes[1] if len(partes) > 1 else ""
+        if sub == "" and m == "GET":
+            if q.get("wait"):
+                p["state"], p["exit_code"] = "exited", 0
+            return self._json(200, p)
+        if sub == "" and m == "DELETE":
+            del st.procesos[clave]
+            self.send_response(204)
+            self.end_headers()
+            return
+        if sub == "signal" and m == "POST":
+            req = json.loads(cuerpo or b"{}")
+            p["state"], p["signal"] = "exited", req.get("signal") or "TERM"
+            return self._json(200, p)
+        if sub == "output" and m == "GET":
+            off = int(q.get("offset", 0))
+            datos = st.salida_proc[off:]
+            lineas = [{"stream": "stdout", "data": base64.b64encode(datos[:6]).decode(),
+                       "offset": off + len(datos[:6])}] if datos[:6] else []
+            if len(datos) > 6:
+                lineas.append({"stream": "stdout", "data": base64.b64encode(datos[6:]).decode(),
+                               "offset": off + len(datos)})
+            fin = {"offset": len(st.salida_proc)}
+            if q.get("follow") == "1":
+                fin["exit"] = 0
+            lineas.append(fin)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for l in lineas:
+                t = (json.dumps(l) + "\n").encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(t), t))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        self._err(405, "no", None)
+
+    def _sesiones(self, m, sid, resto, cuerpo):
+        st = self.server.estado
+        if not resto and m == "POST":
+            req = json.loads(cuerpo or b"{}")
+            n = len([k for k in st.sesiones if k[0] == sid]) + 1
+            se = {"id": req.get("id") or "s%d" % n, "dir": req.get("dir", ""),
+                  "env": req.get("env", []), "execs": 0}
+            st.sesiones[(sid, se["id"])] = se
+            return self._json(201, se)
+        if not resto and m == "GET":
+            return self._json(200, [v for k, v in st.sesiones.items() if k[0] == sid])
+        if (sid, resto) not in st.sesiones:
+            return self._err(404, "no such session", "not_found")
+        if m == "GET":
+            return self._json(200, st.sesiones[(sid, resto)])
+        if m == "DELETE":
+            del st.sesiones[(sid, resto)]
+            self.send_response(204)
+            self.end_headers()
+            return
+        self._err(405, "no", None)
 
     def _lote(self, req):
         st = self.server.estado

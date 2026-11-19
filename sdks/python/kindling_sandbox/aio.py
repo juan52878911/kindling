@@ -34,10 +34,59 @@ class AsyncFiles:
         return await _hilo(self._f.stat, path)
 
 
+class AsyncProcesses:
+    def __init__(self, procs):
+        self._p = procs
+
+    async def start(self, *a, **k):
+        return await _hilo(self._p.start, *a, **k)
+
+    async def list(self):
+        return await _hilo(self._p.list)
+
+    async def get(self, pid, wait=None):
+        return await _hilo(self._p.get, pid, wait)
+
+    async def output(self, pid, offset=0, follow=False):
+        """Iterador asíncrono: `async for ev in await sb.processes.output(pid, follow=True)`."""
+        return _IterAsync(await _hilo(self._p.output, pid, offset, follow))
+
+    async def signal(self, pid, signal=None):
+        return await _hilo(self._p.signal, pid, signal)
+
+    async def kill(self, pid):
+        return await _hilo(self._p.kill, pid)
+
+    async def delete(self, pid):
+        await _hilo(self._p.delete, pid)
+
+
+class AsyncSessions:
+    def __init__(self, sesiones):
+        self._s = sesiones
+
+    async def create(self, *a, **k):
+        return await _hilo(self._s.create, *a, **k)
+
+    async def list(self):
+        return await _hilo(self._s.list)
+
+    async def get(self, sid):
+        return await _hilo(self._s.get, sid)
+
+    async def exec(self, sid, cmd, **k):
+        return await _hilo(self._s.exec, sid, cmd, **k)
+
+    async def delete(self, sid):
+        await _hilo(self._s.delete, sid)
+
+
 class AsyncSandbox:
     def __init__(self, sb: Sandbox):
         self._sb = sb
         self.files = AsyncFiles(sb.files)
+        self.processes = AsyncProcesses(sb.processes)
+        self.sessions = AsyncSessions(sb.sessions)
 
     def __repr__(self):
         return "Async" + repr(self._sb)

@@ -20,6 +20,71 @@ class Base(unittest.TestCase):
         self.kw = dict(url=self.srv.url, token=TOKEN)
 
 
+class TestProcesosYSesiones(Base):
+    def setUp(self):
+        super().setUp()
+        self.sb = Sandbox.create(**self.kw)
+
+    def test_start_manda_argv_y_devuelve_pid(self):
+        p = self.sb.processes.start("sleep 9", cwd="/w", env={"A": "1"}, timeout=30, session="dev")
+        self.assertEqual((p.pid, p.state, p.running), (1, "running", True))
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]),
+                         {"cmd": ["sh", "-c", "sleep 9"], "dir": "/w", "env": ["A=1"],
+                          "timeout_seconds": 30, "session": "dev"})
+
+    def test_list_get_con_wait_y_delete(self):
+        p = self.sb.processes.start(["sleep", "9"])
+        self.assertEqual([x.pid for x in self.sb.processes.list()], [p.pid])
+        fin = self.sb.processes.get(p.pid, wait=5)
+        self.assertEqual((fin.state, fin.exit_code), ("exited", 0))
+        self.assertEqual(self.srv.estado.peticiones[-1][2], {"wait": "5"})
+        self.sb.processes.delete(p.pid)
+        with self.assertRaises(NotFound):
+            self.sb.processes.get(p.pid)
+
+    def test_signal_y_kill(self):
+        p = self.sb.processes.start(["x"])
+        self.assertEqual(self.sb.processes.signal(p.pid).signal, "TERM")
+        self.assertEqual(self.sb.processes.kill(p.pid).signal, "KILL")
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]), {"signal": "KILL"})
+
+    def test_output_con_offset_y_follow(self):
+        p = self.sb.processes.start(["x"])
+        evs = list(self.sb.processes.output(p.pid, follow=True))
+        self.assertEqual(b"".join(e.data for e in evs), b"hola\nmundo\n")
+        self.assertEqual((evs[-1].exit, evs[-1].offset), (0, 11))
+        resto = list(self.sb.processes.output(p.pid, offset=5))
+        self.assertEqual(b"".join(e.data for e in resto), b"mundo\n")
+        self.assertIsNone(resto[-1].exit)  # sin follow no hay exit
+
+    def test_sesiones_crear_exec_borrar(self):
+        se = self.sb.sessions.create("dev", cwd="/w", env={"A": "1"}, ttl=60)
+        self.assertEqual((se.id, se.dir, se.env), ("dev", "/w", ["A=1"]))
+        r = self.sb.sessions.exec("dev", "pwd")
+        self.assertEqual(r.exit_code, 3)
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4])["session"], "dev")
+        self.assertEqual([s.id for s in self.sb.sessions.list()], ["dev"])
+        self.sb.sessions.delete("dev")
+        with self.assertRaises(NotFound):
+            self.sb.sessions.get("dev")
+
+    def test_exec_con_session(self):
+        self.sb.exec("pwd", session="dev")
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4])["session"], "dev")
+
+    def test_asincrono(self):
+        async def corre():
+            async with await AsyncSandbox.create(**self.kw) as sb:
+                p = await sb.processes.start(["x"])
+                it = await sb.processes.output(p.pid, follow=True)
+                evs = [e async for e in it]
+                se = await sb.sessions.create("a")
+                return evs, se
+        evs, se = asyncio.run(corre())
+        self.assertEqual(evs[-1].exit, 0)
+        self.assertEqual(se.id, "a")
+
+
 class TestLoteYVolumenes(Base):
     def test_create_many_manda_count_y_atomic(self):
         lote = Sandbox.create_many(3, template="py", atomic=True, **self.kw)

@@ -3,7 +3,7 @@
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from .client import Client
-from .models import ExecEvent, ExecResult, FileStat, SandboxInfo
+from .models import ExecEvent, ExecResult, FileStat, ProcessEvent, ProcessInfo, SandboxInfo, Session
 
 
 class SandboxList(list):
@@ -20,7 +20,7 @@ def _cliente(client, url, token, timeout) -> Client:
     return client if client is not None else Client(url=url, token=token, timeout=timeout)
 
 
-def _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes) -> dict:
+def _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes, session=None) -> dict:
     if isinstance(cmd, str):
         cmd = ["sh", "-c", cmd]  # un string es una línea de shell
     p = {"cmd": list(cmd)}
@@ -38,6 +38,8 @@ def _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes) -> dic
         p["max_output_bytes"] = int(max_output_bytes)
     if user:
         p["user"] = user
+    if session:
+        p["session"] = session
     return p
 
 
@@ -68,11 +70,94 @@ class Files:
         return self._c.stat_file(self._id, path)
 
 
+class Processes:
+    """Procesos de fondo de un sandbox: sobreviven a la conexión del cliente.
+
+    `sb.processes.start("sleep 60")` devuelve un ProcessInfo con el `pid`;
+    `output(pid, follow=True)` itera su salida y `kill(pid)` lo termina.
+    """
+
+    def __init__(self, client: Client, id: str):
+        self._c = client
+        self._id = id
+
+    def start(self, cmd: Union[str, Sequence[str]], cwd: Optional[str] = None,
+              env: Optional[Union[Dict[str, str], Sequence[str]]] = None,
+              timeout: Optional[int] = None, user: Optional[str] = None,
+              max_output_bytes: Optional[int] = None, session: Optional[str] = None) -> ProcessInfo:
+        """Lanza y vuelve enseguida. Un `str` se ejecuta con `sh -c`."""
+        p = _peticion_exec(cmd, cwd, env, timeout, None, user, max_output_bytes, session)
+        return self._c.start_process(self._id, p)
+
+    def list(self) -> List[ProcessInfo]:
+        return self._c.list_processes(self._id)
+
+    def get(self, pid: int, wait: Optional[int] = None) -> ProcessInfo:
+        """Estado. Con `wait` (segundos) espera a que termine; si no, sigue «running»."""
+        return self._c.get_process(self._id, pid, wait)
+
+    def output(self, pid: int, offset: int = 0, follow: bool = False) -> Iterator[ProcessEvent]:
+        """Iterador de ProcessEvent desde `offset`; con `follow` hasta que termine."""
+        return self._c.process_output(self._id, pid, offset, follow)
+
+    def signal(self, pid: int, signal: Optional[str] = None) -> ProcessInfo:
+        """Señal al grupo del proceso (por defecto TERM)."""
+        return self._c.signal_process(self._id, pid, signal)
+
+    def kill(self, pid: int) -> ProcessInfo:
+        return self.signal(pid, "KILL")
+
+    def delete(self, pid: int) -> None:
+        """Mata el proceso si sigue vivo y olvida su salida."""
+        self._c.delete_process(self._id, pid)
+
+
+class Sessions:
+    """Sesiones de exec: cwd y entorno que persisten entre comandos."""
+
+    def __init__(self, client: Client, id: str):
+        self._c = client
+        self._id = id
+
+    def create(self, id: Optional[str] = None, cwd: Optional[str] = None,
+               env: Optional[Union[Dict[str, str], Sequence[str]]] = None,
+               ttl: Optional[int] = None) -> Session:
+        p: Dict[str, Any] = {}
+        if id:
+            p["id"] = id
+        if cwd:
+            p["dir"] = cwd
+        if env:
+            p["env"] = ["%s=%s" % kv for kv in env.items()] if isinstance(env, dict) else list(env)
+        if ttl:
+            p["ttl_seconds"] = int(ttl)
+        return self._c.create_session(self._id, p)
+
+    def list(self) -> List[Session]:
+        return self._c.list_sessions(self._id)
+
+    def get(self, sid: str) -> Session:
+        return self._c.get_session(self._id, sid)
+
+    def exec(self, sid: str, cmd: Union[str, Sequence[str]], cwd: Optional[str] = None,
+             env: Optional[Union[Dict[str, str], Sequence[str]]] = None,
+             timeout: Optional[int] = None, stdin: Optional[Union[str, bytes]] = None,
+             user: Optional[str] = None, max_output_bytes: Optional[int] = None) -> ExecResult:
+        """Como Sandbox.exec, dentro de la sesión `sid`."""
+        return self._c.exec_wait(
+            self._id, _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes, sid))
+
+    def delete(self, sid: str) -> None:
+        self._c.delete_session(self._id, sid)
+
+
 class Sandbox:
     def __init__(self, info: SandboxInfo, client: Client):
         self.info = info
         self._client = client
         self.files = Files(client, info.id)
+        self.processes = Processes(client, info.id)
+        self.sessions = Sessions(client, info.id)
 
     def __repr__(self) -> str:
         return "Sandbox(id=%r, state=%r)" % (self.info.id, self.info.state)
@@ -172,18 +257,21 @@ class Sandbox:
     def exec(self, cmd: Union[str, Sequence[str]], cwd: Optional[str] = None,
              env: Optional[Union[Dict[str, str], Sequence[str]]] = None,
              timeout: Optional[int] = None, stdin: Optional[Union[str, bytes]] = None,
-             user: Optional[str] = None, max_output_bytes: Optional[int] = None) -> ExecResult:
+             user: Optional[str] = None, max_output_bytes: Optional[int] = None,
+             session: Optional[str] = None) -> ExecResult:
         """Espera al final. Un `str` se ejecuta con `sh -c`; una lista, tal cual.
-        `timeout` en segundos (tope del comando en el servidor)."""
+        `timeout` en segundos (tope del comando en el servidor). `session`: id de
+        una sesión (ver `sessions`) cuyo cwd y entorno se usan."""
         return self._client.exec_wait(
-            self.id, _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes))
+            self.id, _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes, session))
 
     def exec_stream(self, cmd: Union[str, Sequence[str]], cwd: Optional[str] = None,
                     env: Optional[Union[Dict[str, str], Sequence[str]]] = None,
                     timeout: Optional[int] = None, stdin: Optional[Union[str, bytes]] = None,
                     user: Optional[str] = None,
-                    max_output_bytes: Optional[int] = None) -> Iterator[ExecEvent]:
+                    max_output_bytes: Optional[int] = None,
+                    session: Optional[str] = None) -> Iterator[ExecEvent]:
         """Iterador de ExecEvent (NDJSON). El último trae `exit` o `error`.
         La petición se envía ya; los errores previos al flujo saltan aquí."""
         return self._client.exec_stream(
-            self.id, _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes))
+            self.id, _peticion_exec(cmd, cwd, env, timeout, stdin, user, max_output_bytes, session))
