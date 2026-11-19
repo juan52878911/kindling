@@ -87,7 +87,8 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 		if dir == "" {
 			dir = ses.dir
 		}
-		argv = []string{"sh", "-c", envolturaSesion, "sh", guionDe(req.Cmd)}
+		yo, _ := os.Executable()
+		argv = []string{"sh", "-c", envolturaSesion, "sh", guionDe(req.Cmd), yo}
 		var err error
 		if cp, err = nuevaCaptura(); err != nil {
 			return api.ExecEvent{Error: fmt.Sprintf("session capture: %v", err)}

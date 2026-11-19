@@ -4,7 +4,7 @@ package guest
 //
 // Un proceso hijo no puede cambiar el directorio ni el entorno de quien lo
 // lanzó, así que con una sesión el comando corre DENTRO de una shell que, al
-// salir (trap EXIT), escribe su `pwd` y su `env -0` por un descriptor aparte
+// salir (trap EXIT), escribe su `pwd` y su entorno por un descriptor aparte
 // (el 3, no el stdout del comando, que es del usuario). El agente lo lee y lo
 // guarda como el estado de la sesión: el siguiente exec arranca desde ahí.
 //
@@ -255,8 +255,38 @@ func guionDe(argv []string) string {
 // envolturaSesion es la shell que corre el guion y, al salir por donde sea
 // (también con `exit N`), vuelca pwd y el entorno por el descriptor 3 sin
 // cambiar el código de salida.
-const envolturaSesion = `trap '__kling_rc=$?; { pwd; echo; env -0; } >&3 2>/dev/null; exit $__kling_rc' EXIT
+//
+// El entorno no se vuelca con `env -0`: es de GNU coreutils y el `env` de
+// BSD/macOS (o de un busybox viejo) lo rechaza, con lo que el entorno de la
+// sesión se perdía en silencio. $2 es el propio binario del agente, que
+// siempre está en el invitado: con KLING_ENVDUMP=1 se limita a escribir su
+// entorno con separador NUL (volcarEntornoSiPide, init de este paquete). Si
+// no se puede ejecutar (otro usuario sin permiso), repliegue a awk y, al
+// final, a env -0.
+const envolturaSesion = `trap '__kling_rc=$?; { pwd; echo; KLING_ENVDUMP=1 "$2" || awk '\''BEGIN{for(k in ENVIRON) printf "%s=%s%c",k,ENVIRON[k],0}'\'' || env -0; } >&3 2>/dev/null; exit $__kling_rc' EXIT
 eval "$1"`
+
+// El init hace de volcador de entorno: lo invoca la envoltura de
+// sesión con KLING_ENVDUMP=1 sobre el binario del agente (cualquiera que
+// embeba este paquete, también el binario de test).
+func init() {
+	if os.Getenv("KLING_ENVDUMP") != "1" {
+		return
+	}
+	var b bytes.Buffer
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "KLING_ENVDUMP=") {
+			continue
+		}
+		b.WriteString(kv)
+		b.WriteByte(0)
+	}
+	_, err := os.Stdout.Write(b.Bytes())
+	if err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 // estadoCapturado es lo que el trap escribió por el descriptor 3.
 type estadoCapturado struct {

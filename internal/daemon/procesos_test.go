@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func TestProcesosYSesionesDeExtremoAExtremo(t *testing.T) {
 
 	// Sesión: se crea por el daemon y el exec con session (openGuestExec, lo
 	// que hace handleExec) ve el cwd y el entorno del anterior.
-	dir := t.TempDir()
+	dir, _ := filepath.EvalSymlinks(t.TempDir()) // macOS: /var es /private/var
 	if _, err := cl.CreateSession(ctx, "m", api.SessionRequest{ID: "dev"}); err != nil {
 		t.Fatal(err)
 	}

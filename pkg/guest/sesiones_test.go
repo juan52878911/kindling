@@ -2,6 +2,8 @@ package guest
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -20,7 +22,7 @@ func execSes(t *testing.T, ses string, cmd ...string) (string, string, api.ExecE
 
 func TestSesionPersisteCwdYEntornoEntreExecs(t *testing.T) {
 	srv := servidorProcs(t)
-	dir := t.TempDir()
+	dir := dirReal(t)
 	var s api.Session
 	if c := llamar(t, srv, http.MethodPost, "/sessions", api.SessionRequest{ID: "dev", Env: []string{"BASE=uno"}}, &s); c != http.StatusCreated {
 		t.Fatalf("crear: %d", c)
@@ -155,7 +157,7 @@ func TestSesionTopeYValidacion(t *testing.T) {
 
 func TestProcesoDeFondoHeredaLaSesionSinModificarla(t *testing.T) {
 	srv := servidorProcs(t)
-	dir := t.TempDir()
+	dir := dirReal(t)
 	crearSesion(api.SessionRequest{ID: "bg", Dir: dir, Env: []string{"QUIEN=sesion"}})
 	p := lanzar(t, srv, api.ProcessStartRequest{Session: "bg", Cmd: []string{"sh", "-c", `pwd; echo $QUIEN; cd /; export QUIEN=otro`}})
 	esperar(t, srv, p.PID)
@@ -176,5 +178,38 @@ func TestGuionDeCitaArgvYRespetaShellDashC(t *testing.T) {
 	}
 	if g := guionDe([]string{"echo", "it's", "a b"}); g != `'echo' 'it'\''s' 'a b'` {
 		t.Errorf("argv = %q", g)
+	}
+}
+
+// dirReal es un directorio temporal sin symlinks: en macOS t.TempDir() es
+// /var/… y `pwd` da /private/var/….
+func dirReal(t *testing.T) string {
+	t.Helper()
+	d, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// El volcado del entorno no usa `env -0` (que el env de BSD/macOS rechaza):
+// con un env falso en el PATH que falla con -0 y con cualquier otra cosa, la
+// sesión sigue guardando el entorno.
+func TestSesionEntornoNoDependeDeEnvGNU(t *testing.T) {
+	bin := t.TempDir()
+	falso := "#!/bin/sh\necho 'env: illegal option -- 0' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "env"), []byte(falso), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	srv := servidorProcs(t)
+	var s api.Session
+	if c := llamar(t, srv, http.MethodPost, "/sessions", api.SessionRequest{ID: "bsd"}, &s); c != http.StatusCreated {
+		t.Fatalf("crear: %d", c)
+	}
+	execSes(t, "bsd", "sh", "-c", "export VOLCADA=si")
+	so, _, _ := execSes(t, "bsd", "sh", "-c", `echo "$VOLCADA"`)
+	if so != "si\n" {
+		t.Fatalf("el entorno no persistió sin env -0: %q", so)
 	}
 }
