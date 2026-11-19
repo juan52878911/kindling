@@ -1,0 +1,722 @@
+openapi: 3.1.0
+info:
+  title: kindling-sandbox gateway API
+  version: v1
+  description: |
+    API HTTP /v1 del gateway de sandboxes de kindling. Cada ruta pide
+    `Authorization: Bearer <token>` salvo `GET /v1/health`.
+    El id de un sandbox o grafo es `host/maquina`: lleva una barra dentro y va
+    sin codificar en la ruta (`/v1/sandboxes/h1/m-abc/exec`).
+servers:
+  - url: http://localhost:8088
+security:
+  - bearer: []
+tags:
+  - name: sandboxes
+  - name: graphs
+  - name: ops
+paths:
+  /v1/health:
+    get:
+      tags: [ops]
+      summary: Sonda de vida, sin token
+      security: []
+      responses:
+        "200":
+          description: Vivo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/hosts:
+    get:
+      tags: [ops]
+      summary: Daemons de detrás del gateway (solo token de admin)
+      responses:
+        "200":
+          description: Estado de cada host
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HostEstado"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /v1/metrics:
+    get:
+      tags: [ops]
+      summary: Métricas en formato texto de Prometheus
+      description: Un admin ve las series de todos los inquilinos; los demás, las suyas.
+      responses:
+        "200":
+          description: Exposición de Prometheus 0.0.4
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/templates:
+    get:
+      tags: [ops]
+      summary: Catálogo de plantillas y en qué hosts están construidas
+      responses:
+        "200":
+          description: Plantillas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TemplateInfo"
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes:
+    get:
+      tags: [sandboxes]
+      summary: Sandboxes del inquilino
+      description: |
+        Un host caído no oculta los demás: se devuelve lo que hay y la cabecera
+        `X-Kindling-Partial` lista los fallos.
+      responses:
+        "200":
+          description: Lista (puede ir vacía)
+          headers:
+            X-Kindling-Partial:
+              description: Errores de los hosts que no contestaron
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Sandbox"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [sandboxes]
+      summary: Crea un sandbox
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrearPeticion"
+      responses:
+        "201":
+          description: Creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [sandboxes]
+      summary: Ve un sandbox
+      responses:
+        "200":
+          description: El sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [sandboxes]
+      summary: Destruye un sandbox
+      responses:
+        "204":
+          description: Destruido
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/renew:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Renueva el TTL
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenovarPeticion"
+      responses:
+        "200":
+          description: Sandbox con el TTL nuevo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/exec:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Ejecuta un comando
+      description: |
+        Por defecto responde un flujo NDJSON (`application/x-ndjson`): una
+        línea JSON por evento (`ExecEvent`), vaciada al momento. Los eventos
+        `stream`+`data` llevan salida; el último es `exit` (con `duration_ms`,
+        `truncated`, `timed_out`) o `error` si el flujo se cortó tras el 200.
+        Con `?wait=1` espera al final y devuelve un `ExecResult` JSON.
+        Los errores previos al primer evento llegan con su código HTTP y un
+        `Error` JSON normales.
+      parameters:
+        - name: wait
+          in: query
+          description: "`1` para recibir un ExecResult agregado en vez del flujo"
+          schema:
+            type: string
+            enum: ["1"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "200":
+          description: Flujo NDJSON, o ExecResult con `?wait=1`
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ExecEvent"
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/shell:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Terminal interactiva (upgrade a kling-shell/1)
+      description: |
+        Hay que pedir `Upgrade: kling-shell/1` (y `Connection: Upgrade`); sin
+        él, 426. El cuerpo JSON es un `ShellRequest` (puede ir vacío). Si todo
+        va bien responde `101 Switching Protocols` y la conexión TCP pasa a
+        hablar tramas binarias en ambos sentidos:
+
+        `tipo (1 byte) | longitud (uint32 big-endian) | carga (≤ 65536 bytes)`
+
+        Tipos: `0` datos (stdin hacia dentro, salida del PTY hacia fuera);
+        `1` resize (rows uint16, cols uint16; solo hacia dentro);
+        `2` señal (número de señal; solo hacia dentro); `3` exit
+        (código int32; siempre la última hacia fuera); `4` error (texto
+        UTF-8; también la última); `5` ping (vacía, del servidor al cliente).
+        El inquilino tiene un tope de sesiones de shell abiertas (429).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShellRequest"
+      responses:
+        "101":
+          description: Cambio de protocolo a kling-shell/1
+          headers:
+            Upgrade:
+              schema:
+                type: string
+                const: kling-shell/1
+            Connection:
+              schema:
+                type: string
+                const: Upgrade
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "426":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/files:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: path
+        in: query
+        required: true
+        description: Ruta absoluta del fichero dentro del sandbox
+        schema:
+          type: string
+    get:
+      tags: [sandboxes]
+      summary: Descarga un fichero, o con `stat=1` sus metadatos
+      parameters:
+        - name: stat
+          in: query
+          description: "`1` para devolver un FileStat JSON en vez del contenido"
+          schema:
+            type: string
+            enum: ["1"]
+      responses:
+        "200":
+          description: Contenido (se corta en 256 MiB) o FileStat
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileStat"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [sandboxes]
+      summary: Sube un fichero (cuerpo crudo, hasta 64 MiB)
+      parameters:
+        - name: mode
+          in: query
+          description: Permisos en octal, p. ej. `0644`
+          schema:
+            type: string
+            pattern: "^[0-7]+$"
+        - name: mkdir
+          in: query
+          description: "`1` crea los directorios que falten"
+          schema:
+            type: string
+            enum: ["1"]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              maxLength: 67108864
+      responses:
+        "200":
+          description: Fichero escrito
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileStat"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [sandboxes]
+      summary: Borra un fichero
+      responses:
+        "204":
+          description: Borrado
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/graphs:
+    get:
+      tags: [graphs]
+      summary: Grafos reclamados por el inquilino
+      responses:
+        "200":
+          description: Lista
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Grafo"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [graphs]
+      summary: Reclama un grafo precalentado de una plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrearGrafoPeticion"
+      responses:
+        "201":
+          description: Reclamado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Grafo"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/graphs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [graphs]
+      summary: Ve un grafo
+      responses:
+        "200":
+          description: El grafo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Grafo"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [graphs]
+      summary: Suelta un grafo
+      responses:
+        "204":
+          description: Soltado
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: |
+        Token de inquilino (sandboxes, grafos, plantillas, métricas propias) o
+        de admin (además `/v1/hosts` y las métricas de todos). Sin token o con
+        uno inválido: 401 con `WWW-Authenticate: Bearer realm="kindling-sandbox"`.
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      description: Id `host/maquina`; la barra va sin codificar
+      schema:
+        type: string
+      allowReserved: true
+  responses:
+    Error:
+      description: Error. El código HTTP manda; `message` es para personas.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+          description: Código estable (bad_request, unauthorized, forbidden, not_found, conflict...); puede faltar
+    Health:
+      type: object
+      properties:
+        ok:
+          type: boolean
+    HostEstado:
+      type: object
+      properties:
+        name:
+          type: string
+        endpoint:
+          type: string
+        alive:
+          type: boolean
+        version:
+          type: string
+        machines:
+          type: integer
+        available_mib:
+          type: integer
+        error:
+          type: string
+    TemplateHost:
+      type: object
+      properties:
+        host:
+          type: string
+        snapshot:
+          type: string
+        built_at:
+          type: string
+          format: date-time
+        recipe_sha256:
+          type: string
+        instances:
+          type: integer
+    TemplateInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          description: '"graph" en una plantilla de grafo; ausente en una de máquina'
+        hosts:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateHost"
+    Sandbox:
+      type: object
+      properties:
+        id:
+          type: string
+        host:
+          type: string
+        template:
+          type: string
+        image:
+          type: string
+        state:
+          type: string
+        vcpus:
+          type: integer
+        mem_mib:
+          type: integer
+        egress:
+          type: string
+        allow_domains:
+          type: array
+          items:
+            type: string
+        on_ttl:
+          type: string
+        ttl_seconds:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+    CrearPeticion:
+      type: object
+      properties:
+        template:
+          type: string
+        image:
+          type: string
+        ttl_seconds:
+          type: integer
+        on_ttl:
+          type: string
+        egress:
+          type: string
+        allow_domains:
+          type: array
+          items:
+            type: string
+        mem_mib:
+          type: integer
+        vcpus:
+          type: integer
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+    RenovarPeticion:
+      type: object
+      properties:
+        ttl_seconds:
+          type: integer
+    ExecRequest:
+      type: object
+      required: [cmd]
+      properties:
+        cmd:
+          type: array
+          items:
+            type: string
+        dir:
+          type: string
+        env:
+          type: array
+          items:
+            type: string
+        stdin:
+          type: string
+          format: byte
+        timeout_seconds:
+          type: integer
+        max_output_bytes:
+          type: integer
+        user:
+          type: string
+    ExecEvent:
+      type: object
+      description: Una línea del flujo NDJSON. `data` va en base64.
+      properties:
+        stream:
+          type: string
+          enum: [stdout, stderr]
+        data:
+          type: string
+          format: byte
+        exit:
+          type: integer
+        duration_ms:
+          type: integer
+        truncated:
+          type: boolean
+        timed_out:
+          type: boolean
+        error:
+          type: string
+    ExecResult:
+      type: object
+      properties:
+        exit_code:
+          type: integer
+        stdout:
+          type: string
+          format: byte
+        stderr:
+          type: string
+          format: byte
+        duration_ms:
+          type: integer
+        truncated:
+          type: boolean
+        timed_out:
+          type: boolean
+    ShellRequest:
+      type: object
+      properties:
+        cmd:
+          type: array
+          items:
+            type: string
+        dir:
+          type: string
+        env:
+          type: array
+          items:
+            type: string
+        term:
+          type: string
+        rows:
+          type: integer
+        cols:
+          type: integer
+    FileStat:
+      type: object
+      properties:
+        path:
+          type: string
+        size:
+          type: integer
+        mode:
+          type: string
+        is_dir:
+          type: boolean
+        mod_time:
+          type: string
+          format: date-time
+    NodoGrafo:
+      type: object
+      properties:
+        id:
+          type: string
+        state:
+          type: string
+        ports:
+          type: array
+          items:
+            type: integer
+    Grafo:
+      type: object
+      properties:
+        id:
+          type: string
+        host:
+          type: string
+        template:
+          type: string
+        state:
+          type: string
+        claimed_at:
+          type: string
+          format: date-time
+        nodes:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/NodoGrafo"
+    CrearGrafoPeticion:
+      type: object
+      required: [template]
+      properties:
+        template:
+          type: string

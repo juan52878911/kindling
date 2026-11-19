@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- kling-sandbox: OpenAPI 3.1 spec of the `/v1` gateway API (`ext/sandbox/api/openapi.yaml`, see `docs/sandbox-api.md`), with a contract test that fails when a route or a schema field drifts from the code.
 - Volumes take labels (`labels` in `POST /volumes` and in `GET /volumes`); compose labels its volumes with the project and the compose file.
 - macOS: `kling doctor` warns when the kernel or `min.ext4` that `kling up` downloaded come from another release, since `kling up` never replaces them.
 - `kling-mcp gateway -max-sessions` caps the MCP sessions a tenant has open at once (default 256; without named tokens every client shares the `default` tenant).
