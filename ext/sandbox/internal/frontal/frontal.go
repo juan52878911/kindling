@@ -87,6 +87,11 @@ type Tenant struct {
 	// sandboxes medianos; es opt-in porque contarlo lista los hosts en cada
 	// creación y solo suma los que contestan.
 	MaxMemTotalMiB int
+	// MaxLote es el mayor "count" de una creación en lote; 0 = el del frontal
+	// (Opciones.MaxLote). Nunca pasa del global.
+	MaxLote int
+	// MaxVolumenes es cuántos volúmenes puede tener el tenant (0 = sin tope).
+	MaxVolumenes int
 	// Admin ve lo que es del operador y no de un tenant: /v1/hosts (los
 	// endpoints de los daemons) y las métricas de TODOS los tenants. Sin él,
 	// /v1/hosts es un 403 y /v1/metrics solo enseña las series del que llama.
@@ -112,6 +117,12 @@ type Opciones struct {
 	// MaxMemTotalMiB es la suma máxima de mem_mib vivos por tenant para los que
 	// no traen la suya. 0 = sin tope total salvo el que traiga cada tenant.
 	MaxMemTotalMiB int
+	// MaxLote es el tope GLOBAL de "count" en POST /v1/sandboxes; ningún tenant
+	// lo supera. 0 = MaxLotePorDefecto.
+	MaxLote int
+	// MaxVolumenMiB es el mayor size_mib de un volumen nuevo; 0 =
+	// MaxVolumenMiBPorDefecto.
+	MaxVolumenMiB int
 
 	// Abandono es cuánto puede llevar un sandbox sin usarse antes de que la
 	// limpieza lo borre. Es el segundo plazo, distinto del TTL: el TTL lo
@@ -138,6 +149,8 @@ type Servidor struct {
 	log      *log.Logger
 	mux      *http.ServeMux
 	ingreso  *ingreso
+
+	maxVolumenMiB int
 
 	// mu protege enVuelo y reclamos, y aparta las precalentadas que se reclaman. Las
 	// cuotas se cuentan contra lo que el daemon tiene vivo, y una creación tarda
@@ -187,6 +200,7 @@ var nombreValido = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 const (
 	MaxMemMiBPorDefecto = 4096
 	MaxVCPUsPorDefecto  = 4
+	MaxLotePorDefecto   = 16
 )
 
 // minToken es la longitud mínima de un token de tenant. Uno corto se adivina
@@ -206,6 +220,17 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	}
 	if o.MaxMemMiB < 0 || o.MaxVCPUs < 0 || o.MaxMemTotalMiB < 0 {
 		return nil, errors.New("default mem_mib and vcpus limits can't be negative")
+	}
+	if o.MaxLote < 0 || o.MaxVolumenMiB < 0 {
+		return nil, errors.New("MaxLote and MaxVolumenMiB can't be negative")
+	}
+	maxLote := o.MaxLote
+	if maxLote == 0 {
+		maxLote = MaxLotePorDefecto
+	}
+	maxVol := o.MaxVolumenMiB
+	if maxVol == 0 {
+		maxVol = MaxVolumenMiBPorDefecto
 	}
 	maxMem, maxCPU, maxTotal := o.MaxMemMiB, o.MaxVCPUs, o.MaxMemTotalMiB
 	if maxMem == 0 {
@@ -250,6 +275,12 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		if t.MaxMemTotalMiB == 0 {
 			t.MaxMemTotalMiB = maxTotal
 		}
+		if t.MaxLote < 0 || t.MaxVolumenes < 0 {
+			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
+		}
+		if t.MaxLote == 0 || t.MaxLote > maxLote {
+			t.MaxLote = maxLote
+		}
 		tenants = append(tenants, t)
 	}
 	if len(tenants) == 0 {
@@ -258,7 +289,7 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	s := &Servidor{
 		reg: o.Hosts, tenants: tenants, imagen: o.ImagenPorDefecto,
 		ttl: o.TTLPorDefecto, abandono: o.Abandono, cada: o.CadaLimpieza,
-		log: o.Log, enVuelo: map[string]int{},
+		log: o.Log, enVuelo: map[string]int{}, maxVolumenMiB: maxVol,
 	}
 	if s.ttl == 0 {
 		s.ttl = api.SandboxDefaultTTL
@@ -300,6 +331,8 @@ func (s *Servidor) rutas() {
 	// Las rutas por sandbox se despachan a mano: el id lleva una barra dentro
 	// ("host/máquina") y el ServeMux no deja que un comodín la contenga.
 	m.Handle("/v1/sandboxes/", s.auth(http.HandlerFunc(s.handleSandbox)))
+	m.Handle("/v1/volumes", s.auth(http.HandlerFunc(s.handleVolumenes)))
+	m.Handle("/v1/volumes/", s.auth(http.HandlerFunc(s.handleVolumenes)))
 	// Grafos precalentados (grafos.go): reclamar, listar, ver y soltar.
 	m.Handle("POST /v1/graphs", s.auth(http.HandlerFunc(s.handleCrearGrafo)))
 	m.Handle("GET /v1/graphs", s.auth(http.HandlerFunc(s.handleListarGrafos)))

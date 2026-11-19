@@ -84,6 +84,20 @@ type CrearPeticion struct {
 	MemMiB       int               `json:"mem_mib,omitempty"`
 	VCPUs        int               `json:"vcpus,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
+
+	// Count crea un lote de Count sandboxes iguales (ver lote.go). Ausente es
+	// uno solo y la respuesta es el sandbox; presente, aunque sea 1, la
+	// respuesta es LoteRespuesta.
+	Count *int `json:"count,omitempty"`
+	// Atomic hace el lote todo o nada: si uno falla, se borran los ya creados.
+	Atomic bool `json:"atomic,omitempty"`
+	// Volumes son volúmenes del tenant a montar (volumenes.go).
+	Volumes []VolumenPeticion `json:"volumes,omitempty"`
+
+	// volumenes es lo que resolverVolumenes decidió; no viaja en el JSON.
+	volumenes *planVolumenes
+	// desplazo es el índice del sandbox en su lote: reparte entre hosts.
+	desplazo int
 }
 
 // RenovarPeticion es el cuerpo de POST /v1/sandboxes/{id}/renew.
@@ -385,6 +399,14 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	n := 1
+	if pet.Count != nil {
+		n = *pet.Count
+		if n < 1 || n > t.MaxLote {
+			fail(w, http.StatusBadRequest, fmt.Errorf("count must be between 1 and %d", t.MaxLote))
+			return
+		}
+	}
 	// Con plantilla, lo que la petición no dice (mem_mib o vcpus a 0) lo pone
 	// el snapshot: se averigua aquí para acotar el tamaño EFECTIVO, que es el
 	// que ocupa RAM en el host, y no solo el pedido.
@@ -403,11 +425,18 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	plan, err := s.resolverVolumenes(r.Context(), t, pet.Volumes)
+	if err != nil {
+		fail(w, codigoVolumen(err), err)
+		return
+	}
+	pet.volumenes = plan
 
 	// Cuota. Se cuenta lo vivo en los daemons más lo que este proceso tiene en
 	// camino, y se reserva el hueco ANTES de crear para que dos peticiones a la
-	// vez no lo compartan.
-	if err := s.reservar(r.Context(), t, pet.Template, memCuota(efectiva.MemMiB)); err != nil {
+	// vez no lo compartan. Un lote reserva los n de golpe: o caben todos o no
+	// se crea ninguno.
+	if err := s.reservarN(r.Context(), t, pet.Template, memCuota(efectiva.MemMiB), n); err != nil {
 		codigo := codigoReservar(err)
 		if codigo == http.StatusTooManyRequests {
 			s.metricas.registrar(resultadoCuota, 0)
@@ -417,33 +446,55 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, codigo, err)
 		return
 	}
-	defer s.liberar(t, pet.Template, memCuota(efectiva.MemMiB))
+	defer s.liberarN(t, pet.Template, memCuota(efectiva.MemMiB), n)
+
+	// Los clones se hacen con la cuota ya reservada: un lote rechazado no deja
+	// volúmenes detrás.
+	hVol, clonados, err := s.clonar(r.Context(), plan)
+	if err != nil {
+		s.metricas.registrar(resultadoDe(err), 0)
+		fail(w, codigoVolumen(err), err)
+		return
+	}
+
+	if pet.Count != nil {
+		s.respuestaLote(w, r, t, pet, snaps, n, hVol, clonados)
+		return
+	}
 
 	inicio := time.Now()
 	h, mc, err := s.crear(r.Context(), t, pet, snaps)
 	if err != nil {
 		s.metricas.registrar(resultadoDe(err), time.Since(inicio))
-		// Un reinicio del host invalida sus dorados: la reconstrucción ya se
-		// lanzó en segundo plano (dentro de crear, en cuanto se vio el fallo) y
-		// lo único que falta es decírselo a quien pidió el sandbox, con un
-		// Retry-After en vez del 502/503 genérico que daría un fallo cualquiera.
-		if pet.Template != "" && api.EsFalloTSC(err) {
-			w.Header().Set("Retry-After", retryAfterReconstruccion)
-			// errPublico: el mensaje (con lo que contestó el daemon) sale tal
-			// cual y fail() no busca un *api.StatusError más abajo que nos pise
-			// el 503 con el código que trajera el daemon.
-			fail(w, http.StatusServiceUnavailable, &errPublico{err: err, msg: fmt.Sprintf(
-				"template %q can't be restored right now: a host restart invalidated its golden snapshot; "+
-					"rebuilding it in the background, try again shortly (%v)", pet.Template, err)})
-			return
+		if hVol != nil {
+			s.borrarVolumenes(hVol, clonados)
 		}
-		fail(w, codigoCrear(err), err)
+		s.falloCrear(w, pet, err)
 		return
 	}
 	s.metricas.registrar(resultadoOK, time.Since(inicio))
 	sb := vista(h, mc)
 	w.Header().Set("Location", "/v1/sandboxes/"+sb.ID)
 	writeJSON(w, http.StatusCreated, sb)
+}
+
+// falloCrear contesta al fallo de crear.
+func (s *Servidor) falloCrear(w http.ResponseWriter, pet CrearPeticion, err error) {
+	// Un reinicio del host invalida sus dorados: la reconstrucción ya se
+	// lanzó en segundo plano (dentro de crear, en cuanto se vio el fallo) y
+	// lo único que falta es decírselo a quien pidió el sandbox, con un
+	// Retry-After en vez del 502/503 genérico que daría un fallo cualquiera.
+	if pet.Template != "" && api.EsFalloTSC(err) {
+		w.Header().Set("Retry-After", retryAfterReconstruccion)
+		// errPublico: el mensaje (con lo que contestó el daemon) sale tal
+		// cual y fail() no busca un *api.StatusError más abajo que nos pise
+		// el 503 con el código que trajera el daemon.
+		fail(w, http.StatusServiceUnavailable, &errPublico{err: err, msg: fmt.Sprintf(
+			"template %q can't be restored right now: a host restart invalidated its golden snapshot; "+
+				"rebuilding it in the background, try again shortly (%v)", pet.Template, err)})
+		return
+	}
+	fail(w, codigoCrear(err), err)
 }
 
 // normalizar aplica los valores por defecto y rechaza lo que no vale. Por
@@ -491,6 +542,19 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 	}
 	if p.MemMiB < 0 || p.VCPUs < 0 {
 		return errors.New("mem_mib and vcpus can't be negative")
+	}
+	if p.Count != nil && *p.Count < 1 {
+		return errors.New("count must be at least 1")
+	}
+	if p.Atomic && p.Count == nil {
+		return errors.New("atomic only makes sense with count")
+	}
+	n := 1
+	if p.Count != nil {
+		n = *p.Count
+	}
+	if err := validarVolumenes(p.Volumes, n); err != nil {
+		return err
 	}
 	if len(p.Labels) > maxEtiquetas {
 		return fmt.Errorf("too many labels (%d); the limit is %d", len(p.Labels), maxEtiquetas)
@@ -577,10 +641,20 @@ func memoriaViva(sbs []Sandbox, grafos []Grafo) int {
 // reservar comprueba la cuota y apunta la creación en vuelo. mem son los MiB
 // efectivos del sandbox que se va a crear (0 si no se saben).
 func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string, mem int) error {
+	return s.reservarN(ctx, t, plantilla, mem, 1)
+}
+
+// reservarN es reservar para un lote de n sandboxes de mem MiB cada uno: se
+// cuenta el lote ENTERO antes de empezar, y o caben todos o no se reserva
+// nada.
+func (s *Servidor) reservarN(ctx context.Context, t *Tenant, plantilla string, mem, n int) error {
 	if t.MaxSandboxes == 0 && (t.MaxPorPlantilla == 0 || plantilla == "") && t.MaxMemTotalMiB == 0 {
 		s.mu.Lock()
-		s.enVuelo[t.Nombre]++
-		s.enVuelo[clavePlantilla(t, plantilla)]++
+		s.enVuelo[t.Nombre] += n
+		s.enVuelo[clavePlantilla(t, plantilla)] += n
+		if mem > 0 && t.MaxMemTotalMiB == 0 {
+			s.enVuelo[claveMemoria(t)] += mem * n
+		}
 		s.mu.Unlock()
 		return nil
 	}
@@ -632,24 +706,24 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string, me
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t.MaxSandboxes > 0 && total+s.enVuelo[t.Nombre] >= t.MaxSandboxes {
-		return fmt.Errorf("tenant %s already has %d sandboxes; the limit is %d", t.Nombre, total, t.MaxSandboxes)
+	if t.MaxSandboxes > 0 && total+s.enVuelo[t.Nombre]+n > t.MaxSandboxes {
+		return fmt.Errorf("tenant %s already has %d sandboxes and asks for %d more; the limit is %d", t.Nombre, total, n, t.MaxSandboxes)
 	}
-	if plantilla != "" && t.MaxPorPlantilla > 0 && dePlantilla+s.enVuelo[clavePlantilla(t, plantilla)] >= t.MaxPorPlantilla {
+	if plantilla != "" && t.MaxPorPlantilla > 0 && dePlantilla+s.enVuelo[clavePlantilla(t, plantilla)]+n > t.MaxPorPlantilla {
 		return fmt.Errorf("tenant %s already has %d sandboxes of template %s; the limit is %d", t.Nombre, dePlantilla, plantilla, t.MaxPorPlantilla)
 	}
 	// La suma de memoria: lo vivo, lo que está en camino y lo que se pide.
 	if t.MaxMemTotalMiB > 0 {
 		usada := memoriaViva(vivos, grafos) + s.enVuelo[claveMemoria(t)]
-		if usada+mem > t.MaxMemTotalMiB {
+		if usada+mem*n > t.MaxMemTotalMiB {
 			return fmt.Errorf("tenant %s already uses %d MiB and asks for %d more; the limit is %d MiB in total",
-				t.Nombre, usada, mem, t.MaxMemTotalMiB)
+				t.Nombre, usada, mem*n, t.MaxMemTotalMiB)
 		}
 	}
-	s.enVuelo[t.Nombre]++
-	s.enVuelo[clavePlantilla(t, plantilla)]++
+	s.enVuelo[t.Nombre] += n
+	s.enVuelo[clavePlantilla(t, plantilla)] += n
 	if mem > 0 {
-		s.enVuelo[claveMemoria(t)] += mem
+		s.enVuelo[claveMemoria(t)] += mem * n
 	}
 	return nil
 }
@@ -720,18 +794,25 @@ func codigoReservar(err error) int {
 }
 
 func (s *Servidor) liberar(t *Tenant, plantilla string, mem int) {
+	s.liberarN(t, plantilla, mem, 1)
+}
+
+// liberarN deshace reservarN.
+func (s *Servidor) liberarN(t *Tenant, plantilla string, mem, n int) {
 	ct := s.cerrojoDe(t.Nombre)
 	ct.Lock()
 	defer ct.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.bajarEnVueloLocked(t.Nombre)
-	s.bajarEnVueloLocked(clavePlantilla(t, plantilla))
+	for range n {
+		s.bajarEnVueloLocked(t.Nombre)
+		s.bajarEnVueloLocked(clavePlantilla(t, plantilla))
+	}
 	if k := claveMemoria(t); mem > 0 {
-		if s.enVuelo[k] <= mem {
+		if s.enVuelo[k] <= mem*n {
 			delete(s.enVuelo, k)
 		} else {
-			s.enVuelo[k] -= mem
+			s.enVuelo[k] -= mem * n
 		}
 	}
 }
@@ -778,6 +859,9 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 		VCPUs: p.VCPUs, MemMiB: p.MemMiB, TTLSeconds: p.TTLSeconds, OnTTL: p.OnTTL,
 		Egress: p.Egress, AllowDomains: p.AllowDomains, Labels: etiquetas,
 	}
+	if p.volumenes != nil {
+		req.Volumes = p.volumenes.atts
+	}
 
 	var sirve func(*hosts.Host) bool
 	if p.Template == "" {
@@ -814,7 +898,12 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 		}
 	}
 
-	mc, h, err := hosts.Intentar(ctx, s.reg, sirve, func(ctx context.Context, h *hosts.Host) (*api.Machine, error) {
+	if p.volumenes != nil && p.volumenes.solo != nil {
+		antes, solo := sirve, p.volumenes.solo
+		sirve = func(h *hosts.Host) bool { return solo[h.Nombre] && antes(h) }
+	}
+
+	mc, h, err := hosts.IntentarRotado(ctx, s.reg, sirve, p.desplazo, func(ctx context.Context, h *hosts.Host) (*api.Machine, error) {
 		mc, err := h.Cliente.CreateSandbox(ctx, req)
 		// El fallo de TSC es DE ESE HOST: su dorado quedó invalidado por un
 		// reinicio y solo una reconstrucción con la receta que lleva colgada lo
@@ -890,7 +979,7 @@ func (s *Servidor) hostsCon(ctx context.Context, f func(context.Context, *hosts.
 // no los cambia; lo único que se puede ajustar después es el TTL (renew) y
 // las etiquetas.
 func puedeReclamar(p CrearPeticion) bool {
-	return p.Egress == "none" && p.OnTTL == api.OnTTLFreeze && p.MemMiB == 0 && p.VCPUs == 0
+	return p.Egress == "none" && p.OnTTL == api.OnTTLFreeze && p.MemMiB == 0 && p.VCPUs == 0 && len(p.Volumes) == 0
 }
 
 // plazoDaemon acota cada llamada al daemon que hace una reclamación: sin él,

@@ -175,8 +175,21 @@ func (r *Registro) Candidatos(ctx context.Context, sirve func(*Host) bool) []*Ho
 // puede atender. Un error cualquiera no se reintenta, porque repetirlo en otro
 // sitio solo multiplica el mismo fallo.
 func Intentar[T any](ctx context.Context, r *Registro, sirve func(*Host) bool, trabajo func(context.Context, *Host) (T, error)) (T, *Host, error) {
+	return IntentarRotado(ctx, r, sirve, 0, trabajo)
+}
+
+// IntentarRotado es Intentar empezando por el candidato número desplazo
+// (módulo cuántos hay) en vez de por el de más hueco. Los trabajos de un lote
+// lo usan con su índice para repartirse entre los hosts en vez de caer todos
+// en el que más hueco tenía al empezar; si el elegido no cabe, se sigue por
+// los demás en el mismo orden circular.
+func IntentarRotado[T any](ctx context.Context, r *Registro, sirve func(*Host) bool, desplazo int, trabajo func(context.Context, *Host) (T, error)) (T, *Host, error) {
 	var cero T
 	cands := r.Candidatos(ctx, sirve)
+	if n := len(cands); n > 1 && desplazo > 0 {
+		k := desplazo % n
+		cands = append(append([]*Host(nil), cands[k:]...), cands[:k]...)
+	}
 	if len(cands) == 0 {
 		if len(r.Todos()) == 0 {
 			return cero, nil, ErrSinHosts

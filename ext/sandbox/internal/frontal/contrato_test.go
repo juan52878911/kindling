@@ -182,7 +182,8 @@ func TestContratoRutas(t *testing.T) {
 func TestContratoEsquemas(t *testing.T) {
 	sp := leerSpec(t)
 	structs := map[string]any{
-		"Sandbox": Sandbox{}, "CrearPeticion": CrearPeticion{}, "RenovarPeticion": RenovarPeticion{},
+		"Sandbox": Sandbox{}, "CrearPeticion": CrearPeticion{}, "VolumenPeticion": VolumenPeticion{},
+		"Volumen": Volumen{}, "CrearVolumenPeticion": CrearVolumenPeticion{}, "LoteRespuesta": LoteRespuesta{}, "LoteError": LoteError{}, "RenovarPeticion": RenovarPeticion{},
 		"Grafo": Grafo{}, "NodoGrafo": NodoGrafo{}, "CrearGrafoPeticion": CrearGrafoPeticion{},
 		"TemplateInfo": TemplateInfo{}, "TemplateHost": TemplateHost{}, "HostEstado": hosts.Estado{},
 		"Error": api.Error{}, "ExecRequest": api.ExecRequest{}, "ExecEvent": api.ExecEvent{},

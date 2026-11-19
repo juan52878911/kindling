@@ -14,6 +14,7 @@ security:
 tags:
   - name: sandboxes
   - name: graphs
+  - name: volumes
   - name: ops
 paths:
   /v1/health:
@@ -99,7 +100,22 @@ paths:
           $ref: "#/components/responses/Error"
     post:
       tags: [sandboxes]
-      summary: Crea un sandbox
+      summary: Crea un sandbox, o un lote con `count`
+      description: |
+        Sin `count` crea uno y la respuesta es el sandbox. Con `count` (1 al
+        tope del inquilino y del gateway) crea un lote y la respuesta es
+        `LoteRespuesta`, aunque `count` sea 1. La cuota (sandboxes, por
+        plantilla y memoria total) se cuenta con el lote entero antes de crear
+        nada: si no caben todos, 429 y no se crea ninguno. Los sandboxes se
+        reparten entre los hosts. Con `atomic` el lote es todo o nada: si uno
+        falla se borran los ya creados y la respuesta es el error. Sin `atomic`
+        un lote parcial es 207 con los creados y un error por cada uno que no.
+
+        `volumes` monta volúmenes del inquilino (`/v1/volumes`). Uno que existe
+        fija el host donde nace el sandbox; dos en hosts distintos son 409; uno
+        inexistente o de otro inquilino, 404. Con `clone_from` y un `name`
+        nuevo, el volumen se crea clonando otro del inquilino. Un lote solo
+        monta volúmenes `read_only` y no admite `clone_from`.
       requestBody:
         required: false
         content:
@@ -108,14 +124,26 @@ paths:
               $ref: "#/components/schemas/CrearPeticion"
       responses:
         "201":
-          description: Creado
+          description: Creado (un `Sandbox`, o `LoteRespuesta` con `count`)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Sandbox"
+                oneOf:
+                  - $ref: "#/components/schemas/Sandbox"
+                  - $ref: "#/components/schemas/LoteRespuesta"
+        "207":
+          description: Lote parcial (sin `atomic`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoteRespuesta"
         "400":
           $ref: "#/components/responses/Error"
         "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
           $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
@@ -408,6 +436,87 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+  /v1/volumes:
+    get:
+      tags: [volumes]
+      summary: Volúmenes del inquilino
+      responses:
+        "200":
+          description: Lista (puede ir vacía)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Volumen"
+        "401":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [volumes]
+      summary: Crea un volumen (vacío o clon de otro propio)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrearVolumenPeticion"
+      responses:
+        "201":
+          description: Creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Volumen"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/volumes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Nombre del volumen
+        schema:
+          type: string
+    get:
+      tags: [volumes]
+      summary: Ve un volumen
+      responses:
+        "200":
+          description: El volumen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Volumen"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [volumes]
+      summary: Borra un volumen (409 si está montado)
+      responses:
+        "204":
+          description: Borrado
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
   /v1/graphs:
     get:
       tags: [graphs]
@@ -652,6 +761,76 @@ components:
           type: object
           additionalProperties:
             type: string
+        count:
+          type: integer
+          minimum: 1
+          description: Crea un lote de este tamaño (respuesta `LoteRespuesta`)
+        atomic:
+          type: boolean
+          description: Con `count`, todo o nada
+        volumes:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumenPeticion"
+    VolumenPeticion:
+      type: object
+      required: [name, mount]
+      properties:
+        name:
+          type: string
+        mount:
+          type: string
+          description: Ruta absoluta dentro del sandbox
+        read_only:
+          type: boolean
+        clone_from:
+          type: string
+          description: Si `name` no existe, lo crea clonando este volumen propio
+    Volumen:
+      type: object
+      properties:
+        name:
+          type: string
+        host:
+          type: string
+        size_mib:
+          type: integer
+        used_bytes:
+          type: integer
+        in_use:
+          type: boolean
+    CrearVolumenPeticion:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        size_mib:
+          type: integer
+        clone_from:
+          type: string
+        host:
+          type: string
+    LoteRespuesta:
+      type: object
+      properties:
+        sandboxes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sandbox"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/LoteError"
+    LoteError:
+      type: object
+      properties:
+        index:
+          type: integer
+        status:
+          type: integer
+        error:
+          type: string
     RenovarPeticion:
       type: object
       properties:

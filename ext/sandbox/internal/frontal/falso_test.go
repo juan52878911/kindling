@@ -60,6 +60,15 @@ type falso struct {
 	shellIlegal bool
 	// creadas cuenta los POST /sandboxes aceptados.
 	creadas int
+	// intentos cuenta los POST /sandboxes recibidos; crearFallaDesde > 0 hace
+	// fallar (500) los que lleguen del N-ésimo en adelante. peticiones guarda
+	// lo recibido.
+	intentos        int
+	crearFallaDesde int
+	peticiones      []api.SandboxRequest
+	// volumenes del host, por nombre; clonar los copia con las etiquetas que
+	// el núcleo real NO copia (ninguna).
+	volumenes map[string]*api.Volume
 	// renewFalla hace fallar POST /sandboxes/{ref}/renew con un 500.
 	renewFalla bool
 	// renewEmpezado, si no es nil, se cierra en el siguiente renew, que se
@@ -234,6 +243,64 @@ func (f *falso) rutas() http.Handler {
 		writeJSON(w, 200, out)
 	})
 	m.HandleFunc("POST /sandboxes", f.crear)
+	m.HandleFunc("GET /volumes", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		out := []*api.Volume{}
+		for _, v := range f.volumenes {
+			c := *v
+			out = append(out, &c)
+		}
+		f.mu.Unlock()
+		writeJSON(w, 200, out)
+	})
+	m.HandleFunc("POST /volumes", func(w http.ResponseWriter, r *http.Request) {
+		var req api.CreateVolumeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			failDaemon(w, 400, err)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.volumenes[req.Name] != nil {
+			failDaemon(w, 409, fmt.Errorf("exists"))
+			return
+		}
+		v := &api.Volume{Name: req.Name, SizeBytes: int64(req.SizeMiB) << 20, Labels: req.Labels}
+		f.sembrarVolumenLocked(v)
+		writeJSON(w, 201, v)
+	})
+	m.HandleFunc("POST /volumes/{name}/clone", func(w http.ResponseWriter, r *http.Request) {
+		var req api.CloneVolumeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			failDaemon(w, 400, err)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		src := f.volumenes[r.PathValue("name")]
+		if src == nil {
+			failDaemon(w, 404, fmt.Errorf("no volume"))
+			return
+		}
+		v := &api.Volume{Name: req.To, SizeBytes: src.SizeBytes}
+		f.sembrarVolumenLocked(v)
+		writeJSON(w, 201, &api.CloneVolumeResult{Volume: v})
+	})
+	m.HandleFunc("DELETE /volumes/{name}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		v := f.volumenes[r.PathValue("name")]
+		if v == nil {
+			failDaemon(w, 404, fmt.Errorf("no volume"))
+			return
+		}
+		if len(v.UsedBy) > 0 {
+			failDaemon(w, 409, fmt.Errorf("volume in use"))
+			return
+		}
+		delete(f.volumenes, v.Name)
+		w.WriteHeader(204)
+	})
 	m.HandleFunc("GET /sandboxes", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.sandboxesLlamadas++
@@ -358,7 +425,14 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	tsc := f.crearErrTSC
+	f.intentos++
+	f.peticiones = append(f.peticiones, req)
+	falla := f.crearFallaDesde > 0 && f.intentos >= f.crearFallaDesde
 	f.mu.Unlock()
+	if falla {
+		failDaemon(w, 500, fmt.Errorf("boom"))
+		return
+	}
 	if req.From != "" && tsc {
 		// El mensaje real que deja ver explainRestoreErr del núcleo cuando la
 		// causa es un reinicio del host: api.EsFalloTSC lo reconoce por el
@@ -834,4 +908,24 @@ func (f *falso) grafosVivos() int {
 // fail aplica a los errores que van al tenant.
 func failDaemon(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, api.Error{Message: err.Error()})
+}
+
+func (f *falso) sembrarVolumenLocked(v *api.Volume) {
+	if f.volumenes == nil {
+		f.volumenes = map[string]*api.Volume{}
+	}
+	f.volumenes[v.Name] = v
+}
+
+// sembrarVolumen mete un volumen a mano.
+func (f *falso) sembrarVolumen(v *api.Volume) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sembrarVolumenLocked(v)
+}
+
+func (f *falso) tieneVolumen(n string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.volumenes[n] != nil
 }
