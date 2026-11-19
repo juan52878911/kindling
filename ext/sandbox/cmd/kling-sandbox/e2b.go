@@ -27,6 +27,7 @@ func sbxE2B(args []string) error {
 	envdListen := fs.String("envd-listen", "", "extra address serving the same handler (E2B_DEBUG expects envd on 127.0.0.1:49983)")
 	domain := fs.String("domain", "", "base domain advertised to clients (the E2B_DOMAIN they export)")
 	home := fs.String("home", "/home/user", "directory that resolves relative paths of the SDK")
+	debugSbx := fs.String("debug-sandbox", "", "gateway id of the sandbox that E2B_DEBUG=true clients (id debug_sandbox_id) talk to; needs -envd-listen on loopback and accepts requests without token there")
 	cert := fs.String("tls-cert", "", "TLS certificate (the SDK uses https for envd outside E2B_DEBUG)")
 	key := fs.String("tls-key", "", "TLS key")
 	if err := fs.Parse(args); err != nil {
@@ -34,6 +35,21 @@ func sbxE2B(args []string) error {
 	}
 	if (*cert == "") != (*key == "") {
 		return errors.New("-tls-cert and -tls-key go together")
+	}
+	if *debugSbx != "" {
+		if *envdListen == "" {
+			return errors.New("-debug-sandbox needs -envd-listen")
+		}
+		h, _, err := net.SplitHostPort(*envdListen)
+		if err != nil {
+			return fmt.Errorf("-envd-listen: %w", err)
+		}
+		if ip := net.ParseIP(h); ip == nil || !ip.IsLoopback() {
+			return errors.New("-debug-sandbox only with -envd-listen on a loopback IP (e.g. 127.0.0.1:49983)")
+		}
+		if *cert != "" {
+			return errors.New("-debug-sandbox serves plain HTTP (E2B_DEBUG): do not combine with -tls-cert")
+		}
 	}
 	if *url != "" {
 		os.Setenv("KLING_SANDBOX_URL", *url)
@@ -67,7 +83,10 @@ func sbxE2B(args []string) error {
 		clave = c.token
 	}
 	sh := &e2b.Servidor{API: c, Clave: clave, Dominio: *domain, Home: *home,
-		Log: func(l string) { log.Println(l) }}
+		SandboxDebug: *debugSbx, Log: func(l string) { log.Println(l) }}
+	if *debugSbx != "" {
+		log.Printf("kling sbx e2b: DEBUG MODE: %s accepts requests WITHOUT X-Access-Token for sandbox %q (id %s); loopback only", *envdListen, *debugSbx, e2b.IDDebug)
+	}
 
 	ctx, stop := ctxSenales()
 	defer stop()
@@ -82,7 +101,11 @@ func sbxE2B(args []string) error {
 		if err != nil {
 			return err
 		}
-		srv := &http.Server{Handler: sh, ReadHeaderTimeout: 10 * time.Second}
+		var h http.Handler = sh
+		if d == *envdListen && *debugSbx != "" {
+			h = sh.HandlerDebug()
+		}
+		srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 		srvs = append(srvs, srv)
 		esquema := "http"
 		if *cert != "" {

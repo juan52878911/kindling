@@ -221,7 +221,7 @@ func TestFlujoSDK(t *testing.T) {
 		TemplateID, SandboxID, ClientID, EnvdVersion, EnvdAccessToken, Domain string
 	}
 	json.Unmarshal(cuerpo, &sb)
-	if sb.SandboxID != "sbx1" || sb.TemplateID != "base" || sb.EnvdVersion == "" || sb.EnvdAccessToken == "" || sb.Domain != "e2b.test" || sb.ClientID == "" {
+	if sb.SandboxID != "onrhqmi" || sb.TemplateID != "base" || sb.EnvdVersion == "" || sb.EnvdAccessToken == "" || sb.Domain != "e2b.test" || sb.ClientID == "" {
 		t.Fatalf("respuesta de create: %s", cuerpo)
 	}
 	crear := b.gw.execs[0]["_crear"].(map[string]any)
@@ -230,8 +230,8 @@ func TestFlujoSDK(t *testing.T) {
 		t.Fatalf("petición al gateway: %v", crear)
 	}
 
-	envd := map[string]string{"X-Access-Token": sb.EnvdAccessToken, "E2b-Sandbox-Id": "sbx1", "E2b-Sandbox-Port": "49983"}
-	host := "49983-sbx1.e2b.test"
+	envd := map[string]string{"X-Access-Token": sb.EnvdAccessToken, "E2b-Sandbox-Id": "onrhqmi", "E2b-Sandbox-Port": "49983"}
+	host := "49983-onrhqmi.e2b.test"
 
 	// 2. Process/Start("echo hola") en streaming: bytes exactos.
 	peticionStart := `{"process":{"cmd":"/bin/bash","args":["-l","-c","echo hola"],"envs":{"A":"1"},"cwd":"/work"},"stdin":false}`
@@ -296,7 +296,7 @@ func TestFlujoSDK(t *testing.T) {
 	}
 
 	// 5. kill.
-	resp = b.peticion(t, "DELETE", "/sandboxes/sbx1", "", api, nil)
+	resp = b.peticion(t, "DELETE", "/sandboxes/onrhqmi", "", api, nil)
 	if leer(t, resp); resp.StatusCode != 204 || len(b.gw.borrados) != 1 {
 		t.Fatalf("kill: %d", resp.StatusCode)
 	}
@@ -306,7 +306,7 @@ func TestFlujoSDK(t *testing.T) {
 func TestControl(t *testing.T) {
 	b := nuevoBanco(t)
 	api := map[string]string{"X-API-Key": clave, "Content-Type": "application/json"}
-	resp := b.peticion(t, "GET", "/sandboxes/sbx1", "", api, nil)
+	resp := b.peticion(t, "GET", "/sandboxes/onrhqmi", "", api, nil)
 	var d map[string]any
 	json.Unmarshal(leer(t, resp), &d)
 	if d["state"] != "running" || d["cpuCount"] != float64(2) || d["memoryMB"] != float64(512) || d["endAt"] != "2026-01-02T03:09:05Z" {
@@ -322,17 +322,17 @@ func TestControl(t *testing.T) {
 	if got := strings.TrimSpace(string(leer(t, resp))); got != "[]" {
 		t.Fatalf("filtro: %s", got)
 	}
-	resp = b.peticion(t, "POST", "/sandboxes/sbx1/timeout", "", api, strings.NewReader(`{"timeout":120}`))
+	resp = b.peticion(t, "POST", "/sandboxes/onrhqmi/timeout", "", api, strings.NewReader(`{"timeout":120}`))
 	leer(t, resp)
 	if resp.StatusCode != 204 {
 		t.Fatal(resp.StatusCode)
 	}
-	resp = b.peticion(t, "POST", "/sandboxes/sbx1/refreshes", "", api, strings.NewReader(`{"duration":30}`))
+	resp = b.peticion(t, "POST", "/sandboxes/onrhqmi/refreshes", "", api, strings.NewReader(`{"duration":30}`))
 	leer(t, resp)
 	if resp.StatusCode != 204 || fmt.Sprint(b.gw.renews) != "[120 30]" {
 		t.Fatalf("renovaciones: %v", b.gw.renews)
 	}
-	resp = b.peticion(t, "POST", "/sandboxes/sbx1/connect", "", api, strings.NewReader(`{"timeout":10}`))
+	resp = b.peticion(t, "POST", "/sandboxes/onrhqmi/connect", "", api, strings.NewReader(`{"timeout":10}`))
 	if leer(t, resp); resp.StatusCode != 200 {
 		t.Fatal(resp.StatusCode)
 	}
@@ -342,9 +342,9 @@ func TestNoImplementado(t *testing.T) {
 	b := nuevoBanco(t)
 	api := map[string]string{"X-API-Key": clave, "Content-Type": "application/json"}
 	for _, c := range []struct{ m, p string }{
-		{"POST", "/sandboxes/sbx1/pause"}, {"POST", "/sandboxes/sbx1/resume"}, {"GET", "/sandboxes/sbx1/metrics"},
-		{"POST", "/sandboxes/sbx1/snapshots"}, {"GET", "/v2/sandboxes/sbx1/logs"}, {"POST", "/v3/templates"},
-		{"PUT", "/sandboxes/sbx1/network"},
+		{"POST", "/sandboxes/onrhqmi/pause"}, {"POST", "/sandboxes/onrhqmi/resume"}, {"GET", "/sandboxes/onrhqmi/metrics"},
+		{"POST", "/sandboxes/onrhqmi/snapshots"}, {"GET", "/v2/sandboxes/onrhqmi/logs"}, {"POST", "/v3/templates"},
+		{"PUT", "/sandboxes/onrhqmi/network"},
 	} {
 		resp := b.peticion(t, c.m, c.p, "", api, strings.NewReader(`{}`))
 		got := leer(t, resp)
@@ -355,7 +355,7 @@ func TestNoImplementado(t *testing.T) {
 	// RPC de envd sin soporte: error Connect.
 	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/json"}
 	for _, p := range []string{"/process.Process/SendInput", "/process.Process/Connect", "/filesystem.Filesystem/WatchDir", "/filesystem.Filesystem/CreateWatcher"} {
-		resp := b.peticion(t, "POST", p, "49983-sbx1.e2b.test", cab, strings.NewReader(`{}`))
+		resp := b.peticion(t, "POST", p, "49983-onrhqmi.e2b.test", cab, strings.NewReader(`{}`))
 		got := leer(t, resp)
 		if resp.StatusCode != 501 || !strings.Contains(string(got), `"code":"unimplemented"`) {
 			t.Errorf("%s: %d %s", p, resp.StatusCode, got)
@@ -366,13 +366,13 @@ func TestNoImplementado(t *testing.T) {
 func TestProtobufRechazado(t *testing.T) {
 	b := nuevoBanco(t)
 	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/connect+proto"}
-	resp := b.peticion(t, "POST", "/process.Process/Start", "49983-sbx1.e2b.test", cab, strings.NewReader("\x00\x00\x00\x00\x00"))
+	resp := b.peticion(t, "POST", "/process.Process/Start", "49983-onrhqmi.e2b.test", cab, strings.NewReader("\x00\x00\x00\x00\x00"))
 	got := leer(t, resp)
 	if resp.StatusCode != 415 || !strings.Contains(string(got), "unimplemented") || !strings.Contains(string(got), "JSON") {
 		t.Fatalf("%d %s", resp.StatusCode, got)
 	}
 	cab["Content-Type"] = "application/proto"
-	resp = b.peticion(t, "POST", "/filesystem.Filesystem/Stat", "49983-sbx1.e2b.test", cab, strings.NewReader(""))
+	resp = b.peticion(t, "POST", "/filesystem.Filesystem/Stat", "49983-onrhqmi.e2b.test", cab, strings.NewReader(""))
 	if got := leer(t, resp); resp.StatusCode != 415 {
 		t.Fatalf("%d %s", resp.StatusCode, got)
 	}
@@ -382,7 +382,7 @@ func TestFilesystemRPC(t *testing.T) {
 	b := nuevoBanco(t)
 	b.gw.archivos = map[string][]byte{"/home/user/a.txt": []byte("hola")}
 	cab := map[string]string{"X-Access-Token": (&Servidor{Clave: clave}).tokenEnvd("sbx1"), "Content-Type": "application/json", "Connect-Protocol-Version": "1"}
-	host := "49983-sbx1.e2b.test"
+	host := "49983-onrhqmi.e2b.test"
 	llamar := func(rpc, cuerpo string) (int, map[string]any) {
 		resp := b.peticion(t, "POST", "/filesystem.Filesystem/"+rpc, host, cab, strings.NewReader(cuerpo))
 		var m map[string]any
@@ -422,7 +422,7 @@ func TestSendSignalCortaElProceso(t *testing.T) {
 	b.gw.bloquear = make(chan struct{})
 	defer close(b.gw.bloquear)
 	tok := (&Servidor{Clave: clave}).tokenEnvd("sbx1")
-	host := "49983-sbx1.e2b.test"
+	host := "49983-onrhqmi.e2b.test"
 	cab := map[string]string{"X-Access-Token": tok, "Content-Type": "application/connect+json"}
 	resp := b.peticion(t, "POST", "/process.Process/Start", host, cab,
 		strings.NewReader(string(envelope(`{"process":{"cmd":"sleep","args":["99"]},"tag":"dormir"}`))))
@@ -468,7 +468,7 @@ func TestAutenticacion(t *testing.T) {
 		}
 	}
 	// Token de envd de otro sandbox, o ninguno.
-	host := "49983-sbx1.e2b.test"
+	host := "49983-onrhqmi.e2b.test"
 	for _, tok := range []string{"", "x", (&Servidor{Clave: clave}).tokenEnvd("otro")} {
 		resp := b.peticion(t, "GET", "/files?path=/a", host, map[string]string{"X-Access-Token": tok}, nil)
 		if leer(t, resp); resp.StatusCode != 401 {
@@ -497,13 +497,13 @@ func TestClaveNoSeFiltra(t *testing.T) {
 	api := map[string]string{"X-API-Key": clave, "Content-Type": "application/json"}
 	var todo bytes.Buffer
 	for _, c := range []struct{ m, p, cuerpo string }{
-		{"GET", "/sandboxes/sbx1", ""}, {"POST", "/sandboxes", `{"templateID":"base"}`},
-		{"POST", "/sandboxes/sbx1/pause", "{}"}, {"GET", "/sandboxes/sbx1/../x?k=" + clave, ""},
+		{"GET", "/sandboxes/onrhqmi", ""}, {"POST", "/sandboxes", `{"templateID":"base"}`},
+		{"POST", "/sandboxes/onrhqmi/pause", "{}"}, {"GET", "/sandboxes/onrhqmi/../x?k=" + clave, ""},
 	} {
 		resp := b.peticion(t, c.m, c.p, "", api, strings.NewReader(c.cuerpo))
 		todo.Write(leer(t, resp))
 	}
-	envd := map[string]string{"X-API-Key": clave, "Content-Type": "application/json", "E2b-Sandbox-Id": "sbx1"}
+	envd := map[string]string{"X-API-Key": clave, "Content-Type": "application/json", "E2b-Sandbox-Id": "onrhqmi"}
 	resp := b.peticion(t, "POST", "/filesystem.Filesystem/Stat", "", envd, strings.NewReader(`{"path":"/a"}`))
 	todo.Write(leer(t, resp))
 	resp = b.peticion(t, "GET", "/files?path=/a", "", envd, nil)
@@ -512,7 +512,7 @@ func TestClaveNoSeFiltra(t *testing.T) {
 	s := &Servidor{API: roto{}, Clave: clave, Log: func(l string) { todo.WriteString(l) }}
 	srv := httptest.NewServer(s)
 	defer srv.Close()
-	req, _ := http.NewRequest("GET", srv.URL+"/sandboxes/sbx1", nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/sandboxes/onrhqmi", nil)
 	req.Header.Set("X-API-Key", clave)
 	r, _ := http.DefaultClient.Do(req)
 	todo.Write(leer(t, r))
@@ -558,7 +558,7 @@ func TestStartErrores(t *testing.T) {
 		"con pty":   `{"process":{"cmd":"sh"},"pty":{"size":{"cols":80,"rows":24}}}`,
 		"json roto": `{`,
 	} {
-		resp := b.peticion(t, "POST", "/process.Process/Start", "49983-sbx1.e2b.test", cab, strings.NewReader(string(envelope(cuerpo))))
+		resp := b.peticion(t, "POST", "/process.Process/Start", "49983-onrhqmi.e2b.test", cab, strings.NewReader(string(envelope(cuerpo))))
 		got := leer(t, resp)
 		// Un stream que falla antes de empezar termina con un solo sobre de fin con error.
 		if resp.StatusCode != 200 || len(got) < 5 || got[0] != 0x02 || !strings.Contains(string(got[5:]), `"error"`) {

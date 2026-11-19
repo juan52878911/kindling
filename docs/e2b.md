@@ -27,6 +27,7 @@ kling sbx e2b -listen 127.0.0.1:3000 [-domain e2b.example.test] [-tls-cert c.pem
 |---|---|
 | `-listen` | Dirección del plano de control y de envd (por defecto `127.0.0.1:3000`). |
 | `-envd-listen` | Segunda dirección con el mismo manejador; para `E2B_DEBUG`, `127.0.0.1:49983`. |
+| `-debug-sandbox` | Id del gateway al que apunta `E2B_DEBUG` (ver «Modo debug»). |
 | `-domain` | Dominio base que el shim anuncia en cada sandbox (el `E2B_DOMAIN` del cliente). |
 | `-home` | Directorio que resuelve las rutas relativas del SDK (por defecto `/home/user`). |
 | `-tls-cert`, `-tls-key` | Sirve HTTPS; el SDK usa `https` hacia envd fuera de `E2B_DEBUG`. |
@@ -43,27 +44,48 @@ Cada sandbox recibe un `envdAccessToken` derivado de la clave (HMAC por sandbox)
 
 ## Apuntar el SDK
 
-El SDK construye la URL de envd como `<puerto>-<sandboxID>.<dominio>` (puerto 49983); el
-shim enruta por ese host, o por la cabecera `E2b-Sandbox-Id` si la hay. Hay dos formas:
+**El `sandboxID` que ve E2B no es el id del gateway.** El gateway usa ids `host/ref`, que
+rompen rutas (`DELETE /sandboxes/<id>`) y etiquetas DNS. El shim expone el id codificado en
+base32 en minúsculas sin relleno (`h1/m-1` → `nbswy…`): determinista, reversible y sin estado,
+así que sobrevive a reinicios. Cabe en la etiqueta `<puerto>-<id>` (≤ 63) si el id del gateway
+mide ≤ 35 bytes; con ids más largos el host DNS no sirve, pero la cabecera `E2b-Sandbox-Id` y las
+rutas siguen funcionando. Un id crudo con `/` se rechaza.
 
-**Con dominio (modo normal).** Necesita DNS comodín hacia el shim y TLS que el cliente acepte.
+El shim enruta envd por el host `<puerto>-<sandboxID>.<dominio>` o, si no, por la cabecera
+`E2b-Sandbox-Id`; en los dos casos exige `X-Access-Token` (el `envdAccessToken` de create).
+
+**Pruebas locales (sin DNS ni TLS).** Con `E2B_API_URL` y `E2B_SANDBOX_URL` el SDK manda todo,
+control y envd, al mismo listener, identificando el sandbox solo por cabeceras:
+
+```sh
+kling sbx e2b -listen 127.0.0.1:3000
+export E2B_API_KEY=<token del inquilino>
+export E2B_API_URL=http://127.0.0.1:3000 E2B_SANDBOX_URL=http://127.0.0.1:3000
+```
+
+**En serio (dominio + TLS).** Necesita DNS comodín hacia el shim y TLS que el cliente acepte.
 
 ```sh
 export E2B_API_KEY=<token del inquilino>
 export E2B_DOMAIN=e2b.example.test        # *.e2b.example.test → la máquina del shim
-export E2B_API_URL=https://api.e2b.example.test   # o http://127.0.0.1:3000 sin TLS
+export E2B_API_URL=https://api.e2b.example.test
 # Certificado propio: SSL_CERT_FILE=ca.pem (Python), NODE_EXTRA_CA_CERTS=ca.pem (JS)
 ```
 
-**Modo debug (sin DNS ni TLS).** El SDK habla `http://localhost:3000` y `http://localhost:49983`:
+**Modo debug (`E2B_DEBUG=true`).** Con él el SDK no llama al plano de control: usa el id fijo
+`debug_sandbox_id`, no manda `X-Access-Token` y habla con `http://localhost:49983`. Se soporta
+con una bandera explícita, sobre un sandbox del gateway que ya existe:
 
 ```sh
-kling sbx e2b -listen 127.0.0.1:3000 -envd-listen 127.0.0.1:49983
+kling sbx e2b -listen 127.0.0.1:3000 -envd-listen 127.0.0.1:49983 -debug-sandbox h1/m-1
 export E2B_DEBUG=true E2B_API_KEY=<token del inquilino>
 ```
 
-El sandbox se identifica entonces por `E2b-Sandbox-Id`, que el SDK debe mandar; si tu versión
-no lo hace, usa el modo con dominio.
+`-debug-sandbox` exige `-envd-listen` en una IP de loopback, sin TLS, y avisa en el log al
+arrancar. Solo ese listener acepta, **sin token**, las peticiones de envd sin id o con
+`debug_sandbox_id`, y solo para ese sandbox; el listener principal y el resto de ids siguen
+exigiendo `X-Access-Token`. El plano de control no se usa en este modo: crea y borra el sandbox
+con `kling sbx` (o con el SDK sin `E2B_DEBUG`).
 
 ```python
 from e2b import Sandbox
