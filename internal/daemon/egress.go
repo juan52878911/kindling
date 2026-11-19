@@ -30,3 +30,19 @@ func (s *Server) handleEgress(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+// handleSetEgress sirve PATCH /machines/{ref}/egress: cambia el modo y los
+// dominios de una máquina viva sin reiniciarla (machine.SetEgress).
+func (s *Server) handleSetEgress(w http.ResponseWriter, r *http.Request) {
+	var req api.EgressRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	out, err := s.mgr.SetEgress(r.Context(), r.PathValue("ref"), req)
+	if err != nil {
+		fail(w, cicloStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}

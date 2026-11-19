@@ -2,6 +2,8 @@
 
 package net
 
+import "errors"
+
 // En macOS no hay red en el host que montar: cada kling-vz lleva su propia red
 // de espacio de usuario, con la misma forma que el namespace de Linux, y la
 // política de salida se le manda por su API (PUT /kling/network) desde
@@ -47,3 +49,18 @@ func destinosIP(n *Net) []Destino { return nil }
 
 // ReanudarResolver no hace falta: no hay resolver en el host.
 func (n *Net) ReanudarResolver(e Egress) error { return nil }
+
+// ErrSinRestore y ResultadoEgreso existen también aquí para que el manager
+// compile; en macOS el cambio en caliente lo hace kling-vz (no está hecho).
+var ErrSinRestore = errors.New("live egress change is not supported on this platform")
+
+// ResultadoEgreso: ver egreso_vivo_fc.go.
+type ResultadoEgreso struct {
+	ConexionesCortadas bool
+	Estrecha           bool
+}
+
+// CambiarEgreso no está soportado en macOS.
+func (n *Net) CambiarEgreso(viejo Egress, viejosDominios []string, nuevo Egress, dominios []string) (ResultadoEgreso, error) {
+	return ResultadoEgreso{}, ErrSinRestore
+}
