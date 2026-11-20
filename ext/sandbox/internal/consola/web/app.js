@@ -40,12 +40,16 @@ function deb64(s) {
 function login() {
   limpia();
   var t = el('input', { type: 'password', placeholder: 'token de inquilino', size: '50' });
-  var b = el('button', { text: 'Entrar' });
-  b.addEventListener('click', function () {
+  var b = el('button', { text: 'Entrar', type: 'submit' });
+  // Un <form> para que Enter en el campo también entre.
+  var f = el('form', {}, [t, b]);
+  f.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    if (!t.value) return;
     sessionStorage.setItem('kling-token', t.value); ruta();
   });
   main.appendChild(el('p', { text: 'Pega tu token. Solo se guarda en esta pestaña (sessionStorage).' }));
-  main.appendChild(t); main.appendChild(b);
+  main.appendChild(f);
 }
 
 function celda(txt) { return el('td', { text: txt == null ? '' : String(txt) }); }
