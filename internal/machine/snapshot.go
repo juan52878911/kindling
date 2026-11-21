@@ -1453,7 +1453,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
 	// Una copia que no se pone viva se descarta y se restaura otra, una vez
 	// (copia_muerta.go).
-	return conCopiaDeRepuesto(ctx, req.Name, func() (*api.Machine, error) {
+	return conCopiaDeRepuesto(ctx, req.Name, func() { m.puertaRetroceder("dead copy") }, func() (*api.Machine, error) {
 		return m.runFromUna(ctx, req, ai)
 	})
 }

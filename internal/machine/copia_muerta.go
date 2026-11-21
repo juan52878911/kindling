@@ -61,12 +61,19 @@ func esperarDiagnostico(diag <-chan struct{}) {
 // conCopiaDeRepuesto ejecuta intento y, si falla porque la copia estaba muerta
 // (errCopiaMuerta), lo repite UNA vez: restauración entera, con id, red y VMM
 // nuevos. El segundo error se devuelve tal cual.
-func conCopiaDeRepuesto(ctx context.Context, nombre string, intento func() (*api.Machine, error)) (*api.Machine, error) {
+//
+// muerta, si no es nil, se llama antes del repuesto: la puerta de arranques
+// retrocede (puertaRetroceder), porque una copia muda en un host anidado es
+// la misma señal que un VMM que muere.
+func conCopiaDeRepuesto(ctx context.Context, nombre string, muerta func(), intento func() (*api.Machine, error)) (*api.Machine, error) {
 	mc, err := intento()
 	if err == nil || !errors.Is(err, errCopiaMuerta) || ctx.Err() != nil {
 		return mc, err
 	}
 	log.Printf("%s: the restored copy did not come alive; restoring another one", nombre)
+	if muerta != nil {
+		muerta()
+	}
 	return intento()
 }
 

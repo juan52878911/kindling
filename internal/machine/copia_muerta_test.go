@@ -93,7 +93,7 @@ func TestCopiaMudaSeSustituyePorOtra(t *testing.T) {
 	antes := CopiasMuertas()
 	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now(), ConAgente: true}
 	var n int
-	mc, err := conCopiaDeRepuesto(context.Background(), "web", intentoDe(m, snap, []string{"a", "b"}, []int{4242, 4343}, &n))
+	mc, err := conCopiaDeRepuesto(context.Background(), "web", nil, intentoDe(m, snap, []string{"a", "b"}, []int{4242, 4343}, &n))
 	if err != nil || mc == nil || mc.ID != "b" {
 		t.Fatalf("mc=%v err=%v, quería la segunda copia", mc, err)
 	}
@@ -121,7 +121,7 @@ func TestDosCopiasMudasFallanRapido(t *testing.T) {
 	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now(), ConAgente: true}
 	var n int
 	ini := time.Now()
-	_, err := conCopiaDeRepuesto(context.Background(), "web", intentoDe(m, snap, []string{"a", "b"}, []int{4242, 4242}, &n))
+	_, err := conCopiaDeRepuesto(context.Background(), "web", nil, intentoDe(m, snap, []string{"a", "b"}, []int{4242, 4242}, &n))
 	if !errors.Is(err, errCopiaMuerta) {
 		t.Fatalf("err=%v, quería errCopiaMuerta", err)
 	}
@@ -136,7 +136,7 @@ func TestDosCopiasMudasFallanRapido(t *testing.T) {
 // Un fallo que no es de copia muerta no se repite.
 func TestOtroErrorNoRepite(t *testing.T) {
 	n := 0
-	_, err := conCopiaDeRepuesto(context.Background(), "web", func() (*api.Machine, error) {
+	_, err := conCopiaDeRepuesto(context.Background(), "web", nil, func() (*api.Machine, error) {
 		n++
 		return nil, errors.New("disk full")
 	})
