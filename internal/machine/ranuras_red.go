@@ -54,15 +54,20 @@ func (m *Manager) fondoDeRed() *knet.Fondo {
 		}
 		f := knet.NuevoFondo(tam, m.montarRanura, m.destruirRanura)
 		e.f.Store(f)
-		go func() {
-			for range time.Tick(intervaloRecogida) {
-				f.Recoger()
-			}
-		}()
+		f.Bloquear = m.tryLock
+		f.IniciarRecogida(intervaloRecogida)
 		f.Reponer()
 		log.Printf("network: slot pool of %d prepared networks started", tam)
 	})
 	return e.f.Load()
+}
+
+// cerrarFondoRed destruye las ranuras en espera y para la recogida: sin esto
+// cada parada del daemon dejaba hasta 16 netns kl-*.
+func (m *Manager) cerrarFondoRed() {
+	if f := m.fondoActivo(); f != nil {
+		f.Cerrar()
+	}
 }
 
 // fondoActivo es el fondo si ya está arrancado, sin arrancarlo: lo usan el

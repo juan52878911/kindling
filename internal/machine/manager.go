@@ -1302,6 +1302,7 @@ func (m *Manager) Close() {
 		m.cerrando.Store(true)
 		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
+		m.cerrarFondoRed()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
 		// escritura del estado ya se cerró, esa transición se pierde y el
