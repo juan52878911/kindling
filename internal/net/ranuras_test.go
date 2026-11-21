@@ -295,3 +295,25 @@ func TestCerrarDestruyeTodasYParaLaRecogida(t *testing.T) {
 	}
 	f.Cerrar() // idempotente
 }
+
+// Una ranura entregada con none ya tiene las reglas de none montadas (S5):
+// aplicarPropio no lanza ningún iptables-restore.
+func TestRanuraConNoneNoLanzaRestoreEnAplicarPropio(t *testing.T) {
+	p := sustituirProcesos(t)
+	r, err := ranuraFalsa()
+	if err != nil {
+		t.Fatal(err)
+	}
+	viejo := iniciarResolverNone
+	t.Cleanup(func() { iniciarResolverNone = viejo })
+	iniciarResolverNone = func(*Net) error { return nil }
+	p.vaciar()
+	if err := r.Net.Setup(EgressNone, nil, 1000); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range p.log {
+		if strings.Contains(l, "iptables") {
+			t.Errorf("Setup en none con ranura lanzó %q", l)
+		}
+	}
+}

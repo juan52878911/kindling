@@ -240,12 +240,16 @@ func (n *Net) arrancarRegistroNone(egress Egress) error {
 	if egress != EgressNone {
 		return nil
 	}
-	if err := startDNSResolverModo(n, nil, modoSoloGrafo); err != nil {
+	if err := iniciarResolverNone(n); err != nil {
 		return err
 	}
 	n.instalarRegistroIP()
 	return nil
 }
+
+// iniciarResolverNone arranca el resolver de none (NXDOMAIN a todo). Variable
+// para los tests, que no pueden atar la IP del veth.
+var iniciarResolverNone = func(n *Net) error { return startDNSResolverModo(n, nil, modoSoloGrafo) }
 
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,
 // pero lo intentamos por si el namespace ya no está.
