@@ -13,6 +13,11 @@ import (
 func nuevaImagen(t *testing.T) (*Manager, string) {
 	t.Helper()
 	m := newTestManager(t)
+	// Los tests no corren como root: se da por buena la huella salvo en el
+	// test que prueba lo contrario.
+	antes := huellaConfiable
+	huellaConfiable = func(os.FileInfo) bool { return true }
+	t.Cleanup(func() { huellaConfiable = antes })
 	img := filepath.Join(t.TempDir(), "img.ext4")
 	if err := os.WriteFile(img, []byte("imagen"), 0o644); err != nil {
 		t.Fatal(err)
@@ -158,6 +163,7 @@ func TestEnlaceEstableInvalidaSiOpReescribe(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(img)
+	time.Sleep(20 * time.Millisecond) // que el ctime cambie de tick
 	err := m.enlaceEstable(img, func() error {
 		if err := os.WriteFile(img, []byte("OTRA!!"), 0o644); err != nil {
 			return err
