@@ -28,6 +28,7 @@ type warmSpec struct {
 	Image, Template string
 	Steps           []string
 	CPUs, MemMiB    int
+	DiskMiB         int // 0 = el del daemon (512 MiB)
 	Egress          string
 	Replace         bool
 	Wait            time.Duration // espera a "listo" al arrancar y al guardar
@@ -44,7 +45,7 @@ func warmUp(ctx context.Context, ops warmOps, w warmSpec, out io.Writer, logf fu
 	m := w.Template + "-warm"
 	logf("starting %s from %s (%d vCPU, %d MiB, full CPU)...", m, w.Image, w.CPUs, w.MemMiB)
 	mc, err := ops.Run(ctx, api.RunRequest{
-		Name: m, Image: w.Image, VCPUs: w.CPUs, MemMiB: w.MemMiB,
+		Name: m, Image: w.Image, VCPUs: w.CPUs, MemMiB: w.MemMiB, DiskMiB: w.DiskMiB,
 		CPUPct: w.CPUs * 100, AllowExec: true, Egress: w.Egress,
 		WaitReady: true, ReadyTimeoutSeconds: int(w.Wait.Seconds()),
 	})
