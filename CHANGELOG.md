@@ -8,6 +8,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- kling-sandbox gateway: `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume` and `PATCH /v1/sandboxes/{id}/egress` (owner check as in the other sandbox routes, in the OpenAPI spec).
+- `scripts/bench`: hygiene check between variants (no stray VMMs, netns or store mounts), c50 twice, pause measured at rest and during refill.
 - Atomic sandbox claim: `POST /sandboxes/claim` (capability `sandbox-claim`) picks a running pool machine whose labels match, and labels it, names it and renews its TTL in one critical section; `404 no_claimable` when there is none.
 - `scripts/bench/`: reproducible benchmark (`bench.py`, a per-phase table read from `/metrics`, and `ec2.sh`, which launches a nested c8i instance that terminates itself; `--dry-run` prints the plan).
 - Every creation from a snapshot records its phase breakdown: `kling_create_duration_ms` and `kling_create_phase_ms{phase}` histograms in `/metrics`, and an additive `create` field on the machine (`api.CreatePhases`). `kling_operation_duration_ms{kind="restore"}` is unchanged (load only).
@@ -49,6 +51,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- kling-sandbox gateway: the pool refills 300 ms after the last claim and 2 at a time, so refills no longer compete with sandboxes in use; requests that arrive during a refill round are no longer lost.
 - Guest agent: `/resync` answers once entropy and clock are set and finishes machine-id, the generation file and process cleanup behind a gate that holds exec, files and sessions; `GET /resync` returns per-step timings.
 - Creating from a snapshot clones the overlay and sets up the network in parallel, and skips the balloon stats PATCH when the golden snapshot is already at the idle interval.
 - kling-sandbox gateway: the prewarmed pool keeps its TTL alive and replaces frozen machines (it froze after an hour and every create went cold); failed atomic claims are cleaned up by nonce, claimed machines with open egress are rejected, a daemon that stops announcing `sandbox-claim` falls back to two phases, and pool creation backs off after failures.
@@ -64,6 +67,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox gateway: per-stage creation latency histogram (`kling_sandbox_create_stage_seconds{stage}`); cold creations from templates without a pool no longer list sandboxes, and the template snapshot is fetched by name instead of listing every snapshot.
 
 ### Fixed
+- A restored copy whose guest never answers no longer holds the creation for 12 s: it is discarded and restored again once (`kling_restore_dead_copies_total`), and the failure diagnostics use the real VMM pid.
+- Unexpected deaths of jailed VMMs log the `firecracker.log` tail, the last console line and the cgroup `oom_kill` count, and the launch gate backs off to half (minimum 2), recovering one step per minute.
+- Daemon shutdown destroys the pooled network slots and stops their collector; expired slots are collected under the machine lifecycle lock.
+- Guest agent: the `dns`, `service`, `procs`, `machine/start` and `share` routes also wait behind the resync gate; the second resync phase has a watchdog and recovers from panics; after a thaw that delivered the machine without setting its clock, exec waits up to 2 s for the background resync.
+- Copy-on-write store: a `quotactl` marked broken is retried after a minute, and removing a machine forgets its idle-balloon mark.
 - Guests no longer wake from freeze/thaw or golden restores with a stale clock when the agent is slow or cuts the connection: a cut connection counts as a failed resync, thaw retries it (long timeout, then in the background), the timeout grows with concurrent resyncs, and each failure logs vCPU and tap0 diagnostics.
 - `POST /sandboxes/claim` takes the machine's lifecycle lock without waiting, revalidates the candidate and checks name, TTL and merged labels.
 - Copy-on-write store: project ids are reused per file instead of leaking on every freeze/thaw, the in-process sparse copy is used only where holes are reliable, a transient `quotactl` error no longer disables it for good, failed seeding is retried, and the jail link-stable digest is trusted only for root-owned images.

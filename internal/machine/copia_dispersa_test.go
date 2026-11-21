@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 )
@@ -127,6 +128,12 @@ func TestCopiarDispersoCancelado(t *testing.T) {
 // Una extensión de datos con ceros en medio: mismos bytes y menos bloques que
 // el origen (los ceros quedan como hueco en el destino).
 func TestCopiarDispersoCerosEnMedioDeExtension(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		// APFS rellena los ceros que caen dentro de una extensión ya escrita:
+		// el destino no tiene cómo quedar con hueco. El caso que importa
+		// (overlays en el almacén XFS) es de Linux.
+		t.Skip("APFS no deja hueco en ceros dentro de una extensión")
+	}
 	d := t.TempDir()
 	src := filepath.Join(d, "src")
 	cont := append(append(bytes.Repeat([]byte{1}, 1<<20), make([]byte, 4<<20)...), bytes.Repeat([]byte{2}, 1<<20)...)
