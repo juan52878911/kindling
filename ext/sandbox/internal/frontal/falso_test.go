@@ -118,6 +118,15 @@ type falso struct {
 	// etiquetasLentas retrasa cada PUT labels que pone un tenant.
 	etiquetasLentas time.Duration
 
+	// conReclamo anuncia api.CapabilityClaim y sirve POST /sandboxes/claim.
+	// Sin él, el daemon es uno viejo: el frontal tiene que usar las dos fases.
+	conReclamo bool
+	// reclamoLlamadas cuenta los POST /sandboxes/claim; etiquetasLlamadas,
+	// renovaciones y lecturas, los PUT labels, renew y GET /machines/{ref}.
+	reclamoLlamadas, etiquetasLlamadas, renovaciones, lecturas int
+	// reclamoReq guarda lo que pidió cada reclamo.
+	reclamoReq []api.ClaimRequest
+
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
 }
@@ -158,9 +167,14 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		n := len(f.maquinas)
+		var caps []string
+		if f.conReclamo {
+			caps = []string{api.CapabilityClaim}
+		}
 		f.mu.Unlock()
-		writeJSON(w, 200, api.Info{Version: "fake", Machines: n})
+		writeJSON(w, 200, api.Info{Version: "fake", Machines: n, Capabilities: caps})
 	})
+	m.HandleFunc("POST /sandboxes/claim", f.reclamar)
 	m.HandleFunc("GET /procstats", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, api.ProcStats{AvailableMiB: f.libreMiB})
 	})
@@ -357,6 +371,9 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("POST /sandboxes/{ref}/renew", func(w http.ResponseWriter, r *http.Request) {
 		var req api.RenewRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.renovaciones++
+		f.mu.Unlock()
 		if f.renewEmpezado != nil {
 			// Avisa y no contesta hasta que el frontal se rinda.
 			close(f.renewEmpezado)
@@ -393,6 +410,7 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("GET /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.lecturas++
 		mc, ok := f.maquinas[r.PathValue("ref")]
 		if !ok {
 			failDaemon(w, 404, fmt.Errorf("no machine"))
@@ -405,6 +423,9 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("PUT /machines/{ref}/labels", func(w http.ResponseWriter, r *http.Request) {
 		var labels map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&labels)
+		f.mu.Lock()
+		f.etiquetasLlamadas++
+		f.mu.Unlock()
 		if f.etiquetasEspera != nil {
 			// Solo la PRIMERA espera: es un frontal lento frente a otro.
 			primera := false
@@ -515,6 +536,61 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 }
 
 // sembrar mete una máquina a mano, como si la hubiera creado otro.
+// reclamar es POST /sandboxes/claim: elige, etiqueta y renueva bajo f.mu, como
+// el daemon real (machine.Reclamar).
+func (f *falso) reclamar(w http.ResponseWriter, r *http.Request) {
+	var req api.ClaimRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reclamoLlamadas++
+	f.reclamoReq = append(f.reclamoReq, req)
+	if len(req.Match) == 0 {
+		failDaemon(w, 400, fmt.Errorf("match can't be empty"))
+		return
+	}
+	var elegida *api.Machine
+	for _, mc := range f.maquinas {
+		if mc.State != api.StateRunning || !reclamableFalso(mc.Labels, req) {
+			continue
+		}
+		elegida = mc
+		break
+	}
+	if elegida == nil {
+		writeJSON(w, 404, api.Error{Message: "no claimable machine matches the request", Code: api.CodeNoClaimable})
+		return
+	}
+	elegida.Labels = api.MergeLabels(elegida.Labels, req.Labels)
+	if req.TTLSeconds > 0 {
+		elegida.TTLSeconds = req.TTLSeconds
+	}
+	ahora := time.Now()
+	elegida.TTLAt = &ahora
+	c := *elegida
+	c.Labels = api.MergeLabels(nil, elegida.Labels)
+	writeJSON(w, 200, &c)
+}
+
+func reclamableFalso(labels map[string]string, req api.ClaimRequest) bool {
+	for k, v := range req.Match {
+		if got, ok := labels[k]; !ok || got != v {
+			return false
+		}
+	}
+	for _, k := range req.Absent {
+		if _, ok := labels[k]; ok {
+			return false
+		}
+	}
+	for _, k := range [...]string{api.LabelOwner, api.LabelClaim} {
+		if _, ok := labels[k]; ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (f *falso) sembrar(mc *api.Machine) *api.Machine {
 	f.mu.Lock()
 	defer f.mu.Unlock()
