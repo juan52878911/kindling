@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -141,7 +142,11 @@ func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool
 		}
 		d.creadas++
 		d.pedidas = append(d.pedidas, req)
-		json.NewEncoder(w).Encode(&api.Machine{ID: "nueva0123456789", State: api.StateRunning})
+		// Como un daemon de verdad: la creada aparece en el listado siguiente,
+		// así una segunda vuelta no la vuelve a pedir.
+		nueva := &api.Machine{ID: fmt.Sprintf("nueva%010d", d.creadas), State: api.StateRunning, Labels: req.Labels}
+		d.vivas = append(d.vivas, nueva)
+		json.NewEncoder(w).Encode(nueva)
 	})
 	m.HandleFunc("DELETE /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
