@@ -13,23 +13,6 @@ import (
 
 func init() { Capabilities = append(Capabilities, api.CapabilityClaim) }
 
-// revisarReclamo es el revisor de la ruta bajo política de autorización: las
-// mismas reglas de etiquetas que PUT /machines/{ref}/labels (nadie fija
-// kling.owner), y el dueño que sella el daemon es quien llama, de modo que la
-// cuota se comprueba contra él al reclamar.
-func revisarReclamo(s *Server, t string, b []byte) ([]byte, int, error) {
-	return recodificar(b, func(req *api.ClaimRequest) error {
-		if err := etiquetasDeInquilino(t, req.Labels); err != nil {
-			return err
-		}
-		if req.Labels == nil {
-			req.Labels = map[string]string{}
-		}
-		req.Labels[api.LabelOwner] = t
-		return nil
-	})
-}
-
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req api.ClaimRequest
 	if err := decodeJSON(w, r, &req); err != nil {

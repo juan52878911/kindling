@@ -56,17 +56,15 @@ func TestReclamoAPI(t *testing.T) {
 	}
 }
 
-// Bajo política, el revisor sella el dueño y no deja fijarlo a mano.
-func TestRevisarReclamo(t *testing.T) {
-	out, code, err := revisarReclamo(nil, "ana", []byte(`{"match":{"p":"1"},"labels":{"x":"y"}}`))
-	if err != nil || code != 0 {
-		t.Fatal(code, err)
+// Un inquilino no reclama: las máquinas del admin no llevan kling.owner y el
+// reclamo se las daría (con exec y su TTL). Solo el admin (el gateway) llega.
+func TestReclamoSoloAdmin(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := s.routes()
+	if rr := como(t, h, uidA, "POST", "/sandboxes/claim", `{"match":{"app":"prod-db"}}`); rr.Code != 403 {
+		t.Fatalf("un inquilino reclama: %d %s", rr.Code, rr.Body)
 	}
-	var req api.ClaimRequest
-	if err := json.Unmarshal(out, &req); err != nil || req.Labels[api.LabelOwner] != "ana" || req.Labels["x"] != "y" {
-		t.Fatalf("%s %v", out, err)
-	}
-	if _, code, err := revisarReclamo(nil, "ana", []byte(`{"match":{"p":"1"},"labels":{"kling.owner":"otra"}}`)); err == nil || code != 403 {
-		t.Fatalf("code=%d err=%v", code, err)
+	if rr := como(t, h, uidAdmin, "POST", "/sandboxes/claim", `{"match":{"app":"prod-db"}}`); rr.Code != 404 {
+		t.Fatalf("admin sin nada que reclamar: %d %s", rr.Code, rr.Body)
 	}
 }

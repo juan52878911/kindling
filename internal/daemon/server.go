@@ -493,7 +493,9 @@ func (s *Server) rutas() []ruta {
 		{"POST /machines/{ref}/start", AccionMaquina, nil, s.handleStart},
 		{"DELETE /machines/{ref}", AccionMaquina, nil, s.handleRemove},
 		{"PUT /machines/{ref}/labels", AccionMaquina, revisarEtiquetas, s.handleLabels},
-		{"POST /sandboxes/claim", AccionCrear, revisarReclamo, s.handleClaim},
+		// Solo admin (el gateway): un inquilino podría reclamar una máquina sin
+		// dueño que no es suya (las del admin no llevan kling.owner).
+		{"POST /sandboxes/claim", AccionAdmin, nil, s.handleClaim},
 		{"POST /machines/{ref}/commit", AccionMaquina, revisarCommit, s.handleCommit},
 		{"POST /images", AccionAdmin, nil, s.handleBuildImage},
 		{"GET /images", AccionImagenes, nil, s.handleImages},
