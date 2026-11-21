@@ -1,4 +1,4 @@
-# OpenSandbox 1.2.1 con runtime kubernetes (k3s en la VM 112); servidor fuera del clúster.
+# OpenSandbox 1.2.1 con runtime kubernetes (k3s en la la VM); servidor fuera del clúster.
 [server]
 host = "127.0.0.1"
 port = 18080
@@ -13,7 +13,7 @@ allowed_host_paths = []
 volume_default_size = "1Gi"
 [store]
 type = "sqlite"
-path = "/root/.opensandbox/opensandbox.db"
+path = "/opt/kbench/.opensandbox/opensandbox.db"
 [kubernetes]
 kubeconfig_path = "/etc/rancher/k3s/k3s.yaml"
 namespace = "opensandbox"
@@ -21,7 +21,7 @@ informer_resync_seconds = 300
 informer_watch_timeout_seconds = 60
 workload_provider = "batchsandbox"
 image_pull_policy = "IfNotPresent"
-batchsandbox_template_file = "/root/osbk8s/batchsandbox-template.yaml"
+batchsandbox_template_file = "/opt/kbench/osbk8s/batchsandbox-template.yaml"
 [ingress]
 mode = "direct"
 [egress]

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-# Banco kindling vs OpenSandbox en el mismo host (CT 105).
-# Uso: bench.py k|kpool|osb  -> imprime una línea JSON con los resultados.
-import asyncio, json, os, statistics, subprocess, sys, time
+# Banco kindling vs OpenSandbox en el mismo host.
+# Uso: bench.py k|kpool|osb|osbpool  -> imprime una línea JSON con serie, c10/c20/c50 y la
+# tabla de fases (solo en k/kpool: deltas de /metrics del daemon y del gateway por tanda).
+# Entorno: KTOK (token del inquilino, obligatorio en k/kpool), SERIE, CONC, EXECS, ESPERA_POOL,
+# KB_SDK (ruta del SDK Python), KB_URL (gateway), KB_DAEMON_SOCK, KB_DAEMON_CONFIG, KB_KLING (CLI).
+# Sin dependencias fuera de la librería estándar (y el SDK de cada sistema).
+import asyncio, importlib.util, json, os, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
 MODO = sys.argv[1]
@@ -9,6 +13,20 @@ SERIE = int(os.environ.get("SERIE", "15"))
 CONC = [int(x) for x in os.environ.get("CONC", "10,20").split(",")]
 EXECS = int(os.environ.get("EXECS", "30"))
 ESPERA_POOL = int(os.environ.get("ESPERA_POOL", "0"))
+KB = os.environ.get("KB", "/opt/kbench")
+KB_URL = os.environ.get("KB_URL", "http://127.0.0.1:18099")
+SOCK = os.environ.get("KB_DAEMON_SOCK", "/run/kt-bench/kling.sock")
+KB_CONFIG = os.environ.get("KB_DAEMON_CONFIG", "/srv/kt-bench/config.json")
+KLING = os.environ.get("KB_KLING", "/srv/kt-bench/bin/kling")
+
+
+def cargar_fases():
+    # python -I no pone el directorio del script en sys.path: se carga por ruta.
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fases.py")
+    esp = importlib.util.spec_from_file_location("fases", ruta)
+    m = importlib.util.module_from_spec(esp)
+    esp.loader.exec_module(m)
+    return m
 
 
 def pct(v, p):
@@ -36,9 +54,11 @@ def mem_usada_mib():
 
 # ---------------- kindling ----------------
 def bench_k(plantilla):
-    sys.path.insert(0, "/root/bench2/sdk")
+    sys.path.insert(0, os.environ.get("KB_SDK", os.path.join(KB, "sdk")))
     from kindling_sandbox import Sandbox
-    url, tok = "http://127.0.0.1:18099", os.environ["KTOK"]
+    url, tok = KB_URL, os.environ["KTOK"]
+    F = cargar_fases()
+    fuentes = F.fuentes(KB_URL, tok, SOCK)
 
     def crear():
         t = time.perf_counter()
@@ -51,18 +71,21 @@ def bench_k(plantilla):
         except Exception:
             pass
 
-    res = {}
+    res = {"fases": {}}
     s, _ = crear(); borrar(s)  # calentamiento, no cuenta
     serie = []
+    antes = F.leer(fuentes)
     for _ in range(SERIE):
         s, ms = crear()
         serie.append(ms)
         borrar(s)
     res["create_serial_ms"] = resumen(serie)
+    res["fases"]["serie"] = F.tabla(antes, F.leer(fuentes), serie)
 
     for c in CONC:
         time.sleep(ESPERA_POOL)  # dejar que el pool se rellene antes de la ráfaga
         ok, err, ts = [], 0, []
+        antes = F.leer(fuentes)
         m0 = mem_usada_mib()
         with ThreadPoolExecutor(c) as ex:
             futs = [ex.submit(crear) for _ in range(c)]
@@ -74,6 +97,7 @@ def bench_k(plantilla):
                     err += 1
                     res.setdefault("errores", []).append(str(e)[:120])
         m1 = mem_usada_mib()
+        res["fases"][f"c{c}"] = F.tabla(antes, F.leer(fuentes), ts)
         res[f"create_c{c}_ms"] = resumen(ts) | {"fallos": err}
         if ok and m0 is not None:
             res[f"mem_por_sandbox_c{c}_mib"] = round((m1 - m0) / len(ok), 1)
@@ -87,9 +111,8 @@ def bench_k(plantilla):
                 assert r.stdout.strip() == "ack", r
             res["exec_echo_ms"] = resumen(ex_ms)
             # pausa/reanudar con el CLI del daemon (el frontal no lo expone)
-            env = dict(os.environ, KLING_HOST="unix:///run/kt-bench/kling.sock",
-                       KLING_CONFIG="/srv/kt-bench/config.json")
-            K = "/srv/kt-bench/bin/kling"
+            env = dict(os.environ, KLING_HOST="unix://" + SOCK, KLING_CONFIG=KB_CONFIG)
+            K = KLING
             mid = s.id.split("/")[-1]
             for parar, clave in (("pause", "resume_hasta_exec_ms"), ("freeze", "thaw_desde_freeze_hasta_exec_ms")):
                 pr = []

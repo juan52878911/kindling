@@ -151,3 +151,20 @@ the VON, VON-CPU, encoder and thaw-phase benches, then prints one summary table.
 a host with KVM (real hardware or nested virtualization) and fails with a clear message,
 before touching anything, if `/dev/kvm` is not usable — none of these numbers can be
 produced without it.
+
+## Reproducible bench protocol (F0)
+
+`scripts/bench/` repeats the pool-claim / cold-boot / concurrency figures with a per-phase
+breakdown. Full usage in [`scripts/bench/README.md`](../scripts/bench/README.md).
+
+1. **Rig**: nested EC2 (`c8i`, `NestedVirtualization=enabled`) or any host with KVM. `scripts/bench/ec2.sh`
+   creates and **deletes** it (trap + `InstanceInitiatedShutdownBehavior=terminate` + `shutdown -h +N`).
+   `--dry-run` prints what it would create and delete. Launching it for real costs money.
+2. **Run**: `bench.py k|kpool` — warm-up discarded, serial series (`SERIE`, 15), then bursts `CONC`
+   (10, 20, 50) with `ESPERA_POOL` seconds to let the pool refill before each burst; 3 runs per point.
+3. **Phases**: before and after each batch `fases.py` reads `/metrics` of the daemon and the gateway and
+   prints p50/p95/mean per phase (from histogram buckets) next to the client-side latency, under `fases`
+   in the JSON.
+4. **Sweep**: `KLING_MAX_PARALLEL_BOOT=2,4,8,16`, tenant with and without quotas, jailer on/off.
+5. **Report**: the three medians of p50/p95 per point, the phase table, host type and kindling commit.
+   Numbers from the old lab rig stay marked STALE until F5 replaces them with these.

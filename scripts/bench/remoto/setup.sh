@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Instala en una EC2 Debian 12 todo lo del banco: kindling (Firecracker), k3s + OpenSandbox
 # (runtime kubernetes) y Docker + OpenSandbox (runtime docker). Corre como root.
-# Espera en /root/sube: bins/ (kling, kling-guest, kling-sandbox, 81-base-image.sh,
-# lib-ext4-shrink.sh), bench2/ (bench.py, bench_k8s.py, sdk/), osbk8s/, charts/.
+# Espera en $KB/sube (KB=/opt/kbench): bins/ (kling, kling-guest, kling-sandbox, 81-base-image.sh,
+# lib-ext4-shrink.sh), sdk/, charts/ y los ficheros de scripts/bench (los sube ec2.sh).
 set -uo pipefail
-exec > >(tee -a /root/setup.log) 2>&1
+KB=${KB:-/opt/kbench}
+exec > >(tee -a "$KB/setup.log") 2>&1
 paso(){ echo "== $(date +%T) $*"; }
 bajar(){ curl -fsSL --retry 3 -o "$2" "$1"; }
-cd /root
+cd "$KB"
 
 paso apt
 export DEBIAN_FRONTEND=noninteractive
@@ -23,13 +24,12 @@ tar xzf fc.tgz; install -m755 release-$F-x86_64/firecracker-$F-x86_64 /usr/local
 install -m755 release-$F-x86_64/jailer-$F-x86_64 /usr/local/bin/jailer
 
 paso imagenes kindling
-R=https://github.com/juan52878911/kindling/releases/download/v1.0.0-rc.2
+R=https://github.com/juan52878911/kindling/releases/download/${KB_RELEASE:-v1.0.0-rc.2}
 mkdir -p /var/lib/kindling/images
 bajar $R/vmlinux-amd64.zst v.zst && zstd -dqf v.zst -o /var/lib/kindling/images/vmlinux
 bajar $R/min-amd64.ext4.zst m.zst && zstd -dqf m.zst -o /var/lib/kindling/images/min.ext4
-mkdir -p /root/bench /root/bench2
-cp -r /root/sube/bins /root/bench/; cp -r /root/sube/bench2/. /root/bench2/
-cp /root/sube/kt-bench-up.sh /root/sube/kt-bench-down.sh /root/bench/; cp /root/sube/gw-up.sh /root/bench2/
+cp -r "$KB/sube/bins" "$KB/bins"
+cp -r "$KB/sube/sdk" "$KB/sdk" 2>/dev/null || true
 
 paso k3s y helm
 K=v1.36.4%2Bk3s1; bajar https://github.com/k3s-io/k3s/releases/download/$K/k3s k3s
@@ -41,6 +41,6 @@ H=v3.17.3; bajar https://get.helm.sh/helm-$H-linux-amd64.tar.gz helm.tgz; bajar 
 tar xzf helm.tgz; install -m755 linux-amd64/helm /usr/local/bin/helm
 
 paso venv opensandbox
-python3 -m venv /root/osb && /root/osb/bin/pip install -q opensandbox-server==1.2.1 opensandbox==1.2.1
-mkdir -p /root/osbk8s; cp -r /root/sube/osbk8s/. /root/osbk8s/; cp -r /root/sube/charts /root/charts
+python3 -m venv "$KB/osb" && "$KB/osb/bin/pip" install -q opensandbox-server==1.2.1 opensandbox==1.2.1
+[ -d "$KB/sube/charts" ] && cp -r "$KB/sube/charts" "$KB/charts"
 paso fin
