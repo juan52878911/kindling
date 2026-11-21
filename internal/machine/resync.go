@@ -11,7 +11,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,6 +42,14 @@ const resyncPlazo = 2 * time.Second
 // un instante en volver. Corto a propósito: una máquina sin agente lo paga en
 // cada restauración.
 const resyncReintento = 250 * time.Millisecond
+
+// resyncPlazoConAgente sustituye a los dos anteriores cuando el dorado se
+// guardó con el agente escuchando (api.Snapshot.ConAgente): ahí no hay
+// máquina sin agente a la que no penalizar, y quien no contesta aún está
+// despertando. Medido en el CT 105 con 10-20 restauraciones a la vez en 4
+// núcleos: el ARP hacia el invitado tardaba más de 250 ms ("no route to
+// host") y la copia se descartaba con el agente sano.
+const resyncPlazoConAgente = 6 * time.Second
 
 // Qué pasa cuando no hay agente. En Linux, justo tras restaurar, el primer SYN
 // a un invitado sin nadie en el puerto suele perderse (o el invitado aún está
@@ -87,9 +99,10 @@ func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snap
 	if snap.SinAgente {
 		return resultadoResync{}
 	}
-	if snap.ConAgente {
-		// Se guardó con el agente escuchando: si ahora nadie contesta, es un
-		// fallo (S4), y nada se recuerda.
+	if snap.ConAgente || snap.AllowExec {
+		// Se guardó con el agente escuchando (o con AllowExec, que lo exige:
+		// sin agente no hay exec): si ahora nadie contesta, es un fallo (S4),
+		// y nada se recuerda.
 		return m.resyncGuestCon(ctx, id, "", api.ResyncInstance, true)
 	}
 	return m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
@@ -149,8 +162,9 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 	mc := m.byID[id]
 	var addr, image, name string
 	var ag *api.GuestAgent
+	var pid int
 	if mc != nil && mc.Reachable() {
-		addr, image, name, ag = mc.Addr(api.GuestPort), mc.Image, mc.Name, mc.Agent
+		addr, image, name, ag, pid = mc.Addr(api.GuestPort), mc.Image, mc.Name, mc.Agent, mc.PID
 	}
 	m.mu.RUnlock()
 	if addr == "" {
@@ -168,11 +182,18 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 		}
 	}
 
+	enVuelo := resyncEnVuelo.Add(1)
+	defer resyncEnVuelo.Add(-1)
+	plazo, reintento := resyncPlazo, resyncReintento
+	if conAgente {
+		plazo = plazoResyncCarga(int(enVuelo), runtime.NumCPU())
+		reintento = plazo
+	}
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, resyncPlazo)
+	ctx, cancel := context.WithTimeout(ctx, plazo)
 	defer cancel()
 	res, err := resyncOnce(ctx, "http://"+addr, kind)
-	for err != nil && errors.Is(err, errResyncConexion) && time.Since(start) < resyncReintento {
+	for err != nil && errors.Is(err, errResyncConexion) && time.Since(start) < reintento {
 		select {
 		case <-ctx.Done():
 		case <-time.After(10 * time.Millisecond):
@@ -202,6 +223,9 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 		// sí debía contestar. Nadie escuchando también lo es si el dorado se
 		// guardó con el agente escuchando.
 		fallo := !errors.Is(err, errResyncNoSoportado) && (conAgente || !errors.Is(err, errResyncNadie))
+		if fallo {
+			m.diagnosticarResync(id, name, pid, int(enVuelo), err)
+		}
 		return resultadoResync{took: took, fallo: fallo}
 	}
 	if res.SkewMS > 1000 || res.SkewMS < -1000 {
@@ -296,9 +320,16 @@ const pasoCede = 5 * time.Millisecond
 // tarda, lo corta (resyncCedeMax); y si el Freeze llegó antes, el resync ya
 // no ve la misma ejecución y no se manda.
 func (m *Manager) resyncEnFondo(id string, ej ejecucion, kind string) {
+	m.resyncEnFondoCon(id, ej, kind, false)
+}
+
+// resyncEnFondoCon es resyncEnFondo con el resultado y, con estricto, el
+// fallo de "nadie escucha" (agente conocido). hecho es falso si no se mandó
+// porque la máquina ya no está en la ejecución ej.
+func (m *Manager) resyncEnFondoCon(id string, ej ejecucion, kind string, estricto bool) (res resultadoResync, hecho bool) {
 	defer m.lock(id)()
 	if ahora, ok := m.ejecucionDe(id); !ok || ahora != ej || m.enTransicion(id) {
-		return
+		return resultadoResync{}, false
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
@@ -322,7 +353,7 @@ func (m *Manager) resyncEnFondo(id string, ej ejecucion, kind string) {
 			return
 		}
 	}()
-	m.resyncGuest(ctx, id, "", kind)
+	return m.resyncGuestCon(ctx, id, "", kind, estricto), true
 }
 
 // enTransicion dice si la máquina id tiene una transición marcada
@@ -391,7 +422,7 @@ var (
 	errResyncConexion    = errors.New("guest agent not reachable")
 	errResyncNoSoportado = errors.New("guest agent has no resync route")
 	// errResyncNadie acompaña a errResyncConexion cuando nadie escucha en el
-	// puerto del agente: RST en Linux, cierre del reenvío en macOS.
+	// puerto del agente: el RST (ECONNREFUSED).
 	errResyncNadie = errors.New("nothing listens on the guest agent port")
 	// errResyncRechazada acompaña a errResyncNadie cuando fue un RST
 	// (ECONNREFUSED): lo único que se recuerda por snapshot.
@@ -414,12 +445,20 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	}
 	req.ContentLength = int64(body.n)
 	req.Header.Set("Content-Type", "application/json")
+	traza := trazaResyncNueva(base)
+	req = traza.sobre(req)
 	resp, err := resyncClient.Do(req)
+	traza.fin(err)
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {
 			return out, fmt.Errorf("%w: %w: %w: %v", errResyncConexion, errResyncNadie, errResyncRechazada, err)
 		}
-		if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		// En Linux un ECONNRESET o un EOF son un agente que sí estaba y cortó
+		// bajo carga: fallo, no "nadie" (solo el RST lo es). En macOS el
+		// reenvío del VMM cierra así cuando no hay nadie al otro lado, así que
+		// ahí sigue siendo "nadie"; un dorado con agente conocido (ConAgente o
+		// AllowExec) falla igual, porque ese caso no acepta "nadie".
+		if runtime.GOOS == "darwin" && (errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 			return out, fmt.Errorf("%w: %w: %v", errResyncConexion, errResyncNadie, err)
 		}
 		return out, fmt.Errorf("%w: %v", errResyncConexion, err)
@@ -544,4 +583,56 @@ func (m *Manager) sondearAgente(ctx context.Context, id string) sondeoAgente {
 	default:
 		return sondeoNoSe
 	}
+}
+
+// trazaResync parte el resync en tramos con KLING_RESYNC_TRACE=1 (solo log, como
+// KLING_NET_TRACE): "conexión" es ARP + SYN/SYN-ACK, es decir, el kernel del
+// invitado recién reanudado; "respuesta" es lo que tarda el agente desde que
+// recibe la petición. Sin la variable es nil y no cambia nada: ni el resultado
+// ni los reintentos.
+type trazaResync struct {
+	mu                                 sync.Mutex // los ganchos del cliente corren en otras goroutines
+	base                               string
+	ini, conectado, escrito, respuesta time.Time
+}
+
+func trazaResyncNueva(base string) *trazaResync {
+	if os.Getenv("KLING_RESYNC_TRACE") != "1" {
+		return nil
+	}
+	return &trazaResync{base: base, ini: time.Now()}
+}
+
+func (t *trazaResync) sobre(req *http.Request) *http.Request {
+	if t == nil {
+		return req
+	}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		ConnectDone:          func(string, string, error) { t.marca(&t.conectado) },
+		WroteRequest:         func(httptrace.WroteRequestInfo) { t.marca(&t.escrito) },
+		GotFirstResponseByte: func() { t.marca(&t.respuesta) },
+	}))
+}
+
+func (t *trazaResync) marca(p *time.Time) {
+	t.mu.Lock()
+	*p = time.Now()
+	t.mu.Unlock()
+}
+
+func (t *trazaResync) fin(err error) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	desde := func(a, b time.Time) time.Duration {
+		if a.IsZero() || b.IsZero() {
+			return -1
+		}
+		return b.Sub(a).Round(10 * time.Microsecond)
+	}
+	log.Printf("resync trace %s: connect=%v write=%v agent=%v total=%v err=%v", t.base,
+		desde(t.ini, t.conectado), desde(t.conectado, t.escrito), desde(t.escrito, t.respuesta),
+		time.Since(t.ini).Round(10*time.Microsecond), err)
 }

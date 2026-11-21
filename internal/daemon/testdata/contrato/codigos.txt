@@ -39,7 +39,6 @@ GET /machines/{ref}  ←  GET /machines/nadie  →  404 not_found
 GET /machines/{ref}  ←  GET /machines/parada  →  200 -
 GET /machines/{ref}/credaudit  ←  GET /machines/nadie/credaudit  →  404 not_found
 GET /machines/{ref}/egress  ←  GET /machines/nadie/egress  →  404 not_found
-PATCH /machines/{ref}/egress  ←  PATCH /machines/nadie/egress {"egress":"none"}  →  404 not_found
 GET /machines/{ref}/files  ←  GET /machines/nadie/files?path=/x  →  404 not_found
 GET /machines/{ref}/logs  ←  GET /machines/nadie/logs  →  404 not_found
 GET /machines/{ref}/logs  ←  GET /machines/parada/logs  →  404 not_found
@@ -66,6 +65,7 @@ GET /store/{ns}  ←  GET /store/ns  →  200 -
 GET /store/{ns}/{key}  ←  GET /store/ns/nada  →  404 not_found
 GET /volumes  ←  GET /volumes  →  200 -
 GET /volumes/{name}/snapshots  ←  GET /volumes/nada/snapshots  →  404 not_found
+PATCH /machines/{ref}/egress  ←  PATCH /machines/nadie/egress {"egress":"none"}  →  404 not_found
 POST /cow/store/grow  ←  POST /cow/store/grow {  →  400 bad_request
 POST /cow/store/grow  ←  POST /cow/store/grow {"size_mib":1,"add_mib":1}  →  400 bad_request
 POST /graphs  ←  POST /graphs {  →  400 bad_request
@@ -115,6 +115,8 @@ POST /machines/{ref}/thaw  ←  POST /machines/nadie/thaw  →  404 not_found
 POST /machines/{ref}/thaw  ←  POST /machines/parada/thaw  →  409 conflict
 POST /registries  ←  POST /registries {  →  400 bad_request
 POST /sandboxes  ←  POST /sandboxes {  →  400 bad_request
+POST /sandboxes/claim  ←  POST /sandboxes/claim {  →  400 bad_request
+POST /sandboxes/claim  ←  POST /sandboxes/claim {"match":{"x":"y"}}  →  404 no_claimable
 POST /sandboxes/{ref}/fork  ←  POST /sandboxes/nadie/fork {}  →  404 not_found
 POST /sandboxes/{ref}/renew  ←  POST /sandboxes/nadie/renew  →  404 not_found
 POST /shares/uploads  ←  POST /shares/uploads  →  201 -

@@ -1606,6 +1606,16 @@ const netIndexSpace = 16000
 // Rotando, una IP tarda 16.000 máquinas en repetirse. Y mirando el host, no se
 // repite la de una máquina de otro daemon (ver internal/net/subredes.go).
 func (m *Manager) asignarRed(id string) (*knet.Net, error) {
+	// Si id es de una ranura del fondo (ranuras_red.go), su red ya está
+	// montada con su índice: ni volcado del host ni reserva.
+	if n := m.ranuraEntregar(id); n != nil {
+		return n, nil
+	}
+	return m.asignarRedNueva(id)
+}
+
+// asignarRedNueva es asignarRed sin ranura: busca índice y lo reserva.
+func (m *Manager) asignarRedNueva(id string) (*knet.Net, error) {
 	m.mu.RLock()
 	used := make(map[int]bool, len(m.byID))
 	for _, mc := range m.byID {
@@ -1631,7 +1641,22 @@ func newID() string {
 // repetido haría que Setup, que empieza por Teardown, tirase netns, resolver y
 // credproxy de la máquina viva que ya lo lleva. Se repite el sorteo hasta dar
 // con uno libre, mirando byID y los acuñados que aún no han llegado a él.
-func (m *Manager) nuevoIDMaquina() string { return m.idLibre(newID) }
+//
+// Con el fondo de ranuras de red (ranuras_red.go), el id es el de una ranura
+// lista —ya acuñado por idLibre al crearla— y su red ya está montada.
+func (m *Manager) nuevoIDMaquina() string {
+	if id, ok := m.ranuraTomar(); ok {
+		return id
+	}
+	return m.idLibre(func() string {
+		for {
+			id := newID()
+			if !m.ranuraPrefijoEnUso(knet.Corto(id)) {
+				return id
+			}
+		}
+	})
+}
 
 // acuñados guarda los prefijos recién dados, hasta que la máquina llega a byID o
 // pasa plazoAcuñado: cubre la ventana entre acuñar y publicar, en la que dos
@@ -2792,7 +2817,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// ¿Hay agente al que resincronizar al descongelarla? Se pregunta ahora,
 	// con el invitado en marcha, porque tras restaurar un invitado sin nadie en
 	// el puerto puede tardar segundos en contestar (ver resyncSinAgenteTTL).
-	sinAgente := !m.agenteEscucha(ctx, mc.ID)
+	sinAgente := m.sinAgenteAlCongelar(ctx, mc.ID)
 
 	// Con el invitado aún en marcha: que suelte lo que no usa, y el volcado
 	// lleve solo lo que está en uso (apreton_volcado.go).
@@ -4083,6 +4108,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
 	var resync resultadoResync
+	var avisoResync string
 	if m.pruebasAntesDeResync != nil {
 		m.pruebasAntesDeResync()
 	}
@@ -4092,8 +4118,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// thaw sigue hasta el final aunque quien lo pidió se vaya, y un ctx
 		// cancelado hacía que resyncGuest volviera al instante: la máquina
 		// quedaba running con el reloj y el CSPRNG de cuando se congeló. El
-		// propio resync lleva su plazo (resyncPlazo).
-		resync = m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
+		// propio resync lleva su plazo (resyncPlazo). Si falla se repite con el
+		// plazo largo (agente conocido) y, si aun así, se entrega con aviso y
+		// sigue en segundo plano (resyncTrasThaw).
+		resync, avisoResync = m.resyncTrasThaw(context.WithoutCancel(ctx), mc.ID, mc.AllowExec)
 	}
 	<-credsHechas
 	crono.marca(&crono.p.ResyncMS) // con la entrega de credenciales, que va a la vez
@@ -4168,7 +4196,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases))})
+		Message: fmt.Sprintf("thawed in %d ms%s%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases), avisoResync)})
+	if avisoResync != "" {
+		// Entregada sin ponerla en hora: se sigue intentando hasta que entre.
+		if ej, ok := m.ejecucionDe(mc.ID); ok {
+			go m.resyncThawReintentos(mc.ID, ej, mc.AllowExec || mc.Agent != nil)
+		}
+	}
 	return &out, nil
 }
 

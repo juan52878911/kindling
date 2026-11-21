@@ -291,7 +291,7 @@ var coreTree = []section{
   image import <ref> -warm [-step 'cmd']...        then boots it at full CPU, runs each
       [-template T] [-cpus N] [-mem M]             -step inside (sh -c), waits until the
       [-egress E] [-wait D] [-step-timeout D]      service is ready and saves a template:
-                                                   from the ref to kling run -from, in one
+      [-disk SIZE]                                 from the ref to kling run -from, in one
                                                    command
   image import -archive <x.tar|dir> [-image R]     the same from a file on this machine:
                                                    docker save (manifest.json) or an OCI

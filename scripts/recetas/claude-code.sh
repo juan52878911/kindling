@@ -22,7 +22,8 @@ exigir_clave ANTHROPIC_API_KEY
 
 # 1. Plantilla: node + Claude Code. Esta fase sí necesita red (npm), pero aún
 #    no hay ninguna clave en juego.
-ejecutar "$KLING" image import node:22-slim -warm -template "$PLANTILLA" \
+# Claude Code y su caché de npm no caben en el disco de 512 MiB por defecto.
+ejecutar "$KLING" image import node:22-slim -warm -template "$PLANTILLA" -disk 2G \
   -egress internet -step 'npm install -g @anthropic-ai/claude-code' \
   -step 'mkdir -p /work'
 

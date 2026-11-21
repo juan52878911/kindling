@@ -29,6 +29,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/plantilla"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -394,6 +395,7 @@ func leerJSON(r *http.Request, v any) error {
 // ---- creación
 
 func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
+	entrada := time.Now()
 	t := tenantDe(r)
 	var pet CrearPeticion
 	if err := leerJSON(r, &pet); err != nil {
@@ -416,8 +418,12 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// el snapshot: se averigua aquí para acotar el tamaño EFECTIVO, que es el
 	// que ocupa RAM en el host, y no solo el pedido.
 	var snaps map[string]*api.Snapshot
+	var durSnap time.Duration
 	if pet.Template != "" {
+		tramo := time.Now()
 		snaps = s.snapshotsDe(r.Context(), plantilla.SnapshotDe(pet.Template))
+		durSnap = time.Since(tramo)
+		s.metricas.observar(tramoSnapshot, durSnap)
 		if len(snaps) == 0 {
 			err := &errSinPlantilla{pet.Template}
 			s.metricas.registrar(resultadoDe(err), 0)
@@ -463,12 +469,18 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// prepasos: todo lo anterior a hablar con el daemon para crear, menos el
+	// snapshot, que tiene su tramo.
+	s.metricas.observar(tramoPrepasos, time.Since(entrada)-durSnap)
+
 	if pet.Count != nil {
 		s.respuestaLote(w, r, t, pet, snaps, n, hVol, clonados)
+		s.metricas.observar(tramoTotal, time.Since(entrada))
 		return
 	}
 
 	inicio := time.Now()
+	defer func() { s.metricas.observar(tramoTotal, time.Since(entrada)) }()
 	h, mc, err := s.crear(r.Context(), t, pet, snaps)
 	if err != nil {
 		s.metricas.registrar(resultadoDe(err), time.Since(inicio))
@@ -872,6 +884,7 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 	var sirve func(*hosts.Host) bool
 	if p.Template == "" {
 		req.Image = p.Image
+		tramoImg := time.Now()
 		tienen := s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
 			imgs, err := h.Cliente.Images(ctx)
 			if err != nil {
@@ -884,6 +897,7 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 			}
 			return false, nil
 		})
+		s.metricas.observar(tramoImagenes, time.Since(tramoImg))
 		if len(tienen) == 0 {
 			return nil, nil, &api.StatusError{Code: http.StatusNotFound,
 				Message: fmt.Sprintf("image %q is not on any reachable host", p.Image)}
@@ -897,8 +911,13 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 		}
 		sirve = func(h *hosts.Host) bool { return snaps[h.Nombre] != nil }
 
-		if puedeReclamar(p) {
-			if h, mc := s.reclamarPrecalentada(ctx, t, p, etiquetas, snaps); mc != nil {
+		// Sin pool en ningún snapshot de la plantilla no hay nada que
+		// reclamar: se ahorra el listado de cada host.
+		if puedeReclamar(p) && algunoPideAlPool(snaps) {
+			tramo := time.Now()
+			h, mc := s.reclamarPrecalentada(ctx, t, p, etiquetas, snaps)
+			s.metricas.observar(tramoReclamo, time.Since(tramo))
+			if mc != nil {
 				return h, mc, nil
 			}
 		}
@@ -909,6 +928,8 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 		sirve = func(h *hosts.Host) bool { return solo[h.Nombre] && antes(h) }
 	}
 
+	tramoCreate := time.Now()
+	defer func() { s.metricas.observar(tramoDaemon, time.Since(tramoCreate)) }()
 	mc, h, err := hosts.IntentarRotado(ctx, s.reg, sirve, p.desplazo, func(ctx context.Context, h *hosts.Host) (*api.Machine, error) {
 		mc, err := h.Cliente.CreateSandbox(ctx, req)
 		// El fallo de TSC es DE ESE HOST: su dorado quedó invalidado por un
@@ -928,12 +949,38 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 	return h, mc, nil
 }
 
+// algunoPideAlPool dice si algún snapshot de la plantilla pide precalentadas
+// (pool > 0). Si ninguno, reclamarPrecalentada solo gastaría un listado por
+// host para no encontrar nada.
+func algunoPideAlPool(snaps map[string]*api.Snapshot) bool {
+	for _, sn := range snaps {
+		if _, quiere := pool.DeseoDe(sn); quiere > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // snapshotsDe devuelve, por host, el snapshot llamado nombre en los hosts que
-// lo tienen.
+// lo tienen. Pide solo ese snapshot (GET /snapshots/{name}); sin caché, porque
+// la versión del snapshot decide qué precalentada vale y un rebuild la dejaría
+// vieja. Un daemon sin esa ruta (404/405 que no es "no existe") cae a la lista.
 func (s *Servidor) snapshotsDe(ctx context.Context, nombre string) map[string]*api.Snapshot {
 	var mu sync.Mutex
 	out := map[string]*api.Snapshot{}
 	s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
+		sn, err := h.Cliente.Snapshot(ctx, nombre)
+		if err == nil {
+			mu.Lock()
+			out[h.Nombre] = sn
+			mu.Unlock()
+			return true, nil
+		}
+		if !api.IsUnsupported(err) {
+			return false, err
+		}
+		// 404: o el host no tiene el snapshot, o es un daemon viejo sin la
+		// ruta. La lista lo distingue.
 		snaps, err := h.Cliente.Snapshots(ctx)
 		if err != nil {
 			return false, err
@@ -1021,10 +1068,23 @@ const (
 // snaps es el snapshot de la plantilla en cada host que la tiene: solo vale una
 // precalentada que salió de ESE snapshot (plantilla.LabelVersion), no de uno
 // anterior con el mismo nombre que un rebuild ya reemplazó.
+//
+// Con un daemon que anuncia sandbox-claim (api.CapabilityClaim) el reclamo es
+// UNA llamada atómica (reclamarAtomica): sin listar, sin nonce y sin pausa. El
+// camino de dos fases queda solo para un daemon anterior.
 func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearPeticion, etiquetas map[string]string, snaps map[string]*api.Snapshot) (*hosts.Host, *api.Machine) {
 	sirve := func(h *hosts.Host) bool { return snaps[h.Nombre] != nil }
 	for _, h := range s.reg.Candidatos(ctx, sirve) {
 		version := plantilla.VersionDe(snaps[h.Nombre])
+		if s.hostReclama(ctx, h) {
+			out, dosFases := s.reclamarAtomica(ctx, h, t, p, etiquetas, version)
+			if out != nil {
+				return h, out
+			}
+			if !dosFases {
+				continue
+			}
+		}
 		listada := time.Now()
 		lctx, cancel := context.WithTimeout(ctx, plazoDaemon)
 		ms, err := h.Cliente.Sandboxes(lctx)
@@ -1051,6 +1111,143 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 		}
 	}
 	return nil, nil
+}
+
+// capHost es lo que se sabe de si un host sirve el reclamo atómico.
+type capHost struct {
+	reclama bool
+	hasta   time.Time // cero: para siempre
+}
+
+// vidaSinReclamo es cuánto se recuerda que un daemon NO anuncia sandbox-claim:
+// poco, para que un daemon actualizado sin reiniciar el gateway la pase a usar.
+const vidaSinReclamo = time.Minute
+
+// hostReclama dice si el daemon del host anuncia sandbox-claim. Se consulta una
+// vez (GET /info) y se cachea; si la consulta falla no se cachea y esa petición
+// usa las dos fases, que funcionan con cualquier daemon.
+func (s *Servidor) hostReclama(ctx context.Context, h *hosts.Host) bool {
+	s.mCap.Lock()
+	c, ok := s.capReclamo[h.Nombre]
+	s.mCap.Unlock()
+	if ok && (c.hasta.IsZero() || time.Now().Before(c.hasta)) {
+		return c.reclama
+	}
+	ictx, cancel := context.WithTimeout(ctx, plazoDaemon)
+	defer cancel()
+	info, err := h.Cliente.Info(ictx)
+	if err != nil {
+		return false
+	}
+	c = capHost{reclama: info.Has(api.CapabilityClaim)}
+	if !c.reclama {
+		c.hasta = time.Now().Add(vidaSinReclamo)
+	}
+	s.mCap.Lock()
+	s.capReclamo[h.Nombre] = c
+	s.mCap.Unlock()
+	return c.reclama
+}
+
+// pedirRelleno avisa al fondo de que en ese host falta de esa plantilla.
+func (s *Servidor) pedirRelleno(h *hosts.Host, plantilla string) {
+	if s.rellena != nil {
+		s.rellena.Pedir(h.Nombre, plantilla)
+	}
+}
+
+// reclamarAtomica reclama una precalentada con una sola llamada al daemon
+// (POST /sandboxes/claim): él elige, etiqueta y renueva bajo su cerrojo, así
+// que no hace falta listar ni nonce ni pausa. Devuelve nil si no hay copia o
+// el reclamo falla; en ambos casos y en el de éxito avisa al fondo.
+//
+// Además de las etiquetas del tenant pone LabelReclamo: un frontal anterior
+// que comparta el daemon la ve como reclamada en su relectura.
+//
+// El segundo valor pide seguir por las dos fases: el daemon contestó con un
+// 404/405 sin código, es decir, ya no tiene la ruta (se bajó de versión): se
+// invalida la capacidad cacheada y esta misma petición no se pierde.
+func (s *Servidor) reclamarAtomica(ctx context.Context, h *hosts.Host, t *Tenant, p CrearPeticion, etiquetas map[string]string, version string) (*api.Machine, bool) {
+	defer s.pedirRelleno(h, p.Template)
+	labels := make(map[string]string, len(etiquetas)+1)
+	for k, v := range etiquetas {
+		labels[k] = v
+	}
+	// Nonce único: si el reclamo se corta tras etiquetar, es lo que permite
+	// encontrar y borrar lo que quedó a medias.
+	nonce, err := nuevoNonce()
+	if err != nil {
+		s.log.Printf("frontal: claiming from %s: %v", h.Nombre, err)
+		return nil, false
+	}
+	labels[LabelReclamo] = nonce
+	match := map[string]string{api.LabelKind: api.KindSandbox, LabelTemplate: p.Template}
+	absent := []string{LabelTenant, LabelReclamo}
+	if version != "" {
+		match[plantilla.LabelVersion] = version
+	} else {
+		// Sin versión no se casa con cualquiera: solo vale una sin etiqueta.
+		absent = append(absent, plantilla.LabelVersion)
+	}
+	ctx, cancel := context.WithTimeout(ctx, plazoDaemon)
+	defer cancel()
+	out, err := h.Cliente.ClaimSandbox(ctx, api.ClaimRequest{
+		Match: match, Absent: absent,
+		Labels: labels, TTLSeconds: p.TTLSeconds,
+	})
+	if err != nil {
+		if api.IsNoClaimable(err) {
+			return nil, false
+		}
+		var se *api.StatusError
+		if errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusMethodNotAllowed) && se.ErrorCode == "" {
+			s.log.Printf("frontal: %s no longer serves sandbox-claim (%v); using two phases", h.Nombre, err)
+			s.invalidarReclamo(h)
+			return nil, true
+		}
+		s.log.Printf("frontal: claiming from %s: %v", h.Nombre, err)
+		// El daemon pudo etiquetar antes del corte o del plazo: lo que lleve
+		// el nonce cuenta en la cuota del inquilino. Se borra sin la
+		// cancelación de la petición.
+		s.soltarPorNonce(ctx, h, nonce)
+		return nil, false
+	}
+	if !esSandboxDe(out, t) {
+		s.log.Printf("frontal: claim on %s/%s came back without the tenant label; removing it", h.Nombre, out.ID)
+		s.soltarMediaReclamada(ctx, h, out.ID, "claimed for another tenant")
+		return nil, false
+	}
+	if (out.Egress != "" && out.Egress != "none") || out.OnTTL == api.OnTTLRemove {
+		// Contrato de esPrecalentadaDe, que el camino atómico no comprueba:
+		// solo un admin fabrica una candidata así, pero no se entrega.
+		s.soltarMediaReclamada(ctx, h, out.ID, "not a prewarmed one (egress or on_ttl)")
+		return nil, false
+	}
+	return out, false
+}
+
+// invalidarReclamo olvida que el host sirve sandbox-claim (por un minuto).
+func (s *Servidor) invalidarReclamo(h *hosts.Host) {
+	s.mCap.Lock()
+	s.capReclamo[h.Nombre] = capHost{hasta: time.Now().Add(vidaSinReclamo)}
+	s.mCap.Unlock()
+}
+
+// soltarPorNonce busca en el host las máquinas que llevan el nonce de un
+// reclamo que falló y las borra.
+func (s *Servidor) soltarPorNonce(ctx context.Context, h *hosts.Host, nonce string) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDaemon)
+	defer cancel()
+	ms, err := h.Cliente.Sandboxes(rctx)
+	if err != nil {
+		s.log.Printf("frontal: looking for half-claimed machines on %s: %v", h.Nombre, err)
+		return
+	}
+	for _, mc := range ms {
+		if mc.Labels[LabelReclamo] == nonce {
+			s.soltarMediaReclamada(rctx, h, mc.ID, "claim failed after labelling")
+		}
+	}
 }
 
 // marcarReclamo aparta la máquina para esta petición si nadie de este proceso

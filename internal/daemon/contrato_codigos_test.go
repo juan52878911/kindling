@@ -129,6 +129,8 @@ var casosCodigos = []casoCodigo{
 	{"POST", "/shares/uploads", ""},
 	{"POST", "/sandboxes", `{`},
 	{"GET", "/sandboxes", ""},
+	{"POST", "/sandboxes/claim", `{"match":{"x":"y"}}`},
+	{"POST", "/sandboxes/claim", `{`},
 	{"GET", "/sandboxes/nadie", ""},
 	{"POST", "/sandboxes/nadie/renew", ""},
 	{"POST", "/sandboxes/nadie/fork", `{}`},
