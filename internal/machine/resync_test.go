@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -214,6 +215,36 @@ func TestResyncCopiaNoEntregaSinResync(t *testing.T) {
 	mu.Unlock()
 	if r, err := m.resyncCopia(context.Background(), id, snap); err != nil || !r.ok {
 		t.Fatalf("con el reintento bien: ok=%v err=%v", r.ok, err)
+	}
+}
+
+// Una copia cuyo agente no contesta no retiene la creación 12 s: el primer
+// intento tiene plazo corto y no hay segundo POST a la misma copia.
+func TestResyncCopiaMudaNoEspera12s(t *testing.T) {
+	var pedidos atomic.Int32
+	liberar := make(chan struct{})
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pedidos.Add(1)
+		select {
+		case <-liberar:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(liberar) })
+	capturarLog(t)
+	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now(), ConAgente: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ini := time.Now()
+	_, err := m.resyncCopia(ctx, id, snap)
+	if err == nil {
+		t.Fatal("una copia muda se dio por buena")
+	}
+	if d := time.Since(ini); d > 2500*time.Millisecond {
+		t.Errorf("tardó %v, quería < 2,5 s (plazo corto, un solo intento)", d)
+	}
+	if n := pedidos.Load(); n != 1 {
+		t.Errorf("%d POST a la misma copia, quería 1", n)
 	}
 }
 
