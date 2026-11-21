@@ -528,8 +528,10 @@ func TestClonarInstanciaEnParaleloNoHaceFila(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if d := time.Since(ini); d > 300*time.Millisecond {
-		t.Errorf("50 clones a la vez tardaron %v: hay fila (esperado ≈20 ms)", d)
+	// En fila serían 50 × 20 ms = 1 s. Los runners de CI (macOS sobre todo)
+	// ya tardan varios cientos de ms en paralelo: el tope es la mitad de la fila.
+	if d := time.Since(ini); d > 600*time.Millisecond {
+		t.Errorf("50 clones a la vez tardaron %v: hay fila (en paralelo ≈20 ms, en fila 1 s)", d)
 	}
 }
 
