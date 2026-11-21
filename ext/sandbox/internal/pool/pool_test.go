@@ -443,6 +443,7 @@ func TestPedirEsperaYRellenaDeDosEnDos(t *testing.T) {
 	if d.creadas != 8 {
 		t.Fatalf("created %d, want 8", d.creadas)
 	}
+	t.Logf("starts %v creadas %d", d.inicios, d.creadas)
 	if espera := d.inicios[0].Sub(ultimo); espera < 280*time.Millisecond {
 		t.Errorf("first creation %s after the last claim, want >= 300ms", espera)
 	}
