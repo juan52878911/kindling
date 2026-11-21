@@ -40,7 +40,7 @@ type evCodigo struct {
 // python3 contesta 127 como un invitado sin él.
 type daemonReal struct {
 	mu        sync.Mutex
-	procs     map[int]*exec.Cmd
+	procs     map[int]chan struct{} // se cierra cuando el proceso termina
 	info      map[int]api.ProcessInfo
 	sinPython bool
 	execs     []api.ExecRequest
@@ -50,7 +50,15 @@ func (d *daemonReal) vivo(pid int) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	c := d.procs[pid]
-	return c != nil && c.ProcessState == nil
+	if c == nil {
+		return false
+	}
+	select {
+	case <-c:
+		return false
+	default:
+		return true
+	}
 }
 
 func ponerReal(t *testing.T, f *falso) *daemonReal {
@@ -68,7 +76,7 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 	if err != nil {
 		t.Skipf("no unix sockets here: %v", err)
 	}
-	d := &daemonReal{procs: map[int]*exec.Cmd{}, info: map[int]api.ProcessInfo{}}
+	d := &daemonReal{procs: map[int]chan struct{}{}, info: map[int]api.ProcessInfo{}}
 	detras := f.endpoint
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) { r.URL.Scheme, r.URL.Host = "http", "daemon" },
@@ -152,10 +160,11 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 			failDaemon(w, 500, err)
 			return
 		}
-		go func() { _ = c.Wait() }()
+		fin := make(chan struct{})
+		go func() { _ = c.Wait(); close(fin) }()
 		p := api.ProcessInfo{PID: c.Process.Pid, Cmd: req.Cmd, State: api.ProcessRunning, StartedAt: time.Now()}
 		d.mu.Lock()
-		d.procs[p.PID], d.info[p.PID] = c, p
+		d.procs[p.PID], d.info[p.PID] = fin, p
 		d.mu.Unlock()
 		t.Cleanup(func() { _ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL) })
 		writeJSON(w, 201, p)
@@ -164,8 +173,10 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		d.mu.Lock()
 		out := []api.ProcessInfo{}
 		for pid, p := range d.info {
-			if c := d.procs[pid]; c.ProcessState != nil {
+			select {
+			case <-d.procs[pid]:
 				p.State = api.ProcessExited
+			default:
 			}
 			out = append(out, p)
 		}
@@ -175,10 +186,10 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 	m.HandleFunc("DELETE /machines/{ref}/processes/{pid}", func(w http.ResponseWriter, r *http.Request) {
 		pid, _ := strconv.Atoi(r.PathValue("pid"))
 		d.mu.Lock()
-		c := d.procs[pid]
+		_, ok := d.procs[pid]
 		delete(d.info, pid)
 		d.mu.Unlock()
-		if c == nil {
+		if !ok {
 			failDaemon(w, 404, os.ErrNotExist)
 			return
 		}
@@ -350,7 +361,11 @@ func TestCodigoAjenoYBorrado(t *testing.T) {
 		{"POST", "/code/contexts"}, {"GET", "/code/contexts"}, {"GET", "/code/contexts/" + id},
 		{"DELETE", "/code/contexts/" + id}, {"POST", "/code"},
 	} {
-		resp := pide(t, b.srv, tokenBob, r.m, b.base+r.p, map[string]any{"code": "1", "context_id": id})
+		var cuerpo any
+		if r.p == "/code" {
+			cuerpo = map[string]any{"code": "1", "context_id": id}
+		}
+		resp := pide(t, b.srv, tokenBob, r.m, b.base+r.p, cuerpo)
 		esperaCodigo(t, resp, 404)
 	}
 	// Y un id que no existe en el sandbox propio también.

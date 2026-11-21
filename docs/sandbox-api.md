@@ -109,6 +109,19 @@ Topes por tenant (todos con `429`): procesos vivos por sandbox (`max_processes`,
 defecto) y lecturas con `follow` abiertas a la vez (`max_follow`, 32). Se fijan en
 `KLING_SANDBOX_TENANTS` (campos 8.º a 10.º). Como en exec, el sandbox ajeno da `404`.
 
+## Intérprete de código (experimental)
+
+Versión mínima de `/code` y `/code/contexts` del execd de OpenSandbox, solo Python.
+`POST /v1/sandboxes/{id}/code/contexts` crea un contexto (un proceso de fondo del sandbox con
+un conductor embebido que guarda las variables); `GET` los lista, `GET|DELETE …/contexts/{cid}`
+lo ve o lo borra (mata el proceso). `POST …/code` con `{"code","context_id","timeout_seconds"}`
+devuelve NDJSON de eventos `stdout`, `stderr`, `result` (el valor de la última expresión),
+`error` (`ename`, `evalue`, `traceback`) y `done`; sin `context_id` usa un contexto efímero.
+Un error del código es un evento, no un código HTTP. Topes: 8 contextos por sandbox (`429`),
+1 MiB de código (`413`), plazo por ejecución 60 s por defecto y 600 s como máximo. Sin
+`python3` en la imagen, `422`. Los contextos de otro inquilino dan `404`. No hay salidas
+ricas de Jupyter, y una ejecución a la vez por contexto (las demás esperan).
+
 ## Sesiones
 
 `POST /v1/sandboxes/{id}/sessions` (`id`, `dir`, `env`, `ttl_seconds`) crea una sesión; `GET`
