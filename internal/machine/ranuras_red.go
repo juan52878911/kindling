@@ -24,14 +24,11 @@ import (
 // ranuras en espera las recoge barrerNamespaces del siguiente arranque si el
 // daemon muere (llevan la marca de red propia desde que se montan).
 
-// fondoRed es la entrada de un Manager en fondosRed. Es un mapa global y no un
-// campo de Manager: el fondo no pide tocar la estructura.
+// fondoRed es el estado del fondo de ranuras de un Manager (campo fondoRed).
 type fondoRed struct {
 	once sync.Once
 	f    atomic.Pointer[knet.Fondo] // nil si el fondo no está activo
 }
-
-var fondosRed sync.Map // *Manager → *fondoRed
 
 // ranurasPosibles dice si este daemon puede montar ranuras: con privilegios
 // (el tap se crea a nombre del usuario sin privilegios), root y las
@@ -45,8 +42,7 @@ var ranurasPosibles = func(m *Manager) bool {
 const intervaloRecogida = 15 * time.Second
 
 func (m *Manager) fondoDeRed() *knet.Fondo {
-	v, _ := fondosRed.LoadOrStore(m, &fondoRed{})
-	e := v.(*fondoRed)
+	e := &m.fondoRed
 	e.once.Do(func() {
 		tam := knet.TamPool()
 		if tam == 0 || !ranurasPosibles(m) {
@@ -73,10 +69,7 @@ func (m *Manager) cerrarFondoRed() {
 // fondoActivo es el fondo si ya está arrancado, sin arrancarlo: lo usan el
 // barrido de huérfanos y asignarRed.
 func (m *Manager) fondoActivo() *knet.Fondo {
-	if v, ok := fondosRed.Load(m); ok {
-		return v.(*fondoRed).f.Load()
-	}
-	return nil
+	return m.fondoRed.f.Load()
 }
 
 // montarRanura crea una red con la base montada, con id e índice ya dados.

@@ -78,7 +78,7 @@ func TestReclamarSoloRunningSinTransicion(t *testing.T) {
 	m.marcarTransicion(enTransicion.ID, api.TransitionFreezing)
 	sinExec := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
 	sinExec.AllowExec = false
-	if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}}); !errors.Is(err, ErrNoReclamable) {
+	if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: marcaReclamo}); !errors.Is(err, ErrNoReclamable) {
 		t.Fatalf("err = %v, quería ErrNoReclamable", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestReclamarRespetaAbsentYMatch(t *testing.T) {
 	ajena := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok", "otro": "1"})
 	otra := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "no"})
 	propia := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
-	mc, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Absent: []string{"otro"}})
+	mc, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: marcaReclamo, Absent: []string{"otro"}})
 	if err != nil || mc.ID != propia.ID {
 		t.Fatalf("reclamó %v, %v; quería %s", mc, err, propia.ID)
 	}
@@ -102,7 +102,7 @@ func TestReclamarNoRobaDeInquilinoNiYaReclamada(t *testing.T) {
 	sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok", api.LabelOwner: "a"})
 	sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok", api.LabelClaim: "n"})
 	sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok", api.LabelPool: "base"})
-	if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}}); !errors.Is(err, ErrNoReclamable) {
+	if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: marcaReclamo}); !errors.Is(err, ErrNoReclamable) {
 		t.Fatalf("err = %v, quería ErrNoReclamable", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestReclamarPoneEtiquetasNombreYTTL(t *testing.T) {
 	}
 	// El nombre ocupado se rechaza y no consume la máquina.
 	sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
-	if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Name: "sbx1"}); !errors.Is(err, ErrNameTaken) {
+	if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Name: "sbx1", Labels: marcaReclamo}); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("err = %v, quería ErrNameTaken", err)
 	}
 }
@@ -173,7 +173,7 @@ func TestReclamarSaltaCandidataConCerrojo(t *testing.T) {
 		b.Labels = map[string]string{"pool": "ok"}
 		b.TTLAt = nil
 		m.mu.Unlock()
-		mc, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}})
+		mc, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: marcaReclamo})
 		if err != nil || mc.ID != b.ID {
 			t.Fatalf("reclamó %v, %v; quería %s", mc, err, b.ID)
 		}
@@ -186,7 +186,7 @@ func TestReclamarSaltaCandidataConCerrojo(t *testing.T) {
 	defer suelta()
 	done := make(chan error, 1)
 	go func() {
-		_, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}})
+		_, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: marcaReclamo})
 		done <- err
 	}()
 	select {
@@ -211,3 +211,23 @@ func TestReclamarValidaNombreYTTL(t *testing.T) {
 		}
 	}
 }
+
+// Un reclamo que no deja marca (ni claim ni owner) permitiría reclamar dos
+// veces la misma máquina: 400, y la máquina queda intacta.
+func TestReclamarExigeMarca(t *testing.T) {
+	m := managerReclamo(t, 1)
+	for _, labels := range []map[string]string{nil, {}, {"otra": "cosa"}} {
+		_, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: labels})
+		if !errors.Is(err, ErrRunRequest) {
+			t.Errorf("labels %v: err = %v, quería ErrRunRequest", labels, err)
+		}
+	}
+	for _, k := range []string{api.LabelClaim, api.LabelOwner} {
+		m := managerReclamo(t, 1)
+		if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: map[string]string{k: "x"}}); err != nil {
+			t.Errorf("con %s: %v", k, err)
+		}
+	}
+}
+
+var marcaReclamo = map[string]string{api.LabelClaim: "n"}

@@ -142,7 +142,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	// se arranca en frío como cualquier failed: contestar con la máquina tal
 	// cual era decir que había arrancado sin hacer nada.
 	if cur.State == api.StateRunning {
-		if !m.comprobarVMMLocked(cur.ID, "") {
+		if !m.comprobarVMMLocked(cur.ID, "", false, "") {
 			return cur, nil
 		}
 		if cur, ok = m.Get(mc.ID); !ok {

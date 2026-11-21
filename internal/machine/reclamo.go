@@ -26,6 +26,10 @@ func (m *Manager) Reclamar(req api.ClaimRequest) (*api.Machine, error) {
 	if err := api.ValidateLabels(req.Labels); err != nil {
 		return nil, comoPeticion(err)
 	}
+	// Sin marca, la misma máquina se podría reclamar dos veces.
+	if req.Labels[api.LabelClaim] == "" && req.Labels[api.LabelOwner] == "" {
+		return nil, comoPeticion(fmt.Errorf("labels must carry %s or %s", api.LabelClaim, api.LabelOwner))
+	}
 	if err := api.ValidateNoGraphLabels(req.Labels); err != nil {
 		return nil, comoPeticion(err)
 	}

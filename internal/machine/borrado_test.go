@@ -259,15 +259,14 @@ func TestLimpiarMaquinaOlvidaGloboReposo(t *testing.T) {
 	m.bus = events.New()
 	id := "dd00000000000001"
 	maquinaConDir(t, m, id, nombreTumba(id))
-	marcarGloboReposo(id)
-	t.Cleanup(func() { olvidarGloboReposo(id) })
+	m.marcarGloboReposo(id)
 	m.mu.RLock()
 	mc := m.byID[id].Clone()
 	m.mu.RUnlock()
 	if err := m.limpiarMaquina(mc); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := globoEnReposo.Load(id); ok {
+	if _, ok := m.globoEnReposo.Load(id); ok {
 		t.Error("el mapa del globo en reposo conserva la máquina borrada")
 	}
 }

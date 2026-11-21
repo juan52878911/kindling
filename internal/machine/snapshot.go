@@ -722,7 +722,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, fmt.Errorf("marking image snapshot %s: %w", name, err)
 		}
 	}
-	escribirMarcaGloboReposo(dir, mc.ID)
+	m.escribirMarcaGloboReposo(dir, mc.ID)
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
@@ -1453,7 +1453,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
 	// Una copia que no se pone viva se descarta y se restaura otra, una vez
 	// (copia_muerta.go).
-	return conCopiaDeRepuesto(ctx, req.Name, func() { m.puertaRetroceder("dead copy") }, func() (*api.Machine, error) {
+	return conCopiaDeRepuesto(ctx, req.Name, func() { m.puertaRetroceder("dead copy", origenPuerta(req), false) }, func() (*api.Machine, error) {
 		return m.runFromUna(ctx, req, ai)
 	})
 }
@@ -1824,6 +1824,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	// nombrarla (ver doc.go).
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
+	defer m.marcarCreando(id, origenPuerta(req))()
 	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
 	if err := m.publicarCon(ctx, mc); err != nil {
 		m.desmontarRed(netcfg, id)
@@ -2006,7 +2007,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	// cada 1 s; la copia, al de reposo.
 	// Si el dorado se congeló ya en el de reposo (globo_ritmo.go), ni se manda.
 	ritmoGloboReposoSi(ctx, c, doradoConGloboReposo(m.snapDir(req.From)))
-	marcarGloboReposo(id)
+	m.marcarGloboReposo(id)
 	// Su caudal de red, si no es el que quedó en el snapshot (red_caudal.go).
 	m.caudalTrasCargar(ctx, c, id)
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir

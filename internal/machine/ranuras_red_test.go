@@ -20,11 +20,9 @@ func fondoRanurasDePrueba(t *testing.T, m *Manager, tam int) *knet.Fondo {
 		id := fmt.Sprintf("%08x00000000", 0xa0000000+k)
 		return &knet.Ranura{ID: id, Net: knet.Plan(k, id)}, nil
 	}, func(*knet.Ranura) {})
-	e := &fondoRed{}
-	e.once.Do(func() {})
-	e.f.Store(f)
-	fondosRed.Store(m, e)
-	t.Cleanup(func() { fondosRed.Delete(m); f.Cerrar() })
+	m.fondoRed.once.Do(func() {})
+	m.fondoRed.f.Store(f)
+	t.Cleanup(func() { m.fondoRed.f.Store(nil); f.Cerrar() })
 	f.Reponer()
 	for n := 0; n < 2000 && f.Len() < tam; n++ {
 		time.Sleep(time.Millisecond)

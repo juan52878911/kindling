@@ -17,28 +17,34 @@ import (
 // tests lo acortan. Pasado el tope sigue, con aviso en el log.
 var relojEsperaMax = 2 * time.Second
 
-var (
-	relojesMu  sync.Mutex
-	relojesPen = map[string]chan struct{}{} // id -> se cierra al acabar
-)
+// relojesPendientes es el campo Manager.relojes: por máquina, un canal que se
+// cierra al acabar su resync. Su valor cero sirve.
+type relojesPendientes struct {
+	mu  sync.Mutex
+	pen map[string]chan struct{}
+}
 
 // relojPendiente apunta que la máquina id tiene un resync pendiente y
 // devuelve la función que lo da por acabado (idempotente).
 func (m *Manager) relojPendiente(id string) (fin func()) {
 	ch := make(chan struct{})
-	relojesMu.Lock()
-	if viejo, ok := relojesPen[id]; ok {
+	r := &m.relojes
+	r.mu.Lock()
+	if viejo, ok := r.pen[id]; ok {
 		close(viejo) // un thaw nuevo sustituye al anterior
 	}
-	relojesPen[id] = ch
-	relojesMu.Unlock()
+	if r.pen == nil {
+		r.pen = map[string]chan struct{}{}
+	}
+	r.pen[id] = ch
+	r.mu.Unlock()
 	var una sync.Once
 	return func() {
 		una.Do(func() {
-			relojesMu.Lock()
-			defer relojesMu.Unlock()
-			if relojesPen[id] == ch {
-				delete(relojesPen, id)
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.pen[id] == ch {
+				delete(r.pen, id)
 				close(ch)
 			}
 		})
@@ -49,9 +55,9 @@ func (m *Manager) relojPendiente(id string) (fin func()) {
 // pendiente de id, si lo hay. Devuelve true si sigue pendiente al volver (tope
 // o ctx).
 func (m *Manager) esperarRelojPendiente(ctx context.Context, id string) bool {
-	relojesMu.Lock()
-	ch := relojesPen[id]
-	relojesMu.Unlock()
+	m.relojes.mu.Lock()
+	ch := m.relojes.pen[id]
+	m.relojes.mu.Unlock()
 	if ch == nil {
 		return false
 	}

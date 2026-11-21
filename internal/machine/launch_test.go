@@ -144,8 +144,8 @@ func TestRetrocesoPuerta(t *testing.T) {
 	if r.tope() != 8 {
 		t.Fatalf("tope inicial %d", r.tope())
 	}
-	for _, quiero := range []int{4, 2, 2} {
-		r.retroceder()
+	for i, quiero := range []int{4, 2, 2} {
+		r.retroceder(string(rune('a'+i)), 8)
 		if got := r.tope(); got != quiero {
 			t.Fatalf("tras retroceder: tope %d, quiero %d", got, quiero)
 		}
@@ -167,7 +167,7 @@ func TestRetrocesoPuerta(t *testing.T) {
 	}
 	// Un tope base de 1 (KLING_MAX_PARALLEL_BOOT=1) no sube a 2.
 	u := &retrocesoPuerta{base: 1, reloj: func() time.Time { return ahora }}
-	u.retroceder()
+	u.retroceder("o", 8)
 	if u.tope() != 1 {
 		t.Fatalf("base 1: %d", u.tope())
 	}
@@ -179,7 +179,8 @@ func TestPuertaRetrocedeLimitaEntradas(t *testing.T) {
 	m := &Manager{launchGate: make(chan struct{}, 4)}
 	ahora := time.Unix(1000, 0)
 	m.retrocesoDe().reloj = func() time.Time { return ahora }
-	m.puertaRetroceder("test")
+	m.puertaRetroceder("test", "a", false)
+	m.puertaRetroceder("test", "b", false)
 	var sueltas []func()
 	for i := 0; i < 2; i++ {
 		r, err := m.enterLaunch(context.Background())
@@ -218,5 +219,76 @@ func TestPuertaRetrocedeLimitaEntradas(t *testing.T) {
 	}
 	if len(m.launchGate) != 0 {
 		t.Fatalf("huecos sin soltar: %d", len(m.launchGate))
+	}
+}
+
+// Veinte copias mudas del mismo snapshot son una plantilla rota, no una
+// tormenta del host: la puerta baja como mucho un escalón.
+func TestRetrocesoMismoOrigenUnEscalon(t *testing.T) {
+	m := &Manager{launchGate: make(chan struct{}, 8)}
+	ahora := time.Unix(1000, 0)
+	m.retrocesoDe().reloj = func() time.Time { return ahora }
+	for i := 0; i < 20; i++ {
+		m.puertaRetroceder("dead copy", "snap", false)
+	}
+	if got := m.retrocesoDe().tope(); got < 4 {
+		t.Fatalf("tope %d tras 20 señales del mismo origen, como mucho un escalón (4)", got)
+	}
+}
+
+// Veinte muertes de máquinas ya entregadas no cambian el tope.
+func TestRetrocesoEntregadasNoCuentan(t *testing.T) {
+	m := &Manager{launchGate: make(chan struct{}, 8)}
+	for i := 0; i < 20; i++ {
+		m.puertaRetroceder("unexpected VMM death", "dueño"+string(rune('a'+i)), true)
+	}
+	if got := m.retrocesoDe().tope(); got != 8 {
+		t.Fatalf("tope %d, quería 8", got)
+	}
+}
+
+// Dos orígenes distintos en 30 s bajan; fuera de la ventana no; con arranques
+// en vuelo ≥ tope/2 una sola señal baja.
+func TestRetrocesoOrigenesYArranquesEnVuelo(t *testing.T) {
+	ahora := time.Unix(1000, 0)
+	nuevo := func() *Manager {
+		m := &Manager{launchGate: make(chan struct{}, 8)}
+		m.retrocesoDe().reloj = func() time.Time { return ahora }
+		return m
+	}
+	m := nuevo()
+	m.puertaRetroceder("x", "a", false)
+	ahora = ahora.Add(10 * time.Second)
+	m.puertaRetroceder("x", "b", false)
+	if got := m.retrocesoDe().tope(); got != 4 {
+		t.Fatalf("dos orígenes en 10 s: tope %d, quería 4", got)
+	}
+
+	ahora = ahora.Add(time.Hour)
+	m = nuevo()
+	m.puertaRetroceder("x", "a", false)
+	ahora = ahora.Add(31 * time.Second)
+	m.puertaRetroceder("x", "b", false)
+	if got := m.retrocesoDe().tope(); got != 8 {
+		t.Fatalf("dos orígenes a 31 s: tope %d, quería 8", got)
+	}
+
+	m = nuevo()
+	for i := 0; i < 3; i++ {
+		m.launchGate <- struct{}{}
+	}
+	m.puertaRetroceder("x", "a", false)
+	if got := m.retrocesoDe().tope(); got != 8 {
+		t.Fatalf("3 en vuelo de 8: tope %d, quería 8", got)
+	}
+	m.launchGate <- struct{}{}
+	m.puertaRetroceder("x", "a", false)
+	if got := m.retrocesoDe().tope(); got != 4 {
+		t.Fatalf("4 en vuelo de 8: tope %d, quería 4", got)
+	}
+	// Mismo origen otra vez dentro del plazo: no baja otro escalón.
+	m.puertaRetroceder("x", "a", false)
+	if got := m.retrocesoDe().tope(); got != 4 {
+		t.Fatalf("mismo origen en el plazo: tope %d, quería 4", got)
 	}
 }
