@@ -928,6 +928,16 @@ func paraComprobar(r []string) []string {
 // montarEgresoHost instala las HostEgressRules que falten, y la del agente
 // en mangle, además, la primera (ponerPrimera).
 func montarEgresoHost() error {
+	if err := montarEgresoHostBase(); err != nil {
+		return err
+	}
+	if CadenaForwardActiva() {
+		return montarCadenaForward()
+	}
+	return nil
+}
+
+func montarEgresoHostBase() error {
 	agente := reglaAgenteDesdeFuera()
 	for _, r := range HostEgressRules("") {
 		if slices.Equal(r, agente) {
@@ -1452,13 +1462,19 @@ func centinelas(acceso AccesoAgente, snap *instantaneaTablas) []func() (bool, er
 			return esPrimera(r)
 		}
 	}
-	return []func() (bool, error){
+	cs := []func() (bool, error){
 		comprobar(reglas[0]),
 		primera(salto),
 		comprobar(cierre[0]),
 		comprobar(centinelaForward()),
 		primera(reglaAgenteDesdeFuera()),
 	}
+	// Con KLING_FORWARD_CHAIN=1, el salto a KINDLING-FWD es el sexto: primero
+	// de FORWARD, y la última regla de la cadena en su sitio.
+	if c := centinelaCadenaForward(); c != nil {
+		cs = append(cs, primera(c), comprobar(ReglasCadenaForward()[len(ReglasCadenaForward())-1]))
+	}
+	return cs
 }
 
 // instantaneaTablas es la salida de UN iptables-save: tabla → cadena → reglas
@@ -1674,7 +1690,7 @@ func reponerHost(estan []bool, acceso AccesoAgente) error {
 			return err
 		}
 	}
-	if !estan[3] || !estan[4] {
+	if !estan[3] || !estan[4] || slices.Contains(estan[5:], false) {
 		log.Printf("net: the host FORWARD rules for the machines are gone or out of place (a firewall reload?); reinstalling them")
 		return montarEgresoHost()
 	}
