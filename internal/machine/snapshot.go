@@ -722,6 +722,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, fmt.Errorf("marking image snapshot %s: %w", name, err)
 		}
 	}
+	escribirMarcaGloboReposo(dir, mc.ID)
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
@@ -1650,22 +1651,6 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// cow.go).
 	fases.marca(fcChecks)
 	overlay := filepath.Join(dir, "overlay.ext4")
-	modoCoW, err := m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("copying golden overlay: %w", err)
-	}
-	// En el almacén, el overlay no vive en dir: los fallos de antes de
-	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
-	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
-	publicada := false
-	if modoCoW == cowModoStore {
-		defer func() {
-			if !publicada {
-				m.borrarOverlayAlmacen(id)
-			}
-		}()
-	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
 	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
@@ -1758,12 +1743,25 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	fases.marca(fcDisk)
-	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("setting up network: %w", err)
+	// Disco y red a la vez (clonarYMontarRed): se esperan los dos antes de ceder.
+	modoCoW, err := m.clonarYMontarRed(ctx, fases, dir, netcfg, id, egress, req.AllowDomains,
+		func(ctx context.Context) (string, error) {
+			return m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
+		})
+	// En el almacén, el overlay no vive en dir: los fallos de antes de
+	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
+	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
+	publicada := false
+	if modoCoW == cowModoStore {
+		defer func() {
+			if !publicada {
+				m.borrarOverlayAlmacen(id)
+			}
+		}()
 	}
-	fases.marca(fcNet)
+	if err != nil {
+		return nil, err
+	}
 	// Con el overlay en el almacén, overlay es un enlace a él y Own (chown, que
 	// sigue enlaces) se lo daría en propiedad al VMM: ahí es del daemon y el VMM
 	// lo usa por grupo (ver clonarInstancia).
@@ -1997,7 +1995,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	}
 	// Un dorado de antes de globo_ritmo.go trae las estadísticas del globo
 	// cada 1 s; la copia, al de reposo.
-	ritmoGloboReposo(ctx, c)
+	// Si el dorado se congeló ya en el de reposo (globo_ritmo.go), ni se manda.
+	ritmoGloboReposoSi(ctx, c, doradoConGloboReposo(m.snapDir(req.From)))
+	marcarGloboReposo(id)
 	// Su caudal de red, si no es el que quedó en el snapshot (red_caudal.go).
 	m.caudalTrasCargar(ctx, c, id)
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
@@ -2328,4 +2328,48 @@ func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
 		delete(m.memAllocCache, e.Name())
 		log.Printf("reconcile: snapshot %q was an interrupted commit; its leftovers go to the trash", e.Name())
 	}
+}
+
+// clonarYMontarRed hace la copia del overlay dorado (clon: disco) y el montaje
+// de la red; no dependen entre sí. Si falla una se deshace la otra y se borra
+// dir; el overlay del almacén que haya salido bien lo recoge quien llama con el
+// modo devuelto. Las fases fcDisk y fcNet llevan el tiempo propio de cada rama.
+func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, dir string, n *knet.Net, id string,
+	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, error) {
+	fases.marca(fcDisk)
+	var (
+		modo    string
+		errClon error
+		dClon   time.Duration
+		hecho   = make(chan struct{})
+	)
+	go func() {
+		defer close(hecho)
+		t0 := time.Now()
+		modo, errClon = clon(ctx)
+		dClon = time.Since(t0)
+	}()
+	t1 := time.Now()
+	errRed := m.montarRed(n, id, egress, domains)
+	dRed := time.Since(t1)
+	<-hecho
+	fases.d[fcDisk] += dClon
+	fases.d[fcNet] += dRed
+	fases.ultima = time.Now()
+	return m.cerrarClonYRed(dir, n, id, modo, errClon, errRed)
+}
+
+// cerrarClonYRed decide el resultado de las dos ramas y deshace lo que toque.
+func (m *Manager) cerrarClonYRed(dir string, n *knet.Net, id, modo string, errClon, errRed error) (string, error) {
+	if errClon == nil && errRed == nil {
+		return modo, nil
+	}
+	if errRed == nil {
+		m.desmontarRed(n, id)
+	}
+	os.RemoveAll(dir)
+	if errClon != nil {
+		return modo, fmt.Errorf("copying golden overlay: %w", errClon)
+	}
+	return modo, fmt.Errorf("setting up network: %w", errRed)
 }
