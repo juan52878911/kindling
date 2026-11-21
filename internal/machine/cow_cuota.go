@@ -104,7 +104,7 @@ func abrirSinSeguir(ruta string) (*os.File, error) {
 
 // asignadorProyectos reparte los ids de proyecto de XFS desde memoria: un
 // conjunto de usados y el último repartido, bajo un mutex pequeño. Se siembra
-// una vez con el escaneo de proyectosEnUso (sobrevive a un reinicio del
+// una vez con el escaneo de proyectosPorDir (sobrevive a un reinicio del
 // daemon) y cada id se libera al borrar el directorio de su instancia. Es la
 // única fuente de ids: dos instancias con el mismo proyecto compartirían cuota.
 type asignadorProyectos struct {
@@ -202,24 +202,13 @@ func proyectoLibre(usados map[uint32]bool) uint32 {
 	return id
 }
 
-// proyectosEnUso recorre los ficheros de las instancias del almacén (el
+// proyectosPorDir recorre los ficheros de las instancias del almacén (el
 // overlay y los de memoria: mem.full, mem.diff, el diff acumulado, cada uno
-// con su proyecto) y devuelve los ids que ya tienen. Sin estado en memoria:
-// sobrevive a un reinicio del daemon y libera el id de una instancia borrada
-// sin llevar cuentas. Mirar solo los overlays repartía a un overlay nuevo el
-// id del mem.full de otra copia, y el límite del overlay se encontraba ya
-// gastado: EDQUOT en el disco del invitado.
-func proyectosEnUso(dirM string) map[uint32]bool {
-	usados := map[uint32]bool{}
-	for _, ids := range proyectosPorDir(dirM) {
-		for _, id := range ids {
-			usados[id] = true
-		}
-	}
-	return usados
-}
-
-// proyectosPorDir es proyectosEnUso con el directorio de cada instancia.
+// con su proyecto) y devuelve, por directorio de instancia, los ids que ya
+// tienen. Siembra al asignador: sobrevive a un reinicio del daemon. Mirar solo
+// los overlays repartía a un overlay nuevo el id del mem.full de otra copia, y
+// el límite del overlay se encontraba ya gastado: EDQUOT en el disco del
+// invitado.
 func proyectosPorDir(dirM string) map[string][]uint32 {
 	usados := map[string][]uint32{}
 	instancias, err := os.ReadDir(dirM)
