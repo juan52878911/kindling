@@ -120,10 +120,11 @@ type asignadorProyectos struct {
 // sembrarSiHaceFalta hace el escaneo la primera vez. Con a.mu tomado. Si el
 // escaneo falló no se da por hecho: se queda con lo que leyó y lo repite en la
 // siguiente asignación (fundiendo, sin pisar lo ya repartido), porque dar por
-// libres los id que no pudo leer repartiría un proyecto ya en uso.
-func (p *asignadorProyectos) sembrarSiHaceFalta() {
+// libres los id que no pudo leer repartiría un proyecto ya en uso. Mientras no
+// esté hecho devuelve el error y no se reparte nada.
+func (p *asignadorProyectos) sembrarSiHaceFalta() error {
 	if p.listo {
-		return
+		return nil
 	}
 	if p.usados == nil {
 		p.usados = map[uint32]string{}
@@ -132,11 +133,13 @@ func (p *asignadorProyectos) sembrarSiHaceFalta() {
 		p.sig = primerProyecto
 	}
 	p.listo = true
+	var errSiembra error
 	if p.sembrar != nil {
 		vistos, err := p.sembrar()
 		if err != nil {
 			p.listo = false
-			log.Printf("warning: copy-on-write store: scanning project ids failed (%v); retrying on the next allocation", err)
+			errSiembra = fmt.Errorf("scanning the copy-on-write store's project ids: %w", err)
+			log.Printf("warning: %v; retrying on the next allocation", errSiembra)
 		}
 		for dir, ids := range vistos {
 			for _, id := range ids {
@@ -148,29 +151,34 @@ func (p *asignadorProyectos) sembrarSiHaceFalta() {
 			}
 		}
 	}
+	return errSiembra
 }
 
-// asignar reserva un id libre para un fichero de la instancia d.
+// asignar reserva un id libre para un fichero de la instancia d (0 si el
+// escaneo aún no se pudo hacer).
 func (p *asignadorProyectos) asignar(d string) uint32 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.asignarLocked(d, "")
+	id, _ := p.asignarLocked(d, "")
+	return id
 }
 
 // asignarFichero reserva el id del fichero nombre de la instancia d y lo
 // recuerda: recrear mem.full o mem.diff sin borrar la instancia reutiliza el
 // id en vez de gastar uno nuevo en cada llamada.
-func (p *asignadorProyectos) asignarFichero(d, nombre string) uint32 {
+func (p *asignadorProyectos) asignarFichero(d, nombre string) (uint32, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.asignarLocked(d, nombre)
 }
 
-func (p *asignadorProyectos) asignarLocked(d, nombre string) uint32 {
-	p.sembrarSiHaceFalta()
+func (p *asignadorProyectos) asignarLocked(d, nombre string) (uint32, error) {
+	if err := p.sembrarSiHaceFalta(); err != nil {
+		return 0, err
+	}
 	if nombre != "" {
 		if id, ok := p.nombres[d][nombre]; ok && p.usados[id] == d {
-			return id
+			return id, nil
 		}
 	}
 	id := p.sig
@@ -192,7 +200,7 @@ func (p *asignadorProyectos) asignarLocked(d, nombre string) uint32 {
 		p.nombres[d][nombre] = id
 	}
 	p.sig = id + 1
-	return id
+	return id, nil
 }
 
 // liberar devuelve los ids de la instancia d. El siguiente reparto vuelve a
@@ -462,7 +470,10 @@ func (a *almacenCoW) activarCuota() {
 		var devOnce sync.Once
 		qc := &quotactlXFS{llamar: limiteXFSQuotactl}
 		a.limitar = func(d, overlay string, bytes int64) error {
-			id := ids.asignarFichero(d, filepath.Base(overlay))
+			id, err := ids.asignarFichero(d, filepath.Base(overlay))
+			if err != nil {
+				return err
+			}
 			ok := false
 			defer func() {
 				if !ok {

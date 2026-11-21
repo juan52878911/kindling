@@ -447,13 +447,16 @@ func TestAsignadorReutilizaIdPorFichero(t *testing.T) {
 	vistos := map[uint32]bool{}
 	for range 1000 {
 		for _, f := range []string{"overlay.ext4", "mem.full", "mem.diff"} {
-			vistos[p.asignarFichero("/x/a", f)] = true
+			id, _ := p.asignarFichero("/x/a", f)
+			vistos[id] = true
 		}
 	}
 	if len(vistos) > 3 {
 		t.Fatalf("%d ids distintos para 3 ficheros", len(vistos))
 	}
-	if a, b := p.asignarFichero("/x/a", "mem.full"), p.asignarFichero("/x/b", "mem.full"); a == b {
+	a, _ := p.asignarFichero("/x/a", "mem.full")
+	b, _ := p.asignarFichero("/x/b", "mem.full")
+	if a == b {
 		t.Fatalf("dos instancias comparten el id %d", a)
 	}
 	p.liberar("/x/a")
@@ -491,7 +494,12 @@ func TestAsignadorSiembraFallidaSeReintenta(t *testing.T) {
 		}
 		return map[string][]uint32{"/x/a": {1000}}, nil
 	}}
-	p.asignar("/x/b")
+	// Con el escaneo fallido no se reparte nada: el id libre podría ser de
+	// una instancia que no se llegó a leer (dos ficheros vivos con la misma
+	// cuota).
+	if id, err := p.asignarFichero("/x/b", "overlay.ext4"); err == nil || id != 0 {
+		t.Fatalf("con el escaneo fallido se repartió %d (err %v)", id, err)
+	}
 	if got := p.asignar("/x/c"); got == 1000 {
 		t.Fatalf("se repartió el id 1000, ya usado por /x/a")
 	}

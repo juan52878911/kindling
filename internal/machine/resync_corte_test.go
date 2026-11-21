@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -72,10 +73,11 @@ func TestResyncCopiaConAgenteNoSeEntregaSinRespuesta(t *testing.T) {
 				t.Fatal("se entregó una copia cuyo agente no contestó")
 			}
 			// Sin el campo (un dorado anterior): un puerto vacío (RST) se
-			// entrega; un corte (EOF/RST de conexión) es fallo desde I1-A.
+			// entrega; un corte (EOF/RST de conexión) es fallo desde I1-A,
+			// salvo en macOS, donde el reenvío cierra así si no hay nadie.
 			snap.ConAgente = false
 			_, err := m.resyncCopia(context.Background(), "x", snap)
-			if corte := nombre == "corte"; corte != (err != nil) {
+			if corte := nombre == "corte" && runtime.GOOS != "darwin"; corte != (err != nil) {
 				t.Fatalf("sin con_agente (%s): err=%v", nombre, err)
 			}
 		})

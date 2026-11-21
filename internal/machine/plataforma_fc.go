@@ -196,9 +196,8 @@ func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
 	// Solo si el sistema de ficheros del origen declara bien sus huecos: en
 	// NFSv3 o FUSE todo son datos y la copia en proceso ocuparía el tamaño
 	// lógico; cp --sparse=always detecta los ceros.
-	var err error = errors.New("huecos no fiables")
 	if huecosFiables(filepath.Dir(src)) {
-		if err = copiarDispersoEnProceso(ctx, src, dst); err == nil {
+		if err := copiarDispersoEnProceso(ctx, src, dst); err == nil {
 			return nil, nil
 		}
 	}

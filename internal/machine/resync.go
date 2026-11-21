@@ -453,8 +453,14 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 		if errors.Is(err, syscall.ECONNREFUSED) {
 			return out, fmt.Errorf("%w: %w: %w: %v", errResyncConexion, errResyncNadie, errResyncRechazada, err)
 		}
-		// Un ECONNRESET o un EOF son un agente que sí estaba y cortó bajo carga:
-		// fallo, no "nadie" (solo el RST lo es).
+		// En Linux un ECONNRESET o un EOF son un agente que sí estaba y cortó
+		// bajo carga: fallo, no "nadie" (solo el RST lo es). En macOS el
+		// reenvío del VMM cierra así cuando no hay nadie al otro lado, así que
+		// ahí sigue siendo "nadie"; un dorado con agente conocido (ConAgente o
+		// AllowExec) falla igual, porque ese caso no acepta "nadie".
+		if runtime.GOOS == "darwin" && (errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			return out, fmt.Errorf("%w: %w: %v", errResyncConexion, errResyncNadie, err)
+		}
 		return out, fmt.Errorf("%w: %v", errResyncConexion, err)
 	}
 	defer resp.Body.Close()

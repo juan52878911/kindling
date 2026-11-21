@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -90,7 +91,7 @@ func TestResyncInstanciaCortePorAgente(t *testing.T) {
 	}{
 		{"AllowExec", api.Snapshot{AllowExec: true}, true},
 		{"ConAgente", api.Snapshot{ConAgente: true}, true},
-		{"nada, EOF", api.Snapshot{}, true},
+		{"nada, EOF", api.Snapshot{}, runtime.GOOS != "darwin"}, // en macOS un EOF es el reenvío sin nadie
 	} {
 		m := newTestManager(t)
 		id := maquinaEnFondo(t, m, agenteCortaEOF(t))
