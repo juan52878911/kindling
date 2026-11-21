@@ -84,7 +84,12 @@ type Fondo struct {
 	crear    func() (*Ranura, error)
 	destruir func(*Ranura)
 	ahora    func() time.Time
+	// Bloquear toma, sin esperar, el cerrojo de ciclo de vida del id de una
+	// ranura (nil: sin cerrojo). Recoger no destruye una ranura cuyo id está
+	// ocupado: un asignarRed tardío podría montar sobre el netns que se borra.
+	Bloquear func(id string) (func(), bool)
 
+	parar    chan struct{} // se cierra en Cerrar; para la recogida
 	mu       sync.Mutex
 	listas   []*Ranura
 	tomadas  map[string]tomada // por id: entregado el id, aún sin asignarRed
@@ -95,6 +100,7 @@ type Fondo struct {
 	ultimoFallo time.Time
 	cerrado     bool
 	wg          sync.WaitGroup
+	wgRecogida  sync.WaitGroup
 }
 
 type tomada struct {
@@ -105,7 +111,7 @@ type tomada struct {
 // NuevoFondo crea un fondo de tam ranuras. No empieza a reponer: Reponer.
 func NuevoFondo(tam int, crear func() (*Ranura, error), destruir func(*Ranura)) *Fondo {
 	return &Fondo{tam: tam, crear: crear, destruir: destruir, ahora: time.Now,
-		tomadas: map[string]tomada{}, montando: map[string]bool{}}
+		tomadas: map[string]tomada{}, montando: map[string]bool{}, parar: make(chan struct{})}
 }
 
 // esperaTrasFallo es lo que el fondo deja pasar tras un montaje fallido.
@@ -209,23 +215,70 @@ func (f *Fondo) Descartar(id string) {
 	}
 }
 
+// IniciarRecogida lanza la goroutine que llama a Recoger cada intervalo hasta
+// que Cerrar la para (ticker con parada, no time.Tick).
+func (f *Fondo) IniciarRecogida(intervalo time.Duration) {
+	f.mu.Lock()
+	if f.cerrado {
+		f.mu.Unlock()
+		return
+	}
+	f.wgRecogida.Add(1)
+	f.mu.Unlock()
+	go func() {
+		defer f.wgRecogida.Done()
+		t := time.NewTicker(intervalo)
+		defer t.Stop()
+		for {
+			select {
+			case <-f.parar:
+				return
+			case <-t.C:
+				f.Recoger()
+			}
+		}
+	}()
+}
+
 // Recoger destruye las ranuras tomadas hace más de PlazoRanuraTomada que no
-// llegaron a asignarRed (la creación se abandonó). Devuelve cuántas.
+// llegaron a asignarRed (la creación se abandonó). Devuelve cuántas. Cada una
+// se destruye con el cerrojo de ciclo de vida de su id (Bloquear); si está
+// ocupado, queda para la vuelta siguiente.
 func (f *Fondo) Recoger() int {
 	f.mu.Lock()
-	var viejas []*Ranura
+	var viejas []string
 	for id, t := range f.tomadas {
 		if f.ahora().Sub(t.en) > PlazoRanuraTomada {
-			viejas = append(viejas, t.r)
-			delete(f.tomadas, id)
+			viejas = append(viejas, id)
 		}
 	}
 	f.mu.Unlock()
-	for _, r := range viejas {
-		log.Printf("net: slot %s was taken but never mounted; destroying it", r.Net.NS)
-		f.destruir(r)
+	n := 0
+	for _, id := range viejas {
+		soltar := func() {}
+		if f.Bloquear != nil {
+			s, ok := f.Bloquear(id)
+			if !ok {
+				continue
+			}
+			soltar = s
+		}
+		f.mu.Lock()
+		t, ok := f.tomadas[id]
+		if ok && f.ahora().Sub(t.en) > PlazoRanuraTomada {
+			delete(f.tomadas, id)
+		} else {
+			ok = false
+		}
+		f.mu.Unlock()
+		if ok {
+			log.Printf("net: slot %s was taken but never mounted; destroying it", t.r.Net.NS)
+			f.destruir(t.r)
+			n++
+		}
+		soltar()
 	}
-	return len(viejas)
+	return n
 }
 
 // Propia dice si el netns ns o el prefijo de id es de una ranura que el fondo
@@ -271,10 +324,14 @@ func (f *Fondo) Desmarcar(ns string) {
 // su camino.
 func (f *Fondo) Cerrar() {
 	f.mu.Lock()
+	if !f.cerrado {
+		close(f.parar)
+	}
 	f.cerrado = true
 	listas := f.listas
 	f.listas = nil
 	f.mu.Unlock()
+	f.wgRecogida.Wait()
 	f.wg.Wait()
 	f.mu.Lock()
 	listas = append(listas, f.listas...)
