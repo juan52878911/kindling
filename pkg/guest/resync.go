@@ -50,17 +50,69 @@ var (
 )
 
 // resyncMu serializa: dos resync a la vez no rompen nada, pero el desfase que
-// se devuelve sería el de la otra.
+// se devuelve sería el de la otra. Con el segundo tiempo en segundo plano, se
+// suelta cuando este acaba, no al contestar: el siguiente resync no pisa al
+// anterior.
 var resyncMu sync.Mutex
 
-// ResyncHandler sirve POST /resync.
+// Pasos del segundo tiempo; variables para los tests.
+var (
+	renovarIdentidad = func() []string { return renewMachineID(machineIDFiles) }
+	cortarProcesos   = cortarExecs
+	limpiarFondo     = limpiarProcesos
+)
+
+// ResyncTiempos son los tiempos (µs) de cada paso del último /resync, medidos
+// dentro del invitado: la traza del host solo ve el total. GET /resync (solo
+// host) los devuelve. Los pasos del segundo tiempo se rellenan al acabar:
+// Diferido es false mientras tanto.
+type ResyncTiempos struct {
+	Restore    string `json:"restore,omitempty"`
+	Origen     int64  `json:"origen_us"`
+	Cuerpo     int64  `json:"cuerpo_us"`
+	Entropia   int64  `json:"entropia_us"`
+	Reloj      int64  `json:"reloj_us"`
+	Generacion int64  `json:"generacion_us"`
+	MachineID  int64  `json:"machine_id_us"`
+	FicheroGen int64  `json:"fichero_generacion_us"`
+	Exec       int64  `json:"exec_us"`
+	Procesos   int64  `json:"procesos_us"`
+	Respuesta  int64  `json:"respuesta_us"`
+	Critico    int64  `json:"critico_us"`
+	Diferido   bool   `json:"diferido_hecho"`
+	DiferidoUS int64  `json:"diferido_us"`
+}
+
+var (
+	tiemposMu      sync.Mutex
+	ultimosTiempos ResyncTiempos
+)
+
+func guardarTiempos(f func(t *ResyncTiempos)) {
+	tiemposMu.Lock()
+	defer tiemposMu.Unlock()
+	f(&ultimosTiempos)
+}
+
+func us(d time.Duration) int64 { return d.Microseconds() }
+
+// ResyncHandler sirve POST /resync (y GET, los tiempos del último).
 func ResyncHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			tiemposMu.Lock()
+			t := ultimosTiempos
+			tiemposMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(t)
+			return
+		}
 		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
+			w.Header().Set("Allow", "GET, POST")
 			http.Error(w, "use POST", http.StatusMethodNotAllowed)
 			return
 		}
+		inicio := time.Now()
 		body, err := io.ReadAll(io.LimitReader(r.Body, api.GuestResyncMaxBody+1))
 		if err != nil {
 			http.Error(w, "reading body: "+err.Error(), http.StatusBadRequest)
@@ -79,57 +131,122 @@ func ResyncHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		tCuerpo := time.Since(inicio)
 
 		resyncMu.Lock()
-		defer resyncMu.Unlock()
+		// Lo que se hace tras contestar: la generación en fichero y, en una
+		// copia de un dorado, identidad y limpieza. Si lo hay, la puerta se
+		// cierra ya, antes de tocar nada, y se abre al acabarlo.
+		restaura := !resyncSinRestaurar(req.Restore)
+		diferido := false
+		defer func() {
+			if !diferido {
+				resyncMu.Unlock()
+			}
+		}()
+		if restaura {
+			puertaResync.Cerrar()
+			defer func() {
+				if !diferido {
+					puertaResync.Abrir()
+				}
+			}()
+		}
+
 		// La entropía primero: es lo que importa para la seguridad, y un fallo
 		// del reloj no debe dejar el CSPRNG sin resembrar.
+		t0 := time.Now()
 		if err := mixEntropy(req.Entropy); err != nil {
 			http.Error(w, "reseeding the kernel RNG: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		tEntropia := time.Since(t0)
 		host := time.Unix(0, req.UnixNano)
 		skew := time.Until(host)
 		// Tras reanudar una pausada el reloj suele estar bien (KVM no para el
 		// contador): ponerlo ahí solo sumaría lo que tardó la petición. Se
 		// pone si va desfasado de verdad (kling-hv sí lo para).
 		poner := req.Restore != ResyncResume || skew > resyncUmbralReanudar || skew < -resyncUmbralReanudar
+		var tReloj time.Duration
 		if poner {
+			t0 = time.Now()
 			if err := setClock(host); err != nil {
 				http.Error(w, "setting the clock: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
+			tReloj = time.Since(t0)
 		}
 		// Un arranque en frío o una reanudación no son restauraciones: ni
 		// suben la generación ni cambian la identidad.
+		t0 = time.Now()
 		gen := generation
-		if !resyncSinRestaurar(req.Restore) {
-			gen = bumpGeneration()
+		if restaura {
+			generation++
+			gen = generation
 		}
-		// Una copia de un dorado no es la misma máquina: machine-id propio.
-		// Al descongelar la misma máquina no se toca.
-		var renewed []string
-		if req.Restore == api.ResyncInstance {
-			renewed = renewMachineID(machineIDFiles)
-			// Los exec que corrían al volcar el dorado no son de esta copia
-			// (cortarExecs). Al descongelar la misma máquina no se tocan: su
-			// petición puede seguir viva, y la red los corta si no.
-			if n := cortarExecs(); n > 0 {
-				log.Printf("resync: stopped %d command(s) left running in the snapshot", n)
-			}
-			// Y los procesos de fondo y las sesiones: eran de otra máquina.
-			if n := limpiarProcesos(); n > 0 {
-				log.Printf("resync: stopped %d background process(es) left running in the snapshot", n)
-			}
-		}
+		tGen := time.Since(t0)
 		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
 		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
 		// pide él cuando ya montó volúmenes y entregó credenciales) o una
 		// sonda que esperar (ver ready.go).
 		st := readyState.snapshot()
+		// Renewed sale vacío: el host no lo usa.
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen, Renewed: renewed})
+		t0 = time.Now()
+		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen})
+		tResp := time.Since(t0)
+		critico := time.Since(inicio)
+		guardarTiempos(func(t *ResyncTiempos) {
+			*t = ResyncTiempos{Restore: req.Restore, Origen: t.Origen, Cuerpo: us(tCuerpo), Entropia: us(tEntropia),
+				Reloj: us(tReloj), Generacion: us(tGen), Respuesta: us(tResp), Critico: us(critico), Diferido: !restaura}
+		})
+		if !restaura {
+			return
+		}
+		diferido = true
+		go func() {
+			defer resyncMu.Unlock()
+			defer puertaResync.Abrir()
+			segundoTiempo(req.Restore, gen)
+		}()
 	}
+}
+
+// segundoTiempo es lo que se hace tras contestar. Se llama con resyncMu
+// tomado y la puerta cerrada.
+func segundoTiempo(restore string, gen uint64) {
+	ini := time.Now()
+	var t ResyncTiempos
+	t0 := time.Now()
+	if err := writeGeneration(generationFile, gen); err != nil {
+		log.Printf("resync: writing %s: %v", generationFile, err)
+	}
+	t.FicheroGen = us(time.Since(t0))
+	// Una copia de un dorado no es la misma máquina: machine-id propio.
+	// Al descongelar la misma máquina no se toca.
+	if restore == api.ResyncInstance {
+		t0 = time.Now()
+		renovarIdentidad()
+		t.MachineID = us(time.Since(t0))
+		// Los exec que corrían al volcar el dorado no son de esta copia
+		// (cortarExecs). Al descongelar la misma máquina no se tocan: su
+		// petición puede seguir viva, y la red los corta si no.
+		t0 = time.Now()
+		if n := cortarProcesos(); n > 0 {
+			log.Printf("resync: stopped %d command(s) left running in the snapshot", n)
+		}
+		t.Exec = us(time.Since(t0))
+		// Y los procesos de fondo y las sesiones: eran de otra máquina.
+		t0 = time.Now()
+		if n := limpiarFondo(); n > 0 {
+			log.Printf("resync: stopped %d background process(es) left running in the snapshot", n)
+		}
+		t.Procesos = us(time.Since(t0))
+	}
+	t.DiferidoUS = us(time.Since(ini))
+	guardarTiempos(func(u *ResyncTiempos) {
+		u.FicheroGen, u.MachineID, u.Exec, u.Procesos, u.DiferidoUS, u.Diferido = t.FicheroGen, t.MachineID, t.Exec, t.Procesos, t.DiferidoUS, true
+	})
 }
 
 // Valores de GuestResync.Restore que no son restauraciones, y la capacidad
@@ -161,18 +278,6 @@ var (
 	generation     uint64
 	generationFile = api.GuestGenerationFile
 )
-
-// bumpGeneration sube el contador y lo escribe en generationFile con un
-// rename, para que quien lo vigile no lea nunca un fichero a medias. Un fallo
-// al escribirlo se apunta y no tumba el /resync: el kernel ya está resembrado.
-// Se llama con resyncMu tomado.
-func bumpGeneration() uint64 {
-	generation++
-	if err := writeGeneration(generationFile, generation); err != nil {
-		log.Printf("resync: writing %s: %v", generationFile, err)
-	}
-	return generation
-}
 
 func writeGeneration(p string, n uint64) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {

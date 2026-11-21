@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -30,6 +31,9 @@ func falsos(t *testing.T, errReloj, errEntropia error) (*time.Time, *[]byte) {
 	mixEntropy = func(b []byte) error { ent = append([]byte(nil), b...); return errEntropia }
 	generationFile = filepath.Join(t.TempDir(), "run/kindling/generation")
 	t.Cleanup(func() {
+		// Lo que /resync hace tras contestar toca estas variables: que acabe
+		// antes de reponerlas.
+		func() { resyncMu.Lock(); defer resyncMu.Unlock() }()
 		setClock, mixEntropy, generationFile, generation = viejoReloj, viejaEnt, viejoFichero, viejaGen
 	})
 	return &reloj, &ent
@@ -100,9 +104,9 @@ func TestResyncRechazaLoQueNoCuadra(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	ResyncHandler()(rr, httptest.NewRequest(http.MethodGet, api.GuestResyncPath, nil))
+	ResyncHandler()(rr, httptest.NewRequest(http.MethodPut, api.GuestResyncPath, nil))
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET: %d", rr.Code)
+		t.Fatalf("PUT: %d", rr.Code)
 	}
 }
 
@@ -159,6 +163,7 @@ func TestResyncSubeLaGeneracion(t *testing.T) {
 		if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil || res.Generation != want {
 			t.Fatalf("resync %d: generation %d (%v), quiero %d", want, res.Generation, err, want)
 		}
+		esperarSegundoTiempo(t)
 		b, err := os.ReadFile(generationFile)
 		if err != nil || string(b) != fmt.Sprintf("%d\n", want) {
 			t.Fatalf("fichero de generación = %q (%v), quiero %d", b, err, want)
@@ -272,5 +277,122 @@ func TestResyncRespondeAntesDeLoLento(t *testing.T) {
 	}
 	if !reloj.Equal(host) || !bytes.Equal(*ent, semilla) {
 		t.Fatal("la respuesta llegó sin reloj o sin entropía")
+	}
+}
+
+// esperarSegundoTiempo bloquea hasta que acaba lo que /resync hace tras
+// contestar (la puerta abierta y resyncMu suelto).
+func esperarSegundoTiempo(t *testing.T) {
+	t.Helper()
+	hecho := make(chan struct{})
+	go func() { resyncMu.Lock(); defer resyncMu.Unlock(); close(hecho) }()
+	select {
+	case <-hecho:
+	case <-time.After(5 * time.Second):
+		t.Fatal("el segundo tiempo de /resync no acaba")
+	}
+	if puertaResync.Cerrada() {
+		t.Fatal("la puerta sigue cerrada tras el segundo tiempo")
+	}
+}
+
+// pasosFalsos sustituye los pasos del segundo tiempo; cada uno cuenta que se
+// llamó y espera a que el test lo suelte con el canal.
+func pasosFalsos(t *testing.T, suelta <-chan struct{}) *atomic.Int32 {
+	t.Helper()
+	var n atomic.Int32
+	r, c, l := renovarIdentidad, cortarProcesos, limpiarFondo
+	renovarIdentidad = func() []string { n.Add(1); <-suelta; return nil }
+	cortarProcesos = func() int { n.Add(1); return 0 }
+	limpiarFondo = func() int { n.Add(1); return 0 }
+	t.Cleanup(func() { renovarIdentidad, cortarProcesos, limpiarFondo = r, c, l })
+	return &n
+}
+
+func cuerpoInstancia(t *testing.T) string {
+	b, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(),
+		Entropy: bytes.Repeat([]byte{5}, api.GuestResyncEntropy), Restore: api.ResyncInstance})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// Con el paso diferido bloqueado, la respuesta llega; un exec (una ruta
+// envuelta) no entra hasta que la puerta se abre; y dos resync no se pisan.
+func TestResyncPuertaRetieneRutasYSerializa(t *testing.T) {
+	falsos(t, nil, nil)
+	suelta := make(chan struct{})
+	n := pasosFalsos(t, suelta)
+
+	rr := postResync(t, cuerpoInstancia(t)) // vuelve con el segundo tiempo colgado
+	if rr.Code != http.StatusOK {
+		t.Fatalf("código %d: %s", rr.Code, rr.Body)
+	}
+	var res api.GuestResyncResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil || len(res.Renewed) != 0 || res.Generation != 1 {
+		t.Fatalf("respuesta %+v (%v): Renewed debe ir vacío y la generación en 1", res, err)
+	}
+	if !puertaResync.Cerrada() {
+		t.Fatal("la puerta debería estar cerrada mientras acaba el segundo tiempo")
+	}
+
+	entro := make(chan struct{})
+	exec := trasResync(func(w http.ResponseWriter, r *http.Request) { close(entro) })
+	go exec(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/exec", nil))
+	segundo := make(chan *httptest.ResponseRecorder, 1)
+	go func() { segundo <- postResync(t, cuerpoInstancia(t)) }()
+
+	select {
+	case <-entro:
+		t.Fatal("el exec entró con la puerta cerrada")
+	case <-segundo:
+		t.Fatal("el segundo resync empezó antes de acabar el primero")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(suelta)
+	select {
+	case <-entro:
+	case <-time.After(5 * time.Second):
+		t.Fatal("el exec no entró al abrirse la puerta")
+	}
+	select {
+	case rr := <-segundo:
+		var r2 api.GuestResyncResult
+		if json.Unmarshal(rr.Body.Bytes(), &r2) != nil || r2.Generation != 2 {
+			t.Fatalf("segundo resync: %d %s", rr.Code, rr.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("el segundo resync no contestó")
+	}
+	esperarSegundoTiempo(t)
+	if n.Load() != 6 {
+		t.Fatalf("pasos diferidos = %d, quería 6 (3 por resync)", n.Load())
+	}
+}
+
+// Un resync que falla antes de contestar no deja la puerta cerrada.
+func TestResyncFalloNoDejaLaPuertaCerrada(t *testing.T) {
+	falsos(t, nil, errors.New("sin entropía"))
+	if rr := postResync(t, cuerpoInstancia(t)); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("código %d", rr.Code)
+	}
+	esperarSegundoTiempo(t)
+}
+
+// GET /resync devuelve el cronómetro del último, con el segundo tiempo al acabar.
+func TestResyncGetDevuelveTiempos(t *testing.T) {
+	falsos(t, nil, nil)
+	pasosFalsos(t, func() chan struct{} { c := make(chan struct{}); close(c); return c }())
+	postResync(t, cuerpoInstancia(t))
+	esperarSegundoTiempo(t)
+	rr := httptest.NewRecorder()
+	ResyncHandler()(rr, httptest.NewRequest(http.MethodGet, api.GuestResyncPath, nil))
+	var tt ResyncTiempos
+	if err := json.Unmarshal(rr.Body.Bytes(), &tt); err != nil || rr.Code != 200 {
+		t.Fatalf("GET: %d %v", rr.Code, err)
+	}
+	if tt.Restore != api.ResyncInstance || !tt.Diferido || tt.Critico <= 0 || tt.DiferidoUS < 0 {
+		t.Fatalf("tiempos inesperados: %+v", tt)
 	}
 }
