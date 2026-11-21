@@ -37,6 +37,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `fork` | v0.15 | `POST /sandboxes/{ref}/fork` |
+| `sandbox-claim` | sin publicar | `POST /sandboxes/claim`: reclama de forma atómica una máquina en marcha cuyas etiquetas casan con `match` y no llevan las de `absent`; pone `labels`, `name` y TTL en la misma sección crítica. Nunca da máquinas con `kling.owner`, `kling.sandbox.claim` ni del fondo del propio daemon. Si no hay ninguna, `404` `no_claimable` |
 | `credaudit` | v0.17 | `GET /machines/{ref}/credaudit` |
 | `db-attach` | v0.17 | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (Linux y macOS), `DELETE /machines/{ref}/credentials/{env}` |
 | `graphs` | v0.17 | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
@@ -1002,7 +1003,7 @@ reutiliza. Sale del código HTTP salvo cuando el daemon reconoce la causa:
 | `400` | `bad_request` | — |
 | `401` | `unauthorized` | — |
 | `403` | `forbidden` | — |
-| `404` | `not_found` | — |
+| `404` | `not_found` | `no_claimable` (`POST /sandboxes/claim` sin máquina que reclamar) |
 | `405` | — | — |
 | `409` | `conflict` | `name_taken` (nombre de máquina cogido), `machine_limit` (tope de máquinas), `stale_golden` (dorado de otro VMM o versión) |
 | `411` | `length_required` | — |
@@ -1122,6 +1123,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `GET /sandboxes/{ref}` | 200 | `404` (también si no es un sandbox) |
 | `POST /sandboxes/{ref}/renew` | 200 | `404`; `413`/`400` cuerpo; `400` ttl; `renewStatus` |
 | `POST /sandboxes/{ref}/fork` | 201 | `404`; `413`/`400` cuerpo; `400` validación; `forkStatus` |
+| `POST /sandboxes/claim` | 200 | `413`/`400` cuerpo; `400` validación (`match` vacío); `404` `no_claimable`; `409` `name_taken`; `429` `tenant_quota` |
 | `DELETE /sandboxes/{ref}` | 204 | `404` (también si no es un sandbox); `cicloStatus`, como `DELETE /machines/{ref}` |
 | `POST /graphs` | 201 | `413`/`400` cuerpo, también un campo que el daemon no conoce; `graphStatus`; `409` existe o tope; admisión |
 | `GET /graphs` | 200 | — |
