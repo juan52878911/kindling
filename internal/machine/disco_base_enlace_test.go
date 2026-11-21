@@ -13,6 +13,11 @@ import (
 func nuevaImagen(t *testing.T) (*Manager, string) {
 	t.Helper()
 	m := newTestManager(t)
+	// Los tests no corren como root: se da por buena la huella salvo en el
+	// test que prueba lo contrario.
+	antes := huellaConfiable
+	huellaConfiable = func(os.FileInfo) bool { return true }
+	t.Cleanup(func() { huellaConfiable = antes })
 	img := filepath.Join(t.TempDir(), "img.ext4")
 	if err := os.WriteFile(img, []byte("imagen"), 0o644); err != nil {
 		t.Fatal(err)
@@ -143,5 +148,35 @@ func TestEnlaceEstableOpFallidaNoAnota(t *testing.T) {
 	_, _ = m.digestDiscoBase(img)
 	if n.Load() != 2 {
 		t.Fatalf("lecturas = %d, quiero 2 (la op fallida no anota)", n.Load())
+	}
+}
+
+// Un op que reescribe el contenido y restaura el mtime no debe conservar el
+// digest cuando el fichero no es de confianza (no es de root o escribible).
+func TestEnlaceEstableInvalidaSiOpReescribe(t *testing.T) {
+	m, img := nuevaImagen(t)
+	antes := huellaConfiable
+	huellaConfiable = func(os.FileInfo) bool { return false }
+	t.Cleanup(func() { huellaConfiable = antes })
+	n := contarDigests(t, 0)
+	if _, err := m.digestDiscoBase(img); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(img)
+	time.Sleep(20 * time.Millisecond) // que el ctime cambie de tick
+	err := m.enlaceEstable(img, func() error {
+		if err := os.WriteFile(img, []byte("OTRA!!"), 0o644); err != nil {
+			return err
+		}
+		return os.Chtimes(img, fi.ModTime(), fi.ModTime())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.digestDiscoBase(img); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Load(); got != 2 {
+		t.Fatalf("lecturas = %d, quiero 2 (la huella debía invalidarse)", got)
 	}
 }
