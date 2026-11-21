@@ -1162,8 +1162,23 @@ func partirRegla(r []string) (tabla, cadena string, espec []string) {
 // por ejemplo), y las dos reglas que se comparan así no se confunden con
 // otra por el orden.
 func normalizarRegla(f []string) []string {
-	out := quitarMatchImplicito(f)
-	slices.Sort(out)
+	// Se ordenan cláusulas, no tokens: cada opción va con sus valores (y con
+	// el "!" que la niega), así "-s A -d B" no se confunde con "-s B -d A".
+	var claus [][]string
+	for _, t := range quitarMatchImplicito(f) {
+		nueva := len(claus) == 0 || t == "!" ||
+			(strings.HasPrefix(t, "-") && !(len(claus[len(claus)-1]) == 1 && claus[len(claus)-1][0] == "!"))
+		if nueva {
+			claus = append(claus, []string{t})
+			continue
+		}
+		claus[len(claus)-1] = append(claus[len(claus)-1], t)
+	}
+	slices.SortFunc(claus, func(a, b []string) int { return slices.Compare(a, b) })
+	out := make([]string, 0, len(f))
+	for _, c := range claus {
+		out = append(out, c...)
+	}
 	return out
 }
 

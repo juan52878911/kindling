@@ -136,3 +136,22 @@ func TestVersionRestoreConWait(t *testing.T) {
 		}
 	}
 }
+
+// Ordenar tokens sueltos haría iguales dos reglas con origen y destino
+// cambiados; ordenando cláusulas no.
+func TestNormalizarReglaNoMezclaValores(t *testing.T) {
+	a := normalizarRegla(strings.Fields("-s 10.0.0.1 -d 10.0.0.2 -j DROP"))
+	b := normalizarRegla(strings.Fields("-s 10.0.0.2 -d 10.0.0.1 -j DROP"))
+	if slices.Equal(a, b) {
+		t.Fatalf("reglas distintas normalizadas igual: %v", a)
+	}
+	c := normalizarRegla(strings.Fields("-d 10.0.0.2 -s 10.0.0.1 -j DROP"))
+	if !slices.Equal(a, c) {
+		t.Fatalf("mismo orden lógico normalizado distinto: %v vs %v", a, c)
+	}
+	n1 := normalizarRegla(strings.Fields("! -s 10.0.0.1 -d 10.0.0.2 -j DROP"))
+	n2 := normalizarRegla(strings.Fields("-s 10.0.0.1 ! -d 10.0.0.2 -j DROP"))
+	if slices.Equal(n1, n2) {
+		t.Fatalf("negación movida normalizada igual: %v", n1)
+	}
+}
