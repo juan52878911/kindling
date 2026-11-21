@@ -1979,7 +1979,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// No la de un snapshot por imagen: su volcado no debe depender de una
 	// caché que el daemon poda (ni de un campo, ImageSnapshot, que un kling
 	// anterior no conoce).
-	enDiff := congelarEnDiff() && ai == nil
+	enDiff := cargarConSeguimiento(ai != nil, req.OnTTL)
 	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotTracking(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false, enDiff); err != nil {

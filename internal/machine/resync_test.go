@@ -283,3 +283,25 @@ func TestResyncConAgenteEsperaALaRed(t *testing.T) {
 		t.Fatalf("con ConAgente y el agente a los 800 ms: ok=%v took=%s fallo=%v", r.ok, r.took, r.fallo)
 	}
 }
+
+// La traza no altera el resultado: mismo cuerpo, mismo éxito, y no hace nada
+// sin la variable.
+func TestResyncOnceConTraza(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	for _, v := range []string{"", "1"} {
+		t.Setenv("KLING_RESYNC_TRACE", v)
+		if _, err := resyncOnce(context.Background(), srv.URL, "restore"); err != nil {
+			t.Fatalf("traza=%q: %v", v, err)
+		}
+	}
+	if trazaResyncNueva("x") == nil {
+		t.Fatal("con KLING_RESYNC_TRACE=1 debe haber traza")
+	}
+	t.Setenv("KLING_RESYNC_TRACE", "")
+	if trazaResyncNueva("x") != nil {
+		t.Fatal("sin la variable no debe haber traza")
+	}
+}
