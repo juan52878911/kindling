@@ -17,6 +17,7 @@ import (
 func TestDosFrontalesSoloUnoSeQuedaLaPrecalentada(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	f.etiquetasEspera = make(chan struct{})
 	f.etiquetasEmpezado = make(chan struct{})
@@ -71,6 +72,7 @@ func TestDosFrontalesSoloUnoSeQuedaLaPrecalentada(t *testing.T) {
 func TestReclamoConSegundaFaseLentaNoSeEntrega(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	f.etiquetasLentas = 60 * time.Millisecond
 	srv, s := montar(t, map[string]*falso{"a": f})
