@@ -137,6 +137,9 @@ func (f *Fondo) reponedor() {
 	for {
 		r, err := f.crear()
 		f.mu.Lock()
+		if r != nil {
+			delete(f.montando, r.Net.NS) // ya es de listas, o se destruye abajo
+		}
 		if err != nil {
 			f.enCurso--
 			f.ultimoFallo = f.ahora()
