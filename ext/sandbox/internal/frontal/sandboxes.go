@@ -1077,10 +1077,13 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 	for _, h := range s.reg.Candidatos(ctx, sirve) {
 		version := plantilla.VersionDe(snaps[h.Nombre])
 		if s.hostReclama(ctx, h) {
-			if out := s.reclamarAtomica(ctx, h, t, p, etiquetas, version); out != nil {
+			out, dosFases := s.reclamarAtomica(ctx, h, t, p, etiquetas, version)
+			if out != nil {
 				return h, out
 			}
-			continue
+			if !dosFases {
+				continue
+			}
 		}
 		listada := time.Now()
 		lctx, cancel := context.WithTimeout(ctx, plazoDaemon)
@@ -1160,35 +1163,91 @@ func (s *Servidor) pedirRelleno(h *hosts.Host, plantilla string) {
 //
 // Además de las etiquetas del tenant pone LabelReclamo: un frontal anterior
 // que comparta el daemon la ve como reclamada en su relectura.
-func (s *Servidor) reclamarAtomica(ctx context.Context, h *hosts.Host, t *Tenant, p CrearPeticion, etiquetas map[string]string, version string) *api.Machine {
+//
+// El segundo valor pide seguir por las dos fases: el daemon contestó con un
+// 404/405 sin código, es decir, ya no tiene la ruta (se bajó de versión): se
+// invalida la capacidad cacheada y esta misma petición no se pierde.
+func (s *Servidor) reclamarAtomica(ctx context.Context, h *hosts.Host, t *Tenant, p CrearPeticion, etiquetas map[string]string, version string) (*api.Machine, bool) {
 	defer s.pedirRelleno(h, p.Template)
 	labels := make(map[string]string, len(etiquetas)+1)
 	for k, v := range etiquetas {
 		labels[k] = v
 	}
-	labels[LabelReclamo] = "1"
+	// Nonce único: si el reclamo se corta tras etiquetar, es lo que permite
+	// encontrar y borrar lo que quedó a medias.
+	nonce, err := nuevoNonce()
+	if err != nil {
+		s.log.Printf("frontal: claiming from %s: %v", h.Nombre, err)
+		return nil, false
+	}
+	labels[LabelReclamo] = nonce
 	match := map[string]string{api.LabelKind: api.KindSandbox, LabelTemplate: p.Template}
+	absent := []string{LabelTenant, LabelReclamo}
 	if version != "" {
 		match[plantilla.LabelVersion] = version
+	} else {
+		// Sin versión no se casa con cualquiera: solo vale una sin etiqueta.
+		absent = append(absent, plantilla.LabelVersion)
 	}
 	ctx, cancel := context.WithTimeout(ctx, plazoDaemon)
 	defer cancel()
 	out, err := h.Cliente.ClaimSandbox(ctx, api.ClaimRequest{
-		Match: match, Absent: []string{LabelTenant, LabelReclamo},
+		Match: match, Absent: absent,
 		Labels: labels, TTLSeconds: p.TTLSeconds,
 	})
 	if err != nil {
-		if !api.IsNoClaimable(err) {
-			s.log.Printf("frontal: claiming from %s: %v", h.Nombre, err)
+		if api.IsNoClaimable(err) {
+			return nil, false
 		}
-		return nil
+		var se *api.StatusError
+		if errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusMethodNotAllowed) && se.ErrorCode == "" {
+			s.log.Printf("frontal: %s no longer serves sandbox-claim (%v); using two phases", h.Nombre, err)
+			s.invalidarReclamo(h)
+			return nil, true
+		}
+		s.log.Printf("frontal: claiming from %s: %v", h.Nombre, err)
+		// El daemon pudo etiquetar antes del corte o del plazo: lo que lleve
+		// el nonce cuenta en la cuota del inquilino. Se borra sin la
+		// cancelación de la petición.
+		s.soltarPorNonce(ctx, h, nonce)
+		return nil, false
 	}
 	if !esSandboxDe(out, t) {
 		s.log.Printf("frontal: claim on %s/%s came back without the tenant label; removing it", h.Nombre, out.ID)
 		s.soltarMediaReclamada(ctx, h, out.ID, "claimed for another tenant")
-		return nil
+		return nil, false
 	}
-	return out
+	if (out.Egress != "" && out.Egress != "none") || out.OnTTL == api.OnTTLRemove {
+		// Contrato de esPrecalentadaDe, que el camino atómico no comprueba:
+		// solo un admin fabrica una candidata así, pero no se entrega.
+		s.soltarMediaReclamada(ctx, h, out.ID, "not a prewarmed one (egress or on_ttl)")
+		return nil, false
+	}
+	return out, false
+}
+
+// invalidarReclamo olvida que el host sirve sandbox-claim (por un minuto).
+func (s *Servidor) invalidarReclamo(h *hosts.Host) {
+	s.mCap.Lock()
+	s.capReclamo[h.Nombre] = capHost{hasta: time.Now().Add(vidaSinReclamo)}
+	s.mCap.Unlock()
+}
+
+// soltarPorNonce busca en el host las máquinas que llevan el nonce de un
+// reclamo que falló y las borra.
+func (s *Servidor) soltarPorNonce(ctx context.Context, h *hosts.Host, nonce string) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDaemon)
+	defer cancel()
+	ms, err := h.Cliente.Sandboxes(rctx)
+	if err != nil {
+		s.log.Printf("frontal: looking for half-claimed machines on %s: %v", h.Nombre, err)
+		return
+	}
+	for _, mc := range ms {
+		if mc.Labels[LabelReclamo] == nonce {
+			s.soltarMediaReclamada(rctx, h, mc.ID, "claim failed after labelling")
+		}
+	}
 }
 
 // marcarReclamo aparta la máquina para esta petición si nadie de este proceso

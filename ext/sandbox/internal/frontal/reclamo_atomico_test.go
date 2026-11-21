@@ -45,7 +45,7 @@ func TestReclamoAtomicoEsUnaLlamadaSinPausa(t *testing.T) {
 		t.Fatalf("the claim listed the host: %d listings", f.sandboxesLlamadas-antes)
 	}
 	req := f.reclamoReq[0]
-	if req.Match[LabelTemplate] != "node" || len(req.Absent) != 2 || req.TTLSeconds != 300 {
+	if req.Match[LabelTemplate] != "node" || len(req.Absent) != 3 || req.TTLSeconds != 300 {
 		t.Fatalf("claim request: %+v", req)
 	}
 	mc := f.maquinas[pre.ID]

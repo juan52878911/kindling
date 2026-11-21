@@ -37,10 +37,16 @@ const (
 	LabelTenant   = "tenant"
 )
 
-// TTLPrecalentada es el plazo de las máquinas del fondo. Generoso y con
-// on_ttl=freeze: una precalentada que nadie reclama se duerme —deja de costar
-// RAM— y sigue ahí para el siguiente, que solo paga un thaw.
+// TTLPrecalentada es el plazo de las máquinas del fondo. Con on_ttl=freeze, una
+// precalentada vencida pasa a warm, y el reclamo atómico solo elige running:
+// por eso el rellenador renueva el plazo de las running cuando les queda menos
+// de un cuarto (el fondo cuesta su RAM siempre) y, con un host que anuncia
+// sandbox-claim, repone las warm como si estuvieran rotas.
 const TTLPrecalentada = 3600
+
+// retrocesoCreacion es lo que descansa un host/plantilla tras un fallo de
+// creación, para no machacar un host lleno o roto en cada vuelta.
+const retrocesoCreacion = 5 * time.Second
 
 // Rellenador mantiene el fondo de todas las plantillas de todos los hosts.
 type Rellenador struct {
@@ -58,6 +64,9 @@ type Rellenador struct {
 	// maxCreaciones acota las creaciones simultáneas de una vuelta (0:
 	// CreacionesALaVez). Solo lo cambian los tests.
 	maxCreaciones int
+	// retroceso: host/plantilla -> hasta cuándo no se intenta crear.
+	rmu       sync.Mutex
+	retroceso map[string]time.Time
 }
 
 // CreacionesALaVez es cuántas precalentadas crea una vuelta a la vez: la misma
@@ -166,11 +175,18 @@ func (r *Rellenador) Vuelta(ctx context.Context) {
 func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[string]bool) {
 	snaps, err := h.Cliente.Snapshots(ctx)
 	if err != nil {
-		return // el host no contesta; ya lo dice `kling sbx hosts`
+		r.log.Printf("pool %s: listing snapshots: %v", h.Nombre, err)
+		return
 	}
 	vivas, err := h.Cliente.Sandboxes(ctx)
 	if err != nil {
+		r.log.Printf("pool %s: listing sandboxes: %v", h.Nombre, err)
 		return
+	}
+	// Con sandbox-claim el frontal solo reclama running: una warm no sirve.
+	reclama := false
+	if info, err := h.Cliente.Info(ctx); err == nil {
+		reclama = info.Has(api.CapabilityClaim)
 	}
 
 	// La versión de cada plantilla que el host tiene ahora. Una precalentada sin
@@ -197,7 +213,7 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[str
 			motivo = "orphaned (its template is gone)"
 		case mc.Labels[plantilla.LabelVersion] != v:
 			motivo = "stale (its template was rebuilt)"
-		case rota(mc):
+		case rota(mc) || (reclama && mc.State == api.StateWarm):
 			// Una rota no la reclama el frontal (esPrecalentadaDe): contarla
 			// dejaría la plaza ocupada para siempre y cada create caería al
 			// restore. Se borra y se fabrica otra.
@@ -205,6 +221,11 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[str
 		}
 		if motivo == "" {
 			hay[nombre]++
+			if mc.State == api.StateRunning && seVaADormir(mc) {
+				if _, err := h.Cliente.RenewSandbox(ctx, mc.ID, TTLPrecalentada); err != nil {
+					r.log.Printf("pool %s/%s: renewing prewarmed %s: %v", h.Nombre, nombre, shortID(mc.ID), err)
+				}
+			}
 			continue
 		}
 		if err := h.Cliente.Remove(ctx, mc.ID); err != nil {
@@ -235,6 +256,9 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[str
 		if v := version[nombre]; v != "" {
 			etiquetas[plantilla.LabelVersion] = v
 		}
+		if r.enRetroceso(h.Nombre + "/" + nombre) {
+			continue
+		}
 		var parada atomic.Bool
 		var hechas atomic.Int32
 		hechas.Store(int32(hay[nombre]))
@@ -260,6 +284,7 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[str
 					Labels:     etiquetas,
 				})
 				if err != nil {
+					r.retroceder(h.Nombre + "/" + nombre)
 					if !parada.Swap(true) && !api.IsInsufficientMemory(err) && !api.IsMachineLimit(err) {
 						r.log.Printf("pool %s/%s: %v", h.Nombre, nombre, err)
 					}
@@ -269,6 +294,31 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[str
 			}(s.Name)
 		}
 	}
+}
+
+func (r *Rellenador) enRetroceso(clave string) bool {
+	r.rmu.Lock()
+	defer r.rmu.Unlock()
+	return time.Now().Before(r.retroceso[clave])
+}
+
+func (r *Rellenador) retroceder(clave string) {
+	r.rmu.Lock()
+	defer r.rmu.Unlock()
+	if r.retroceso == nil {
+		r.retroceso = map[string]time.Time{}
+	}
+	r.retroceso[clave] = time.Now().Add(retrocesoCreacion)
+}
+
+// seVaADormir dice si a una precalentada running le queda menos de un cuarto
+// de su plazo. Sin reloj conocido (TTLAt) no se toca.
+func seVaADormir(mc *api.Machine) bool {
+	if mc.TTLSeconds <= 0 || mc.TTLAt == nil {
+		return false
+	}
+	plazo := time.Duration(mc.TTLSeconds) * time.Second
+	return time.Until(mc.TTLAt.Add(plazo)) < plazo/4
 }
 
 // rota dice si una precalentada ya no sirve: ni corre ni duerme, y no va a
