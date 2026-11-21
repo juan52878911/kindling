@@ -126,6 +126,11 @@ type falso struct {
 	reclamoLlamadas, etiquetasLlamadas, renovaciones, lecturas int
 	// reclamoReq guarda lo que pidió cada reclamo.
 	reclamoReq []api.ClaimRequest
+	// reclamoCorta hace que el daemon etiquete y renueve la candidata pero
+	// corte la conexión sin contestar; reclamoPlano404 contesta con un 404 sin
+	// código (un daemon que ya no tiene la ruta); borrados cuenta los DELETE.
+	reclamoCorta, reclamoPlano404 bool
+	borrados                      []string
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -404,6 +409,7 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 404, fmt.Errorf("no sandbox"))
 			return
 		}
+		f.borrados = append(f.borrados, r.PathValue("ref"))
 		delete(f.maquinas, r.PathValue("ref"))
 		w.WriteHeader(204)
 	})
@@ -545,6 +551,10 @@ func (f *falso) reclamar(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	f.reclamoLlamadas++
 	f.reclamoReq = append(f.reclamoReq, req)
+	if f.reclamoPlano404 {
+		http.NotFound(w, r)
+		return
+	}
 	if len(req.Match) == 0 {
 		failDaemon(w, 400, fmt.Errorf("match can't be empty"))
 		return
@@ -567,6 +577,14 @@ func (f *falso) reclamar(w http.ResponseWriter, r *http.Request) {
 	}
 	ahora := time.Now()
 	elegida.TTLAt = &ahora
+	if f.reclamoCorta {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+			}
+		}
+		return
+	}
 	c := *elegida
 	c.Labels = api.MergeLabels(nil, elegida.Labels)
 	writeJSON(w, 200, &c)

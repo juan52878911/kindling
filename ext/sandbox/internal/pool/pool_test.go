@@ -84,6 +84,10 @@ type daemonPool struct {
 	maxEnCurso int
 	intentos   int
 	sinMemoria int
+	// conReclamo anuncia sandbox-claim en GET /info; renovadas guarda los
+	// POST /sandboxes/{ref}/renew.
+	conReclamo bool
+	renovadas  []string
 }
 
 func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool, string) {
@@ -110,6 +114,21 @@ func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool
 		}
 		json.NewEncoder(w).Encode([]*api.Snapshot{{Name: "sbx-ts",
 			Annotations: map[string]json.RawMessage{plantilla.AnotacionReceta: receta}}})
+	})
+	m.HandleFunc("GET /info", func(w http.ResponseWriter, _ *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		info := api.Info{Version: "fake"}
+		if d.conReclamo {
+			info.Capabilities = []string{api.CapabilityClaim}
+		}
+		json.NewEncoder(w).Encode(info)
+	})
+	m.HandleFunc("POST /sandboxes/{ref}/renew", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.renovadas = append(d.renovadas, r.PathValue("ref"))
+		json.NewEncoder(w).Encode(&api.Machine{ID: r.PathValue("ref"), State: api.StateRunning})
 	})
 	m.HandleFunc("GET /sandboxes", func(w http.ResponseWriter, _ *http.Request) {
 		d.mu.Lock()
@@ -316,5 +335,61 @@ func TestPedirDisparaUnaVueltaSinEsperarAlTic(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if n := creadas(); n != 3 {
 		t.Fatalf("Pedir of another template created: %d", n)
+	}
+}
+
+func nuevoRell(sock string) *Rellenador {
+	return Nuevo(hosts.Nuevo(map[string]string{"h1": sock}), time.Hour, log.New(io.Discard, "", 0))
+}
+
+// H1: con un host que anuncia sandbox-claim, una precalentada warm (su TTL
+// venció y se congeló) no la reclama nadie: se trata como rota, se borra y se
+// repone.
+func TestVueltaReponeLasWarmSiElHostReclama(t *testing.T) {
+	d, sock := nuevoDaemonPool(t, 1, precalentada("dormida12345678", api.StateWarm))
+	d.conReclamo = true
+	nuevoRell(sock).Vuelta(context.Background())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.creadas != 1 || len(d.borradas) != 1 || d.borradas[0] != "dormida12345678" {
+		t.Fatalf("created %d removed %v, want 1 and the warm one", d.creadas, d.borradas)
+	}
+}
+
+// H1: a una running con menos de un cuarto de TTL se le renueva; a una recién
+// hecha, no.
+func TestVueltaRenuevaLasQueSeVanADormir(t *testing.T) {
+	ya := time.Now()
+	vieja := precalentada("vieja0123456789", api.StateRunning)
+	vieja.TTLSeconds = 3600
+	hace := ya.Add(-50 * time.Minute)
+	vieja.TTLAt = &hace
+	nueva := precalentada("nueva0123456789", api.StateRunning)
+	nueva.TTLSeconds = 3600
+	nueva.TTLAt = &ya
+	d, sock := nuevoDaemonPool(t, 2, vieja, nueva)
+	nuevoRell(sock).Vuelta(context.Background())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.renovadas) != 1 || d.renovadas[0] != "vieja0123456789" {
+		t.Fatalf("renewed %v, want only the old one", d.renovadas)
+	}
+	if d.creadas != 0 {
+		t.Fatalf("created %d", d.creadas)
+	}
+}
+
+// Tras un fallo de creación el host/plantilla descansa unos segundos: la vuelta
+// siguiente no vuelve a golpear.
+func TestRellenoRetrocedeTrasUnFallo(t *testing.T) {
+	d, sock := nuevoDaemonPool(t, 1)
+	d.falla = map[string]bool{"sbx-ts": true}
+	r := nuevoRell(sock)
+	r.Vuelta(context.Background())
+	r.Vuelta(context.Background())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.intentos != 1 {
+		t.Fatalf("%d attempts across two rounds, want 1", d.intentos)
 	}
 }

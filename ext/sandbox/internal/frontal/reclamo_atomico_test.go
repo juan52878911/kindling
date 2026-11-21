@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/sandbox/internal/plantilla"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -161,5 +162,94 @@ func TestReclamoAtomicoAvisaAlRellenador(t *testing.T) {
 	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"}) // pool vacío: frío
 	if v := rell.vistos(); len(v) != 2 || f.creadas != 1 {
 		t.Fatalf("after an empty pool: asked %v, created %d", v, f.creadas)
+	}
+}
+
+// H5: si el reclamo etiquetó la máquina y la conexión se cortó antes de la
+// respuesta, el frontal busca lo que lleva su nonce y lo borra; si no, la
+// máquina cuenta en la cuota del inquilino hasta que caduque.
+func TestReclamoCortadoBorraLoEtiquetado(t *testing.T) {
+	f := nuevoFalso(t)
+	f.conReclamo = true
+	f.reclamoCorta = true
+	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	borrada := false
+	for _, id := range f.borrados {
+		borrada = borrada || id == pre.ID
+	}
+	if !borrada {
+		t.Fatalf("the half-claimed %s was not deleted (deleted: %v)", pre.ID, f.borrados)
+	}
+}
+
+// H6: una candidata con egress abierto no se entrega aunque el daemon la haya
+// reclamado: se suelta y la creación sigue por el camino frío.
+func TestReclamoAtomicoRechazaEgressAbierto(t *testing.T) {
+	f := nuevoFalso(t)
+	f.conReclamo = true
+	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Egress: "full", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	sb := crea(t, srv, tokenAlice, CrearPeticion{Template: "node"})
+	if sb.ID == "a/"+pre.ID {
+		t.Fatal("delivered a prewarmed machine with open egress")
+	}
+}
+
+// H6: con versión vacía el reclamo exige que la etiqueta de versión no exista.
+func TestReclamoAtomicoSinVersionExigeEtiquetaAusente(t *testing.T) {
+	f := nuevoFalso(t)
+	f.conReclamo = true
+	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
+	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reclamoReq) == 0 {
+		t.Fatal("no claim")
+	}
+	req := f.reclamoReq[0]
+	if _, ok := req.Match[plantilla.LabelVersion]; ok {
+		t.Fatalf("match carries a version: %v", req.Match)
+	}
+	ausente := false
+	for _, k := range req.Absent {
+		ausente = ausente || k == plantilla.LabelVersion
+	}
+	if !ausente {
+		t.Fatalf("absent lacks the version label: %v", req.Absent)
+	}
+}
+
+// H9: capacidad anunciada y luego un 404 sin código (daemon sin la ruta): la
+// misma petición sigue por las dos fases y la capacidad queda invalidada.
+func TestCapacidadAnunciadaYLuego404UsaDosFases(t *testing.T) {
+	f := nuevoFalso(t)
+	f.conReclamo = true
+	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 2)
+	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, s := montar(t, map[string]*falso{"a": f})
+	s.esperaReclamo = 5 * time.Millisecond
+	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"}) // aprende la capacidad
+	f.mu.Lock()
+	f.reclamoPlano404 = true
+	f.etiquetasLlamadas = 0
+	f.mu.Unlock()
+	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.etiquetasLlamadas == 0 {
+		t.Fatal("the second creation did not fall back to PUT labels")
 	}
 }
