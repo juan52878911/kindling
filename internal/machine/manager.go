@@ -2817,7 +2817,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// ¿Hay agente al que resincronizar al descongelarla? Se pregunta ahora,
 	// con el invitado en marcha, porque tras restaurar un invitado sin nadie en
 	// el puerto puede tardar segundos en contestar (ver resyncSinAgenteTTL).
-	sinAgente := !m.agenteEscucha(ctx, mc.ID)
+	sinAgente := m.sinAgenteAlCongelar(ctx, mc.ID)
 
 	// Con el invitado aún en marcha: que suelte lo que no usa, y el volcado
 	// lleve solo lo que está en uso (apreton_volcado.go).
