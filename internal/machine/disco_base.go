@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -169,6 +170,55 @@ func (m *Manager) comprobarDiscoBase(snap *api.Snapshot) error {
 		return marcado(errCorrupto, "template %q was frozen over a different %s than %q has now "+
 			"(its disk changed after the commit), and its copies would restore over a disk that doesn't match. Recreate it:\n%s",
 			snap.Name, cual, snap.Image, remedioDorado(snap.Name))
+	}
+	return nil
+}
+
+// cerrojosEnlace serializa, por ruta, las operaciones de enlaceEstable.
+var cerrojosEnlace sync.Map // ruta → *sync.Mutex
+
+// enlaceEstable ejecuta op, que hace enlaces duros (o los borra) sobre el
+// fichero path, sin perder el digest cacheado de path. Un enlace duro cambia
+// nlink y por tanto el ctime del inodo, y la huella (huellaDisco) lo mira: sin
+// esto cada restauración con jailer y cada borrado de jail invalidaban el
+// digest y la siguiente creación volvía a hashear la imagen entera.
+//
+// Bajo un cerrojo por ruta: si la huella de antes es la cacheada (la
+// verificada), ejecuta op y reanota la de después solo si lo único que cambió
+// es el ctime (mismos tamaño, fecha, dispositivo e inodo). Cualquier otro
+// cambio, una huella previa distinta o un op que falla no anotan nada, y la
+// siguiente comprobación rehashea. Un camino que no pase por aquí solo cuesta
+// un rehash, nunca da por bueno un disco distinto.
+func (m *Manager) enlaceEstable(path string, op func() error) error {
+	v, ok := m.discosBase.Load(path)
+	if !ok {
+		return op()
+	}
+	mu, _ := cerrojosEnlace.LoadOrStore(path, new(sync.Mutex))
+	l := mu.(*sync.Mutex)
+	l.Lock()
+	defer l.Unlock()
+	antes, errAntes := os.Stat(path)
+	if errAntes != nil {
+		return op()
+	}
+	hAntes := huellaDeDisco(antes)
+	if v, ok = m.discosBase.Load(path); !ok || v.(digestCacheado).huella != hAntes {
+		return op()
+	}
+	c := v.(digestCacheado)
+	if err := op(); err != nil {
+		return err
+	}
+	despues, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	hDespues := huellaDeDisco(despues)
+	hAntes.ctime = hDespues.ctime
+	if hAntes == hDespues {
+		// CompareAndSwap: si otro digest ya anotó algo, no se pisa.
+		m.discosBase.CompareAndSwap(path, c, digestCacheado{huella: hDespues, hash: c.hash})
 	}
 	return nil
 }

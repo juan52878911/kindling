@@ -212,22 +212,26 @@ func (m *Manager) linkComo(id, hostPath, src string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	_ = os.Remove(dst) // una restauración anterior sin limpiar apuntaría a un inodo viejo
-	if err := os.Link(src, dst); err != nil {
-		return fmt.Errorf("linking %s inside the jail: %w", src, err)
-	}
-	hostPath = src
-	// firecracker corre como el usuario del jail: tiene que poder abrirlo. El
-	// hardlink es el MISMO inodo que el original, así que tocarlo es tocar el
-	// original. Antes se le hacía chown al usuario del VMM, y así el kernel, la
-	// base y los dorados acababan siendo SUYOS, escribibles por un Firecracker
-	// comprometido para todas las microVMs futuras. Ahora: lo que ya es del VMM
-	// (su overlay, sus volúmenes, su volcado) se deja; lo demás, que es de solo
-	// lectura, se le da por grupo con dueño root (ver EnsureReadable).
-	if m.priv.Enabled {
-		darLecturaVMM(hostPath, m.priv)
-	}
-	return nil
+	// Bajo enlaceEstable: si src es una imagen con digest cacheado, el ctime
+	// que mueve el enlace no invalida ese digest.
+	return m.enlaceEstable(src, func() error {
+		_ = os.Remove(dst) // una restauración anterior sin limpiar apuntaría a un inodo viejo
+		if err := os.Link(src, dst); err != nil {
+			return fmt.Errorf("linking %s inside the jail: %w", src, err)
+		}
+		hostPath = src
+		// firecracker corre como el usuario del jail: tiene que poder abrirlo. El
+		// hardlink es el MISMO inodo que el original, así que tocarlo es tocar el
+		// original. Antes se le hacía chown al usuario del VMM, y así el kernel, la
+		// base y los dorados acababan siendo SUYOS, escribibles por un Firecracker
+		// comprometido para todas las microVMs futuras. Ahora: lo que ya es del VMM
+		// (su overlay, sus volúmenes, su volcado) se deja; lo demás, que es de solo
+		// lectura, se le da por grupo con dueño root (ver EnsureReadable).
+		if m.priv.Enabled {
+			darLecturaVMM(hostPath, m.priv)
+		}
+		return nil
+	})
 }
 
 // darLecturaVMM hace legible por grupo para el VMM un fichero que no es suyo,
