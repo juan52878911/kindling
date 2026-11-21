@@ -10,7 +10,7 @@ scripts/recetas/codex.sh "tu prompt"                   # necesita el daemon
 
 ## Pasos
 
-1. **Plantilla** (una vez): `kling image import node:22-slim -warm -template codex -egress internet -step 'npm install -g @openai/codex'`.
+1. **Plantilla** (una vez): `kling image import node:22-slim -warm -template codex -disk 2G -egress internet -step 'npm install -g @openai/codex'`.
 2. **Sandbox**: `kling sandbox create -from codex -egress allowlist -allow api.openai.com -ttl 30m -wait-ready -q`.
 3. **Credencial**: por stdin, `kling machine credential <id> -domain api.openai.com -env OPENAI_API_KEY -allow-request 'POST /v1/responses' -allow-request 'POST /v1/chat/completions'`. La VM solo ve `kling-cred-…`.
 4. **Agente**: `kling exec -e OPENAI_BASE_URL=http://api.openai.com/v1 -w /work <id> -- codex exec --skip-git-repo-check --sandbox danger-full-access "…"`. `http://` porque el proxy pone el TLS.

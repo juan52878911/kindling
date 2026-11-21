@@ -87,6 +87,7 @@ POST /machines/{ref}/stop  machine
 POST /machines/{ref}/thaw  machine
 POST /registries  admin
 POST /sandboxes  create
+POST /sandboxes/claim  admin
 POST /sandboxes/{ref}/fork  machine
 POST /sandboxes/{ref}/renew  machine
 POST /shares/uploads  admin

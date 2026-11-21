@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ func imagesImport(args []string) error {
 	tmplName := fs.String("template", "", "with -warm: template name (default: the image's)")
 	warmMem := units.MiBVar(fs, "mem", 0, "with -warm: memory of the template: 512M, 2G (default 1G)")
 	warmCPUs := fs.Int("cpus", 0, "with -warm: vCPUs of the template (default 2)")
+	warmDisk := units.MiBVar(fs, "disk", 0, "with -warm: writable disk of the template and its copies: 2G, 8G (default 512M)")
 	warmEgress := fs.String("egress", "", "with -warm: egress of the preparation machine: none | internet (default: the daemon's)")
 	warmWait := fs.Duration("wait", machine.DefaultReadyWait, "with -warm: how long to wait for the service to be ready, at boot and at save")
 	stepTimeout := fs.Duration("step-timeout", 10*time.Minute, "with -warm: kill a -step after this long")
@@ -74,7 +76,7 @@ func imagesImport(args []string) error {
 		return err
 	}
 	if !*warm {
-		if dados := flagsGiven(fs, "step", "template", "mem", "cpus", "egress", "wait", "step-timeout"); len(dados) > 0 {
+		if dados := flagsGiven(fs, "step", "template", "mem", "cpus", "disk", "egress", "wait", "step-timeout"); len(dados) > 0 {
 			return fmt.Errorf("-%s only goes with -warm", strings.Join(dados, ", -"))
 		}
 	} else if *tmplName != "" && !reTemplateWarm.MatchString(*tmplName) {
@@ -161,6 +163,17 @@ func imagesImport(args []string) error {
 	ctx, stop := ctxWithSignalsTuberia()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
+	if *warm && *warmDisk > 0 {
+		// Antes de importar: un daemon anterior ignoraría el campo y la
+		// plantilla saldría con el disco fijo de 512 MiB sin un solo error.
+		info, err := c.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(info.Capabilities, api.CapabilityDisk) {
+			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
+		}
+	}
 	if *arch != "" || *emulate {
 		in, err := c.Info(ctx)
 		if err != nil {
@@ -262,7 +275,7 @@ func imagesImport(args []string) error {
 			"ready": built.Ready, "service": built.Service}
 		if *warm {
 			// El progreso y la salida de los pasos, a stderr: stdout es el JSON.
-			snap, err := warmUp(ctx, c, warmFrom(*name, *tmplName, steps, *warmCPUs, *warmMem, *warmEgress, *warmWait, *stepTimeout, *replace),
+			snap, err := warmUp(ctx, c, warmFrom(*name, *tmplName, steps, *warmCPUs, *warmMem, *warmDisk, *warmEgress, *warmWait, *stepTimeout, *replace),
 				os.Stderr, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
 			if err != nil {
 				return err
@@ -306,7 +319,7 @@ func imagesImport(args []string) error {
 		fmt.Printf("  volumes  %s  (keep data with -volume NAME:<a parent dir>)\n", strings.Join(built.Volumes, " "))
 	}
 	if *warm {
-		snap, err := warmUp(ctx, c, warmFrom(*name, *tmplName, steps, *warmCPUs, *warmMem, *warmEgress, *warmWait, *stepTimeout, *replace),
+		snap, err := warmUp(ctx, c, warmFrom(*name, *tmplName, steps, *warmCPUs, *warmMem, *warmDisk, *warmEgress, *warmWait, *stepTimeout, *replace),
 			os.Stdout, func(f string, a ...any) { fmt.Printf(f+"\n", a...) })
 		if err != nil {
 			return err
@@ -323,9 +336,9 @@ func imagesImport(args []string) error {
 }
 
 // warmFrom junta las opciones de -warm con sus valores por defecto.
-func warmFrom(image, template string, steps []string, cpus, memMiB int, egress string, wait, stepTimeout time.Duration, replace bool) warmSpec {
+func warmFrom(image, template string, steps []string, cpus, memMiB, diskMiB int, egress string, wait, stepTimeout time.Duration, replace bool) warmSpec {
 	return warmSpec{Image: image, Template: cmp.Or(template, image), Steps: steps,
-		CPUs: cmp.Or(cpus, 2), MemMiB: cmp.Or(memMiB, 1024), Egress: egress,
+		CPUs: cmp.Or(cpus, 2), MemMiB: cmp.Or(memMiB, 1024), DiskMiB: diskMiB, Egress: egress,
 		Replace: replace, Wait: wait, StepTimeout: stepTimeout}
 }
 

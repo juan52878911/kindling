@@ -1,6 +1,7 @@
 package net
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -225,9 +226,12 @@ func sysctlsIPv6(nsIf string) []string {
 	return s
 }
 
+// hayIp6tables dice si hay ip6tables en el host. Sustituible en tests.
+var hayIp6tables = func() bool { _, err := exec.LookPath("ip6tables"); return err == nil }
+
 // applyIPv6Barrier es la capa 2 de la barrera IPv6 (ver sysctlsIPv6).
 func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
-	if _, err := exec.LookPath("ip6tables"); err != nil {
+	if !hayIp6tables() {
 		log.Printf("net: ip6tables no está instalado; %s queda solo con la barrera de sysctl para IPv6", n.NS)
 		return nil
 	}
@@ -411,10 +415,11 @@ func sysctlsNetns(nsIf string) []string {
 // restoreRules añade reglas dentro del namespace con un solo iptables-restore
 // --noflush: todas o ninguna, y un proceso en vez de uno por regla.
 //
-// Sin -w (es de la 1.6.2; una más vieja rechazaría la opción): si el cerrojo
-// de xtables está tomado (iptables-legacy con varios arranques a la vez), se
-// reintenta hasta esperaRestore. Antes fallaba al momento y con él el Setup
-// de la máquina. iptables-restore aplica cada tabla de una vez, así que un
+// Con iptables >= 1.6.2, iptables-restore lleva --wait: espera al cerrojo de
+// xtables dentro del propio proceso, sin pausas nuestras (ejecutarRestore).
+// Con una versión más vieja (rechazaría la opción) o si aun así devuelve
+// "cerrojo ocupado", queda el bucle: se reintenta hasta esperaRestore con
+// retroceso. iptables-restore aplica cada tabla de una vez, así que un
 // intento rechazado no deja nada a medias.
 func (n *Net) restoreRules(rules [][]string) error {
 	entrada := restoreInput(rules)
@@ -428,10 +433,14 @@ func (n *Net) restoreRules(rules [][]string) error {
 		if !cerrojoOcupado(err, out) || time.Now().After(limite) {
 			return fmt.Errorf("iptables-restore in %s: %v: %s", n.NS, err, strings.TrimSpace(string(out)))
 		}
-		time.Sleep(pausa)
+		dormir(pausa)
 		pausa = min(2*pausa, 500*time.Millisecond)
 	}
 }
+
+// dormir es time.Sleep detrás de una variable, para probar que restoreRules
+// no duerme cuando el kernel espera por él.
+var dormir = time.Sleep
 
 // esperaRestore es lo que restoreRules espera al cerrojo de xtables, como el
 // -w esperaXtables de los demás iptables.
@@ -440,9 +449,37 @@ const esperaRestore = 5 * time.Second
 // ejecutarRestore lanza iptables-restore --noflush en el netns ns con entrada
 // por stdin. Sustituible en tests.
 var ejecutarRestore = func(ns, entrada string) ([]byte, error) {
-	cmd := exec.Command("ip", "netns", "exec", ns, "iptables-restore", "--noflush")
+	args := []string{"iptables-restore"}
+	if restoreSoportaWait() {
+		args = append(args, "--wait="+esperaXtables)
+	}
+	// Dentro del netns con setns (lanzador_fc.go), sin `ip netns exec`.
+	var out bytes.Buffer
+	cmd := exec.Command(args[0], append(args[1:], "--noflush")...)
 	cmd.Stdin = strings.NewReader(entrada)
-	return cmd.CombinedOutput()
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := ejecutarEnNetns(ns, cmd)
+	return out.Bytes(), err
+}
+
+// restoreSoportaWait dice si el iptables-restore instalado entiende --wait
+// (iptables >= 1.6.2). Se mira una vez; ante la duda, que no.
+var restoreSoportaWait = sync.OnceValue(func() bool {
+	out, err := exec.Command("iptables-restore", "--version").CombinedOutput()
+	return err == nil && versionRestoreConWait(string(out))
+})
+
+// versionRestoreConWait interpreta "iptables-restore v1.8.7 (nf_tables)".
+func versionRestoreConWait(salida string) bool {
+	i := strings.Index(salida, " v")
+	if i < 0 {
+		return false
+	}
+	var mayor, menor, parche int
+	if k, _ := fmt.Sscanf(salida[i+2:], "%d.%d.%d", &mayor, &menor, &parche); k < 2 {
+		return false
+	}
+	return mayor > 1 || (mayor == 1 && (menor > 6 || (menor == 6 && parche >= 2)))
 }
 
 // cerrojoOcupado dice si iptables(-restore) falló porque otro tenía el
@@ -1133,8 +1170,23 @@ func partirRegla(r []string) (tabla, cadena string, espec []string) {
 // por ejemplo), y las dos reglas que se comparan así no se confunden con
 // otra por el orden.
 func normalizarRegla(f []string) []string {
-	out := quitarMatchImplicito(f)
-	slices.Sort(out)
+	// Se ordenan cláusulas, no tokens: cada opción va con sus valores (y con
+	// el "!" que la niega), así "-s A -d B" no se confunde con "-s B -d A".
+	var claus [][]string
+	for _, t := range quitarMatchImplicito(f) {
+		nueva := len(claus) == 0 || t == "!" ||
+			(strings.HasPrefix(t, "-") && !(len(claus[len(claus)-1]) == 1 && claus[len(claus)-1][0] == "!"))
+		if nueva {
+			claus = append(claus, []string{t})
+			continue
+		}
+		claus[len(claus)-1] = append(claus[len(claus)-1], t)
+	}
+	slices.SortFunc(claus, func(a, b []string) int { return slices.Compare(a, b) })
+	out := make([]string, 0, len(f))
+	for _, c := range claus {
+		out = append(out, c...)
+	}
 	return out
 }
 
@@ -1363,14 +1415,28 @@ var inputMu sync.Mutex
 // agente dentro de esa cadena, la última DROP de FORWARD y la del agente en
 // mangle. El salto y la de mangle, además, en su sitio: la primera de su
 // cadena (ponerPrimera).
-func centinelas(acceso AccesoAgente) []func() (bool, error) {
+func centinelas(acceso AccesoAgente, snap *instantaneaTablas) []func() (bool, error) {
 	reglas := HostInputRules()
 	_, cierre, salto := reglasAcceso(acceso, os.Geteuid(), os.Getegid())
+	// Con la instantánea, "está" se da por bueno solo si la regla sale en
+	// ella; si no sale (o no hay instantánea), se pregunta al iptables de
+	// siempre: la copia solo ahorra procesos cuando todo está en su sitio, y
+	// nunca da por puesta una regla que no lo está.
 	comprobar := func(r []string) func() (bool, error) {
-		return func() (bool, error) { return comprobarEstado(paraComprobar(r)) }
+		return func() (bool, error) {
+			if snap.tiene(r) {
+				return true, nil
+			}
+			return comprobarEstado(paraComprobar(r))
+		}
 	}
 	primera := func(r []string) func() (bool, error) {
-		return func() (bool, error) { return esPrimera(r) }
+		return func() (bool, error) {
+			if snap.esPrimera(r) {
+				return true, nil
+			}
+			return esPrimera(r)
+		}
 	}
 	return []func() (bool, error){
 		comprobar(reglas[0]),
@@ -1380,6 +1446,142 @@ func centinelas(acceso AccesoAgente) []func() (bool, error) {
 		primera(reglaAgenteDesdeFuera()),
 	}
 }
+
+// instantaneaTablas es la salida de UN iptables-save: tabla → cadena → reglas
+// (la especificación tras "-A CADENA", normalizada) en orden.
+type instantaneaTablas map[string]map[string][][]string
+
+// guardarTablas lee las tablas del host con un solo proceso. Sustituible en
+// tests. Sin -w: iptables-save no espera el cerrojo en todas las versiones, y
+// un fallo solo lleva al camino lento.
+var guardarTablas = func() (string, error) {
+	out, err := exec.Command("iptables-save").Output()
+	return string(out), err
+}
+
+func leerInstantanea() *instantaneaTablas {
+	out, err := guardarTablas()
+	if err != nil || out == "" {
+		return nil
+	}
+	snap := instantaneaTablas{}
+	tabla := ""
+	for _, l := range strings.Split(out, "\n") {
+		f := strings.Fields(l)
+		switch {
+		case len(f) == 1 && strings.HasPrefix(f[0], "*"):
+			tabla = f[0][1:]
+		case len(f) >= 2 && f[0] == "-A" && tabla != "":
+			if snap[tabla] == nil {
+				snap[tabla] = map[string][][]string{}
+			}
+			snap[tabla][f[1]] = append(snap[tabla][f[1]], normalizarRegla(f[2:]))
+		}
+	}
+	return &snap
+}
+
+// destinoRegla separa una regla "-A CADENA espec" o "-I CADENA [n] espec"
+// (con su -t si no es filter) en tabla, cadena y especificación.
+func destinoRegla(r []string) (tabla, cadena string, espec []string) {
+	if slices.Contains(r, "-I") {
+		return partirRegla(r)
+	}
+	a := r[1:]
+	tabla = "filter"
+	if len(a) > 1 && a[0] == "-t" {
+		tabla, a = a[1], a[2:]
+	}
+	return tabla, a[1], a[2:]
+}
+
+// tiene dice si la regla r sale en la instantánea. Una instantánea nil nunca
+// la tiene.
+func (s *instantaneaTablas) tiene(r []string) bool {
+	if s == nil {
+		return false
+	}
+	tabla, cadena, espec := destinoRegla(r)
+	quiere := normalizarRegla(espec)
+	for _, o := range (*s)[tabla][cadena] {
+		if slices.Equal(o, quiere) {
+			return true
+		}
+	}
+	return false
+}
+
+// esPrimera dice si r es la primera regla de su cadena en la instantánea.
+func (s *instantaneaTablas) esPrimera(r []string) bool {
+	if s == nil {
+		return false
+	}
+	tabla, cadena, espec := destinoRegla(r)
+	reglas := (*s)[tabla][cadena]
+	return len(reglas) > 0 && slices.Equal(reglas[0], normalizarRegla(espec))
+}
+
+// vueloHost junta las comprobaciones del host: una que EMPIEZA después de que
+// llegara mi petición me vale (vió lo que había cuando yo llegué o más
+// tarde), pero una que ya estaba en marcha no, porque pudo leer antes de un
+// reload. Así N peticiones simultáneas comparten una sola comprobación nueva
+// (como mucho dos en total: la que ya corría y la siguiente), y ninguna se
+// queda con un resultado anterior a su llegada. No es una caché por tiempo.
+type vueloHost struct {
+	mu        sync.Mutex
+	corriendo bool
+	siguiente *rondaHost // la que arrancará al acabar la actual
+}
+
+type rondaHost struct {
+	hecha chan struct{}
+	err   error
+}
+
+func (v *vueloHost) hacer(f func() error) error {
+	v.mu.Lock()
+	if !v.corriendo {
+		v.corriendo = true
+		r := &rondaHost{hecha: make(chan struct{})}
+		v.mu.Unlock()
+		go v.bucle(r, f)
+		<-r.hecha
+		return r.err
+	}
+	if v.siguiente == nil {
+		v.siguiente = &rondaHost{hecha: make(chan struct{})}
+	}
+	r := v.siguiente
+	v.mu.Unlock()
+	<-r.hecha
+	return r.err
+}
+
+// bucle ejecuta rondas mientras haya peticiones que no cubra la actual.
+func (v *vueloHost) bucle(r *rondaHost, f func() error) {
+	for {
+		func() {
+			defer close(r.hecha)
+			defer func() {
+				if p := recover(); p != nil {
+					r.err = fmt.Errorf("host check panicked: %v", p)
+				}
+			}()
+			r.err = f()
+		}()
+		v.mu.Lock()
+		r = v.siguiente
+		v.siguiente = nil
+		if r == nil {
+			v.corriendo = false
+			v.mu.Unlock()
+			return
+		}
+		v.mu.Unlock()
+	}
+}
+
+var vuelo vueloHost
 
 // AsegurarHost es asegurarHostInput para quien no monta una red: el
 // vigilante, con las máquinas ya en marcha, y el thaw que conserva la red del
@@ -1403,6 +1605,10 @@ func AsegurarHost() error {
 // devuelve el error y Setup no monta la red. Una reposición que falla a
 // medias cuenta igual: la siguiente vuelve a montarlo todo con SetupHost.
 func asegurarHostInput() error {
+	return vuelo.hacer(comprobarYReponerHost)
+}
+
+func comprobarYReponerHost() error {
 	if !inputMontado.Load() {
 		inputMu.Lock()
 		defer inputMu.Unlock()
@@ -1423,7 +1629,7 @@ func asegurarHostInput() error {
 	if a := accesoMontado.Load(); a != nil {
 		acceso = *a
 	}
-	estan, err := comprobarALaVez(centinelas(acceso))
+	estan, err := comprobarALaVez(centinelas(acceso, leerInstantanea()))
 	if err != nil {
 		return err
 	}

@@ -101,3 +101,37 @@ func TestLaunchGateNilSinLimite(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestDecidirLaunch(t *testing.T) {
+	if lanzamientoPlataforma() > 0 {
+		t.Skip("la plataforma fija su propio tope")
+	}
+	ant, cpu := hostAnidado, numCPU
+	defer func() { hostAnidado, numCPU = ant, cpu }()
+	for _, c := range []struct {
+		nombre  string
+		anidado bool
+		cpus    int
+		env     string
+		quiero  int
+	}{
+		{"anidado 4", true, 4, "", 2},
+		{"anidado 7", true, 7, "", 2},
+		{"anidado 8", true, 8, "", 4},
+		{"anidado 16", true, 16, "", 8},
+		{"anidado 64", true, 64, "", 8},
+		{"hierro 4", false, 4, "", 2},
+		{"hierro 64", false, 64, "", 8},
+		{"env manda", true, 64, "3", 3},
+		{"env inválida", true, 4, "x", 2},
+	} {
+		t.Run(c.nombre, func(t *testing.T) {
+			hostAnidado = func() bool { return c.anidado }
+			numCPU = func() int { return c.cpus }
+			t.Setenv("KLING_MAX_PARALLEL_BOOT", c.env)
+			if n, _ := decidirLaunch(); n != c.quiero {
+				t.Fatalf("got %d, quiero %d", n, c.quiero)
+			}
+		})
+	}
+}

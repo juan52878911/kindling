@@ -8,6 +8,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Atomic sandbox claim: `POST /sandboxes/claim` (capability `sandbox-claim`) picks a running pool machine whose labels match, and labels it, names it and renews its TTL in one critical section; `404 no_claimable` when there is none.
+- `scripts/bench/`: reproducible benchmark (`bench.py`, a per-phase table read from `/metrics`, and `ec2.sh`, which launches a nested c8i instance that terminates itself; `--dry-run` prints the plan).
+- Every creation from a snapshot records its phase breakdown: `kling_create_duration_ms` and `kling_create_phase_ms{phase}` histograms in `/metrics`, and an additive `create` field on the machine (`api.CreatePhases`). `kling_operation_duration_ms{kind="restore"}` is unchanged (load only).
+- `kling image import -warm -disk 2G`: sets the writable disk of the warm template and its copies (default 512 MiB). The Claude Code and Codex recipes use 2G: `npm install` did not fit in 512 MiB. Fails early against a daemon without the disk capability.
 - kling-sandbox gateway: `GET /v1/sandboxes/{id}/files?list=1` lists a directory (same owner check as the other file routes, in the OpenAPI spec); the console and the Python/TypeScript SDKs (`files.list`) use it instead of `ls -la`.
 - kling-sandbox gateway: `-console` flag (chart value `gateway.console`); the console is on by default with TLS or on loopback and off on plain HTTP outside loopback, and `/console/` answers 404 when off. The console `index.html` is now tracked (it was hidden by `.gitignore`).
 - `api.Client.WrapTransport` (additive) wraps the HTTP transport; the gateway uses it with OTLP on so the `traceparent` reaches the daemons, and the daemon adds a well-formed `traceparent` to its request error log lines.
@@ -43,7 +47,22 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
+### Changed
+
+- kling-sandbox gateway: the prewarmed pool keeps its TTL alive and replaces frozen machines (it froze after an hour and every create went cold); failed atomic claims are cleaned up by nonce, claimed machines with open egress are rejected, a daemon that stops announcing `sandbox-claim` falls back to two phases, and pool creation backs off after failures.
+- kling-sandbox gateway: claims a warm sandbox with one atomic call when the daemon announces `sandbox-claim` (the two-phase claim with its fixed 50 ms wait stays only for older daemons), and refills the pool when a sandbox is claimed, with bounded parallel creation, instead of waiting for the 30 s tick.
+- Creating a machine no longer re-hashes the base image after every jail hard link or removal (the `checks` phase, ~28 ms per creation on EC2).
+- Copy-on-write store: concurrent clones no longer serialize on a global lock; XFS project ids are allocated in memory, quotas are set with `quotactl` (falling back to `xfs_quota`), free space is cached for 100 ms, and copy-mode disks are copied in-process keeping holes.
+- Network setup keeps a pool of pre-mounted network slots (`KLING_NET_POOL`, default 16, 0 disables), enters the machine netns with `setns` instead of `ip netns exec`, and runs at most 4 full network mounts at a time.
+- Sandboxes with `on_ttl=remove` no longer track dirty guest pages on restore; `KLING_RESYNC_TRACE=1` logs the resync connect/agent split.
+- Restoring from a snapshot now writes the machine state to disk before taking a slot in the launch gate (still before the VMM exists), so the fsync no longer holds a slot.
+- Launch gate: on nested hosts with 8 or more cores, NumCPU/2 boots run at once (up to 8) instead of 2; hosts with fewer cores keep 2. `KLING_MAX_PARALLEL_BOOT` still overrides it, and the daemon logs the value it picked.
+- API client: requests over the local unix socket reuse connections instead of dialing one per request; `ssh://` endpoints are unchanged.
+- Network setup checks the host firewall rules once per concurrent burst with a single `iptables-save`, and `iptables-restore` waits for the xtables lock itself (`--wait`, iptables 1.6.2 or later) instead of sleeping and retrying. `KLING_NET_TRACE=1` logs the timing of each setup step.
+- kling-sandbox gateway: per-stage creation latency histogram (`kling_sandbox_create_stage_seconds{stage}`); cold creations from templates without a pool no longer list sandboxes, and the template snapshot is fetched by name instead of listing every snapshot.
+
 ### Fixed
+- Restore: with a guest agent, the resync now waits up to 6 s for the guest network instead of failing after one retry. Under load (10-20 concurrent restores on a 4-core host) ARP took over 250 ms and creates failed with "the guest agent did not resync after the restore"; with the fix, 120 of 120 concurrent creates succeed.
 - DNS resolver: waits up to 1 s for a port another resolver just released, so a live `kling egress set` no longer fails with "address already in use" on a busy host.
 
 - kling-sandbox gateway: port ingress (`<port>-<id>.<domain>`) answered 502 against a real daemon: the daemon's tunnel and `/guest` only reach ports listed in the machine's `kling.ports` label, and the gateway never added them. It now merges the port into the label (capped at 16 per sandbox) before opening the tunnel; the port stays listed after the endpoint expires (sandboxes are ephemeral). The test daemon enforces the same rule.

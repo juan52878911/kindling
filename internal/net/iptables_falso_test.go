@@ -128,9 +128,9 @@ func (f *iptablesFalso) ejecutar(args ...string) error {
 // usarIptablesFalso pone f en lugar de iptables y de ip_forward hasta el
 // final del test, y deja el estado de SetupHost como estaba.
 func usarIptablesFalso(t interface{ Cleanup(func()) }, f *iptablesFalso) {
-	oldC, oldE, oldL, oldR, oldT := comprobarEstado, ejecutar, listarCadena, activarReenvio, listarTabla
+	oldC, oldE, oldL, oldR, oldT, oldG := comprobarEstado, ejecutar, listarCadena, activarReenvio, listarTabla, guardarTablas
 	t.Cleanup(func() {
-		comprobarEstado, ejecutar, listarCadena, activarReenvio, listarTabla = oldC, oldE, oldL, oldR, oldT
+		comprobarEstado, ejecutar, listarCadena, activarReenvio, listarTabla, guardarTablas = oldC, oldE, oldL, oldR, oldT, oldG
 		inputMontado.Store(false)
 		accesoMontado.Store(nil)
 		accesoPedido.Store(nil)
@@ -143,4 +143,31 @@ func usarIptablesFalso(t interface{ Cleanup(func()) }, f *iptablesFalso) {
 		return f.listar(cadena)
 	}
 	activarReenvio = func() error { return nil }
+	// Sin iptables-save por defecto: el camino lento, que cuenta cada
+	// comprobación. Los tests de la instantánea lo sustituyen.
+	guardarTablas = func() (string, error) { return "", errors.New("sin iptables-save") }
+}
+
+// guardado es lo que iptables-save diría del estado del falso.
+func (f *iptablesFalso) guardado() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var b strings.Builder
+	tablas := map[string][]string{}
+	for _, r := range f.input {
+		tablas["filter"] = append(tablas["filter"], "-A INPUT "+r)
+	}
+	for nombre, reglas := range f.otras {
+		tabla, cadena := "filter", nombre
+		if t, c, ok := strings.Cut(nombre, "/"); ok {
+			tabla, cadena = t, c
+		}
+		for _, r := range reglas {
+			tablas[tabla] = append(tablas[tabla], "-A "+cadena+" "+r)
+		}
+	}
+	for t, ls := range tablas {
+		fmt.Fprintf(&b, "*%s\n%s\nCOMMIT\n", t, strings.Join(ls, "\n"))
+	}
+	return b.String()
 }
