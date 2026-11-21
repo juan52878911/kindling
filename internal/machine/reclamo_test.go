@@ -211,3 +211,21 @@ func TestReclamarValidaNombreYTTL(t *testing.T) {
 		}
 	}
 }
+
+// Un reclamo que no deja marca (ni claim ni owner) permitiría reclamar dos
+// veces la misma máquina: 400, y la máquina queda intacta.
+func TestReclamarExigeMarca(t *testing.T) {
+	m := managerReclamo(t, 1)
+	for _, labels := range []map[string]string{nil, {}, {"otra": "cosa"}} {
+		_, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: labels})
+		if !errors.Is(err, ErrRunRequest) {
+			t.Errorf("labels %v: err = %v, quería ErrRunRequest", labels, err)
+		}
+	}
+	for _, k := range []string{api.LabelClaim, api.LabelOwner} {
+		m := managerReclamo(t, 1)
+		if _, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Labels: map[string]string{k: "x"}}); err != nil {
+			t.Errorf("con %s: %v", k, err)
+		}
+	}
+}

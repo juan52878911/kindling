@@ -220,3 +220,17 @@ func TestPuertaRetrocedeLimitaEntradas(t *testing.T) {
 		t.Fatalf("huecos sin soltar: %d", len(m.launchGate))
 	}
 }
+
+// Veinte copias mudas del mismo snapshot son una plantilla rota, no una
+// tormenta del host: la puerta baja como mucho un escalón.
+func TestRetrocesoMismoOrigenUnEscalon(t *testing.T) {
+	m := &Manager{launchGate: make(chan struct{}, 8)}
+	ahora := time.Unix(1000, 0)
+	m.retrocesoDe().reloj = func() time.Time { return ahora }
+	for i := 0; i < 20; i++ {
+		m.puertaRetroceder("dead copy")
+	}
+	if got := m.retrocesoDe().tope(); got < 4 {
+		t.Fatalf("tope %d tras 20 señales del mismo origen, como mucho un escalón (4)", got)
+	}
+}

@@ -232,3 +232,24 @@ func TestRmdirInstanciaReintenta(t *testing.T) {
 		t.Errorf("RemoveAll de respaldo: %v", err)
 	}
 }
+
+// Con KLING_COW_QUOTA=require un almacén sin cuota aplicable no deja entrar
+// instancias: el límite falla en vez de dejarlo "como antes".
+func TestCuotaRequeridaFallaSinCuota(t *testing.T) {
+	t.Setenv("KLING_COW_QUOTA", "require")
+	for _, fs := range []string{"xfs", "btrfs", "ext4"} {
+		a := &almacenCoW{fs: fs, dir: t.TempDir()}
+		a.activarCuota()
+		if a.detectarCuota == nil || a.limitar == nil {
+			t.Fatalf("%s: sin hooks de cuota en modo require", fs)
+		}
+		a.cuota = a.detectarCuota(context.Background())
+		if a.cuota == "" {
+			t.Fatalf("%s: la cuota queda vacía y la instancia entraría sin límite", fs)
+		}
+		err := a.limitar(filepath.Join(a.dir, "m", "x"), filepath.Join(a.dir, "m", "x", "overlay.ext4"), 1<<30)
+		if err == nil || !strings.Contains(err.Error(), "KLING_COW_QUOTA") {
+			t.Errorf("%s: err = %v", fs, err)
+		}
+	}
+}
