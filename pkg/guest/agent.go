@@ -32,6 +32,7 @@
 package guest
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -131,7 +132,11 @@ func (a *Agent) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		api.GuestHealth
 		// ResyncPending: el agente sigue con el segundo tiempo de un resync.
 		ResyncPending bool `json:"resync_pending,omitempty"`
-	}{api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()}, puertaResync.Cerrada()})
+		// SegundosTiemposVencidos: segundos tiempos de resync que pasaron su
+		// tope y se dejaron colgados (S6).
+		SegundosTiemposVencidos uint64 `json:"segundos_tiempos_vencidos"`
+	}{api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()}, puertaResync.Cerrada(),
+		segundosTiemposVencidos.Load()})
 }
 
 // New prepara el agente: arranca el cosechador, añade la ruta a MMDS y monta los
@@ -387,6 +392,7 @@ func soloHostResync(h http.HandlerFunc) http.HandlerFunc {
 		}
 		if r.Method == http.MethodPost {
 			guardarTiempos(func(t *ResyncTiempos) { t.Origen = us(d) })
+			r = r.WithContext(context.WithValue(r.Context(), origenResyncKey{}, d))
 		}
 		h(w, r)
 	}

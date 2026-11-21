@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -334,5 +335,57 @@ func TestResyncOnceConTraza(t *testing.T) {
 	t.Setenv("KLING_RESYNC_TRACE", "")
 	if trazaResyncNueva("x") != nil {
 		t.Fatal("sin la variable no debe haber traza")
+	}
+}
+
+// El agente manda en su respuesta cuánto tardó su camino crítico y la
+// comprobación del origen: el daemon los resta del total (despertar del
+// invitado) y los anota; con la traza, una línea "resync split".
+func TestResyncOnceReparteElTiempo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"critical_us":1200,"origin_us":300}`))
+	}))
+	defer srv.Close()
+	t.Setenv("KLING_RESYNC_TRACE", "1")
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	n0, g0, w0 := tel.resyncN.Load(), tel.resyncGuestUS.Load(), tel.resyncWakeUS.Load()
+	res, err := resyncOnce(context.Background(), srv.URL, "restore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CriticalUS != 1200 || res.OriginUS != 300 {
+		t.Fatalf("campos = %d/%d", res.CriticalUS, res.OriginUS)
+	}
+	if tel.resyncN.Load()-n0 != 1 || tel.resyncGuestUS.Load()-g0 != 1200 {
+		t.Fatalf("guest: n=%d us=%d", tel.resyncN.Load()-n0, tel.resyncGuestUS.Load()-g0)
+	}
+	if w := tel.resyncWakeUS.Load() - w0; w < 3000 {
+		t.Fatalf("wake = %d µs, quería ≥ 3000 (5 ms de servidor − 1,2 ms)", w)
+	}
+	linea := buf.String()
+	for _, quiero := range []string{"resync split: connect=", "first_byte=", "guest_critical=1.2ms", "guest_origin=300µs"} {
+		if !strings.Contains(linea, quiero) {
+			t.Fatalf("falta %q en el log:\n%s", quiero, linea)
+		}
+	}
+}
+
+// Un agente anterior (sin los campos) no rompe nada ni ensucia las métricas.
+func TestResyncOnceAgenteAnteriorSinCampos(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"skew_ms":3}`))
+	}))
+	defer srv.Close()
+	n0 := tel.resyncN.Load()
+	res, err := resyncOnce(context.Background(), srv.URL, "restore")
+	if err != nil || res.SkewMS != 3 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if tel.resyncN.Load() != n0 {
+		t.Fatal("sin critical_us no debe contarse")
 	}
 }

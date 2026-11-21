@@ -332,6 +332,15 @@ func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
 		histo("kling_create_phase_ms", fmt.Sprintf("phase=%q,", f), t.FasesCreacionH[f])
 	}
 
+	// Reparto de la espera del /resync de las restauraciones (agentes que
+	// mandan critical_us): dentro del invitado y el resto.
+	fmt.Fprintln(w, "# HELP kling_resync_guest_seconds Time the guest agent spent on the critical path of POST /resync, in seconds (only agents that report it).")
+	fmt.Fprintln(w, "# TYPE kling_resync_guest_seconds summary")
+	fmt.Fprintf(w, "kling_resync_guest_seconds_sum %.6f\nkling_resync_guest_seconds_count %d\n", t.ResyncGuestSeg, t.ResyncRepartidos)
+	fmt.Fprintln(w, "# HELP kling_resync_wake_seconds Rest of the wait for POST /resync, in seconds: guest wake-up, ARP, TCP and the reply (daemon wait minus the guest critical path).")
+	fmt.Fprintln(w, "# TYPE kling_resync_wake_seconds summary")
+	fmt.Fprintf(w, "kling_resync_wake_seconds_sum %.6f\nkling_resync_wake_seconds_count %d\n", t.ResyncWakeSeg, t.ResyncRepartidos)
+
 	// La suma por fase de los despertares que salieron bien: dividida por
 	// kling_operation_duration_ms_count de su clase, la media de cada fase.
 	fmt.Fprintln(w, "# HELP kling_wake_phase_ms_total Time spent in each phase of successful wakes, in ms (kind thaw: from a snapshot on disk; resume: from paused). Divide by kling_operation_duration_ms_count of the same kind for the mean per wake.")
