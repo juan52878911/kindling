@@ -166,3 +166,25 @@ func TestIndiceDe(t *testing.T) {
 		t.Error("fuera de 172.30.0.0/16 no hay índice")
 	}
 }
+
+// S1: VerificarUnica detecta dos interfaces con direcciones en la misma /30.
+func TestVerificarUnica(t *testing.T) {
+	h := conHostFalso(t)
+	n := Plan(21, "aaaaaaaa")
+	h.poner(n)
+	antes := SubredesRepetidas()
+	if err := n.VerificarUnica(); err != nil {
+		t.Fatalf("única y da error: %v", err)
+	}
+	h.poner(Plan(21, "bbbbbbbb")) // otra interfaz, misma /30
+	if err := n.VerificarUnica(); err == nil {
+		t.Fatal("dos interfaces en la misma /30 no se detectaron")
+	}
+	if SubredesRepetidas() != antes+1 {
+		t.Fatalf("contador = %d, quería %d", SubredesRepetidas(), antes+1)
+	}
+	DireccionesHost = func() ([]DireccionHost, error) { return nil, fmt.Errorf("roto") }
+	if err := n.VerificarUnica(); err == nil {
+		t.Fatal("un volcado fallido debe ser error")
+	}
+}
