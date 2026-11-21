@@ -28,6 +28,8 @@ package machine
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strconv"
@@ -45,26 +47,50 @@ const defaultMaxParallelLaunch = 2
 // ráfaga de cien arranques satura el disco igual; ocho ya no es el cuello.
 const maxParallelLaunchMetal = 8
 
+// minNucleosAnidadoRapido: con al menos tantos núcleos, un host anidado tiene
+// CPU de sobra para encender más de dos microVMs a la vez. Por debajo (el
+// laboratorio de 4 vCPU, el caso que colgaba el kernel) se queda en 2.
+const minNucleosAnidadoRapido = 8
+
+// Inyectables para los tests.
+var (
+	hostAnidado = bajoHipervisor
+	numCPU      = runtime.NumCPU
+)
+
 // maxParallelLaunch lee el tope de KLING_MAX_PARALLEL_BOOT, con mínimo 1.
 //
-// Sin configurar, depende de dónde corre. El 2 se eligió para hosts anidados
-// (una VM con KVM dentro), donde una ráfaga de arranques cuelga el host; en
-// hierro desnudo ese mismo 2 era el cuello de las ráfagas, que las pruebas de
-// estrés pusieron en p95 de 13 a 15 s. Allí se usa la mitad de los núcleos,
+// Sin configurar, depende de dónde corre. En un host anidado con menos de 8
+// núcleos se queda en 2 (una ráfaga mayor cuelga el host); con 8 o más se usa
+// la mitad de los núcleos con tope en maxParallelLaunchMetal, porque allí el 2
+// era el cuello de las ráfagas. En hierro desnudo, la mitad de los núcleos
 // entre 2 y maxParallelLaunchMetal.
 func maxParallelLaunch() int {
+	n, motivo := decidirLaunch()
+	logLaunch.Do(func() { log.Printf("launch gate: %d simultaneous boots (%s)", n, motivo) })
+	return n
+}
+
+var logLaunch sync.Once
+
+// decidirLaunch devuelve el tope y el motivo, para dejarlo en el log.
+func decidirLaunch() (int, string) {
 	if v := os.Getenv("KLING_MAX_PARALLEL_BOOT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
-			return n
+			return n, "KLING_MAX_PARALLEL_BOOT"
 		}
 	}
 	if n := lanzamientoPlataforma(); n > 0 {
-		return n
+		return n, "plataforma"
 	}
-	if bajoHipervisor() {
-		return defaultMaxParallelLaunch
+	cpus := numCPU()
+	if hostAnidado() {
+		if cpus >= minNucleosAnidadoRapido {
+			return min(cpus/2, maxParallelLaunchMetal), fmt.Sprintf("anidado, %d núcleos", cpus)
+		}
+		return defaultMaxParallelLaunch, fmt.Sprintf("anidado, %d núcleos (<%d)", cpus, minNucleosAnidadoRapido)
 	}
-	return min(max(defaultMaxParallelLaunch, runtime.NumCPU()/2), maxParallelLaunchMetal)
+	return min(max(defaultMaxParallelLaunch, cpus/2), maxParallelLaunchMetal), fmt.Sprintf("hierro, %d núcleos", cpus)
 }
 
 // bajoHipervisor dice si el host es a su vez una máquina virtual.

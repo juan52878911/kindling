@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,18 @@ func NewClient(endpoint string) *Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	if esSocketUnix(d.Endpoint) {
+		// Con socket unix el connect por petición es un coste sin motivo:
+		// se reutilizan conexiones. Con SSH detrás se queda como estaba.
+		// Tras reiniciar el daemon, la primera petición sobre una conexión
+		// ociosa ya muerta la repite el propio http.Transport mientras no
+		// se haya escrito nada (ver internal/apiclienttest).
+		t := c.http.Transport.(*http.Transport)
+		t.DisableKeepAlives = false
+		t.MaxIdleConnsPerHost = 16
+		t.MaxIdleConns = 16
+		t.IdleConnTimeout = 30 * time.Second
+	}
 	// El daemon no redirige nunca. Sin esto, http.Client seguiría la
 	// redirección que ServeMux hace de una ruta con ".." conservando método y
 	// token, y la petición acabaría en el handler de otra ruta.
@@ -119,6 +132,10 @@ func (t conToken) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Authorization", "Bearer "+t.tok)
 	return t.rt.RoundTrip(r)
 }
+
+// esSocketUnix dice si el endpoint es un socket local (con o sin esquema):
+// todo lo que no sea ssh://.
+func esSocketUnix(endpoint string) bool { return !strings.HasPrefix(endpoint, "ssh://") }
 
 func (c *Client) Endpoint() string { return c.d.Describe() }
 
