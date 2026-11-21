@@ -49,6 +49,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- kling-sandbox gateway: the prewarmed pool keeps its TTL alive and replaces frozen machines (it froze after an hour and every create went cold); failed atomic claims are cleaned up by nonce, claimed machines with open egress are rejected, a daemon that stops announcing `sandbox-claim` falls back to two phases, and pool creation backs off after failures.
 - kling-sandbox gateway: claims a warm sandbox with one atomic call when the daemon announces `sandbox-claim` (the two-phase claim with its fixed 50 ms wait stays only for older daemons), and refills the pool when a sandbox is claimed, with bounded parallel creation, instead of waiting for the 30 s tick.
 - Creating a machine no longer re-hashes the base image after every jail hard link or removal (the `checks` phase, ~28 ms per creation on EC2).
 - Copy-on-write store: concurrent clones no longer serialize on a global lock; XFS project ids are allocated in memory, quotas are set with `quotactl` (falling back to `xfs_quota`), free space is cached for 100 ms, and copy-mode disks are copied in-process keeping holes.
