@@ -189,8 +189,92 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 // copiarDisco copia un disco conservando su dispersión. --sparse=always: el
 // overlay es disperso y copiarlo denso destruiría lo que hace que una máquina
 // cueste ~8 MB en vez de 512.
+//
+// En proceso, con SEEK_DATA/SEEK_HOLE y copy_file_range, vía io.CopyN (sin lanzar cp, que en
+// el modo "copy" es un proceso por máquina creada); si algo falla, cp.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
+	err := copiarDispersoEnProceso(ctx, src, dst)
+	if err == nil {
+		return nil, nil
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		_ = os.Remove(dst)
+		return nil, cerr
+	}
+	_ = os.Remove(dst)
 	return exec.CommandContext(ctx, "cp", "--sparse=always", src, dst).CombinedOutput()
+}
+
+// copiarDispersoEnProceso copia src en dst saltando los huecos: solo se copian
+// los tramos de datos, y el fichero acaba con el mismo tamaño lógico.
+func copiarDispersoEnProceso(ctx context.Context, src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", src)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			out.Close()
+		}
+	}()
+	tam := fi.Size()
+	const trozo = 64 << 20
+	var pos int64
+	for pos < tam {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ini, err := in.Seek(pos, 3) // SEEK_DATA
+		if err != nil {
+			if errors.Is(err, syscall.ENXIO) {
+				break // el resto es un hueco
+			}
+			return err
+		}
+		fin, err := in.Seek(ini, 4) // SEEK_HOLE
+		if err != nil {
+			return err
+		}
+		if fin > tam {
+			fin = tam
+		}
+		// io.CopyN entre *os.File usa copy_file_range en Linux (el runtime).
+		if _, err := in.Seek(ini, 0); err != nil {
+			return err
+		}
+		if _, err := out.Seek(ini, 0); err != nil {
+			return err
+		}
+		for resto := fin - ini; resto > 0; {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			n, err := io.CopyN(out, in, min(resto, trozo))
+			if err != nil {
+				return err
+			}
+			resto -= n
+		}
+		pos = fin
+	}
+	if err := out.Truncate(tam); err != nil {
+		return err
+	}
+	ok = true
+	return out.Close()
 }
 
 // clonarDisco copia un volumen para un snapshot o un restore y dice cómo:

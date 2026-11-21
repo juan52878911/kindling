@@ -3,6 +3,7 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"unsafe"
 )
 
 func TestProyectoLibre(t *testing.T) {
@@ -328,5 +331,111 @@ func TestCuotaXFSMemoriaYOverlayNoComparten(t *testing.T) {
 	defer g.Close()
 	if id2, err := proyectoDe(g); err != nil || id2 == idMem {
 		t.Fatalf("el overlay nuevo tiene el proyecto %d (%v), el mismo que el mem.full de otra copia", id2, err)
+	}
+}
+
+// 1 000 asignaciones concurrentes dan ids distintos; un id liberado se reutiliza.
+func TestAsignadorProyectosUnicosYReutiliza(t *testing.T) {
+	p := &asignadorProyectos{}
+	const n = 1000
+	ids := make([]uint32, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ids[i] = p.asignar(fmt.Sprintf("d%d", i))
+		}()
+	}
+	wg.Wait()
+	vistos := map[uint32]bool{}
+	for _, id := range ids {
+		if id < primerProyecto || vistos[id] {
+			t.Fatalf("id %d repetido o menor que %d", id, primerProyecto)
+		}
+		vistos[id] = true
+	}
+	liberado := ids[500]
+	p.liberar("d500")
+	if got := p.asignar("nuevo"); got != liberado {
+		t.Errorf("tras liberar %d se asignó %d", liberado, got)
+	}
+	if got := p.asignar("otro"); vistos[got] {
+		t.Errorf("id %d ya en uso", got)
+	}
+}
+
+// Se siembra una vez del disco: los ids existentes no se reparten y se
+// liberan con su directorio.
+func TestAsignadorProyectosResiembra(t *testing.T) {
+	llamadas := 0
+	p := &asignadorProyectos{sembrar: func() map[string][]uint32 {
+		llamadas++
+		return map[string][]uint32{"/x/a": {1000, 1001}, "/x/b": {1003}}
+	}}
+	if got := p.asignar("/x/c"); got != 1002 {
+		t.Errorf("primer id %d, quería 1002", got)
+	}
+	if got := p.asignar("/x/d"); got != 1004 {
+		t.Errorf("segundo id %d, quería 1004", got)
+	}
+	p.liberar("/x/a")
+	if got := p.asignar("/x/e"); got != 1000 {
+		t.Errorf("tras liberar /x/a: %d, quería 1000", got)
+	}
+	if llamadas != 1 {
+		t.Errorf("el escaneo se hizo %d veces", llamadas)
+	}
+}
+
+func TestLimiteQuotactlXFS(t *testing.T) {
+	if sz := unsafe.Sizeof(fsDiskQuota{}); sz != 112 {
+		t.Errorf("struct fs_disk_quota de %d bytes, quería 112", sz)
+	}
+	q := limiteQuotactlXFS(1234, 1025)
+	if q.BlkHard != 3 || q.ID != 1234 || q.Flags != 2 || q.Fieldmask != 8 || q.Version != 1 {
+		t.Errorf("%+v", q)
+	}
+	if qXSetQLim != 0x580402 {
+		t.Errorf("cmd %#x", qXSetQLim)
+	}
+}
+
+// copiarDisco en proceso conserva el contenido y los huecos.
+func TestCopiarDiscoConservaHuecos(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
+	f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteAt([]byte("inicio"), 1<<20)
+	f.WriteAt([]byte("fin"), 40<<20)
+	f.Truncate(64 << 20)
+	f.Close()
+	if err := copiarDispersoEnProceso(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := os.ReadFile(src)
+	b, _ := os.ReadFile(dst)
+	if !bytes.Equal(a, b) {
+		t.Fatal("el contenido difiere")
+	}
+	blq := func(p string) int64 {
+		var st syscall.Stat_t
+		if err := syscall.Stat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Blocks
+	}
+	// Bloques de 512 bytes: 2048 = 1 MiB, muy por debajo de los 64 MiB lógicos.
+	if bs, bd := blq(src), blq(dst); bd > 2048 || bd > bs+2048 {
+		t.Errorf("bloques asignados: src=%d dst=%d", bs, bd)
+	}
+	if out, err := copiarDisco(context.Background(), src, dst); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	if c, _ := os.ReadFile(dst); !bytes.Equal(a, c) {
+		t.Fatal("copiarDisco: el contenido difiere")
 	}
 }

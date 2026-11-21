@@ -126,7 +126,7 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 	}
 	a.reconfigurar = func(fs string) {
 		a.fs, a.img, a.errFS = fs, filepath.Join(root, imgAlmacen(fs)), nil
-		a.detectarCuota, a.crearDir, a.limitar, a.quitarDir = nil, nil, nil, nil
+		a.detectarCuota, a.crearDir, a.limitar, a.quitarDir, a.liberarProyectos = nil, nil, nil, nil, nil
 		a.activarCuota()
 	}
 	a.activarCuota()
