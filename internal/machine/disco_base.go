@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -184,7 +185,10 @@ func (m *Manager) comprobarDiscoBase(snap *api.Snapshot) error {
 
 // huellaConfiable dice si el fichero (de st) solo lo puede modificar root, de
 // modo que conservar su digest tras la operación es seguro.
-var huellaConfiable = func(st os.FileInfo) bool { return true }
+var huellaConfiable = func(st os.FileInfo) bool {
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	return ok && sys.Uid == 0 && st.Mode().Perm()&0o022 == 0
+}
 
 // cerrojosEnlace serializa, por ruta, las operaciones de enlaceEstable.
 var cerrojosEnlace sync.Map // ruta → *sync.Mutex
@@ -228,7 +232,9 @@ func (m *Manager) enlaceEstable(path string, op func() error) error {
 	}
 	hDespues := huellaDeDisco(despues)
 	hAntes.ctime = hDespues.ctime
-	if hAntes == hDespues {
+	// Solo si nadie más que root pudo reescribir el fichero con el mtime
+	// restaurado durante op.
+	if hAntes == hDespues && huellaConfiable(despues) {
 		// CompareAndSwap: si otro digest ya anotó algo, no se pisa.
 		m.discosBase.CompareAndSwap(path, c, digestCacheado{huella: hDespues, hash: c.hash})
 	}

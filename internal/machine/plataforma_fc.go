@@ -193,9 +193,14 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 // En proceso, con SEEK_DATA/SEEK_HOLE y copy_file_range, vía io.CopyN (sin lanzar cp, que en
 // el modo "copy" es un proceso por máquina creada); si algo falla, cp.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
-	err := copiarDispersoEnProceso(ctx, src, dst)
-	if err == nil {
-		return nil, nil
+	// Solo si el sistema de ficheros del origen declara bien sus huecos: en
+	// NFSv3 o FUSE todo son datos y la copia en proceso ocuparía el tamaño
+	// lógico; cp --sparse=always detecta los ceros.
+	var err error = errors.New("huecos no fiables")
+	if huecosFiables(filepath.Dir(src)) {
+		if err = copiarDispersoEnProceso(ctx, src, dst); err == nil {
+			return nil, nil
+		}
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		_ = os.Remove(dst)
@@ -252,8 +257,14 @@ func copiarDispersoEnProceso(ctx context.Context, src, dst string) error {
 		if err != nil {
 			return err
 		}
+		if ini >= tam {
+			break
+		}
 		if fin > tam {
 			fin = tam
+		}
+		if fin <= ini {
+			return fmt.Errorf("%s: SEEK_HOLE no avanza (datos en %d, hueco en %d)", src, ini, fin)
 		}
 		// io.CopyN entre *os.File usa copy_file_range en Linux (el runtime).
 		if _, err := in.Seek(ini, 0); err != nil {
