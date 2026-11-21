@@ -170,20 +170,21 @@ breakdown. Full usage in [`scripts/bench/README.md`](../scripts/bench/README.md)
 ## kindling vs OpenSandbox 1.2.1
 
 Median of 3 rounds of p50 and p95, with n per point. **Read the caveats below before quoting any row.**
-OSB cells come from the bench JSON (`res/*.log` produced by `scripts/bench/remoto/fases.sh`), never from
-memory: a cell reading *pending* means that JSON is not in the repository yet and must be filled from
-`$KB/res/` of the run, not estimated. Reproduce with `scripts/bench/ec2.sh kindling osbk8s docker`.
+OSB cells come from the run of 2026-11-21 on the same instance type (the same `bench.py`, OSB 1.2.1 with the
+kubernetes runtime on k3s v1.36.4 and the docker runtime), one system at a time on the host. Their raw logs are
+not in the repository; rerun them instead of quoting older numbers. Reproduce with `scripts/bench/ec2.sh kindling osbk8s docker`.
 
 | measure | kindling (range between rounds) | OSB 1.2.1 | n | note |
 |---|---|---|---|---|
 | create from pool, serial | ~1 ms | 34 ms | 15 | pre-warmed machine claimed vs. pod from the pool |
-| create from pool, c10 | 7–10 ms | pending (bench JSON) | 10 per burst | |
-| create cold, serial | 82–105 ms | pending (bench JSON) | 15 | restored microVM vs. new container |
-| create cold, c50 | p50 640–670 ms, **p95 ~1030 ms** | pending (bench JSON) | 50 per burst, 2 bursts per round | default gate (4); the p95 always goes with the p50 |
-| exec `echo` | 1.9 ms | pending (bench JSON) | 30 | through the gateway, HTTP |
-| pause → exec | 6.2 ms (9–12 in pool) | pending (bench JSON) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
+| create from pool, c10 | 7–10 ms | 180 ms (k8s Pool) | 10 per burst | |
+| create from pool, c50 | 404–427 ms | 6.4 s with 25/50 failed (k8s Pool) | 50 per burst | pool of 10, refilled while the burst runs |
+| create cold, serial | 88–105 ms | 0.91–1.11 s (k8s) · 524–543 ms (docker) | 15 | restored microVM vs. new container |
+| create cold, c50 | p50 613–647 ms, **p95 ~1030 ms** | 4.0–4.6 s with 19/50 failed (k8s) · 7.6–7.7 s (docker) | 50 per burst, 2 bursts per round | default gate (4); the p95 always goes with the p50 |
+| exec `echo` | 1.9 ms | 1003 ms | 30 | through the gateway, HTTP; OSB looks like a fixed 1 s poll |
+| pause → exec | 5.9–6.8 ms | 1027 ms (docker) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
 | freeze → exec | 89–101 ms | no equivalent | 5 | dumps memory to disk and releases it |
-| failures | 0 in ~1700 creations | pending (bench JSON) | | clean host |
+| failures | 0 in ~1700 creations | 19/50 (k8s cold c50), 25/50 (k8s Pool c50) | | clean host |
 
 Give the range between rounds, not one number. Memory per sandbox (~9 MiB) is in the JSON as `mem_por_sandbox_*_mib`.
 
@@ -204,8 +205,8 @@ Give the range between rounds, not one number. Memory per sandbox (~9 MiB) is in
 8. **Earlier failures (2–7 in 100)** came from orphaned VMMs left on the host by previous variants, not from
    kindling's create path. The hygiene check (`higiene.sh verificar`, protocol step 6) now aborts the bench
    if any are left.
-9. **Where OSB is ahead today**: code interpreter with contexts, isolated session with diff/commit, a credential
-   vault in the API, diagnostics, native Kubernetes CRDs and more SDKs. "Outperforms in everything" does not hold
+9. **Where OSB is ahead today**: isolated session with diff/commit, a credential vault in the API, diagnostics,
+   native Kubernetes CRDs and more SDKs. kindling's code interpreter (`/code`, contexts) is experimental. "Outperforms in everything" does not hold
    yet and must not be written.
 
 New JSON keys that support the table: `kvm_serie` (KVM `pf_fixed`/`exits` delta per serial create, needs root
