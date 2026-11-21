@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // nftTabla es la tabla de nftables (dentro del netns de la máquina) cuyo set
@@ -45,12 +46,19 @@ func (n *Net) instalarRegistroIP() {
 	}
 	script := n.reglasRegistroIP()
 	ns := n.NS
+	registrosEnVuelo.Add(1)
 	go func() {
+		defer registrosEnVuelo.Done()
 		cmd := exec.Command("nft", "-f", "-")
 		cmd.Stdin = strings.NewReader(script)
 		_ = ejecutarEnNetns(ns, cmd) // setns, sin `ip netns exec`
 	}()
 }
+
+// registrosEnVuelo cuenta los nft de instalarRegistroIP que siguen corriendo:
+// los tests que cambian opsNetns esperan a que acaben (si no, leen la
+// variable mientras el test la sustituye).
+var registrosEnVuelo sync.WaitGroup
 
 // destinosIP lee el set de nft del netns de n.
 func destinosIP(n *Net) []Destino {

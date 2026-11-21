@@ -11,8 +11,9 @@ import (
 // hilo. fallaVuelta hace fallar el setns de regreso.
 func fakeNetns(t *testing.T, fallaVuelta bool) *[]string {
 	t.Helper()
+	registrosEnVuelo.Wait()
 	old := opsNetns
-	t.Cleanup(func() { opsNetns = old })
+	t.Cleanup(func() { registrosEnVuelo.Wait(); opsNetns = old })
 	var traza []string
 	opsNetns.abrir = func(ruta string) (int, error) {
 		traza = append(traza, "abrir "+ruta)
@@ -55,8 +56,9 @@ func TestLanzadorNoDevuelveElHiloSiNoPuedeVolver(t *testing.T) {
 }
 
 func TestLanzadorSiElSetnsDeIdaFallaElHiloSigueEnSuNetns(t *testing.T) {
+	registrosEnVuelo.Wait()
 	old := opsNetns
-	t.Cleanup(func() { opsNetns = old })
+	t.Cleanup(func() { registrosEnVuelo.Wait(); opsNetns = old })
 	opsNetns.abrir = func(string) (int, error) { return 3, nil }
 	opsNetns.cerrar = func(int) {}
 	opsNetns.setns = func(int) error { return errors.New("EINVAL") }
