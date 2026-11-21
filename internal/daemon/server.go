@@ -493,6 +493,7 @@ func (s *Server) rutas() []ruta {
 		{"POST /machines/{ref}/start", AccionMaquina, nil, s.handleStart},
 		{"DELETE /machines/{ref}", AccionMaquina, nil, s.handleRemove},
 		{"PUT /machines/{ref}/labels", AccionMaquina, revisarEtiquetas, s.handleLabels},
+		{"POST /sandboxes/claim", AccionCrear, revisarReclamo, s.handleClaim},
 		{"POST /machines/{ref}/commit", AccionMaquina, revisarCommit, s.handleCommit},
 		{"POST /images", AccionAdmin, nil, s.handleBuildImage},
 		{"GET /images", AccionImagenes, nil, s.handleImages},

@@ -71,7 +71,7 @@ func TestReclamarConcurrente(t *testing.T) {
 
 func TestReclamarSoloRunningSinTransicion(t *testing.T) {
 	m := managerReclamo(t, 0)
-	for _, st := range []api.State{api.StatePaused, api.StateFrozen, api.StateFailed, api.StateStopped} {
+	for _, st := range []api.State{api.StatePaused, api.StateWarm, api.StateFailed, api.StateStopped} {
 		sembrarReclamable(m, st, map[string]string{"pool": "ok"})
 	}
 	enTransicion := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
@@ -124,7 +124,7 @@ func TestReclamarMatchVacioYEtiquetasMalas(t *testing.T) {
 func TestReclamarPoneEtiquetasNombreYTTL(t *testing.T) {
 	m := managerReclamo(t, 1)
 	mc, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}, Name: "sbx1",
-		Labels: map[string]string{"t": "1"}, TTLSeconds: 90, OnTTL: api.OnTTLRemove})
+		Labels: map[string]string{"t": "1", api.LabelClaim: "n"}, TTLSeconds: 90, OnTTL: api.OnTTLRemove})
 	if err != nil {
 		t.Fatal(err)
 	}
