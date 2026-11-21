@@ -496,3 +496,39 @@ func TestMontadoEncimaSinMontaje(t *testing.T) {
 		t.Errorf("uno que no existe: %v %v", encima, err)
 	}
 }
+
+// Hipótesis de rendimiento: clonarInstancia no debe poner en fila a las
+// instancias de una ráfaga. Con un clonar que tarda 20 ms, 50 clones a la vez
+// deben acabar en pocas decenas de ms y no en ~1 s (50 × 20 ms bajo a.mu).
+func TestClonarInstanciaEnParaleloNoHaceFila(t *testing.T) {
+	root := t.TempDir()
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, root, f)
+	src := escribirDorado(t, root, "dorado", "disco v1")
+	clonarBase := a.clonar
+	a.clonar = func(s, d string) error {
+		time.Sleep(20 * time.Millisecond)
+		return clonarBase(s, d)
+	}
+	// Calienta: monta y crea la base una vez.
+	if _, err := a.clonarInstancia(context.Background(), "dorado", src, "calentar", 0); err != nil {
+		t.Fatal(err)
+	}
+	const n = 50
+	errs := make(chan error, n)
+	ini := time.Now()
+	for i := range n {
+		go func() {
+			_, err := a.clonarInstancia(context.Background(), "dorado", src, fmt.Sprintf("p%d", i), 0)
+			errs <- err
+		}()
+	}
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := time.Since(ini); d > 300*time.Millisecond {
+		t.Errorf("50 clones a la vez tardaron %v: hay fila (esperado ≈20 ms)", d)
+	}
+}
