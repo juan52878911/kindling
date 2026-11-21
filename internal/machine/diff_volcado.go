@@ -64,6 +64,15 @@ func congelarEnDiff() bool {
 	return backendVMM == BackendFirecracker && restaurarComparteMemoria && os.Getenv("KLING_DIFF_FREEZE") != "0"
 }
 
+// cargarConSeguimiento dice si una copia se carga con seguimiento de páginas
+// sucias (diferencial al congelar). porImagen: viene de un snapshot por imagen.
+// Una copia on_ttl=remove no se congela nunca: seguirla solo añadiría una salida
+// de EPT por primera escritura a cada página. Si alguien la congela a mano, no
+// tiene DiffBase (solo se fija con seguimiento) y vuelca la RAM entera.
+func cargarConSeguimiento(porImagen bool, onTTL string) bool {
+	return congelarEnDiff() && !porImagen && onTTL != api.OnTTLRemove
+}
+
 // existe dice si hay algo en path.
 func existe(path string) bool {
 	_, err := os.Stat(path)

@@ -146,6 +146,11 @@ type Opciones struct {
 
 	Log *log.Logger
 
+	// Rellenador, si no es nil, recibe un aviso cada vez que una creación
+	// reclama (o no encuentra) una precalentada, para que el fondo se reponga
+	// sin esperar a su tic. *pool.Rellenador lo cumple.
+	Rellenador Rellenador
+
 	// Ingress configura la entrada HTTP a puertos del sandbox (ingress.go).
 	// Con IngresoDominio vacío está apagada.
 	Ingreso IngresoOpciones
@@ -153,6 +158,12 @@ type Opciones struct {
 	// SinConsola apaga la consola web (/console/, docs/consola.md): la ruta
 	// contesta 404. El valor cero la deja encendida.
 	SinConsola bool
+}
+
+// Rellenador es lo que el frontal necesita del fondo de precalentadas: poder
+// avisarle de que en ese host falta de esa plantilla. No bloquea.
+type Rellenador interface {
+	Pedir(host, plantilla string)
 }
 
 // Servidor es el frontal. Implementa http.Handler.
@@ -192,6 +203,12 @@ type Servidor struct {
 	// esperaReclamo es la pausa entre las dos fases de una reclamación (0:
 	// esperaReclamo del paquete). Solo la cambian los tests.
 	esperaReclamo time.Duration
+	// rellena recibe los avisos de reposición (puede ser nil).
+	rellena Rellenador
+	// capReclamo cachea por host si su daemon anuncia sandbox-claim (ver
+	// hostReclama). Bajo mCap, no bajo mu: se consulta en cada creación.
+	mCap       sync.Mutex
+	capReclamo map[string]capHost
 
 	// shells cuenta las sesiones de shell abiertas por tenant AHORA MISMO. Sirve
 	// dos propósitos con el mismo número: la cuota de Tenant.MaxShells y la
@@ -309,7 +326,7 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		reg: o.Hosts, tenants: tenants, imagen: o.ImagenPorDefecto,
 		ttl: o.TTLPorDefecto, abandono: o.Abandono, cada: o.CadaLimpieza,
 		log: o.Log, enVuelo: map[string]int{}, maxVolumenMiB: maxVol,
-		sinConsola: o.SinConsola, almacen: o.Almacen, defMem: maxMem, defCPU: maxCPU, defTotal: maxTotal, defLote: maxLote,
+		rellena: o.Rellenador, capReclamo: map[string]capHost{}, sinConsola: o.SinConsola, almacen: o.Almacen, defMem: maxMem, defCPU: maxCPU, defTotal: maxTotal, defLote: maxLote,
 	}
 	if s.ttl == 0 {
 		s.ttl = api.SandboxDefaultTTL

@@ -139,3 +139,36 @@ func TestVMMCaidoEnLaRestauracion(t *testing.T) {
 		t.Errorf("other error: %v, want it unchanged", got)
 	}
 }
+
+// El diagnóstico de un VMM enjaulado muerto trae la cola del log, la última
+// línea de consola y oom_kill del cgroup.
+func TestDiagnosticoVMM(t *testing.T) {
+	m := newTestManager(t)
+	m.cgroupRoot = t.TempDir()
+	id := "dead0000000000d4"
+	if err := os.MkdirAll(m.dir(id), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.dir(id), "firecracker.log"),
+		[]byte("one\ntwo\nKVM_RUN failed: EINTR\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cg := m.dirCgroup(id)
+	if err := os.MkdirAll(cg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cg, "memory.events"),
+		[]byte("low 0\nhigh 0\nmax 3\noom 1\noom_kill 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := m.diagnosticoVMM(id)
+	for _, quiero := range []string{"log tail: one | two | KVM_RUN failed: EINTR",
+		"last console line: KVM_RUN failed: EINTR", "oom_kill=2"} {
+		if !strings.Contains(got, quiero) {
+			t.Errorf("diagnostico %q sin %q", got, quiero)
+		}
+	}
+	if d := m.diagnosticoVMM("beef0000000000e5"); d != "" {
+		t.Errorf("sin nada: %q", d)
+	}
+}

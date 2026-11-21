@@ -194,6 +194,9 @@ func (m *Manager) barrerNamespaces(seen map[string]bool) {
 	existen := map[string]bool{}
 	for _, ns := range listarNamespaces() {
 		existen[ns] = true
+		if m.ranuraPropia(ns) {
+			continue // ranura del fondo de este daemon: en espera, no huérfana
+		}
 		if seen[ns] {
 			// Es de una máquina de este daemon. Si no lleva marca, la montó
 			// un daemon anterior a las marcas (actualizar con máquinas vivas:
@@ -218,7 +221,7 @@ func (m *Manager) barrerNamespaces(seen map[string]bool) {
 		return
 	}
 	for _, e := range ents {
-		if ns := e.Name(); !existen[ns] && !seen[ns] {
+		if ns := e.Name(); !existen[ns] && !seen[ns] && !m.ranuraPropia(ns) {
 			m.olvidarRedPropia(ns)
 		}
 	}

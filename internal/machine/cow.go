@@ -499,6 +499,28 @@ func (a *almacenCoW) libreDentro() (total, libre int64, err error) {
 	return a.libreEn(a.dir)
 }
 
+// vigenciaLibre es cuánto vale una lectura del espacio libre del almacén para
+// las altas de una ráfaga.
+const vigenciaLibre = 100 * time.Millisecond
+
+// libreCacheado es libreDentro con una lectura válida 100 ms: en una ráfaga de
+// altas basta un statfs. libreMinimaAlmacen y la cuota por instancia acotan lo
+// que pueda colarse entre dos lecturas.
+func (a *almacenCoW) libreCacheado() (total, libre int64, err error) {
+	a.libreMu.Lock()
+	defer a.libreMu.Unlock()
+	if a.libreOK && time.Since(a.libreT) < vigenciaLibre {
+		return a.libreTotal, a.libreLibre, nil
+	}
+	total, libre, err = a.libreDentro()
+	if err != nil {
+		a.libreOK = false
+		return total, libre, err
+	}
+	a.libreT, a.libreTotal, a.libreLibre, a.libreOK = time.Now(), total, libre, true
+	return total, libre, nil
+}
+
 // almacenCoW es el almacén propio: un XFS con reflink (o un Btrfs, ver
 // elegirFSAlmacen) en un fichero, montado por loop dentro de la raíz de
 // kindling. Todo lo que toca el sistema (crear
@@ -552,6 +574,15 @@ type almacenCoW struct {
 	limitar       func(d, overlay string, bytes int64) error
 	quitarDir     func(d string) error
 	cuota         string // lo que detectó detectarCuota al montar
+	// liberarProyectos devuelve al asignador los ids de proyecto de la
+	// instancia d al borrarla (cow_cuota.go). nil sin cuota de proyecto.
+	liberarProyectos func(d string)
+
+	// Última lectura del espacio libre (libreCacheado).
+	libreMu                sync.Mutex
+	libreT                 time.Time
+	libreTotal, libreLibre int64
+	libreOK                bool
 
 	// espejando son los espejos de memoria que alguien copia ahora mismo sin
 	// a.mu (baseMemoria): la ruta definitiva y un canal que se cierra al
@@ -582,6 +613,15 @@ func (a *almacenCoW) mkdirInstancia(d string) error {
 // claro en el log: RemoveAll vacía un subvolumen pero no lo quita (EPERM), y
 // el que quede ocupa su qgroup y bloquea el id hasta que alguien lo borre.
 func (a *almacenCoW) rmdirInstancia(d string) {
+	// Los ids de proyecto se liberan solo si el directorio ya no existe: con
+	// ficheros que sigan ahí, reutilizar su id compartiría cuota.
+	if a.liberarProyectos != nil {
+		defer func() {
+			if _, err := os.Lstat(d); os.IsNotExist(err) {
+				a.liberarProyectos(d)
+			}
+		}()
+	}
 	if a.quitarDir != nil && a.cuota != "" {
 		err := a.quitarDir(d)
 		if err == nil {
@@ -1032,15 +1072,22 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 	if err := nombreSeguro(id); err != nil {
 		return "", err
 	}
+	// a.mu solo para preparar el almacén y crear la base del dorado (una vez
+	// por snapshot): lo demás es por instancia y no comparte nada, así que una
+	// ráfaga no se pone en fila.
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if err := a.preparar(ctx, gib); err != nil {
+		a.mu.Unlock()
 		return "", err
 	}
-	if _, libre, err := a.libreDentro(); err == nil && libre < libreMinimaAlmacen {
+	if _, libre, err := a.libreCacheado(); err == nil && libre < libreMinimaAlmacen {
+		a.mu.Unlock()
 		return "", &errAlmacenLleno{libre: libre}
 	}
 	base, err := a.base(ctx, snap, src)
+	// Los hooks y la cuota solo cambian con a.mu (reconfigurar): se leen aquí.
+	clonar, limitar, cuota, priv := a.clonar, a.limitar, a.cuota, a.priv
+	a.mu.Unlock()
 	if err != nil {
 		return "", err
 	}
@@ -1058,7 +1105,7 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 		}
 	}
 	ruta := filepath.Join(d, "overlay.ext4")
-	if err := a.clonar(base, ruta); err != nil {
+	if err := clonar(base, ruta); err != nil {
 		a.rmdirInstancia(d)
 		return "", fmt.Errorf("reflinking the overlay: %w", err)
 	}
@@ -1067,17 +1114,17 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 	// La cuota, antes de ceder el fichero al VMM. Si el almacén la impone y no
 	// se puede aplicar, la instancia NO va al almacén: sin cuota, un VMM
 	// comprometido podría llenarlo.
-	if a.cuota != "" && a.limitar != nil {
+	if cuota != "" && limitar != nil {
 		fi, err := os.Stat(ruta)
 		if err == nil {
-			err = a.limitar(d, ruta, cuotaInstancia(fi.Size()))
+			err = limitar(d, ruta, cuotaInstancia(fi.Size()))
 		}
 		if err != nil {
 			a.rmdirInstancia(d)
-			return "", fmt.Errorf("applying the disk quota (%s): %w", a.cuota, err)
+			return "", fmt.Errorf("applying the disk quota (%s): %w", cuota, err)
 		}
 	}
-	if a.priv != nil && a.priv.Enabled {
+	if priv != nil && priv.Enabled {
 		// El VMM NO es dueño de nada aquí: el overlay queda del daemon (root) y
 		// el VMM lo lee y escribe por grupo (0660); el directorio, root:grupo
 		// 0750, solo lo atraviesa. Dueño del FICHERO podría cambiarle el id de
@@ -1086,11 +1133,11 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 		// instancia. Dueño del directorio podría crear ficheros en él (llenar el
 		// almacén compartido) y cambiar el overlay por un enlace entre la
 		// comprobación del daemon y su lectura.
-		if err := cederPorGrupo(ruta, os.Geteuid(), a.priv.GID); err != nil {
+		if err := cederPorGrupo(ruta, os.Geteuid(), priv.GID); err != nil {
 			a.rmdirInstancia(d)
 			return "", err
 		}
-		if err := os.Lchown(d, os.Geteuid(), a.priv.GID); err != nil {
+		if err := os.Lchown(d, os.Geteuid(), priv.GID); err != nil {
 			a.rmdirInstancia(d)
 			return "", fmt.Errorf("securing %s: %w", d, err)
 		}

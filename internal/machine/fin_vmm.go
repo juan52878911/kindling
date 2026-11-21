@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -133,4 +135,59 @@ func (m *Manager) vmmCaido(err error, id string, pid int) error {
 		msg += "; last line of its console: " + l
 	}
 	return fmt.Errorf("%w: %s", err, msg)
+}
+
+// lineasColaDiagnostico es cuántas líneas del final de firecracker.log van al
+// diagnóstico de un VMM enjaulado que murió solo.
+const lineasColaDiagnostico = 5
+
+// maxColaDiagnostico acota el texto de esas líneas.
+const maxColaDiagnostico = 600
+
+// oomKillCgroup lee oom_kill de memory.events del cgroup dir: cuántas veces
+// el kernel mató un proceso de ese cgroup por memoria. ok es false si el
+// fichero no existe o no trae la clave (sin controlador de memoria).
+func oomKillCgroup(dir string) (n int, ok bool) {
+	b, err := os.ReadFile(filepath.Join(dir, "memory.events"))
+	if err != nil {
+		return 0, false
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, found := strings.CutPrefix(l, "oom_kill "); found {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
+// diagnosticoVMM explica la muerte inesperada de un VMM enjaulado, que no es
+// hijo del daemon y no deja código de salida: la cola de firecracker.log, la
+// última línea de la consola y oom_kill del cgroup. Hay que llamarlo antes de
+// trasMorir, que borra el cgroup y el jail. Devuelve "" si no hay nada.
+func (m *Manager) diagnosticoVMM(id string) string {
+	var partes []string
+	if cola, err := leerCola(filepath.Join(m.dir(id), "firecracker.log"), 4<<10); err == nil {
+		ls := strings.Split(strings.TrimRight(string(cola), "\r\n\t "), "\n")
+		if len(ls) > lineasColaDiagnostico {
+			ls = ls[len(ls)-lineasColaDiagnostico:]
+		}
+		for i := range ls {
+			ls[i] = sanearMotivo(ls[i])
+		}
+		t := strings.TrimSpace(strings.Join(ls, " | "))
+		if r := []rune(t); len(r) > maxColaDiagnostico {
+			t = "…" + string(r[len(r)-maxColaDiagnostico:])
+		}
+		if t != "" {
+			partes = append(partes, "log tail: "+t)
+		}
+	}
+	if l := m.ultimaLineaConsola(id); l != "" {
+		partes = append(partes, "last console line: "+l)
+	}
+	if n, ok := oomKillCgroup(m.dirCgroup(id)); ok {
+		partes = append(partes, fmt.Sprintf("oom_kill=%d", n))
+	}
+	return strings.Join(partes, "; ")
 }

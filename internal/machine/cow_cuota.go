@@ -30,11 +30,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -99,6 +102,149 @@ func abrirSinSeguir(ruta string) (*os.File, error) {
 	return f, nil
 }
 
+// asignadorProyectos reparte los ids de proyecto de XFS desde memoria: un
+// conjunto de usados y el último repartido, bajo un mutex pequeño. Se siembra
+// una vez con el escaneo de proyectosPorDir (sobrevive a un reinicio del
+// daemon) y cada id se libera al borrar el directorio de su instancia. Es la
+// única fuente de ids: dos instancias con el mismo proyecto compartirían cuota.
+type asignadorProyectos struct {
+	mu      sync.Mutex
+	sembrar func() (map[string][]uint32, error) // el escaneo del disco (dir → ids); nil = vacío
+	listo   bool
+	usados  map[uint32]string            // id → directorio de la instancia
+	porDir  map[string][]uint32          // directorio → ids
+	nombres map[string]map[string]uint32 // directorio → fichero → id
+	sig     uint32                       // desde dónde buscar el próximo
+}
+
+// sembrarSiHaceFalta hace el escaneo la primera vez. Con a.mu tomado. Si el
+// escaneo falló no se da por hecho: se queda con lo que leyó y lo repite en la
+// siguiente asignación (fundiendo, sin pisar lo ya repartido), porque dar por
+// libres los id que no pudo leer repartiría un proyecto ya en uso. Mientras no
+// esté hecho devuelve el error y no se reparte nada.
+func (p *asignadorProyectos) sembrarSiHaceFalta() error {
+	if p.listo {
+		return nil
+	}
+	if p.usados == nil {
+		p.usados = map[uint32]string{}
+		p.porDir = map[string][]uint32{}
+		p.nombres = map[string]map[string]uint32{}
+		p.sig = primerProyecto
+	}
+	p.listo = true
+	var errSiembra error
+	if p.sembrar != nil {
+		vistos, err := p.sembrar()
+		if err != nil {
+			p.listo = false
+			errSiembra = fmt.Errorf("scanning the copy-on-write store's project ids: %w", err)
+			log.Printf("warning: %v; retrying on the next allocation", errSiembra)
+		}
+		for dir, ids := range vistos {
+			for _, id := range ids {
+				if _, en := p.usados[id]; en {
+					continue
+				}
+				p.usados[id] = dir
+				p.porDir[dir] = append(p.porDir[dir], id)
+			}
+		}
+	}
+	return errSiembra
+}
+
+// asignar reserva un id libre para un fichero de la instancia d (0 si el
+// escaneo aún no se pudo hacer).
+func (p *asignadorProyectos) asignar(d string) uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	id, _ := p.asignarLocked(d, "")
+	return id
+}
+
+// asignarFichero reserva el id del fichero nombre de la instancia d y lo
+// recuerda: recrear mem.full o mem.diff sin borrar la instancia reutiliza el
+// id en vez de gastar uno nuevo en cada llamada.
+func (p *asignadorProyectos) asignarFichero(d, nombre string) (uint32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.asignarLocked(d, nombre)
+}
+
+func (p *asignadorProyectos) asignarLocked(d, nombre string) (uint32, error) {
+	if err := p.sembrarSiHaceFalta(); err != nil {
+		return 0, err
+	}
+	if nombre != "" {
+		if id, ok := p.nombres[d][nombre]; ok && p.usados[id] == d {
+			return id, nil
+		}
+	}
+	id := p.sig
+	if id < primerProyecto {
+		id = primerProyecto
+	}
+	for {
+		if _, en := p.usados[id]; !en {
+			break
+		}
+		id++
+	}
+	p.usados[id] = d
+	p.porDir[d] = append(p.porDir[d], id)
+	if nombre != "" {
+		if p.nombres[d] == nil {
+			p.nombres[d] = map[string]uint32{}
+		}
+		p.nombres[d][nombre] = id
+	}
+	p.sig = id + 1
+	return id, nil
+}
+
+// liberar devuelve los ids de la instancia d. El siguiente reparto vuelve a
+// mirar desde el más bajo liberado, para reutilizarlos.
+func (p *asignadorProyectos) liberar(d string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.listo {
+		return
+	}
+	for _, id := range p.porDir[d] {
+		delete(p.usados, id)
+		if id < p.sig {
+			p.sig = id
+		}
+	}
+	delete(p.porDir, d)
+	delete(p.nombres, d)
+}
+
+// soltar libera un solo id (el que no llegó a usarse).
+func (p *asignadorProyectos) soltar(d string, id uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.usados[id] == d {
+		delete(p.usados, id)
+		if id < p.sig {
+			p.sig = id
+		}
+		for n, v := range p.nombres[d] {
+			if v == id {
+				delete(p.nombres[d], n)
+			}
+		}
+		ids := p.porDir[d]
+		for i, v := range ids {
+			if v == id {
+				p.porDir[d] = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
 // proyectoLibre es el primer id de proyecto desde primerProyecto que no está
 // en usados.
 func proyectoLibre(usados map[uint32]bool) uint32 {
@@ -109,18 +255,27 @@ func proyectoLibre(usados map[uint32]bool) uint32 {
 	return id
 }
 
-// proyectosEnUso recorre los ficheros de las instancias del almacén (el
+// proyectosPorDir recorre los ficheros de las instancias del almacén (el
 // overlay y los de memoria: mem.full, mem.diff, el diff acumulado, cada uno
-// con su proyecto) y devuelve los ids que ya tienen. Sin estado en memoria:
-// sobrevive a un reinicio del daemon y libera el id de una instancia borrada
-// sin llevar cuentas. Mirar solo los overlays repartía a un overlay nuevo el
-// id del mem.full de otra copia, y el límite del overlay se encontraba ya
-// gastado: EDQUOT en el disco del invitado.
-func proyectosEnUso(dirM string) map[uint32]bool {
-	usados := map[uint32]bool{}
+// con su proyecto) y devuelve, por directorio de instancia, los ids que ya
+// tienen. Siembra al asignador: sobrevive a un reinicio del daemon. Mirar solo
+// los overlays repartía a un overlay nuevo el id del mem.full de otra copia, y
+// el límite del overlay se encontraba ya gastado: EDQUOT en el disco del
+// invitado.
+func proyectosPorDir(dirM string) (map[string][]uint32, error) {
+	usados := map[string][]uint32{}
 	instancias, err := os.ReadDir(dirM)
 	if err != nil {
-		return usados
+		if errors.Is(err, fs.ErrNotExist) {
+			return usados, nil
+		}
+		return usados, err
+	}
+	var primero error
+	fallo := func(err error) {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && primero == nil {
+			primero = err // una instancia borrada durante el escaneo no cuenta
+		}
 	}
 	for _, inst := range instancias {
 		if !inst.IsDir() {
@@ -129,6 +284,7 @@ func proyectosEnUso(dirM string) map[uint32]bool {
 		dir := filepath.Join(dirM, inst.Name())
 		ficheros, err := os.ReadDir(dir)
 		if err != nil {
+			fallo(err)
 			continue
 		}
 		for _, e := range ficheros {
@@ -137,15 +293,118 @@ func proyectosEnUso(dirM string) map[uint32]bool {
 			}
 			f, err := abrirSinSeguir(filepath.Join(dir, e.Name()))
 			if err != nil {
+				fallo(err)
 				continue
 			}
-			if id, err := proyectoDe(f); err == nil && id != 0 {
-				usados[id] = true
+			id, err := proyectoDe(f)
+			if err != nil {
+				fallo(err)
+			} else if id != 0 {
+				usados[dir] = append(usados[dir], id)
 			}
 			f.Close()
 		}
 	}
-	return usados
+	return usados, primero
+}
+
+// quotactl de XFS: Q_XSETQLIM sobre cuotas de proyecto (XQM_CMD(4) con tipo 2).
+// Es lo que hace `xfs_quota -x -c "limit -p bhard=..."`, sin lanzar un proceso.
+const (
+	qXSetQLim      = (('X'<<8 + 4) << 8) | 2
+	fsDQBHard      = 1 << 3 // FS_DQ_BHARD: d_blk_hardlimit vale
+	fsDquotVersion = 1
+	xfsProjQuota   = 2
+)
+
+// fsDiskQuota es struct fs_disk_quota de <linux/dqblk_xfs.h> (112 bytes).
+type fsDiskQuota struct {
+	Version   int8
+	Flags     int8
+	Fieldmask uint16
+	ID        uint32
+	BlkHard   uint64 // en bloques de 512 bytes
+	BlkSoft   uint64
+	InoHard   uint64
+	InoSoft   uint64
+	BCount    uint64
+	ICount    uint64
+	ITimer    int32
+	BTimer    int32
+	IWarns    uint16
+	BWarns    uint16
+	_         int32
+	RtbHard   uint64
+	RtbSoft   uint64
+	RtbCount  uint64
+	RtbTimer  int32
+	RtbWarns  uint16
+	_         int16
+	_         [8]byte
+}
+
+// limiteQuotactlXFS arma la petición de límite duro de bloques de un proyecto.
+func limiteQuotactlXFS(id uint32, bytes int64) fsDiskQuota {
+	return fsDiskQuota{
+		Version: fsDquotVersion, Flags: xfsProjQuota, Fieldmask: fsDQBHard,
+		ID: id, BlkHard: uint64((bytes + 511) / 512),
+	}
+}
+
+// limiteXFSQuotactl fija el límite duro de bytes del proyecto id con la
+// llamada quotactl sobre el dispositivo dev del montaje.
+func limiteXFSQuotactl(dev string, id uint32, bytes int64) error {
+	p, err := syscall.BytePtrFromString(dev)
+	if err != nil {
+		return err
+	}
+	q := limiteQuotactlXFS(id, bytes)
+	_, _, e := syscall.Syscall6(syscall.SYS_QUOTACTL, uintptr(qXSetQLim), uintptr(unsafe.Pointer(p)),
+		uintptr(id), uintptr(unsafe.Pointer(&q)), 0, 0)
+	if e != 0 {
+		return e
+	}
+	return nil
+}
+
+// quotactlXFS fija límites por quotactl y recuerda si el núcleo no lo admite.
+type quotactlXFS struct {
+	dev    string
+	roto   atomic.Int64 // hasta cuándo (UnixNano) se da por roto; 0 = no lo está
+	llamar func(dev string, id uint32, bytes int64) error
+	ahora  func() time.Time // reloj; nil = time.Now
+}
+
+// quotactlRotoDura es lo que dura la marca de "el núcleo no lo admite": pasado
+// el minuto se vuelve a probar, por si el fallo era del momento.
+const quotactlRotoDura = time.Minute
+
+func (q *quotactlXFS) reloj() time.Time {
+	if q.ahora != nil {
+		return q.ahora()
+	}
+	return time.Now()
+}
+
+// fijar intenta el límite por quotactl y dice si quedó hecho.
+func (q *quotactlXFS) fijar(id uint32, bytes int64) bool {
+	if q.dev == "" {
+		return false
+	}
+	if hasta := q.roto.Load(); hasta != 0 && q.reloj().UnixNano() < hasta {
+		return false
+	}
+	if err := q.llamar(q.dev, id, bytes); err != nil {
+		// Solo es permanente si el núcleo o el dispositivo no lo admiten; un
+		// EINTR o un fallo pasajero se reintenta en la siguiente llamada.
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPERM) ||
+			errors.Is(err, syscall.ENOTBLK) || errors.Is(err, syscall.EINVAL) {
+			q.roto.Store(q.reloj().Add(quotactlRotoDura).UnixNano())
+		}
+		log.Printf("warning: copy-on-write store: quotactl on %s failed (%v); using xfs_quota", q.dev, err)
+		return false
+	}
+	return true
 }
 
 // ejecutar corre una herramienta del sistema con un tope de tiempo.
@@ -204,6 +463,7 @@ func montajeDe(dir string) (montaje, bool) {
 // activarCuota engancha en el almacén la cuota que su sistema de ficheros
 // permita, si están las herramientas; si no, deja los hooks a nil.
 func (a *almacenCoW) activarCuota() {
+	a.liberarProyectos = nil
 	switch a.fs {
 	case "xfs":
 		a.detectarCuota = func(context.Context) string {
@@ -216,16 +476,42 @@ func (a *almacenCoW) activarCuota() {
 			}
 			return "prjquota"
 		}
+		// Los ids se reparten desde memoria, sembrados una vez con el escaneo
+		// del almacén; se liberan al borrar la instancia (rmdirInstancia).
+		ids := &asignadorProyectos{sembrar: func() (map[string][]uint32, error) {
+			return proyectosPorDir(filepath.Join(a.dir, "m"))
+		}}
+		a.liberarProyectos = ids.liberar
+		var devOnce sync.Once
+		qc := &quotactlXFS{llamar: limiteXFSQuotactl}
 		a.limitar = func(d, overlay string, bytes int64) error {
-			bin := buscarE2fs("xfs_quota")
-			if bin == "" {
-				return errors.New("xfs_quota not found")
-			}
-			id := proyectoLibre(proyectosEnUso(filepath.Dir(d)))
-			// Primero el límite, luego el proyecto: si el fichero no cupiera, el
-			// cambio de proyecto falla y la instancia no entra al almacén.
-			if err := ejecutar(bin, argsLimiteXFS(id, bytes, a.dir)...); err != nil {
+			id, err := ids.asignarFichero(d, filepath.Base(overlay))
+			if err != nil {
 				return err
+			}
+			ok := false
+			defer func() {
+				if !ok {
+					ids.soltar(d, id)
+				}
+			}()
+			// Primero el límite, luego el proyecto: si el fichero no cupiera, el
+			// cambio de proyecto falla y la instancia no entra al almacén. Por
+			// quotactl; si falla (o no hay dispositivo), el proceso xfs_quota.
+			devOnce.Do(func() {
+				if mt, found := montajeDe(a.dir); found && strings.HasPrefix(mt.fuente, "/dev/") {
+					qc.dev = mt.fuente
+				}
+			})
+			hecho := qc.fijar(id, bytes)
+			if !hecho {
+				bin := buscarE2fs("xfs_quota")
+				if bin == "" {
+					return errors.New("xfs_quota not found")
+				}
+				if err := ejecutar(bin, argsLimiteXFS(id, bytes, a.dir)...); err != nil {
+					return err
+				}
 			}
 			f, err := abrirSinSeguir(overlay)
 			if err != nil {
@@ -235,6 +521,7 @@ func (a *almacenCoW) activarCuota() {
 			if err := fijarProyecto(f, id); err != nil {
 				return fmt.Errorf("setting the project of %s: %w", overlay, err)
 			}
+			ok = true
 			return nil
 		}
 	case "btrfs":

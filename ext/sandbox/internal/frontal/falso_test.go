@@ -103,6 +103,10 @@ type falso struct {
 	sandboxesUnaVez   sync.Once
 	sandboxesColgarN  int
 	sandboxesLlamadas int
+	// snapLista y snapUno cuentan GET /snapshots y GET /snapshots/{name};
+	// snapUnoViejo hace que la segunda ruta no exista (un daemon anterior).
+	snapLista, snapUno int
+	snapUnoViejo       bool
 	// sandboxesFalla hace fallar GET /sandboxes con un 500: un host que
 	// contesta a su sonda de estado pero no a la lista.
 	sandboxesFalla bool
@@ -113,6 +117,20 @@ type falso struct {
 	etiquetasUnaVez   sync.Once
 	// etiquetasLentas retrasa cada PUT labels que pone un tenant.
 	etiquetasLentas time.Duration
+
+	// conReclamo anuncia api.CapabilityClaim y sirve POST /sandboxes/claim.
+	// Sin él, el daemon es uno viejo: el frontal tiene que usar las dos fases.
+	conReclamo bool
+	// reclamoLlamadas cuenta los POST /sandboxes/claim; etiquetasLlamadas,
+	// renovaciones y lecturas, los PUT labels, renew y GET /machines/{ref}.
+	reclamoLlamadas, etiquetasLlamadas, renovaciones, lecturas int
+	// reclamoReq guarda lo que pidió cada reclamo.
+	reclamoReq []api.ClaimRequest
+	// reclamoCorta hace que el daemon etiquete y renueve la candidata pero
+	// corte la conexión sin contestar; reclamoPlano404 contesta con un 404 sin
+	// código (un daemon que ya no tiene la ruta); borrados cuenta los DELETE.
+	reclamoCorta, reclamoPlano404 bool
+	borrados                      []string
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -154,14 +172,20 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		n := len(f.maquinas)
+		var caps []string
+		if f.conReclamo {
+			caps = []string{api.CapabilityClaim}
+		}
 		f.mu.Unlock()
-		writeJSON(w, 200, api.Info{Version: "fake", Machines: n})
+		writeJSON(w, 200, api.Info{Version: "fake", Machines: n, Capabilities: caps})
 	})
+	m.HandleFunc("POST /sandboxes/claim", f.reclamar)
 	m.HandleFunc("GET /procstats", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, api.ProcStats{AvailableMiB: f.libreMiB})
 	})
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.snapLista++
 		out := []*api.Snapshot{}
 		for _, n := range f.snapshots {
 			out = append(out, &api.Snapshot{Name: n, AllowExec: true, Annotations: f.snapAnot[n],
@@ -174,6 +198,11 @@ func (f *falso) rutas() http.Handler {
 		nombre := r.PathValue("name")
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.snapUno++
+		if f.snapUnoViejo {
+			http.NotFound(w, r)
+			return
+		}
 		hay := false
 		for _, s := range f.snapshots {
 			hay = hay || s == nombre
@@ -182,7 +211,8 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 404, fmt.Errorf("no snapshot %q", nombre))
 			return
 		}
-		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre]})
+		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre],
+			MemMiB: f.snapMem[nombre], CreatedAt: f.snapHecho[nombre]})
 	})
 	m.HandleFunc("PUT /snapshots/{name}/annotations/{key}", func(w http.ResponseWriter, r *http.Request) {
 		var valor json.RawMessage
@@ -200,7 +230,8 @@ func (f *falso) rutas() http.Handler {
 			f.snapAnot[nombre] = map[string]json.RawMessage{}
 		}
 		f.snapAnot[nombre][clave] = valor
-		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre]})
+		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre],
+			MemMiB: f.snapMem[nombre], CreatedAt: f.snapHecho[nombre]})
 	})
 	// POST /machines y POST /machines/{ref}/commit: lo que plantilla.Construir
 	// necesita para rehacer un dorado (Run, un exec que ya sirve /machines/{ref}/exec,
@@ -345,6 +376,9 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("POST /sandboxes/{ref}/renew", func(w http.ResponseWriter, r *http.Request) {
 		var req api.RenewRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.renovaciones++
+		f.mu.Unlock()
 		if f.renewEmpezado != nil {
 			// Avisa y no contesta hasta que el frontal se rinda.
 			close(f.renewEmpezado)
@@ -375,12 +409,14 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 404, fmt.Errorf("no sandbox"))
 			return
 		}
+		f.borrados = append(f.borrados, r.PathValue("ref"))
 		delete(f.maquinas, r.PathValue("ref"))
 		w.WriteHeader(204)
 	})
 	m.HandleFunc("GET /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.lecturas++
 		mc, ok := f.maquinas[r.PathValue("ref")]
 		if !ok {
 			failDaemon(w, 404, fmt.Errorf("no machine"))
@@ -393,6 +429,9 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("PUT /machines/{ref}/labels", func(w http.ResponseWriter, r *http.Request) {
 		var labels map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&labels)
+		f.mu.Lock()
+		f.etiquetasLlamadas++
+		f.mu.Unlock()
 		if f.etiquetasEspera != nil {
 			// Solo la PRIMERA espera: es un frontal lento frente a otro.
 			primera := false
@@ -503,6 +542,73 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 }
 
 // sembrar mete una máquina a mano, como si la hubiera creado otro.
+// reclamar es POST /sandboxes/claim: elige, etiqueta y renueva bajo f.mu, como
+// el daemon real (machine.Reclamar).
+func (f *falso) reclamar(w http.ResponseWriter, r *http.Request) {
+	var req api.ClaimRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reclamoLlamadas++
+	f.reclamoReq = append(f.reclamoReq, req)
+	if f.reclamoPlano404 {
+		http.NotFound(w, r)
+		return
+	}
+	if len(req.Match) == 0 {
+		failDaemon(w, 400, fmt.Errorf("match can't be empty"))
+		return
+	}
+	var elegida *api.Machine
+	for _, mc := range f.maquinas {
+		if mc.State != api.StateRunning || !reclamableFalso(mc.Labels, req) {
+			continue
+		}
+		elegida = mc
+		break
+	}
+	if elegida == nil {
+		writeJSON(w, 404, api.Error{Message: "no claimable machine matches the request", Code: api.CodeNoClaimable})
+		return
+	}
+	elegida.Labels = api.MergeLabels(elegida.Labels, req.Labels)
+	if req.TTLSeconds > 0 {
+		elegida.TTLSeconds = req.TTLSeconds
+	}
+	ahora := time.Now()
+	elegida.TTLAt = &ahora
+	if f.reclamoCorta {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+			}
+		}
+		return
+	}
+	c := *elegida
+	c.Labels = api.MergeLabels(nil, elegida.Labels)
+	writeJSON(w, 200, &c)
+}
+
+func reclamableFalso(labels map[string]string, req api.ClaimRequest) bool {
+	for k, v := range req.Match {
+		if got, ok := labels[k]; !ok || got != v {
+			return false
+		}
+	}
+	for _, k := range req.Absent {
+		if _, ok := labels[k]; ok {
+			return false
+		}
+	}
+	for _, k := range [...]string{api.LabelOwner, api.LabelClaim} {
+		if _, ok := labels[k]; ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (f *falso) sembrar(mc *api.Machine) *api.Machine {
 	f.mu.Lock()
 	defer f.mu.Unlock()

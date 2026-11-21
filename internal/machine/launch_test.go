@@ -101,3 +101,122 @@ func TestLaunchGateNilSinLimite(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestDecidirLaunch(t *testing.T) {
+	if lanzamientoPlataforma() > 0 {
+		t.Skip("la plataforma fija su propio tope")
+	}
+	ant, cpu := hostAnidado, numCPU
+	defer func() { hostAnidado, numCPU = ant, cpu }()
+	for _, c := range []struct {
+		nombre  string
+		anidado bool
+		cpus    int
+		env     string
+		quiero  int
+	}{
+		{"anidado 4", true, 4, "", 2},
+		{"anidado 7", true, 7, "", 2},
+		{"anidado 8", true, 8, "", 4},
+		{"anidado 16", true, 16, "", 8},
+		{"anidado 64", true, 64, "", 8},
+		{"hierro 4", false, 4, "", 2},
+		{"hierro 64", false, 64, "", 8},
+		{"env manda", true, 64, "3", 3},
+		{"env inválida", true, 4, "x", 2},
+	} {
+		t.Run(c.nombre, func(t *testing.T) {
+			hostAnidado = func() bool { return c.anidado }
+			numCPU = func() int { return c.cpus }
+			t.Setenv("KLING_MAX_PARALLEL_BOOT", c.env)
+			if n, _ := decidirLaunch(); n != c.quiero {
+				t.Fatalf("got %d, quiero %d", n, c.quiero)
+			}
+		})
+	}
+}
+
+// El retroceso baja el tope a la mitad, no pasa de 2 y se recupera de uno en
+// uno con el reloj falso.
+func TestRetrocesoPuerta(t *testing.T) {
+	ahora := time.Unix(1000, 0)
+	r := &retrocesoPuerta{base: 8, reloj: func() time.Time { return ahora }}
+	if r.tope() != 8 {
+		t.Fatalf("tope inicial %d", r.tope())
+	}
+	for _, quiero := range []int{4, 2, 2} {
+		r.retroceder()
+		if got := r.tope(); got != quiero {
+			t.Fatalf("tras retroceder: tope %d, quiero %d", got, quiero)
+		}
+	}
+	if r.retrocesos() != 3 {
+		t.Fatalf("retrocesos %d", r.retrocesos())
+	}
+	ahora = ahora.Add(plazoRetroceso - time.Second)
+	if r.tope() != 2 {
+		t.Fatalf("antes del plazo: %d", r.tope())
+	}
+	ahora = ahora.Add(time.Second)
+	if r.tope() != 3 {
+		t.Fatalf("un plazo: %d", r.tope())
+	}
+	ahora = ahora.Add(10 * plazoRetroceso)
+	if r.tope() != 8 {
+		t.Fatalf("recuperado: %d, no debe pasar de la base", r.tope())
+	}
+	// Un tope base de 1 (KLING_MAX_PARALLEL_BOOT=1) no sube a 2.
+	u := &retrocesoPuerta{base: 1, reloj: func() time.Time { return ahora }}
+	u.retroceder()
+	if u.tope() != 1 {
+		t.Fatalf("base 1: %d", u.tope())
+	}
+}
+
+// La puerta real respeta el tope bajado: con 4 de capacidad y un retroceso a 2,
+// solo dos entran a la vez.
+func TestPuertaRetrocedeLimitaEntradas(t *testing.T) {
+	m := &Manager{launchGate: make(chan struct{}, 4)}
+	ahora := time.Unix(1000, 0)
+	m.retrocesoDe().reloj = func() time.Time { return ahora }
+	m.puertaRetroceder("test")
+	var sueltas []func()
+	for i := 0; i < 2; i++ {
+		r, err := m.enterLaunch(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		sueltas = append(sueltas, r)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if r, err := m.enterLaunch(ctx); err == nil {
+		r()
+		t.Fatal("entró un tercero con el tope en 2")
+	}
+	// Pasado el plazo, el tope vuelve a 3 y entra uno más.
+	ahora = ahora.Add(plazoRetroceso)
+	r3, err := m.enterLaunch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r3()
+	for _, s := range sueltas {
+		s()
+	}
+	ahora = ahora.Add(10 * plazoRetroceso)
+	var todas []func()
+	for i := 0; i < 4; i++ {
+		r, err := m.enterLaunch(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		todas = append(todas, r)
+	}
+	for _, s := range todas {
+		s()
+	}
+	if len(m.launchGate) != 0 {
+		t.Fatalf("huecos sin soltar: %d", len(m.launchGate))
+	}
+}

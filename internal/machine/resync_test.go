@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,12 +186,11 @@ func TestAgenteEscucha(t *testing.T) {
 }
 
 // Una copia de un dorado (run -from, fork) cuyo agente falla el /resync no se
-// entrega: se reintenta una vez y, si vuelve a fallar, error. Antes se daba
-// por running con el reloj y el CSPRNG del dorado. Si el reintento sale bien,
-// sigue.
+// entrega: un solo intento y error (errCopiaMuerta; runFrom restaura otra
+// copia). Antes se daba por running con el reloj y el CSPRNG del dorado.
 func TestResyncCopiaNoEntregaSinResync(t *testing.T) {
 	var mu sync.Mutex
-	n, fallos := 0, 2
+	n, fallos := 0, 1
 	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
@@ -203,17 +204,47 @@ func TestResyncCopiaNoEntregaSinResync(t *testing.T) {
 	}))
 	capturarLog(t)
 	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now()}
-	if _, err := m.resyncCopia(context.Background(), id, snap); err == nil {
-		t.Fatal("resyncCopia entregó una copia cuyo agente no resincronizó")
+	if _, err := m.resyncCopia(context.Background(), id, snap, 0); !errors.Is(err, errCopiaMuerta) {
+		t.Fatalf("resyncCopia entregó una copia cuyo agente no resincronizó: %v", err)
 	}
 	mu.Lock()
-	if n != 2 {
-		t.Fatalf("el agente recibió %d intentos, quería 2 (uno y el reintento)", n)
+	if n != 1 {
+		t.Fatalf("el agente recibió %d intentos, quería 1 (sin segundo POST a la misma copia)", n)
 	}
-	n, fallos = 0, 1
+	n, fallos = 0, 0
 	mu.Unlock()
-	if r, err := m.resyncCopia(context.Background(), id, snap); err != nil || !r.ok {
+	if r, err := m.resyncCopia(context.Background(), id, snap, 0); err != nil || !r.ok {
 		t.Fatalf("con el reintento bien: ok=%v err=%v", r.ok, err)
+	}
+}
+
+// Una copia cuyo agente no contesta no retiene la creación 12 s: el primer
+// intento tiene plazo corto y no hay segundo POST a la misma copia.
+func TestResyncCopiaMudaNoEspera12s(t *testing.T) {
+	var pedidos atomic.Int32
+	liberar := make(chan struct{})
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pedidos.Add(1)
+		select {
+		case <-liberar:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(liberar) })
+	capturarLog(t)
+	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now(), ConAgente: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ini := time.Now()
+	_, err := m.resyncCopia(ctx, id, snap, 0)
+	if err == nil {
+		t.Fatal("una copia muda se dio por buena")
+	}
+	if d := time.Since(ini); d > 2500*time.Millisecond {
+		t.Errorf("tardó %v, quería < 2,5 s (plazo corto, un solo intento)", d)
+	}
+	if n := pedidos.Load(); n != 1 {
+		t.Errorf("%d POST a la misma copia, quería 1", n)
 	}
 }
 
@@ -223,7 +254,7 @@ func TestResyncCopiaSinAgenteSeEntrega(t *testing.T) {
 		"x": {ID: "x", Name: "x", Image: "sin-agente", Forwards: map[string]string{"8080": dirSinNadie}},
 	}}
 	capturarLog(t)
-	if _, err := m.resyncCopia(context.Background(), "x", &api.Snapshot{Name: "d", CreatedAt: time.Now()}); err != nil {
+	if _, err := m.resyncCopia(context.Background(), "x", &api.Snapshot{Name: "d", CreatedAt: time.Now()}, 0); err != nil {
 		t.Fatalf("sin agente: %v", err)
 	}
 }
@@ -247,5 +278,61 @@ func TestRecordarSinAgenteRetiraLasCaducadas(t *testing.T) {
 	m.resyncSinAgente.Range(func(any, any) bool { n++; return true })
 	if n != 2 {
 		t.Fatalf("%d claves; quería 2 (la nueva y la del thaw)", n)
+	}
+}
+
+// Un dorado guardado con el agente: si la red del invitado tarda en volver
+// (ARP bajo carga, "no route to host"), se insiste hasta resyncPlazoConAgente
+// en vez de descartar la copia a los 250 ms. Sin la marca, se sigue rápido.
+func TestResyncConAgenteEsperaALaRed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	m := &Manager{byID: map[string]*api.Machine{
+		"x": {ID: "x", Name: "x", Image: "img", Forwards: map[string]string{"8080": addr}},
+	}}
+	capturarLog(t)
+	if r := m.resyncGuestCon(context.Background(), "x", "", api.ResyncInstance, false); r.ok || r.took > time.Second {
+		t.Fatalf("sin ConAgente: ok=%v took=%s, quería un fallo rápido", r.ok, r.took)
+	}
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"skew_ms":0}`))
+		})}
+		t.Cleanup(func() { _ = srv.Close() })
+		_ = srv.Serve(l)
+	}()
+	if r := m.resyncGuestCon(context.Background(), "x", "", api.ResyncInstance, true); !r.ok {
+		t.Fatalf("con ConAgente y el agente a los 800 ms: ok=%v took=%s fallo=%v", r.ok, r.took, r.fallo)
+	}
+}
+
+// La traza no altera el resultado: mismo cuerpo, mismo éxito, y no hace nada
+// sin la variable.
+func TestResyncOnceConTraza(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	for _, v := range []string{"", "1"} {
+		t.Setenv("KLING_RESYNC_TRACE", v)
+		if _, err := resyncOnce(context.Background(), srv.URL, "restore"); err != nil {
+			t.Fatalf("traza=%q: %v", v, err)
+		}
+	}
+	if trazaResyncNueva("x") == nil {
+		t.Fatal("con KLING_RESYNC_TRACE=1 debe haber traza")
+	}
+	t.Setenv("KLING_RESYNC_TRACE", "")
+	if trazaResyncNueva("x") != nil {
+		t.Fatal("sin la variable no debe haber traza")
 	}
 }

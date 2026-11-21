@@ -191,7 +191,10 @@ func TestTenantsLaClaveNoSeFiltra(t *testing.T) {
 	// Usarla y fallar con otras genera logs; ninguno puede llevar claves.
 	pide(t, b.srv, k.Clave, "GET", "/v1/sandboxes", nil).Body.Close()
 	pide(t, b.srv, k.Clave+"x", "GET", "/v1/sandboxes", nil).Body.Close()
-	secretos := []string{k.Clave, n.Clave, k.Clave[strings.LastIndex(k.Clave, "_")+1:], n.Clave[strings.LastIndex(n.Clave, "_")+1:]}
+	// La clave es <prefijo>_<secreto>; el secreto va en base64url, que también
+	// usa "_": se corta por el prefijo, no por el último "_" (que a veces deja
+	// un trozo de uno o dos caracteres y el test fallaba por azar).
+	secretos := []string{k.Clave, n.Clave, strings.TrimPrefix(k.Clave, k.Prefijo+"_"), strings.TrimPrefix(n.Clave, n.Prefijo+"_")}
 	// Ninguna lectura de la API la repite.
 	for _, ruta := range []string{"/v1/tenants", "/v1/tenants/carol"} {
 		resp := pide(t, b.srv, tokenAdmin, "GET", ruta, nil)

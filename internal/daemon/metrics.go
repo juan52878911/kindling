@@ -41,6 +41,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "kling_machines{state=%q} %d\n", st, ps.ByState[string(st)])
 	}
 
+	fmt.Fprintln(w, "# HELP kling_restore_dead_copies_total Restored copies whose guest never answered and were restored again.")
+	fmt.Fprintln(w, "# TYPE kling_restore_dead_copies_total counter")
+	fmt.Fprintf(w, "kling_restore_dead_copies_total %d\n", machine.CopiasMuertas())
 	// Memoria del host (0 si no hay /proc, p. ej. en dev sobre macOS).
 	fmt.Fprintln(w, "# HELP kling_available_mib Host MemAvailable in MiB (/proc/meminfo).")
 	fmt.Fprintln(w, "# TYPE kling_available_mib gauge")
@@ -301,6 +304,32 @@ func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
 		fmt.Fprintf(w, "kling_operation_duration_ms_bucket{kind=%q,le=\"+Inf\"} %d\n", k, h.Cuenta)
 		fmt.Fprintf(w, "kling_operation_duration_ms_sum{kind=%q} %d\n", k, h.Suma)
 		fmt.Fprintf(w, "kling_operation_duration_ms_count{kind=%q} %d\n", k, h.Cuenta)
+	}
+
+	// Cada creación desde un snapshot, desde la entrada a runFromCon. El de
+	// kind="restore" de arriba solo cubre la carga (compatibilidad).
+	fmt.Fprintln(w, "# HELP kling_create_duration_ms Total duration of each successful creation from a snapshot, in ms, from the entry to the restore until the copy is ready.")
+	fmt.Fprintln(w, "# TYPE kling_create_duration_ms histogram")
+	histo := func(name, label string, h machine.Histograma) {
+		var acum int64
+		for i, l := range machine.LimitesDuracionMS {
+			if i < len(h.Cubos) {
+				acum += h.Cubos[i]
+			}
+			fmt.Fprintf(w, "%s_bucket{%sle=\"%d\"} %d\n", name, label, l, acum)
+		}
+		fmt.Fprintf(w, "%s_bucket{%sle=\"+Inf\"} %d\n", name, label, h.Cuenta)
+		if label != "" {
+			label = "{" + strings.TrimSuffix(label, ",") + "}"
+		}
+		fmt.Fprintf(w, "%s_sum%s %d\n", name, label, h.Suma)
+		fmt.Fprintf(w, "%s_count%s %d\n", name, label, h.Cuenta)
+	}
+	histo("kling_create_duration_ms", "", t.DuracionCreacion)
+	fmt.Fprintln(w, "# HELP kling_create_phase_ms Duration of each phase of a creation from a snapshot, in ms (phases do not overlap: their sum is kling_create_duration_ms).")
+	fmt.Fprintln(w, "# TYPE kling_create_phase_ms histogram")
+	for _, f := range machine.FasesCreacion {
+		histo("kling_create_phase_ms", fmt.Sprintf("phase=%q,", f), t.FasesCreacionH[f])
 	}
 
 	// La suma por fase de los despertares que salieron bien: dividida por

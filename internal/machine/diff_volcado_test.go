@@ -526,3 +526,60 @@ func TestHuecosFiables(t *testing.T) {
 		t.Error("un directorio que no existe tiene huecos fiables")
 	}
 }
+
+// El seguimiento de páginas sucias protege contra escritura toda la RAM del
+// invitado: cada primera escritura es una salida de EPT. Una copia on_ttl=remove
+// nunca se congela, así que no debe pagarlo.
+func TestCargarConSeguimiento(t *testing.T) {
+	t.Setenv("KLING_DIFF_FREEZE", "")
+	if !congelarEnDiff() {
+		t.Skip("este backend no congela en diferencial")
+	}
+	casos := []struct {
+		porImagen bool
+		onTTL     string
+		quiere    bool
+	}{
+		{false, api.OnTTLFreeze, true},
+		{false, "", true},
+		{false, api.OnTTLRemove, false},
+		{true, api.OnTTLFreeze, false},
+	}
+	for _, c := range casos {
+		if got := cargarConSeguimiento(c.porImagen, c.onTTL); got != c.quiere {
+			t.Errorf("cargarConSeguimiento(%v,%q)=%v, quiero %v", c.porImagen, c.onTTL, got, c.quiere)
+		}
+	}
+}
+
+// Una copia nacida sin seguimiento (sin DiffBase) que alguien congela a mano
+// vuelca la memoria entera, no un diferencial.
+func TestFreezeSinSeguimientoPideVolcadoCompleto(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
+	id := newID()
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest(id)
+	m.mu.Lock()
+	mc.MemMiB = 1
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+	falso.enGancho(func(metodo, ruta string) {
+		if metodo == http.MethodPut && ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("snap"), 0o644)
+			escribirPaginas(t, filepath.Join(dir, "mem.file"), paginaDe('A'))
+		}
+	})
+	if _, err := m.Freeze(context.Background(), id); err != nil {
+		t.Fatalf("Freeze: %v", err)
+	}
+	llam := falso.llamadasA(http.MethodPut, "/snapshot/create")
+	if len(llam) != 1 || strings.Contains(string(llam[0].Cuerpo), "Diff") {
+		t.Fatalf("esperaba un volcado completo, vi %v", llam)
+	}
+}
