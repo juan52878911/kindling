@@ -69,14 +69,14 @@ func TestResyncCopiaConAgenteNoSeEntregaSinRespuesta(t *testing.T) {
 			}}
 			capturarLog(t)
 			snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now(), ConAgente: true}
-			if _, err := m.resyncCopia(context.Background(), "x", snap); err == nil {
+			if _, err := m.resyncCopia(context.Background(), "x", snap, 0); err == nil {
 				t.Fatal("se entregó una copia cuyo agente no contestó")
 			}
 			// Sin el campo (un dorado anterior): un puerto vacío (RST) se
 			// entrega; un corte (EOF/RST de conexión) es fallo desde I1-A,
 			// salvo en macOS, donde el reenvío cierra así si no hay nadie.
 			snap.ConAgente = false
-			_, err := m.resyncCopia(context.Background(), "x", snap)
+			_, err := m.resyncCopia(context.Background(), "x", snap, 0)
 			if corte := nombre == "corte" && runtime.GOOS != "darwin"; corte != (err != nil) {
 				t.Fatalf("sin con_agente (%s): err=%v", nombre, err)
 			}

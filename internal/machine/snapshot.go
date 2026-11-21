@@ -1451,6 +1451,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 // (vCPU, memoria, disco, exec), y lo propio de la máquina se le da tras el
 // resync. Para quien la ve, una máquina arrancada en frío.
 func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
+	// Una copia que no se pone viva se descarta y se restaura otra, una vez
+	// (copia_muerta.go).
+	return conCopiaDeRepuesto(ctx, req.Name, func() (*api.Machine, error) {
+		return m.runFromUna(ctx, req, ai)
+	})
+}
+
+// runFromUna es una restauración de runFromCon.
+func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
 	// Las fases, en el log, solo de las de un snapshot por imagen: es lo que
 	// sustituye a un arranque en frío y lo que hay que poder comparar.
 	fases := nuevoCronoCreacion()
@@ -2060,8 +2069,11 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	fases.marca(fcResume)
 	// Si el agente debía contestar y no lo hace, la copia no se entrega
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
-	resync, err := m.resyncCopia(ctx, id, snap)
+	resync, err := m.resyncCopia(ctx, id, snap, pid)
 	if err != nil {
+		// El diagnóstico (otra goroutine) necesita el VMM vivo.
+		esperarDiagnostico(resync.diag)
+		log.Printf("%s: discarding the copy %s of snapshot %s (%v)", mc.Name, shortID(id), req.From, err)
 		return m.descartarCopia(id, soltarCiclo, abortar, fmt.Errorf("snapshot %s: %w", req.From, err))
 	}
 	fases.marca(fcResync)
