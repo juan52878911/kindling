@@ -368,6 +368,146 @@ paths:
           $ref: "#/components/responses/Error"
         "504":
           $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/code:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Ejecuta código Python (EXPERIMENTAL)
+      description: |
+        **Experimental**: versión mínima de `/code` del execd de OpenSandbox.
+        Ejecuta `code` en el contexto `context_id` (el estado persiste entre
+        ejecuciones) o, sin él, en uno efímero que se borra al acabar. La
+        respuesta es un flujo NDJSON de `CodeEvent` que siempre termina en
+        `done`. Un error del código llega como evento `error` con el traceback
+        (la respuesta sigue siendo 200). Sin salidas ricas de Jupyter. Sin
+        `python3` en la imagen, 422. Código de hasta 1 MiB (413), plazo por
+        ejecución `timeout_seconds` (60 por defecto, 600 máximo).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeRequest"
+      responses:
+        "200":
+          description: Flujo NDJSON
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/CodeEvent"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/code/contexts:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Crea un contexto de código (EXPERIMENTAL)
+      description: |
+        **Experimental**. Un contexto es un proceso de fondo del sandbox que
+        guarda las variables entre ejecuciones. Tope de 8 por sandbox (429).
+        Sin `python3` en la imagen, 422.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeContextRequest"
+      responses:
+        "201":
+          description: Contexto creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeContext"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [sandboxes]
+      summary: Lista los contextos de código del sandbox (EXPERIMENTAL)
+      responses:
+        "200":
+          description: Contextos vivos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CodeContext"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/code/contexts/{cid}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: cid
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [sandboxes]
+      summary: Ve un contexto de código (EXPERIMENTAL)
+      responses:
+        "200":
+          description: El contexto
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeContext"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [sandboxes]
+      summary: Borra un contexto de código y mata su proceso (EXPERIMENTAL)
+      responses:
+        "204":
+          description: Borrado
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/processes:
     parameters:
       - $ref: "#/components/parameters/id"
@@ -1503,6 +1643,70 @@ components:
         timeout_seconds:
           type: integer
         max_output_bytes:
+          type: integer
+    CodeContextRequest:
+      type: object
+      properties:
+        language:
+          type: string
+          enum: [python]
+        cwd:
+          type: string
+          description: Directorio de trabajo (vacío = el del agente)
+    CodeContext:
+      type: object
+      properties:
+        id:
+          type: string
+        language:
+          type: string
+        pid:
+          type: integer
+          description: pid del proceso del contexto (en /processes)
+        cwd:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+    CodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+        context_id:
+          type: string
+          description: Vacío = contexto efímero
+        language:
+          type: string
+          enum: [python]
+        timeout_seconds:
+          type: integer
+          description: Plazo por ejecución (60 por defecto, 600 máximo)
+    CodeEvent:
+      type: object
+      description: |
+        `stdout` y `stderr` traen `text`; `result` el `repr` del valor de la
+        última expresión; `error`, `ename`, `evalue` y `traceback`; `done`
+        (`ok`, `duration_ms`) cierra el flujo.
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [stdout, stderr, result, error, done]
+        text:
+          type: string
+        ename:
+          type: string
+        evalue:
+          type: string
+        traceback:
+          type: array
+          items:
+            type: string
+        ok:
+          type: boolean
+        duration_ms:
           type: integer
     ProcessInfo:
       type: object
