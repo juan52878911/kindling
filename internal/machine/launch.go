@@ -147,10 +147,19 @@ func (m *Manager) enterLaunch(ctx context.Context) (func(), error) {
 	if m.launchGate == nil {
 		return func() {}, nil
 	}
+	m.ajustarPuerta()
 	select {
 	case m.launchGate <- struct{}{}:
 		var once sync.Once
-		return func() { once.Do(func() { <-m.launchGate }) }, nil
+		return func() {
+			once.Do(func() {
+				// Con el tope bajado, el hueco soltado se queda retenido
+				// (sigue ocupado en el canal) en vez de volver a la cola.
+				if !m.retenerAlSoltar() {
+					<-m.launchGate
+				}
+			})
+		}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
