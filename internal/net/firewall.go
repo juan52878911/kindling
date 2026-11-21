@@ -1,6 +1,7 @@
 package net
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -225,9 +226,12 @@ func sysctlsIPv6(nsIf string) []string {
 	return s
 }
 
+// hayIp6tables dice si hay ip6tables en el host. Sustituible en tests.
+var hayIp6tables = func() bool { _, err := exec.LookPath("ip6tables"); return err == nil }
+
 // applyIPv6Barrier es la capa 2 de la barrera IPv6 (ver sysctlsIPv6).
 func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
-	if _, err := exec.LookPath("ip6tables"); err != nil {
+	if !hayIp6tables() {
 		log.Printf("net: ip6tables no está instalado; %s queda solo con la barrera de sysctl para IPv6", n.NS)
 		return nil
 	}
@@ -445,13 +449,17 @@ const esperaRestore = 5 * time.Second
 // ejecutarRestore lanza iptables-restore --noflush en el netns ns con entrada
 // por stdin. Sustituible en tests.
 var ejecutarRestore = func(ns, entrada string) ([]byte, error) {
-	args := []string{"netns", "exec", ns, "iptables-restore"}
+	args := []string{"iptables-restore"}
 	if restoreSoportaWait() {
 		args = append(args, "--wait="+esperaXtables)
 	}
-	cmd := exec.Command("ip", append(args, "--noflush")...)
+	// Dentro del netns con setns (lanzador_fc.go), sin `ip netns exec`.
+	var out bytes.Buffer
+	cmd := exec.Command(args[0], append(args[1:], "--noflush")...)
 	cmd.Stdin = strings.NewReader(entrada)
-	return cmd.CombinedOutput()
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := ejecutarEnNetns(ns, cmd)
+	return out.Bytes(), err
 }
 
 // restoreSoportaWait dice si el iptables-restore instalado entiende --wait
