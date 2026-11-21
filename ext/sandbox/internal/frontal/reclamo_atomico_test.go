@@ -123,3 +123,43 @@ func TestReclamoAtomicoCienCreacionesSobreDiez(t *testing.T) {
 		t.Fatalf("claimed %d (want 10), created %d (want 90)", reclamadas, f.creadas)
 	}
 }
+
+// pedidosFalsos apunta los avisos de reposición que recibe el frontal.
+type pedidosFalsos struct {
+	mu sync.Mutex
+	l  []string
+}
+
+func (p *pedidosFalsos) Pedir(host, plantilla string) {
+	p.mu.Lock()
+	p.l = append(p.l, host+"/"+plantilla)
+	p.mu.Unlock()
+}
+
+func (p *pedidosFalsos) vistos() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.l...)
+}
+
+// El frontal avisa al fondo tras reclamar con éxito y también cuando no hay
+// copia que reclamar (y la creación cae al camino frío).
+func TestReclamoAtomicoAvisaAlRellenador(t *testing.T) {
+	f := nuevoFalso(t)
+	f.conReclamo = true
+	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
+	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, s := montar(t, map[string]*falso{"a": f})
+	rell := &pedidosFalsos{}
+	s.rellena = rell
+
+	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"}) // reclama
+	if v := rell.vistos(); len(v) != 1 || v[0] != "a/node" {
+		t.Fatalf("after a claim: %v", v)
+	}
+	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"}) // pool vacío: frío
+	if v := rell.vistos(); len(v) != 2 || f.creadas != 1 {
+		t.Fatalf("after an empty pool: asked %v, created %d", v, f.creadas)
+	}
+}

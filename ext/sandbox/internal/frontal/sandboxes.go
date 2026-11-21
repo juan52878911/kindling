@@ -1068,10 +1068,20 @@ const (
 // snaps es el snapshot de la plantilla en cada host que la tiene: solo vale una
 // precalentada que salió de ESE snapshot (plantilla.LabelVersion), no de uno
 // anterior con el mismo nombre que un rebuild ya reemplazó.
+//
+// Con un daemon que anuncia sandbox-claim (api.CapabilityClaim) el reclamo es
+// UNA llamada atómica (reclamarAtomica): sin listar, sin nonce y sin pausa. El
+// camino de dos fases queda solo para un daemon anterior.
 func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearPeticion, etiquetas map[string]string, snaps map[string]*api.Snapshot) (*hosts.Host, *api.Machine) {
 	sirve := func(h *hosts.Host) bool { return snaps[h.Nombre] != nil }
 	for _, h := range s.reg.Candidatos(ctx, sirve) {
 		version := plantilla.VersionDe(snaps[h.Nombre])
+		if s.hostReclama(ctx, h) {
+			if out := s.reclamarAtomica(ctx, h, t, p, etiquetas, version); out != nil {
+				return h, out
+			}
+			continue
+		}
 		listada := time.Now()
 		lctx, cancel := context.WithTimeout(ctx, plazoDaemon)
 		ms, err := h.Cliente.Sandboxes(lctx)
@@ -1098,6 +1108,87 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 		}
 	}
 	return nil, nil
+}
+
+// capHost es lo que se sabe de si un host sirve el reclamo atómico.
+type capHost struct {
+	reclama bool
+	hasta   time.Time // cero: para siempre
+}
+
+// vidaSinReclamo es cuánto se recuerda que un daemon NO anuncia sandbox-claim:
+// poco, para que un daemon actualizado sin reiniciar el gateway la pase a usar.
+const vidaSinReclamo = time.Minute
+
+// hostReclama dice si el daemon del host anuncia sandbox-claim. Se consulta una
+// vez (GET /info) y se cachea; si la consulta falla no se cachea y esa petición
+// usa las dos fases, que funcionan con cualquier daemon.
+func (s *Servidor) hostReclama(ctx context.Context, h *hosts.Host) bool {
+	s.mCap.Lock()
+	c, ok := s.capReclamo[h.Nombre]
+	s.mCap.Unlock()
+	if ok && (c.hasta.IsZero() || time.Now().Before(c.hasta)) {
+		return c.reclama
+	}
+	ictx, cancel := context.WithTimeout(ctx, plazoDaemon)
+	defer cancel()
+	info, err := h.Cliente.Info(ictx)
+	if err != nil {
+		return false
+	}
+	c = capHost{reclama: info.Has(api.CapabilityClaim)}
+	if !c.reclama {
+		c.hasta = time.Now().Add(vidaSinReclamo)
+	}
+	s.mCap.Lock()
+	s.capReclamo[h.Nombre] = c
+	s.mCap.Unlock()
+	return c.reclama
+}
+
+// pedirRelleno avisa al fondo de que en ese host falta de esa plantilla.
+func (s *Servidor) pedirRelleno(h *hosts.Host, plantilla string) {
+	if s.rellena != nil {
+		s.rellena.Pedir(h.Nombre, plantilla)
+	}
+}
+
+// reclamarAtomica reclama una precalentada con una sola llamada al daemon
+// (POST /sandboxes/claim): él elige, etiqueta y renueva bajo su cerrojo, así
+// que no hace falta listar ni nonce ni pausa. Devuelve nil si no hay copia o
+// el reclamo falla; en ambos casos y en el de éxito avisa al fondo.
+//
+// Además de las etiquetas del tenant pone LabelReclamo: un frontal anterior
+// que comparta el daemon la ve como reclamada en su relectura.
+func (s *Servidor) reclamarAtomica(ctx context.Context, h *hosts.Host, t *Tenant, p CrearPeticion, etiquetas map[string]string, version string) *api.Machine {
+	defer s.pedirRelleno(h, p.Template)
+	labels := make(map[string]string, len(etiquetas)+1)
+	for k, v := range etiquetas {
+		labels[k] = v
+	}
+	labels[LabelReclamo] = "1"
+	match := map[string]string{api.LabelKind: api.KindSandbox, LabelTemplate: p.Template}
+	if version != "" {
+		match[plantilla.LabelVersion] = version
+	}
+	ctx, cancel := context.WithTimeout(ctx, plazoDaemon)
+	defer cancel()
+	out, err := h.Cliente.ClaimSandbox(ctx, api.ClaimRequest{
+		Match: match, Absent: []string{LabelTenant, LabelReclamo},
+		Labels: labels, TTLSeconds: p.TTLSeconds,
+	})
+	if err != nil {
+		if !api.IsNoClaimable(err) {
+			s.log.Printf("frontal: claiming from %s: %v", h.Nombre, err)
+		}
+		return nil
+	}
+	if !esSandboxDe(out, t) {
+		s.log.Printf("frontal: claim on %s/%s came back without the tenant label; removing it", h.Nombre, out.ID)
+		s.soltarMediaReclamada(ctx, h, out.ID, "claimed for another tenant")
+		return nil
+	}
+	return out
 }
 
 // marcarReclamo aparta la máquina para esta petición si nadie de este proceso

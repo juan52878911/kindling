@@ -161,7 +161,12 @@ func cmdGateway(args []string) error {
 		}
 		ing.Secreto = []byte(strings.TrimSpace(string(b)))
 	}
+	// El fondo de precalentadas: lo que hace que crear un sandbox de una
+	// plantilla popular cueste una llamada HTTP en vez de un thaw. El frontal
+	// le avisa (Pedir) al gastar una para que se reponga sin esperar al tic.
+	relleno := pool.Nuevo(reg, 30*time.Second, log.New(os.Stderr, "", log.LstdFlags))
 	srv, err := frontal.Nuevo(frontal.Opciones{
+		Rellenador:       relleno,
 		Hosts:            reg,
 		Tenants:          tenants,
 		Almacen:          almacen,
@@ -181,9 +186,7 @@ func cmdGateway(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	srv.Vigilar(ctx)
-	// El fondo de precalentadas: lo que hace que crear un sandbox de una
-	// plantilla popular cueste una llamada HTTP en vez de un thaw.
-	pool.Nuevo(reg, 30*time.Second, log.New(os.Stderr, "", log.LstdFlags)).Vigilar(ctx)
+	relleno.Vigilar(ctx)
 
 	ln, err := escuchar(a.Listen, a.TLSCert, a.TLSKey, *insecure)
 	if err != nil {
