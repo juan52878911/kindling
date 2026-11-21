@@ -88,6 +88,10 @@ type daemonPool struct {
 	// POST /sandboxes/{ref}/renew.
 	conReclamo bool
 	renovadas  []string
+	// inicios guarda el instante en que empezó cada creación; listados cuenta
+	// los GET /sandboxes.
+	inicios  []time.Time
+	listados int
 }
 
 func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool, string) {
@@ -133,6 +137,7 @@ func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool
 	m.HandleFunc("GET /sandboxes", func(w http.ResponseWriter, _ *http.Request) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
+		d.listados++
 		json.NewEncoder(w).Encode(d.vivas)
 	})
 	m.HandleFunc("POST /sandboxes", func(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +151,7 @@ func nuevoDaemonPool(t *testing.T, pool int, vivas ...*api.Machine) (*daemonPool
 			json.NewEncoder(w).Encode(api.Error{Message: "not enough memory", Code: api.CodeInsufficientMemory})
 			return
 		}
+		d.inicios = append(d.inicios, time.Now())
 		d.enCurso++
 		d.maxEnCurso = max(d.maxEnCurso, d.enCurso)
 		retardo := d.retardo
@@ -313,27 +319,26 @@ func TestPedirDisparaUnaVueltaSinEsperarAlTic(t *testing.T) {
 	}
 	// Se gasta una: ahora el daemon solo tiene 1 viva y falta otra.
 	d.mu.Lock()
-	d.vivas = []*api.Machine{{ID: "viva01234567890", State: api.StateRunning, Labels: map[string]string{
-		api.LabelKind: api.KindSandbox, LabelTemplate: "ts"}}}
+	d.vivas = nil // el fondo vacío no espera
 	d.mu.Unlock()
 	ini := time.Now()
 	for i := 0; i < 50; i++ {
 		r.Pedir("h1", "ts")
 	}
-	if !esperar(3, 2*time.Second) {
+	if !esperar(4, 2*time.Second) {
 		t.Fatal("Pedir did not trigger a round")
 	}
 	if el := time.Since(ini); el > 50*time.Millisecond {
 		t.Fatalf("the round took %s after Pedir", el)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if n := creadas(); n != 3 {
-		t.Fatalf("50 Pedir made %d creations in total, want 3 (one round)", n)
+	if n := creadas(); n != 4 {
+		t.Fatalf("50 Pedir made %d creations in total, want 4 (one round)", n)
 	}
 	// Un host o plantilla ajenos no crean nada.
 	r.Pedir("h1", "otra")
 	time.Sleep(100 * time.Millisecond)
-	if n := creadas(); n != 3 {
+	if n := creadas(); n != 4 {
 		t.Fatalf("Pedir of another template created: %d", n)
 	}
 }
@@ -391,5 +396,121 @@ func TestRellenoRetrocedeTrasUnFallo(t *testing.T) {
 	defer d.mu.Unlock()
 	if d.intentos != 1 {
 		t.Fatalf("%d attempts across two rounds, want 1", d.intentos)
+	}
+}
+
+// vivasDe devuelve n precalentadas sanas de la plantilla ts.
+func vivasDe(n int) []*api.Machine {
+	var v []*api.Machine
+	for i := 0; i < n; i++ {
+		v = append(v, precalentada(fmt.Sprintf("viva%011d", i), api.StateRunning))
+	}
+	return v
+}
+
+// I2-E: tras una ráfaga de reclamos el relleno espera 300 ms desde el último
+// (para no competir con las primeras peticiones del que reclama) y crea de 2 en
+// 2, no de 4 en 4.
+func TestPedirEsperaYRellenaDeDosEnDos(t *testing.T) {
+	d, sock := nuevoDaemonPool(t, 10, vivasDe(10)...)
+	d.retardo = 30 * time.Millisecond
+	r := nuevoRell(sock)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.Vigilar(ctx)
+	time.Sleep(100 * time.Millisecond) // vuelta inicial: no hace nada
+	d.mu.Lock()
+	d.vivas = vivasDe(2) // la ráfaga gastó 8
+	d.mu.Unlock()
+	var ultimo time.Time
+	for i := 0; i < 10; i++ {
+		r.Pedir("h1", "ts")
+		ultimo = time.Now()
+		time.Sleep(5 * time.Millisecond)
+	}
+	fin := time.Now().Add(3 * time.Second)
+	for time.Now().Before(fin) {
+		d.mu.Lock()
+		n := d.creadas
+		d.mu.Unlock()
+		if n >= 8 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.creadas != 8 {
+		t.Fatalf("created %d, want 8", d.creadas)
+	}
+	if espera := d.inicios[0].Sub(ultimo); espera < 280*time.Millisecond {
+		t.Errorf("first creation %s after the last claim, want >= 300ms", espera)
+	}
+	if d.maxEnCurso > 2 {
+		t.Errorf("%d creations at once, want at most 2", d.maxEnCurso)
+	}
+}
+
+// Con el fondo de la plantilla vacío no hay espera: el siguiente reclamo ya
+// cae al restore.
+func TestPedirConElFondoVacioNoEspera(t *testing.T) {
+	d, sock := nuevoDaemonPool(t, 2, vivasDe(2)...)
+	r := nuevoRell(sock)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.Vigilar(ctx)
+	time.Sleep(100 * time.Millisecond)
+	d.mu.Lock()
+	d.vivas = nil
+	d.mu.Unlock()
+	ini := time.Now()
+	r.Pedir("h1", "ts")
+	for time.Since(ini) < 2*time.Second {
+		d.mu.Lock()
+		n := len(d.inicios)
+		d.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.inicios) == 0 || d.inicios[0].Sub(ini) > 150*time.Millisecond {
+		t.Fatalf("empty pool waited: starts %v", d.inicios)
+	}
+}
+
+// Un pedido que llega con una vuelta en curso no se pierde: se atiende al acabar
+// ésta, sin esperar al tic.
+func TestPedidoConVueltaEnCursoSeAtiendeAlAcabar(t *testing.T) {
+	d, sock := nuevoDaemonPool(t, 3, vivasDe(3)...)
+	r := nuevoRell(sock)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.Vigilar(ctx)
+	time.Sleep(100 * time.Millisecond)
+	d.mu.Lock()
+	d.vivas = vivasDe(1)
+	d.retardo = 600 * time.Millisecond
+	d.mu.Unlock()
+	hecha := make(chan struct{})
+	go func() { r.Vuelta(ctx); close(hecha) }()
+	time.Sleep(50 * time.Millisecond)
+	r.Pedir("h1", "ts")
+	time.Sleep(450 * time.Millisecond) // pasa la espera con la vuelta aún en curso
+	d.mu.Lock()
+	antes := d.listados
+	d.mu.Unlock()
+	select {
+	case <-hecha:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the round never ended")
+	}
+	time.Sleep(300 * time.Millisecond)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.listados <= antes {
+		t.Errorf("listings %d -> %d: the request was dropped", antes, d.listados)
 	}
 }
