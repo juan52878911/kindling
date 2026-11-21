@@ -1451,6 +1451,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 // (vCPU, memoria, disco, exec), y lo propio de la máquina se le da tras el
 // resync. Para quien la ve, una máquina arrancada en frío.
 func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
+	// Una copia que no se pone viva se descarta y se restaura otra, una vez
+	// (copia_muerta.go).
+	return conCopiaDeRepuesto(ctx, req.Name, func() (*api.Machine, error) {
+		return m.runFromUna(ctx, req, ai)
+	})
+}
+
+// runFromUna es una restauración de runFromCon.
+func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
 	// Las fases, en el log, solo de las de un snapshot por imagen: es lo que
 	// sustituye a un arranque en frío y lo que hay que poder comparar.
 	fases := nuevoCronoCreacion()
@@ -1826,15 +1835,15 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		ai.id = id
 	}
 
-	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa);
-	// si no puede, no se lanza. Va ANTES de la puerta: la escritura (fsync) no
-	// debe ocupar un hueco de las restauraciones que cargan en KVM.
-	if err := m.persistirYa(); err != nil {
-		m.desmontarRed(netcfg, id)
-		m.fail(mc, err)
-		return nil, err
-	}
-	fases.marca(fcPersist)
+	// La máquina se escribe en disco (persistirYa) EN PARALELO con la puerta y
+	// la restauración: el fsync no está en el camino crítico ni ocupa un hueco
+	// de las restauraciones que cargan en KVM. Se espera justo antes de entregar
+	// la máquina (tras el resync), y en cualquier salida antes (defer), para que
+	// ninguna escritura sobreviva a su borrado. Si falla, se aborta como antes. Una caída a medias deja un VMM sin estado
+	// en disco, que killOrphanVMMs mata, y su directorio y su red marcada los
+	// barren sweepMachineDirs y barrerNamespaces (no están en byID).
+	esperarPersist := enParalelo(m.persistirYa)
+	defer func() { _ = esperarPersist() }()
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
@@ -2060,11 +2069,19 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	fases.marca(fcResume)
 	// Si el agente debía contestar y no lo hace, la copia no se entrega
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
-	resync, err := m.resyncCopia(ctx, id, snap)
+	resync, err := m.resyncCopia(ctx, id, snap, pid)
 	if err != nil {
+		// El diagnóstico (otra goroutine) necesita el VMM vivo.
+		esperarDiagnostico(resync.diag)
+		log.Printf("%s: discarding the copy %s of snapshot %s (%v)", mc.Name, shortID(id), req.From, err)
 		return m.descartarCopia(id, soltarCiclo, abortar, fmt.Errorf("snapshot %s: %w", req.From, err))
 	}
 	fases.marca(fcResync)
+	// La escritura de la máquina tiene que haber acabado antes de entregarla.
+	if err := esperarPersist(); err != nil {
+		return abortar(err)
+	}
+	fases.marca(fcPersist)
 	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
 	// agente lanza el servicio. Sin resync no: sus procesos nacerían con el
 	// CSPRNG de la plantilla.

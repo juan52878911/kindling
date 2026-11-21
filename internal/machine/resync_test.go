@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,12 +186,11 @@ func TestAgenteEscucha(t *testing.T) {
 }
 
 // Una copia de un dorado (run -from, fork) cuyo agente falla el /resync no se
-// entrega: se reintenta una vez y, si vuelve a fallar, error. Antes se daba
-// por running con el reloj y el CSPRNG del dorado. Si el reintento sale bien,
-// sigue.
+// entrega: un solo intento y error (errCopiaMuerta; runFrom restaura otra
+// copia). Antes se daba por running con el reloj y el CSPRNG del dorado.
 func TestResyncCopiaNoEntregaSinResync(t *testing.T) {
 	var mu sync.Mutex
-	n, fallos := 0, 2
+	n, fallos := 0, 1
 	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
@@ -203,17 +204,47 @@ func TestResyncCopiaNoEntregaSinResync(t *testing.T) {
 	}))
 	capturarLog(t)
 	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now()}
-	if _, err := m.resyncCopia(context.Background(), id, snap); err == nil {
-		t.Fatal("resyncCopia entregó una copia cuyo agente no resincronizó")
+	if _, err := m.resyncCopia(context.Background(), id, snap, 0); !errors.Is(err, errCopiaMuerta) {
+		t.Fatalf("resyncCopia entregó una copia cuyo agente no resincronizó: %v", err)
 	}
 	mu.Lock()
-	if n != 2 {
-		t.Fatalf("el agente recibió %d intentos, quería 2 (uno y el reintento)", n)
+	if n != 1 {
+		t.Fatalf("el agente recibió %d intentos, quería 1 (sin segundo POST a la misma copia)", n)
 	}
-	n, fallos = 0, 1
+	n, fallos = 0, 0
 	mu.Unlock()
-	if r, err := m.resyncCopia(context.Background(), id, snap); err != nil || !r.ok {
+	if r, err := m.resyncCopia(context.Background(), id, snap, 0); err != nil || !r.ok {
 		t.Fatalf("con el reintento bien: ok=%v err=%v", r.ok, err)
+	}
+}
+
+// Una copia cuyo agente no contesta no retiene la creación 12 s: el primer
+// intento tiene plazo corto y no hay segundo POST a la misma copia.
+func TestResyncCopiaMudaNoEspera12s(t *testing.T) {
+	var pedidos atomic.Int32
+	liberar := make(chan struct{})
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pedidos.Add(1)
+		select {
+		case <-liberar:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(liberar) })
+	capturarLog(t)
+	snap := &api.Snapshot{Name: "dorado", CreatedAt: time.Now(), ConAgente: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ini := time.Now()
+	_, err := m.resyncCopia(ctx, id, snap, 0)
+	if err == nil {
+		t.Fatal("una copia muda se dio por buena")
+	}
+	if d := time.Since(ini); d > 2500*time.Millisecond {
+		t.Errorf("tardó %v, quería < 2,5 s (plazo corto, un solo intento)", d)
+	}
+	if n := pedidos.Load(); n != 1 {
+		t.Errorf("%d POST a la misma copia, quería 1", n)
 	}
 }
 
@@ -223,7 +254,7 @@ func TestResyncCopiaSinAgenteSeEntrega(t *testing.T) {
 		"x": {ID: "x", Name: "x", Image: "sin-agente", Forwards: map[string]string{"8080": dirSinNadie}},
 	}}
 	capturarLog(t)
-	if _, err := m.resyncCopia(context.Background(), "x", &api.Snapshot{Name: "d", CreatedAt: time.Now()}); err != nil {
+	if _, err := m.resyncCopia(context.Background(), "x", &api.Snapshot{Name: "d", CreatedAt: time.Now()}, 0); err != nil {
 		t.Fatalf("sin agente: %v", err)
 	}
 }

@@ -96,6 +96,24 @@ func claveSnapshot(s *api.Snapshot) string {
 // se intenta: sobrevive a reinicios del daemon. Las anteriores al campo siguen
 // por resyncGuest, que recuerda en memoria lo que descubra.
 func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snapshot) resultadoResync {
+	return m.resyncInstanciaOpc(ctx, id, snap, opcionesResync{})
+}
+
+// opcionesResync afina una llamada a resyncGuestCon. El valor cero es el
+// comportamiento de siempre.
+type opcionesResync struct {
+	// pid es el del VMM de la máquina, si quien llama lo conoce: runFrom no lo
+	// escribe en la máquina hasta entregarla, y el diagnóstico de un fallo leía
+	// un 0 ("no pid to inspect").
+	pid int
+	// plazo, si es >0, acota el intento entero (por debajo del habitual).
+	plazo time.Duration
+	// diagAsync saca el diagnóstico de un fallo a otra goroutine
+	// (resultadoResync.diag avisa de cuándo acaba).
+	diagAsync bool
+}
+
+func (m *Manager) resyncInstanciaOpc(ctx context.Context, id string, snap *api.Snapshot, opc opcionesResync) resultadoResync {
 	if snap.SinAgente {
 		return resultadoResync{}
 	}
@@ -103,27 +121,25 @@ func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snap
 		// Se guardó con el agente escuchando (o con AllowExec, que lo exige:
 		// sin agente no hay exec): si ahora nadie contesta, es un fallo (S4),
 		// y nada se recuerda.
-		return m.resyncGuestCon(ctx, id, "", api.ResyncInstance, true)
+		return m.resyncGuestOpc(ctx, id, "", api.ResyncInstance, true, opc)
 	}
-	return m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
+	return m.resyncGuestOpc(ctx, id, claveSnapshot(snap), api.ResyncInstance, false, opc)
 }
 
 // resyncCopia es el resync de una copia recién restaurada de snap (run -from,
-// fork). Un agente que debía contestar y no lo hizo (un plazo, un 5xx: un
-// host cargado en una tanda de forks) dejaba antes la copia entregada igual,
-// con el reloj, el machine-id y la generación del dorado, y en macOS (sin
-// VMGenID) el CSPRNG de sus hermanas; solo quedaba un aviso en el log. Ahora
-// se reintenta una vez y, si vuelve a fallar, error: quien restaura no la
-// entrega, como con un snapshot por imagen. Un agente anterior o una imagen
-// sin agente no son fallo (resultadoResync.fallo).
-func (m *Manager) resyncCopia(ctx context.Context, id string, snap *api.Snapshot) (resultadoResync, error) {
-	res := m.resyncInstancia(ctx, id, snap)
-	if !res.fallo {
-		return res, nil
-	}
-	log.Printf("%s: the resync after restoring from %s failed; retrying it once", shortID(id), snap.Name)
-	if res = m.resyncInstancia(ctx, id, snap); res.fallo {
-		return res, errors.New("the guest agent did not resync after the restore, so this copy would keep the clock and random state of the snapshot")
+// fork), cuyo VMM es pid. Un agente que debía contestar y no lo hizo dejaba
+// antes la copia entregada igual, con el reloj, el machine-id y la generación
+// del dorado, y en macOS (sin VMGenID) el CSPRNG de sus hermanas. Ahora no se
+// entrega: un solo intento, con plazo corto (plazoCopiaViva), y si falla el
+// error envuelve errCopiaMuerta para que runFrom la descarte y restaure OTRA
+// copia, en vez de insistir 6 s más a la misma (que no contestó nunca en los 22
+// casos medidos). Un agente anterior o una imagen sin agente no son fallo
+// (resultadoResync.fallo).
+func (m *Manager) resyncCopia(ctx context.Context, id string, snap *api.Snapshot, pid int) (resultadoResync, error) {
+	res := m.resyncInstanciaOpc(ctx, id, snap, opcionesResync{pid: pid, plazo: plazoCopiaViva(), diagAsync: true})
+	if res.fallo {
+		copiasMuertas.Add(1)
+		return res, fmt.Errorf("%w: the guest agent did not resync after the restore, so this copy would keep the clock and random state of the snapshot", errCopiaMuerta)
 	}
 	return res, nil
 }
@@ -144,6 +160,9 @@ type resultadoResync struct {
 	ok    bool
 	listo *api.GuestReady
 	fallo bool
+	// diag se cierra cuando acaba el diagnóstico del fallo, que con
+	// opcionesResync.diagAsync va en otra goroutine; nil si no hay.
+	diag <-chan struct{}
 }
 
 // resyncGuest resincroniza el invitado id. No devuelve error: un agente viejo
@@ -158,6 +177,11 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resul
 // resyncGuestCon es resyncGuest sabiendo, con conAgente, que el invitado
 // tenía agente: entonces "nadie escucha" también es un fallo.
 func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, conAgente bool) resultadoResync {
+	return m.resyncGuestOpc(ctx, id, clave, kind, conAgente, opcionesResync{})
+}
+
+// resyncGuestOpc es resyncGuestCon con opc.
+func (m *Manager) resyncGuestOpc(ctx context.Context, id, clave, kind string, conAgente bool, opc opcionesResync) resultadoResync {
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr, image, name string
@@ -167,6 +191,9 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 		addr, image, name, ag, pid = mc.Addr(api.GuestPort), mc.Image, mc.Name, mc.Agent, mc.PID
 	}
 	m.mu.RUnlock()
+	if opc.pid > 0 {
+		pid = opc.pid
+	}
 	if addr == "" {
 		return resultadoResync{}
 	}
@@ -188,6 +215,10 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 	if conAgente {
 		plazo = plazoResyncCarga(int(enVuelo), runtime.NumCPU())
 		reintento = plazo
+	}
+	if opc.plazo > 0 {
+		plazo = min(plazo, opc.plazo)
+		reintento = min(reintento, plazo)
 	}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, plazo)
@@ -223,10 +254,22 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 		// sí debía contestar. Nadie escuchando también lo es si el dorado se
 		// guardó con el agente escuchando.
 		fallo := !errors.Is(err, errResyncNoSoportado) && (conAgente || !errors.Is(err, errResyncNadie))
+		var diag <-chan struct{}
 		if fallo {
-			m.diagnosticarResync(id, name, pid, int(enVuelo), err)
+			if opc.diagAsync {
+				// Sobre copias de los datos (id, name, pid): sin m.mu ni el
+				// cerrojo de ciclo de vida de la máquina.
+				hecho := make(chan struct{})
+				diag = hecho
+				go func(n int) {
+					defer close(hecho)
+					m.diagnosticarResync(id, name, pid, n, err)
+				}(int(enVuelo))
+			} else {
+				m.diagnosticarResync(id, name, pid, int(enVuelo), err)
+			}
 		}
-		return resultadoResync{took: took, fallo: fallo}
+		return resultadoResync{took: took, fallo: fallo, diag: diag}
 	}
 	if res.SkewMS > 1000 || res.SkewMS < -1000 {
 		log.Printf("%s: guest clock was %s off; resynced in %s", name,
