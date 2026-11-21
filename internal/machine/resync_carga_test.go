@@ -182,7 +182,7 @@ func TestDiagnosticoInvitado(t *testing.T) {
 	linea := diagnosticoInvitado(4242, "rx 5 tx 7", func() {
 		tarea("4243", "fc_vcpu 0", "1500000000 700000000 9")
 	})
-	for _, quiere := range []string{"vcpus=2", "cpu_delta=500ms", "wait_delta=500ms", "cpu_total=3500ms", "net=rx 5 tx 7"} {
+	for _, quiere := range []string{"vcpus=2", "cpu_delta=500ms", "wait_delta=500ms", "cpu_total=3.5s", "net=rx 5 tx 7"} {
 		if !strings.Contains(linea, quiere) {
 			t.Errorf("falta %q en %q", quiere, linea)
 		}

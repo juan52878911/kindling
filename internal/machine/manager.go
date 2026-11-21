@@ -4108,6 +4108,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
 	var resync resultadoResync
+	var avisoResync string
 	if m.pruebasAntesDeResync != nil {
 		m.pruebasAntesDeResync()
 	}
@@ -4117,8 +4118,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// thaw sigue hasta el final aunque quien lo pidió se vaya, y un ctx
 		// cancelado hacía que resyncGuest volviera al instante: la máquina
 		// quedaba running con el reloj y el CSPRNG de cuando se congeló. El
-		// propio resync lleva su plazo (resyncPlazo).
-		resync = m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
+		// propio resync lleva su plazo (resyncPlazo). Si falla se repite con el
+		// plazo largo (agente conocido) y, si aun así, se entrega con aviso y
+		// sigue en segundo plano (resyncTrasThaw).
+		resync, avisoResync = m.resyncTrasThaw(context.WithoutCancel(ctx), mc.ID, mc.AllowExec)
 	}
 	<-credsHechas
 	crono.marca(&crono.p.ResyncMS) // con la entrega de credenciales, que va a la vez
@@ -4193,7 +4196,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases))})
+		Message: fmt.Sprintf("thawed in %d ms%s%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases), avisoResync)})
+	if avisoResync != "" {
+		// Entregada sin ponerla en hora: se sigue intentando hasta que entre.
+		if ej, ok := m.ejecucionDe(mc.ID); ok {
+			go m.resyncThawReintentos(mc.ID, ej, mc.AllowExec || mc.Agent != nil)
+		}
+	}
 	return &out, nil
 }
 
