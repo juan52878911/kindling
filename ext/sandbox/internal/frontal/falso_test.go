@@ -103,6 +103,10 @@ type falso struct {
 	sandboxesUnaVez   sync.Once
 	sandboxesColgarN  int
 	sandboxesLlamadas int
+	// snapLista y snapUno cuentan GET /snapshots y GET /snapshots/{name};
+	// snapUnoViejo hace que la segunda ruta no exista (un daemon anterior).
+	snapLista, snapUno int
+	snapUnoViejo       bool
 	// sandboxesFalla hace fallar GET /sandboxes con un 500: un host que
 	// contesta a su sonda de estado pero no a la lista.
 	sandboxesFalla bool
@@ -162,6 +166,7 @@ func (f *falso) rutas() http.Handler {
 	})
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.snapLista++
 		out := []*api.Snapshot{}
 		for _, n := range f.snapshots {
 			out = append(out, &api.Snapshot{Name: n, AllowExec: true, Annotations: f.snapAnot[n],
@@ -174,6 +179,11 @@ func (f *falso) rutas() http.Handler {
 		nombre := r.PathValue("name")
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.snapUno++
+		if f.snapUnoViejo {
+			http.NotFound(w, r)
+			return
+		}
 		hay := false
 		for _, s := range f.snapshots {
 			hay = hay || s == nombre
@@ -182,7 +192,8 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 404, fmt.Errorf("no snapshot %q", nombre))
 			return
 		}
-		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre]})
+		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre],
+			MemMiB: f.snapMem[nombre], CreatedAt: f.snapHecho[nombre]})
 	})
 	m.HandleFunc("PUT /snapshots/{name}/annotations/{key}", func(w http.ResponseWriter, r *http.Request) {
 		var valor json.RawMessage
@@ -200,7 +211,8 @@ func (f *falso) rutas() http.Handler {
 			f.snapAnot[nombre] = map[string]json.RawMessage{}
 		}
 		f.snapAnot[nombre][clave] = valor
-		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre]})
+		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre],
+			MemMiB: f.snapMem[nombre], CreatedAt: f.snapHecho[nombre]})
 	})
 	// POST /machines y POST /machines/{ref}/commit: lo que plantilla.Construir
 	// necesita para rehacer un dorado (Run, un exec que ya sirve /machines/{ref}/exec,

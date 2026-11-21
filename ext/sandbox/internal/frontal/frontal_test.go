@@ -214,6 +214,7 @@ func TestCrearConPlantillaSoloDondeExiste(t *testing.T) {
 func TestCrearReclamaPrecalentada(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	viejo := time.Now().Add(-time.Hour)
 	pre := f.sembrar(&api.Machine{From: "sbx-node", TTLSeconds: 600, TTLAt: &viejo,
 		Labels: map[string]string{LabelTemplate: "node"}})
@@ -254,6 +255,7 @@ func TestCrearReclamaPrecalentada(t *testing.T) {
 func TestReclamarConRenovacionFallidaNoDejaLaMaquinaEtiquetada(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	f.renewFalla = true
 	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	srv, _ := montar(t, map[string]*falso{"a": f})
@@ -787,6 +789,7 @@ func TestListaSigueConUnHostCaido(t *testing.T) {
 func TestReclamarConUnHostColgadoNoParaALosDemas(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	f.sandboxesEspera, f.sandboxesEmpezado = make(chan struct{}), make(chan struct{})
 	// Sin tope de memoria total (no viene por defecto) la cuota no lista: la
@@ -832,6 +835,7 @@ func TestReclamarConUnHostColgadoNoParaALosDemas(t *testing.T) {
 func TestReclamacionesALaVezNoCompartenPrecalentada(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	srv, _ := montar(t, map[string]*falso{"a": f})
 
@@ -871,6 +875,7 @@ func TestReclamacionesALaVezNoCompartenPrecalentada(t *testing.T) {
 func TestReclamarConElClienteIdoBorraLaMediaReclamada(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
 	empezado := make(chan struct{})
 	f.renewEmpezado = empezado
