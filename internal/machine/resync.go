@@ -39,6 +39,14 @@ const resyncPlazo = 2 * time.Second
 // cada restauración.
 const resyncReintento = 250 * time.Millisecond
 
+// resyncPlazoConAgente sustituye a los dos anteriores cuando el dorado se
+// guardó con el agente escuchando (api.Snapshot.ConAgente): ahí no hay
+// máquina sin agente a la que no penalizar, y quien no contesta aún está
+// despertando. Medido en el CT 105 con 10-20 restauraciones a la vez en 4
+// núcleos: el ARP hacia el invitado tardaba más de 250 ms ("no route to
+// host") y la copia se descartaba con el agente sano.
+const resyncPlazoConAgente = 6 * time.Second
+
 // Qué pasa cuando no hay agente. En Linux, justo tras restaurar, el primer SYN
 // a un invitado sin nadie en el puerto suele perderse (o el invitado aún está
 // arrancando y no contesta): cada restauración pagaría el plazo entero. Se
@@ -168,11 +176,15 @@ func (m *Manager) resyncGuestCon(ctx context.Context, id, clave, kind string, co
 		}
 	}
 
+	plazo, reintento := resyncPlazo, resyncReintento
+	if conAgente {
+		plazo, reintento = resyncPlazoConAgente, resyncPlazoConAgente
+	}
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, resyncPlazo)
+	ctx, cancel := context.WithTimeout(ctx, plazo)
 	defer cancel()
 	res, err := resyncOnce(ctx, "http://"+addr, kind)
-	for err != nil && errors.Is(err, errResyncConexion) && time.Since(start) < resyncReintento {
+	for err != nil && errors.Is(err, errResyncConexion) && time.Since(start) < reintento {
 		select {
 		case <-ctx.Done():
 		case <-time.After(10 * time.Millisecond):

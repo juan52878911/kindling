@@ -249,3 +249,37 @@ func TestRecordarSinAgenteRetiraLasCaducadas(t *testing.T) {
 		t.Fatalf("%d claves; quería 2 (la nueva y la del thaw)", n)
 	}
 }
+
+// Un dorado guardado con el agente: si la red del invitado tarda en volver
+// (ARP bajo carga, "no route to host"), se insiste hasta resyncPlazoConAgente
+// en vez de descartar la copia a los 250 ms. Sin la marca, se sigue rápido.
+func TestResyncConAgenteEsperaALaRed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	m := &Manager{byID: map[string]*api.Machine{
+		"x": {ID: "x", Name: "x", Image: "img", Forwards: map[string]string{"8080": addr}},
+	}}
+	capturarLog(t)
+	if r := m.resyncGuestCon(context.Background(), "x", "", api.ResyncInstance, false); r.ok || r.took > time.Second {
+		t.Fatalf("sin ConAgente: ok=%v took=%s, quería un fallo rápido", r.ok, r.took)
+	}
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"skew_ms":0}`))
+		})}
+		t.Cleanup(func() { _ = srv.Close() })
+		_ = srv.Serve(l)
+	}()
+	if r := m.resyncGuestCon(context.Background(), "x", "", api.ResyncInstance, true); !r.ok {
+		t.Fatalf("con ConAgente y el agente a los 800 ms: ok=%v took=%s fallo=%v", r.ok, r.took, r.fallo)
+	}
+}

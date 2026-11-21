@@ -263,6 +263,40 @@ type Machine struct {
 	// es solo la carga del snapshot; Wake.TotalMS es lo que de verdad esperó
 	// quien pidió el thaw (ver docs/despertar.md).
 	Wake *WakePhases `json:"wake,omitempty"`
+
+	// Create desglosa por fases la última creación desde un snapshot (run
+	// -from, o una copia de plantilla). Nil en las demás máquinas.
+	Create *CreatePhases `json:"create,omitempty"`
+}
+
+// CreatePhases es el desglose de una creación desde un snapshot, en
+// milisegundos. Cada campo es el tiempo de pared de esa fase; las fases no se
+// solapan y TotalMS es lo que esperó quien pidió la creación (desde la entrada
+// al daemon hasta tener la copia lista).
+type CreatePhases struct {
+	// ChecksMS es validar la petición y leer el snapshot.
+	ChecksMS float64 `json:"checks_ms"`
+	// DiskMS es preparar los discos de la copia (overlay, volúmenes).
+	DiskMS float64 `json:"disk_ms"`
+	// NetMS es montar la red de la copia.
+	NetMS float64 `json:"net_ms"`
+	// PersistMS es escribir el estado en disco antes de lanzar el VMM.
+	PersistMS float64 `json:"persist_ms"`
+	// GateWaitMS es la espera de un hueco en la puerta de arranque.
+	GateWaitMS float64 `json:"gate_wait_ms"`
+	// VMMMS es lanzar el VMM y esperar a su socket.
+	VMMMS float64 `json:"vmm_ms"`
+	// LoadMS es LoadSnapshot.
+	LoadMS float64 `json:"load_ms"`
+	// ResumeMS es reanudar y abrir reenvíos.
+	ResumeMS float64 `json:"resume_ms"`
+	// ResyncMS es la resincronización de reloj y entropía del invitado.
+	ResyncMS float64 `json:"resync_ms"`
+	// StartMS es entregar la máquina a su agente (solo snapshots por imagen).
+	StartMS float64 `json:"start_ms,omitempty"`
+	// FinishMS es el resto hasta devolver la copia.
+	FinishMS float64 `json:"finish_ms"`
+	TotalMS  float64 `json:"total_ms"`
 }
 
 // StuckMachine es una máquina atascada a mitad de una operación (Info.Stuck).

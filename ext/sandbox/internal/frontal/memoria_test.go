@@ -79,6 +79,7 @@ func TestTokensCortosORepetidosNoArrancan(t *testing.T) {
 func TestPrecalentadaDeOtroSnapshotNoSeEntrega(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
+	conPool(f, "node", 1)
 	ahora := time.Now().UTC()
 	f.snapHecho = map[string]time.Time{"sbx-node": ahora}
 	vieja := plantilla.VersionDe(&api.Snapshot{CreatedAt: ahora.Add(-time.Hour)})
