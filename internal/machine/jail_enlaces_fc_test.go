@@ -24,7 +24,7 @@ func TestSoltarEnlacesBaseConservaElDigest(t *testing.T) {
 	if err := os.MkdirAll(jail, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Link(img, filepath.Join(jail, "rootfs.ext4")); err != nil {
+	if err := m.enlaceEstable(img, func() error { return os.Link(img, filepath.Join(jail, "rootfs.ext4")) }); err != nil {
 		t.Fatal(err)
 	}
 	lecturas := 0
