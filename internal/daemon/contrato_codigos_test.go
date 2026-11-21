@@ -129,6 +129,7 @@ var casosCodigos = []casoCodigo{
 	{"POST", "/shares/uploads", ""},
 	{"POST", "/sandboxes", `{`},
 	{"GET", "/sandboxes", ""},
+	{"POST", "/sandboxes/claim", `{"match":{"x":"y"},"labels":{"kling.sandbox.claim":"n"}}`},
 	{"POST", "/sandboxes/claim", `{"match":{"x":"y"}}`},
 	{"POST", "/sandboxes/claim", `{`},
 	{"GET", "/sandboxes/nadie", ""},

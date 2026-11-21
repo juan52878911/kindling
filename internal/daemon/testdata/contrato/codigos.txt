@@ -116,7 +116,8 @@ POST /machines/{ref}/thaw  ←  POST /machines/parada/thaw  →  409 conflict
 POST /registries  ←  POST /registries {  →  400 bad_request
 POST /sandboxes  ←  POST /sandboxes {  →  400 bad_request
 POST /sandboxes/claim  ←  POST /sandboxes/claim {  →  400 bad_request
-POST /sandboxes/claim  ←  POST /sandboxes/claim {"match":{"x":"y"}}  →  404 no_claimable
+POST /sandboxes/claim  ←  POST /sandboxes/claim {"match":{"x":"y"},"labels":{"kling.sandbox.claim":"n"}}  →  404 no_claimable
+POST /sandboxes/claim  ←  POST /sandboxes/claim {"match":{"x":"y"}}  →  400 bad_request
 POST /sandboxes/{ref}/fork  ←  POST /sandboxes/nadie/fork {}  →  404 not_found
 POST /sandboxes/{ref}/renew  ←  POST /sandboxes/nadie/renew  →  404 not_found
 POST /shares/uploads  ←  POST /shares/uploads  →  201 -

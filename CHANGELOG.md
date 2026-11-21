@@ -8,6 +8,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- kling-sandbox gateway: experimental Python interpreter, `POST /v1/sandboxes/{id}/code` and `/code/contexts` (stateful contexts as background processes in the sandbox, NDJSON events, 8 contexts per sandbox, 422 without `python3`).
+- `KLING_COW_QUOTA=require` refuses copy-on-write instances when no disk quota can be applied; `KLING_FORWARD_CHAIN=1` adds an opt-in `KINDLING-FWD` chain for hosts whose FORWARD policy is DROP (Docker).
+- Resync: the guest agent reports its critical-path and origin-check times in the `/resync` reply; `KLING_RESYNC_TRACE=1` logs the split and `/metrics` exposes `kling_resync_guest_seconds` and `kling_resync_wake_seconds`.
 - kling-sandbox gateway: `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume` and `PATCH /v1/sandboxes/{id}/egress` (owner check as in the other sandbox routes, in the OpenAPI spec).
 - `scripts/bench`: hygiene check between variants (no stray VMMs, netns or store mounts), c50 twice, pause measured at rest and during refill.
 - Atomic sandbox claim: `POST /sandboxes/claim` (capability `sandbox-claim`) picks a running pool machine whose labels match, and labels it, names it and renews its TTL in one critical section; `404 no_claimable` when there is none.
@@ -51,6 +54,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Network slots come with the `none` egress rules installed, so a `none` sandbox skips its `iptables-restore`; other modes apply only the difference in one transaction. The daemon warns at startup when `ipset` is missing (the egress allowlist needs it).
+- `POST /sandboxes/claim` requires a `kling.sandbox.claim` or `kling.owner` label in `labels`.
+- docs/benchmarks.md: kindling vs OpenSandbox 1.2.1 on EC2, with its caveats; the bench records KVM counters, the network pool and pause on fresh vs idle sandboxes.
 - kling-sandbox gateway: the pool refills 300 ms after the last claim and 2 at a time, so refills no longer compete with sandboxes in use; requests that arrive during a refill round are no longer lost.
 - Guest agent: `/resync` answers once entropy and clock are set and finishes machine-id, the generation file and process cleanup behind a gate that holds exec, files and sessions; `GET /resync` returns per-step timings.
 - Creating from a snapshot clones the overlay and sets up the network in parallel, and skips the balloon stats PATCH when the golden snapshot is already at the idle interval.
@@ -228,6 +234,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The 256 MiB/s network floor for machines with live shared folders no longer overrides a lower `daemon.net_mibps` (or `KLING_NET_MIBPS`) set on purpose.
 
 ### Security
+
+- Network setup retries interrupted netlink address dumps and never assigns a /30 subnet when the dump fails, so two machines can no longer end up sharing a subnet (and one machine's exec, resync or credentials reaching another's agent).
+- The launch gate no longer backs off for VMM deaths of already-delivered machines or for repeated dead copies from a single origin, so a guest that reboots itself in a loop cannot hold the gate down for everyone.
 
 - `kling ai serve -listen … -no-auth` refuses (403) requests whose `Host` or `Origin` is not loopback, and every `POST` must be `application/json` (415).
 - MCP gateway: the "types repaired" log line no longer includes the tool's arguments, only its name and size.
