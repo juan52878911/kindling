@@ -27,7 +27,8 @@ func TestReclamoAPI(t *testing.T) {
 		t.Fatalf("sin candidata = %d %s", rr.Code, rr.Body)
 	}
 	// Match vacío, JSON roto, etiqueta de grafo: 400.
-	for _, body := range []string{`{}`, `{`, `{"match":{"pool":"ok"},"labels":{"kling.graph":"x"}}`} {
+	for _, body := range []string{`{}`, `{`, `{"match":{"pool":"ok"},"labels":{"kling.graph":"x"}}`,
+		`{"match":{"pool":"ok"},"ttl_seconds":86401}`, `{"match":{"pool":"ok"},"name":"../x"}`} {
 		if rr := call(t, h, "POST", "/sandboxes/claim", body); rr.Code != 400 {
 			t.Fatalf("%s = %d %s", body, rr.Code, rr.Body)
 		}

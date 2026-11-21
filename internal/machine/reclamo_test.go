@@ -156,3 +156,58 @@ func TestReclamarCuota(t *testing.T) {
 		}
 	}
 }
+
+// H4: Reclamar respeta el cerrojo de ciclo de vida. Una candidata con el
+// cerrojo tomado (un freeze o un remove por TTL decidiendo) se salta, sin
+// esperar; si no hay otra, no_claimable.
+func TestReclamarSaltaCandidataConCerrojo(t *testing.T) {
+	m := managerReclamo(t, 0)
+	a := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
+	b := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
+	suelta, ok := m.tryLock(a.ID)
+	if !ok {
+		t.Fatal("no tomó el cerrojo de a")
+	}
+	for i := 0; i < 20; i++ { // el orden del mapa es aleatorio
+		m.mu.Lock()
+		b.Labels = map[string]string{"pool": "ok"}
+		b.TTLAt = nil
+		m.mu.Unlock()
+		mc, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}})
+		if err != nil || mc.ID != b.ID {
+			t.Fatalf("reclamó %v, %v; quería %s", mc, err, b.ID)
+		}
+	}
+	suelta()
+
+	m = managerReclamo(t, 0)
+	solo := sembrarReclamable(m, api.StateRunning, map[string]string{"pool": "ok"})
+	suelta, _ = m.tryLock(solo.ID)
+	defer suelta()
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Reclamar(api.ClaimRequest{Match: map[string]string{"pool": "ok"}})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNoReclamable) {
+			t.Fatalf("err = %v, quería ErrNoReclamable", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reclamar esperó al cerrojo")
+	}
+}
+
+func TestReclamarValidaNombreYTTL(t *testing.T) {
+	m := managerReclamo(t, 1)
+	for _, req := range []api.ClaimRequest{
+		{Match: map[string]string{"pool": "ok"}, TTLSeconds: api.SandboxMaxTTL + 1},
+		{Match: map[string]string{"pool": "ok"}, Name: "../malo"},
+		{Match: map[string]string{"pool": "ok"}, Name: "con espacio"},
+	} {
+		if _, err := m.Reclamar(req); !errors.Is(err, ErrRunRequest) {
+			t.Errorf("%+v: err = %v, quería ErrRunRequest", req, err)
+		}
+	}
+}
