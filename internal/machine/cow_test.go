@@ -496,3 +496,81 @@ func TestMontadoEncimaSinMontaje(t *testing.T) {
 		t.Errorf("uno que no existe: %v %v", encima, err)
 	}
 }
+
+// Hipótesis de rendimiento: clonarInstancia no debe poner en fila a las
+// instancias de una ráfaga. Con un clonar que tarda 20 ms, 50 clones a la vez
+// deben acabar en pocas decenas de ms y no en ~1 s (50 × 20 ms bajo a.mu).
+func TestClonarInstanciaEnParaleloNoHaceFila(t *testing.T) {
+	root := t.TempDir()
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, root, f)
+	src := escribirDorado(t, root, "dorado", "disco v1")
+	clonarBase := a.clonar
+	a.clonar = func(s, d string) error {
+		time.Sleep(20 * time.Millisecond)
+		return clonarBase(s, d)
+	}
+	// Calienta: monta y crea la base una vez.
+	if _, err := a.clonarInstancia(context.Background(), "dorado", src, "calentar", 0); err != nil {
+		t.Fatal(err)
+	}
+	const n = 50
+	errs := make(chan error, n)
+	ini := time.Now()
+	for i := range n {
+		go func() {
+			_, err := a.clonarInstancia(context.Background(), "dorado", src, fmt.Sprintf("p%d", i), 0)
+			errs <- err
+		}()
+	}
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := time.Since(ini); d > 300*time.Millisecond {
+		t.Errorf("50 clones a la vez tardaron %v: hay fila (esperado ≈20 ms)", d)
+	}
+}
+
+// La cuota se aplica antes de ceder el overlay al grupo del VMM (0660), y
+// una ráfaga lee el espacio libre del almacén una sola vez (caché de 100 ms).
+func TestClonarInstanciaCuotaAntesDelChownYLibreCacheado(t *testing.T) {
+	root := t.TempDir()
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, root, f)
+	a.priv = &Privileges{Enabled: true, GID: os.Getgid()}
+	var libres atomic.Int32
+	a.libreAlmacen = func(string) (int64, int64, error) {
+		libres.Add(1)
+		return 100 << 30, 100 << 30, nil
+	}
+	a.detectarCuota = func(context.Context) string { return "prjquota" }
+	var modoEnCuota atomic.Value
+	a.limitar = func(_, overlay string, _ int64) error {
+		fi, err := os.Stat(overlay)
+		if err != nil {
+			return err
+		}
+		modoEnCuota.Store(fi.Mode().Perm())
+		return nil
+	}
+	src := escribirDorado(t, root, "dorado", "disco v1")
+	var ruta string
+	for i := range 10 {
+		r, err := a.clonarInstancia(context.Background(), "dorado", src, fmt.Sprintf("q%d", i), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ruta = r
+	}
+	if m := modoEnCuota.Load(); m != os.FileMode(0o600) {
+		t.Errorf("modo del overlay al aplicar la cuota: %v, quería 0600 (antes de cederlo)", m)
+	}
+	if fi, err := os.Stat(ruta); err != nil || fi.Mode().Perm() != 0o660 {
+		t.Errorf("tras ceder: %v %v", fi, err)
+	}
+	if n := libres.Load(); n != 1 {
+		t.Errorf("lecturas del espacio libre en la ráfaga: %d, quería 1", n)
+	}
+}
