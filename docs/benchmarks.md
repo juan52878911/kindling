@@ -6,9 +6,10 @@ measured on, and the script that reproduces it. Where no dedicated script exists
 table says so — those numbers come from a one-off run of `kling` itself, shown for
 context, not as a benchmark claim.
 
-Numbers marked **STALE** were measured before the boot-latency work in this remediation
-round (A1–A4 below) and need to be re-measured; the change that could move them is named
-next to each one.
+Figures measured before the boot-latency work (A1–A4 below) and flagged STALE have been
+**withdrawn** from the tables: they are replaced by the section "kindling vs OpenSandbox 1.2.1"
+at the end, measured with the F0 protocol. Cold-boot, snapshot-restore and thaw figures of the old lab rig
+are no longer quoted.
 
 ## The boot-latency changes (A1–A4)
 
@@ -25,7 +26,7 @@ backend (macOS). A4 is backend-agnostic. A3 affects only the CLI's SSH transport
 in-VM latency.
 
 Any number below that measures a cold boot, a restore/thaw, or an end-to-end action that
-includes one of those, is a candidate to move after A1/A2/A4 and is flagged **STALE**.
+includes one of those, is a candidate to have moved after A1/A2/A4; those rows were withdrawn.
 Numbers that measure something else entirely (density in RAM, disk-per-service, hot-path
 latency with no boot involved) are unaffected and are flagged **unaffected**.
 
@@ -46,8 +47,6 @@ keep a benchmarks log of its own before this file.
 
 | Claim | Value | Hardware | Measured around | Script | Status |
 |---|---|---|---|---|---|
-| Thaw a frozen tool | ~30 ms | Lab rig | 2026-08-13 | `scripts/40-bench-boot.sh` | **STALE** (A2, A4) |
-| Ephemeral action, end to end | 19 ms (2 ms actual execution) | Lab rig | 2026-08-13 | none — ad hoc `kling try` timing, not scripted | **STALE** (A2, A4) |
 | Tool call, hot | 9 ms | Lab rig | 2026-08-13 | none — ad hoc, not scripted | unaffected (no boot on the hot path) |
 | RAM of a `frozen` machine | 0 | Lab rig | — | — (definitional: a frozen machine is a file, not a process) | unaffected |
 | Density: 142 microVMs in 3.9 GB | 3.9 GB / 142 | Lab rig | 2026-09-01 | none — see `docs/densidad-zram.md` for the zram density methodology | unaffected |
@@ -59,9 +58,7 @@ keep a benchmarks log of its own before this file.
 
 | Claim | Value | Hardware | Measured around | Script | Status |
 |---|---|---|---|---|---|
-| Cold boot | 2,643 ms | Lab rig | 2026-08-13 | `scripts/40-bench-boot.sh` | **STALE** (A1, A2, A4 all touch the cold-boot path) |
 | Snapshot creation | 305 ms | Lab rig | 2026-08-13 | `scripts/40-bench-boot.sh` | unaffected (Snapshot/dump path, not boot args or CPU cap) |
-| Restore from snapshot | ~30 ms | Lab rig | 2026-08-13 | `scripts/40-bench-boot.sh` | **STALE** (A2, A4 — the CPU boost and agent-poll interval both apply to restore) |
 
 ## README "Measured with 8 instances" block
 
@@ -73,8 +70,6 @@ keep a benchmarks log of its own before this file.
 
 | Claim | Value | Hardware | Measured around | Script | Status |
 |---|---|---|---|---|---|
-| Sandbox `-from` a template, already has the toolchain inside | ~300 ms | Lab rig | 2026-09-22 | none — ad hoc, not scripted | **STALE** (A2, A4 — this is a restore) |
-| Five sandboxes `-from`, in parallel | 0.57 s | Lab rig | 2026-09-22 | none — ad hoc, not scripted | **STALE** (A2, A4) |
 
 ## README "Topology report" example numbers
 
@@ -151,3 +146,68 @@ the VON, VON-CPU, encoder and thaw-phase benches, then prints one summary table.
 a host with KVM (real hardware or nested virtualization) and fails with a clear message,
 before touching anything, if `/dev/kvm` is not usable — none of these numbers can be
 produced without it.
+
+## Reproducible bench protocol (F0)
+
+`scripts/bench/` repeats the pool-claim / cold-boot / concurrency figures with a per-phase
+breakdown. Full usage in [`scripts/bench/README.md`](../scripts/bench/README.md).
+
+1. **Rig**: nested EC2 (`c8i`, `NestedVirtualization=enabled`) or any host with KVM. `scripts/bench/ec2.sh`
+   creates and **deletes** it (trap + `InstanceInitiatedShutdownBehavior=terminate` + `shutdown -h +N`).
+   `--dry-run` prints what it would create and delete. Launching it for real costs money.
+2. **Run**: `bench.py k|kpool` — warm-up discarded, serial series (`SERIE`, 15), then bursts `CONC`
+   (10, 20, 50) with `ESPERA_POOL` seconds to let the pool refill before each burst; 3 runs per point.
+3. **Phases**: before and after each batch `fases.py` reads `/metrics` of the daemon and the gateway and
+   prints p50/p95/mean per phase (from histogram buckets) next to the client-side latency, under `fases`
+   in the JSON.
+4. **Sweep**: `KLING_MAX_PARALLEL_BOOT=2,4,8,16`, tenant with and without quotas, jailer on/off.
+5. **Report**: the three medians of p50/p95 per point, the phase table, host type and kindling commit.
+   The old lab-rig STALE figures were withdrawn; the table below replaces them.
+6. **Hygiene**: `remoto/higiene.sh verificar` runs between variants: 0 `firecracker`, 0 `kl-*` netns, 0 `cow.xfs`
+   mounts, same free disk (±100 MiB), and warns about `vh-*` interfaces and `firecracker` processes that are not the
+   bench daemon's. A dirty host aborts the bench.
+
+## kindling vs OpenSandbox 1.2.1
+
+Median of 3 rounds of p50 and p95, with n per point. kindling figures: final run of 2026-11-21 on a fresh c8i.2xlarge, 3 rounds alternating with `main` (c98ec937), which measured 137–152 ms cold serial, 52 ms pool serial and 827–878 ms cold c50 on the same host; 0 failed creates in either. **Read the caveats below before quoting any row.**
+OSB cells come from the run of 2026-11-21 on the same instance type (the same `bench.py`, OSB 1.2.1 with the
+kubernetes runtime on k3s v1.36.4 and the docker runtime), one system at a time on the host. Their raw logs are
+not in the repository; rerun them instead of quoting older numbers. Reproduce with `scripts/bench/ec2.sh kindling osbk8s docker`.
+
+| measure | kindling (range between rounds) | OSB 1.2.1 | n | note |
+|---|---|---|---|---|
+| create from pool, serial | 0.8–1.1 ms | 34 ms | 15 | pre-warmed machine claimed vs. pod from the pool |
+| create from pool, c10 | 8–10 ms | 180 ms (k8s Pool) | 10 per burst | |
+| create with a pool of 10, c50 (about 40 cold) | 394–432 ms | 6.4 s with 25/50 failed (k8s Pool) | 50 per burst | pool of 10, refilled while the burst runs |
+| create cold, serial | 76–91 ms | 0.91–1.11 s (k8s) · 524–543 ms (docker) | 15 | restored microVM vs. new container |
+| create cold, c50 | p50 603–633 ms, **p95 977–1072 ms** | 4.0–4.6 s with 19/50 failed (k8s) · 7.6–7.7 s (docker) | 50 per burst, 2 bursts per round | default gate (4); the p95 always goes with the p50 |
+| exec `echo` | 1.7–1.9 ms | 1003 ms | 30 | through the gateway, HTTP; OSB looks like a fixed 1 s poll |
+| pause → exec | 6.1–6.6 ms | 1027 ms (docker; includes the same ~1 s exec poll) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
+| freeze → exec | 92–106 ms | no equivalent | 5 | dumps memory to disk and releases it |
+| failures | 0 in ~1700 creations | 19/50 (k8s cold c50), 25/50 (k8s Pool c50) | | clean host |
+
+Give the range between rounds, not one number. Memory per sandbox (~9 MiB) is in the JSON as `mem_por_sandbox_*_mib`.
+
+### Caveats (all nine apply)
+
+1. **Rig**: nested EC2 (c8i.2xlarge, 8 vCPU), not bare metal; a single instance type and a single region.
+2. **Small n**: 15 in serial, 5 for pause and freeze. The ranges between rounds are given instead of a single figure.
+3. **Different isolation**: microVM with its own kernel vs. a container (runc). OSB with Kata or gVisor would give
+   other numbers; that was not measured.
+4. **"Pool" is not the same in both**: kindling's is a set of pre-warmed machines claimed atomically (size `POOL`,
+   10 in the bench, refilled in the background); OSB's is a `Pool` CRD of pods (size and refill as set in
+   `osbk8s/pool.yaml`). State each size and refill policy next to the figure.
+5. **Fast Sandbox's 64 ms** is the figure *they* publish, on *their* hardware; it is not reproduced here.
+6. **Memory per sandbox (~9 MiB)** is marginal PSS with the golden image's shared memory, not RSS.
+7. **Versions and reproduction**: OSB 1.2.1 (docker and kubernetes runtimes); kindling commit, date, gate
+   (`KLING_MAX_PARALLEL_BOOT`, default 4) and `KLING_NET_POOL` as recorded in the JSON (`net_pool`) of the run;
+   command: `scripts/bench/ec2.sh`. Quote them with the figures.
+8. **Earlier failures (2–7 in 100)** came from orphaned VMMs left on the host by previous variants, not from
+   kindling's create path. The hygiene check (`higiene.sh verificar`, protocol step 6) now aborts the bench
+   if any are left.
+9. **Where OSB is ahead today**: isolated session with diff/commit, a credential vault in the API, diagnostics,
+   native Kubernetes CRDs and more SDKs. kindling's code interpreter (`/code`, contexts) is experimental. "Outperforms in everything" does not hold
+   yet and must not be written.
+
+New JSON keys that support the table: `kvm_serie` (KVM `pf_fixed`/`exits` delta per serial create, needs root
+debugfs), `pausa_exec_nueva_ms` and `pausa_exec_ociosa_ms` (pause→exec on a fresh sandbox vs. one idle `E5_OCIOSA_S`=60 s).

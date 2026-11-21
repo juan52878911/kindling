@@ -22,7 +22,7 @@ exigir_clave OPENAI_API_KEY
 
 # 1. Plantilla: node + Codex CLI. Esta fase sí necesita red (npm), pero aún
 #    no hay ninguna clave en juego.
-ejecutar "$KLING" image import node:22-slim -warm -template "$PLANTILLA" \
+ejecutar "$KLING" image import node:22-slim -warm -template "$PLANTILLA" -disk 2G \
   -egress internet -step 'npm install -g @openai/codex' \
   -step 'mkdir -p /work'
 

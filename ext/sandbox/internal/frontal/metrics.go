@@ -66,6 +66,65 @@ type metricas struct {
 	// obliga a decidir de antemano dónde poner los cortes.
 	duracionSumaSeg float64
 	duracionCuenta  int64
+
+	// tramos es el histograma de cada tramo del camino de creación (ver
+	// tramosCrear), para saber en qué se van los ms del gateway.
+	tramos map[string]*histograma
+}
+
+// Tramos del camino de creación, para la etiqueta "stage" de
+// kling_sandbox_create_stage_seconds. Se emiten todos aunque estén a cero.
+const (
+	tramoSnapshot = "snapshot" // averiguar la plantilla en los hosts
+	tramoPrepasos = "prepasos" // límites, volúmenes, cuota y clones
+	tramoImagenes = "images"   // comprobar qué hosts tienen la imagen
+	tramoReclamo  = "claim"    // buscar y reclamar una precalentada
+	tramoDaemon   = "daemon"   // CreateSandbox en el daemon (con reintentos)
+	tramoTotal    = "total"    // de la entrada de la petición a la respuesta
+)
+
+var tramosCrear = []string{tramoSnapshot, tramoPrepasos, tramoImagenes, tramoReclamo, tramoDaemon, tramoTotal}
+
+// cortesTramo son los límites superiores (s) de los buckets: finos entre 1 ms y
+// 100 ms, que es donde está el objetivo, y holgados por arriba.
+var cortesTramo = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10}
+
+type histograma struct {
+	buckets []int64 // acumulados al emitir; aquí, por intervalo
+	suma    float64
+	cuenta  int64
+}
+
+// observar apunta la duración de un tramo.
+func (m *metricas) observar(tramo string, dur time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tramos == nil {
+		m.tramos = map[string]*histograma{}
+	}
+	h := m.tramos[tramo]
+	if h == nil {
+		h = &histograma{buckets: make([]int64, len(cortesTramo)+1)}
+		m.tramos[tramo] = h
+	}
+	seg := dur.Seconds()
+	i := sort.SearchFloat64s(cortesTramo, seg)
+	h.buckets[i]++
+	h.suma += seg
+	h.cuenta++
+}
+
+// fotoTramos copia los histogramas.
+func (m *metricas) fotoTramos() map[string]histograma {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]histograma, len(m.tramos))
+	for k, h := range m.tramos {
+		c := *h
+		c.buckets = append([]int64(nil), h.buckets...)
+		out[k] = c
+	}
+	return out
 }
 
 // registrar apunta un intento de creación. dur es la duración a contar; 0
@@ -208,6 +267,24 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# TYPE kling_sandbox_create_duration_seconds summary")
 	fmt.Fprintf(w, "kling_sandbox_create_duration_seconds_sum %f\n", sumaSeg)
 	fmt.Fprintf(w, "kling_sandbox_create_duration_seconds_count %d\n", cuenta)
+
+	fmt.Fprintln(w, "# HELP kling_sandbox_create_stage_seconds Time spent in each stage of a creation at the gateway.")
+	fmt.Fprintln(w, "# TYPE kling_sandbox_create_stage_seconds histogram")
+	tramos := s.metricas.fotoTramos()
+	for _, tr := range tramosCrear {
+		h, ok := tramos[tr]
+		if !ok {
+			h = histograma{buckets: make([]int64, len(cortesTramo)+1)}
+		}
+		var acum int64
+		for i, le := range cortesTramo {
+			acum += h.buckets[i]
+			fmt.Fprintf(w, "kling_sandbox_create_stage_seconds_bucket{stage=%q,le=\"%g\"} %d\n", tr, le, acum)
+		}
+		fmt.Fprintf(w, "kling_sandbox_create_stage_seconds_bucket{stage=%q,le=\"+Inf\"} %d\n", tr, h.cuenta)
+		fmt.Fprintf(w, "kling_sandbox_create_stage_seconds_sum{stage=%q} %f\n", tr, h.suma)
+		fmt.Fprintf(w, "kling_sandbox_create_stage_seconds_count{stage=%q} %d\n", tr, h.cuenta)
+	}
 
 	fmt.Fprintln(w, "# HELP kling_sandbox_prewarmed Unclaimed prewarmed instances, by template.")
 	fmt.Fprintln(w, "# TYPE kling_sandbox_prewarmed gauge")

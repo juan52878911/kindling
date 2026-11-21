@@ -1,0 +1,8 @@
+metadata:
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: "Exists"

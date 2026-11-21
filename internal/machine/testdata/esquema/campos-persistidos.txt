@@ -3,6 +3,18 @@
 version state.json 4
 version meta.json 5
 version credentials.enc 3
+state.json api.CreatePhases checks_ms float64 ignorable
+state.json api.CreatePhases disk_ms float64 ignorable
+state.json api.CreatePhases finish_ms float64 ignorable
+state.json api.CreatePhases gate_wait_ms float64 ignorable
+state.json api.CreatePhases load_ms float64 ignorable
+state.json api.CreatePhases net_ms float64 ignorable
+state.json api.CreatePhases persist_ms float64 ignorable
+state.json api.CreatePhases resume_ms float64 ignorable
+state.json api.CreatePhases resync_ms float64 ignorable
+state.json api.CreatePhases start_ms float64 ignorable
+state.json api.CreatePhases total_ms float64 ignorable
+state.json api.CreatePhases vmm_ms float64 ignorable
 state.json api.GuestAgent agent string
 state.json api.GuestAgent caps []string
 state.json api.GuestAgent version string
@@ -16,6 +28,7 @@ state.json api.Machine cmd []string effect:3
 state.json api.Machine cpu_boost_pct int
 state.json api.Machine cpu_pct int
 state.json api.Machine cpu_pct_fixed bool
+state.json api.Machine create *api.CreatePhases ignorable
 state.json api.Machine created_at time.Time
 state.json api.Machine credential_any_database []string
 state.json api.Machine credential_domains []string

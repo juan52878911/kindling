@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -60,7 +61,7 @@ func (f *warmFake) Remove(ctx context.Context, ref string) error {
 }
 
 func testWarmSpec() warmSpec {
-	return warmFrom("pgv", "", []string{"a", "b"}, 0, 0, "internet", time.Minute, 5*time.Minute, true)
+	return warmFrom("pgv", "", []string{"a", "b"}, 0, 0, 0, "internet", time.Minute, 5*time.Minute, true)
 }
 
 func TestWarmUpEncadena(t *testing.T) {
@@ -87,6 +88,21 @@ func TestWarmUpEncadena(t *testing.T) {
 	}
 	if out.String() != "out a\nout b\n" {
 		t.Errorf("out = %q", out.String())
+	}
+}
+
+// -disk llega a la máquina de preparación (la plantilla y sus copias heredan
+// su disco); sin él, 0 = el del daemon.
+func TestWarmUpPasaElDisco(t *testing.T) {
+	for _, disk := range []int{0, 2048} {
+		f := &warmFake{}
+		w := warmFrom("pgv", "", []string{"a"}, 0, 0, disk, "internet", time.Minute, time.Minute, true)
+		if _, err := warmUp(context.Background(), f, w, io.Discard, func(string, ...any) {}); err != nil {
+			t.Fatal(err)
+		}
+		if f.run.DiskMiB != disk {
+			t.Errorf("-disk %d: run.DiskMiB = %d", disk, f.run.DiskMiB)
+		}
 	}
 }
 

@@ -79,6 +79,18 @@ kling inspect m1:  cmd[] string
 kling inspect m1:  cpu_boost_pct number
 kling inspect m1:  cpu_pct number
 kling inspect m1:  cpu_pct_fixed bool
+kling inspect m1:  create.checks_ms number
+kling inspect m1:  create.disk_ms number
+kling inspect m1:  create.finish_ms number
+kling inspect m1:  create.gate_wait_ms number
+kling inspect m1:  create.load_ms number
+kling inspect m1:  create.net_ms number
+kling inspect m1:  create.persist_ms number
+kling inspect m1:  create.resume_ms number
+kling inspect m1:  create.resync_ms number
+kling inspect m1:  create.start_ms number
+kling inspect m1:  create.total_ms number
+kling inspect m1:  create.vmm_ms number
 kling inspect m1:  created_at string
 kling inspect m1:  credential_any_database[] string
 kling inspect m1:  credential_domains[] string
@@ -186,6 +198,18 @@ kling ps -a -json:  [].cmd[] string
 kling ps -a -json:  [].cpu_boost_pct number
 kling ps -a -json:  [].cpu_pct number
 kling ps -a -json:  [].cpu_pct_fixed bool
+kling ps -a -json:  [].create.checks_ms number
+kling ps -a -json:  [].create.disk_ms number
+kling ps -a -json:  [].create.finish_ms number
+kling ps -a -json:  [].create.gate_wait_ms number
+kling ps -a -json:  [].create.load_ms number
+kling ps -a -json:  [].create.net_ms number
+kling ps -a -json:  [].create.persist_ms number
+kling ps -a -json:  [].create.resume_ms number
+kling ps -a -json:  [].create.resync_ms number
+kling ps -a -json:  [].create.start_ms number
+kling ps -a -json:  [].create.total_ms number
+kling ps -a -json:  [].create.vmm_ms number
 kling ps -a -json:  [].created_at string
 kling ps -a -json:  [].credential_any_database[] string
 kling ps -a -json:  [].credential_domains[] string
@@ -282,6 +306,18 @@ kling sandbox ls -json:  [].cmd[] string
 kling sandbox ls -json:  [].cpu_boost_pct number
 kling sandbox ls -json:  [].cpu_pct number
 kling sandbox ls -json:  [].cpu_pct_fixed bool
+kling sandbox ls -json:  [].create.checks_ms number
+kling sandbox ls -json:  [].create.disk_ms number
+kling sandbox ls -json:  [].create.finish_ms number
+kling sandbox ls -json:  [].create.gate_wait_ms number
+kling sandbox ls -json:  [].create.load_ms number
+kling sandbox ls -json:  [].create.net_ms number
+kling sandbox ls -json:  [].create.persist_ms number
+kling sandbox ls -json:  [].create.resume_ms number
+kling sandbox ls -json:  [].create.resync_ms number
+kling sandbox ls -json:  [].create.start_ms number
+kling sandbox ls -json:  [].create.total_ms number
+kling sandbox ls -json:  [].create.vmm_ms number
 kling sandbox ls -json:  [].created_at string
 kling sandbox ls -json:  [].credential_any_database[] string
 kling sandbox ls -json:  [].credential_domains[] string

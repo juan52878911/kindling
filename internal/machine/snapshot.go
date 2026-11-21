@@ -722,6 +722,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, fmt.Errorf("marking image snapshot %s: %w", name, err)
 		}
 	}
+	m.escribirMarcaGloboReposo(dir, mc.ID)
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
@@ -1450,9 +1451,18 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 // (vCPU, memoria, disco, exec), y lo propio de la máquina se le da tras el
 // resync. Para quien la ve, una máquina arrancada en frío.
 func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
+	// Una copia que no se pone viva se descarta y se restaura otra, una vez
+	// (copia_muerta.go).
+	return conCopiaDeRepuesto(ctx, req.Name, func() { m.puertaRetroceder("dead copy", origenPuerta(req), false) }, func() (*api.Machine, error) {
+		return m.runFromUna(ctx, req, ai)
+	})
+}
+
+// runFromUna es una restauración de runFromCon.
+func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
 	// Las fases, en el log, solo de las de un snapshot por imagen: es lo que
 	// sustituye a un arranque en frío y lo que hay que poder comparar.
-	fases := nuevosTiempos()
+	fases := nuevoCronoCreacion()
 	// Antes de reservar el snapshot y de publicar nada (ver Run).
 	if m.JailerBlocked != "" {
 		return nil, errors.New(m.JailerBlocked)
@@ -1648,24 +1658,8 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// (nativo o en el almacén) la copia comparte los bloques del dorado hasta
 	// que la instancia escribe: coste constante, sea cual sea su tamaño (ver
 	// cow.go).
-	fases.marca("checks")
+	fases.marca(fcChecks)
 	overlay := filepath.Join(dir, "overlay.ext4")
-	modoCoW, err := m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("copying golden overlay: %w", err)
-	}
-	// En el almacén, el overlay no vive en dir: los fallos de antes de
-	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
-	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
-	publicada := false
-	if modoCoW == cowModoStore {
-		defer func() {
-			if !publicada {
-				m.borrarOverlayAlmacen(id)
-			}
-		}()
-	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
 	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
@@ -1758,12 +1752,25 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	fases.marca("disk")
-	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("setting up network: %w", err)
+	// Disco y red a la vez (clonarYMontarRed): se esperan los dos antes de ceder.
+	modoCoW, err := m.clonarYMontarRed(ctx, fases, dir, netcfg, id, egress, req.AllowDomains,
+		func(ctx context.Context) (string, error) {
+			return m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
+		})
+	// En el almacén, el overlay no vive en dir: los fallos de antes de
+	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
+	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
+	publicada := false
+	if modoCoW == cowModoStore {
+		defer func() {
+			if !publicada {
+				m.borrarOverlayAlmacen(id)
+			}
+		}()
 	}
-	fases.marca("network")
+	if err != nil {
+		return nil, err
+	}
 	// Con el overlay en el almacén, overlay es un enlace a él y Own (chown, que
 	// sigue enlaces) se lo daría en propiedad al VMM: ahí es del daemon y el VMM
 	// lo usa por grupo (ver clonarInstancia).
@@ -1817,6 +1824,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// nombrarla (ver doc.go).
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
+	defer m.marcarCreando(id, origenPuerta(req))()
 	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
 	if err := m.publicarCon(ctx, mc); err != nil {
 		m.desmontarRed(netcfg, id)
@@ -1827,6 +1835,16 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	if ai != nil {
 		ai.id = id
 	}
+
+	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa);
+	// si no puede, no se lanza. Va ANTES de la puerta: la escritura (fsync) no
+	// debe ocupar un hueco de las restauraciones que cargan en KVM.
+	if err := m.persistirYa(); err != nil {
+		m.desmontarRed(netcfg, id)
+		m.fail(mc, err)
+		return nil, err
+	}
+	fases.marca(fcPersist)
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
@@ -1840,19 +1858,12 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		return nil, glErr
 	}
 	defer release()
+	fases.marca(fcGateWait)
 
 	var sock string
 	var pid int
 	var c *fc.Client
 	snapDir := m.snapDir(req.From)
-
-	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa);
-	// si no puede, no se lanza.
-	if err := m.persistirYa(); err != nil {
-		m.desmontarRed(netcfg, id)
-		m.fail(mc, err)
-		return nil, err
-	}
 
 	// El VMM nace ya en su cgroup, como en Thaw, con el techo de ARRANQUE: un
 	// núcleo entero mientras restaura y hasta que contesta su agente (resync);
@@ -1966,7 +1977,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		return abortar(err)
 	}
 	m.credsPrevias.Delete(id) // solo la usa el thaw
-	fases.marca("vmm")
+	fases.marca(fcVMM)
 	start := time.Now()
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
 	// plazo del volcado y no el de 30 s: cargar también es mover la memoria
@@ -1976,7 +1987,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// No la de un snapshot por imagen: su volcado no debe depender de una
 	// caché que el daemon poda (ni de un campo, ImageSnapshot, que un kling
 	// anterior no conoce).
-	enDiff := congelarEnDiff() && ai == nil
+	enDiff := cargarConSeguimiento(ai != nil, req.OnTTL)
 	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotTracking(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false, enDiff); err != nil {
@@ -1994,7 +2005,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	}
 	// Un dorado de antes de globo_ritmo.go trae las estadísticas del globo
 	// cada 1 s; la copia, al de reposo.
-	ritmoGloboReposo(ctx, c)
+	// Si el dorado se congeló ya en el de reposo (globo_ritmo.go), ni se manda.
+	ritmoGloboReposoSi(ctx, c, doradoConGloboReposo(m.snapDir(req.From)))
+	m.marcarGloboReposo(id)
 	// Su caudal de red, si no es el que quedó en el snapshot (red_caudal.go).
 	m.caudalTrasCargar(ctx, c, id)
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
@@ -2039,7 +2052,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	m.mu.Lock()
 	mc.Volumes = withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
-	fases.marca("load")
+	fases.marca(fcLoad)
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
 	}
@@ -2054,14 +2067,17 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
-	fases.marca("resume")
+	fases.marca(fcResume)
 	// Si el agente debía contestar y no lo hace, la copia no se entrega
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
-	resync, err := m.resyncCopia(ctx, id, snap)
+	resync, err := m.resyncCopia(ctx, id, snap, pid)
 	if err != nil {
+		// El diagnóstico (otra goroutine) necesita el VMM vivo.
+		esperarDiagnostico(resync.diag)
+		log.Printf("%s: discarding the copy %s of snapshot %s (%v)", mc.Name, shortID(id), req.From, err)
 		return m.descartarCopia(id, soltarCiclo, abortar, fmt.Errorf("snapshot %s: %w", req.From, err))
 	}
-	fases.marca("resync")
+	fases.marca(fcResync)
 	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
 	// agente lanza el servicio. Sin resync no: sus procesos nacerían con el
 	// CSPRNG de la plantilla.
@@ -2073,7 +2089,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		if err := m.entregarMaquina(ctx, id, ai); err != nil {
 			return abortar(fmt.Errorf("image snapshot %s: %w", req.From, err))
 		}
-		fases.marca("start")
+		fases.marca(fcStart)
 	}
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
@@ -2129,7 +2145,6 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	tel.exito(OpRun, DurRestore, elapsed)
 
 	if ai != nil {
-		log.Printf("%s from image snapshot %s: %s", mc.Name, req.From, fases)
 		// Como tras un arranque en frío: sin ganchos de restauración (el
 		// servicio acaba de nacer), la vigía de "listo" desde cero, y el
 		// impulso hasta que pase la sonda.
@@ -2145,9 +2160,16 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		// normal) o no declara sonda; si no, cuando la pase.
 		impulso.entregarRestaurada(resync.listo)
 	}
-	m.mu.RLock()
+	// El desglose queda en la máquina y en /metrics en TODAS las creaciones,
+	// no solo en las de un snapshot por imagen.
+	creacion := fases.cerrar()
+	tel.creacion(creacion)
+	m.mu.Lock()
+	mc.Create = creacion
+	m.persist()
 	out := *mc
-	m.mu.RUnlock()
+	m.mu.Unlock()
+	log.Printf("%s from snapshot %s: %s", mc.Name, req.From, notaCreacion(creacion))
 	// Las carpetas vivas, como en el arranque en frío: el agente de la copia
 	// las espera para lanzar el servicio.
 	if hasLiveShares(&out) {
@@ -2319,4 +2341,48 @@ func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
 		delete(m.memAllocCache, e.Name())
 		log.Printf("reconcile: snapshot %q was an interrupted commit; its leftovers go to the trash", e.Name())
 	}
+}
+
+// clonarYMontarRed hace la copia del overlay dorado (clon: disco) y el montaje
+// de la red; no dependen entre sí. Si falla una se deshace la otra y se borra
+// dir; el overlay del almacén que haya salido bien lo recoge quien llama con el
+// modo devuelto. Las fases fcDisk y fcNet llevan el tiempo propio de cada rama.
+func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, dir string, n *knet.Net, id string,
+	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, error) {
+	fases.marca(fcDisk)
+	var (
+		modo    string
+		errClon error
+		dClon   time.Duration
+		hecho   = make(chan struct{})
+	)
+	go func() {
+		defer close(hecho)
+		t0 := time.Now()
+		modo, errClon = clon(ctx)
+		dClon = time.Since(t0)
+	}()
+	t1 := time.Now()
+	errRed := m.montarRed(n, id, egress, domains)
+	dRed := time.Since(t1)
+	<-hecho
+	fases.d[fcDisk] += dClon
+	fases.d[fcNet] += dRed
+	fases.ultima = time.Now()
+	return m.cerrarClonYRed(dir, n, id, modo, errClon, errRed)
+}
+
+// cerrarClonYRed decide el resultado de las dos ramas y deshace lo que toque.
+func (m *Manager) cerrarClonYRed(dir string, n *knet.Net, id, modo string, errClon, errRed error) (string, error) {
+	if errClon == nil && errRed == nil {
+		return modo, nil
+	}
+	if errRed == nil {
+		m.desmontarRed(n, id)
+	}
+	os.RemoveAll(dir)
+	if errClon != nil {
+		return modo, fmt.Errorf("copying golden overlay: %w", errClon)
+	}
+	return modo, fmt.Errorf("setting up network: %w", errRed)
 }

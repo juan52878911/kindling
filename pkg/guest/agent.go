@@ -32,12 +32,14 @@
 package guest
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -126,7 +128,15 @@ func (a *Agent) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()})
+	_ = json.NewEncoder(w).Encode(struct {
+		api.GuestHealth
+		// ResyncPending: el agente sigue con el segundo tiempo de un resync.
+		ResyncPending bool `json:"resync_pending,omitempty"`
+		// SegundosTiemposVencidos: segundos tiempos de resync que pasaron su
+		// tope y se dejaron colgados (S6).
+		SegundosTiemposVencidos uint64 `json:"segundos_tiempos_vencidos"`
+	}{api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()}, puertaResync.Cerrada(),
+		segundosTiemposVencidos.Load()})
 }
 
 // New prepara el agente: arranca el cosechador, añade la ruta a MMDS y monta los
@@ -297,74 +307,94 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// privilegios (el servicio con USER, un agente de IA engañado) no debe
 	// poder ejecutar como root, escribir ganchos, mover el reloj ni desmontar.
 	ruta := func(p string, h http.HandlerFunc) { mux.HandleFunc(p, soloHost(h)) }
-	ruta("/dns", DNSHandler)
+	ruta("/dns", trasResync(DNSHandler))
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).
-	ruta(api.GuestResyncPath, ResyncHandler())
+	mux.HandleFunc(api.GuestResyncPath, soloHostResync(ResyncHandler()))
 	// /ready y /hooks: la sonda y los ganchos que declara la imagen. Sin
 	// kling.exec: ejecutan lo que la imagen trae, nunca lo que pida quien llama.
 	ruta(api.GuestReadyPath, a.enArranque(ReadyHandler()))
-	ruta(api.GuestHooksPath, a.enArranque(HooksHandler()))
+	ruta(api.GuestHooksPath, trasResync(a.enArranque(HooksHandler())))
 	ruta(api.GuestMemInfoPath, MemInfoHandler())
 	// /drop-caches: el host la pide antes de apretar, congelar o guardar un
 	// dorado (dropcaches.go).
 	ruta(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
-	ruta(api.GuestServicePath, a.enArranque(ServiceHandler()))
-	ruta(api.GuestServiceStopPath, a.enArranque(ServiceStopHandler()))
+	ruta(api.GuestServicePath, trasResync(a.enArranque(ServiceHandler())))
+	ruta(api.GuestServiceStopPath, trasResync(a.enArranque(ServiceStopHandler())))
 	// /procs: los procesos vivos, para que `kling save` avise de los que el
 	// dorado copiaría con sus aleatorios en memoria (procs.go).
-	ruta(api.GuestProcsPath, a.enPreparado(ProcsHandler()))
+	ruta(api.GuestProcsPath, trasResync(a.enPreparado(ProcsHandler())))
 	// /machine/start: solo en una máquina que espera al host.
 	if a.tardio {
-		ruta(api.GuestStartPath, a.handleStart)
+		ruta(api.GuestStartPath, trasResync(a.handleStart))
 	}
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere
 	// con él: el volumen perdería justo lo más reciente.
-	ruta("/volume/sync", soloPost(func(w http.ResponseWriter, r *http.Request) {
+	ruta("/volume/sync", trasResync(soloPost(func(w http.ResponseWriter, r *http.Request) {
 		a.Volumes.Sync()
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 	// /volume/release DESMONTA antes de congelar un snapshot dorado: la memoria
 	// que se vuelca no puede llevar un ext4 montado, porque cada instancia
 	// restaurada arrancaría con metadatos viejos sobre un disco que ya divergió.
-	ruta("/volume/release", soloPost(func(w http.ResponseWriter, r *http.Request) {
+	ruta("/volume/release", trasResync(soloPost(func(w http.ResponseWriter, r *http.Request) {
 		a.Volumes.Release()
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 	// /volume/acquire vuelve a montar tras restaurar. 500 y no un log: sin el
 	// volumen, lo que se escriba acabaría en el overlay y se perdería en silencio.
-	ruta("/volume/acquire", soloPost(func(w http.ResponseWriter, r *http.Request) {
+	ruta("/volume/acquire", trasResync(soloPost(func(w http.ResponseWriter, r *http.Request) {
 		if err := a.Volumes.Acquire(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 
 	// /share/attach la abre el daemon para cada carpeta compartida en vivo
 	// (docs/compartir.md). No depende de kling.exec: montar una carpeta no da
 	// a nadie una forma de ejecutar nada dentro.
-	ruta(share.AttachPath, shareState.AttachHandler())
+	ruta(share.AttachPath, trasResync(shareState.AttachHandler()))
 
 	if ExecEnabled() {
 		// El entorno de cada exec se lee al llegar: con VolumeWait cambia al
 		// montarse los volúmenes.
-		ruta("/exec", a.enArranque(ExecHandlerFunc(a.Entorno)))
-		ruta("/exec/stream", a.enArranque(StreamExecHandlerFunc(a.Entorno)))
-		ruta("/exec/pty", a.enArranque(ShellHandlerFunc(a.Entorno)))
-		ruta("/files", a.enArranque(FilesHandler()))
+		ruta("/exec", trasResync(a.enArranque(ExecHandlerFunc(a.Entorno))))
+		ruta("/exec/stream", trasResync(a.enArranque(StreamExecHandlerFunc(a.Entorno))))
+		ruta("/exec/pty", trasResync(a.enArranque(ShellHandlerFunc(a.Entorno))))
+		ruta("/files", trasResync(a.enArranque(FilesHandler())))
 		// Procesos de fondo y sesiones (procesos.go, sesiones.go): las dos
 		// formas de la barra final, para el mux de Go.
-		procs, ses := a.enArranque(ProcessesHandlerFunc(a.Entorno)), a.enArranque(SessionsHandler())
+		procs, ses := trasResync(a.enArranque(ProcessesHandlerFunc(a.Entorno))), trasResync(a.enArranque(SessionsHandler()))
 		ruta(api.GuestProcessesPath, procs)
 		ruta(api.GuestProcessesPath+"/", procs)
 		ruta(api.GuestSessionsPath, ses)
 		ruta(api.GuestSessionsPath+"/", ses)
 		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
+	}
+}
+
+// soloHostResync es soloHost para /resync, y apunta lo que tardó la
+// comprobación del origen (requestFromGuest vuelca interfaces y rutas) en los
+// tiempos que devuelve GET /resync.
+func soloHostResync(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		t0 := time.Now()
+		guest := requestFromGuest(r)
+		d := time.Since(t0)
+		if guest {
+			http.Error(w, "this route is only for the host", http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodPost {
+			guardarTiempos(func(t *ResyncTiempos) { t.Origen = us(d) })
+			r = r.WithContext(context.WithValue(r.Context(), origenResyncKey{}, d))
+		}
+		h(w, r)
 	}
 }
 

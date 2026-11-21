@@ -287,10 +287,37 @@ func requestFromGuest(r *http.Request) bool {
 	return !llegaPorLaPasarela(rip)
 }
 
-// direccionesPropias da las IPs de las interfaces del invitado (variable para
-// los tests). Un error deja la lista vacía: lo de arriba ya cubre loopback y
-// la IP por la que entró la conexión, que es el caso de siempre.
+var (
+	direccionesMu    sync.Mutex
+	direccionesCache []net.IP
+	direccionesHay   bool
+)
+
+// invalidarDireccionesPropias olvida las direcciones leídas: se llama en cada
+// /resync con restauración, que es cuando pueden cambiar.
+func invalidarDireccionesPropias() {
+	direccionesMu.Lock()
+	direccionesCache, direccionesHay = nil, false
+	direccionesMu.Unlock()
+}
+
+// direccionesPropias da las IPs del invitado. Se leen una vez (volcar las
+// interfaces en cada petición costaba lo que /resync no puede perder) y se
+// releen tras invalidarDireccionesPropias. Variable para los tests.
 var direccionesPropias = func() []net.IP {
+	direccionesMu.Lock()
+	defer direccionesMu.Unlock()
+	if !direccionesHay {
+		direccionesCache, direccionesHay = leerDireccionesPropias(), true
+	}
+	return direccionesCache
+}
+
+// leerDireccionesPropias vuelca las IPs de las interfaces del invitado
+// (variable para los tests). Un error deja la lista vacía: requestFromGuest ya
+// cubre loopback y la IP por la que entró la conexión, que es el caso de
+// siempre.
+var leerDireccionesPropias = func() []net.IP {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return nil

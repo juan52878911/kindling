@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"maps"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
@@ -36,10 +38,16 @@ const (
 	LabelTenant   = "tenant"
 )
 
-// TTLPrecalentada es el plazo de las máquinas del fondo. Generoso y con
-// on_ttl=freeze: una precalentada que nadie reclama se duerme —deja de costar
-// RAM— y sigue ahí para el siguiente, que solo paga un thaw.
+// TTLPrecalentada es el plazo de las máquinas del fondo. Con on_ttl=freeze, una
+// precalentada vencida pasa a warm, y el reclamo atómico solo elige running:
+// por eso el rellenador renueva el plazo de las running cuando les queda menos
+// de un cuarto (el fondo cuesta su RAM siempre) y, con un host que anuncia
+// sandbox-claim, repone las warm como si estuvieran rotas.
 const TTLPrecalentada = 3600
+
+// retrocesoCreacion es lo que descansa un host/plantilla tras un fallo de
+// creación, para no machacar un host lleno o roto en cada vuelta.
+const retrocesoCreacion = 5 * time.Second
 
 // Rellenador mantiene el fondo de todas las plantillas de todos los hosts.
 type Rellenador struct {
@@ -47,7 +55,35 @@ type Rellenador struct {
 	cada time.Duration
 	log  *log.Logger
 	mu   sync.Mutex
+
+	// pedidos despierta a Vigilar fuera de su tic (búfer 1: varios Pedir
+	// seguidos son una sola vuelta); pedido guarda qué host y qué plantillas
+	// pidió cada uno, bajo pmu.
+	pedidos chan struct{}
+	pmu     sync.Mutex
+	pedido  map[string]map[string]bool
+	// ultimoPedido es el instante del último Pedir (bajo pmu).
+	ultimoPedido time.Time
+	// maxCreaciones acota las creaciones simultáneas de una vuelta (0:
+	// CreacionesALaVez). Solo lo cambian los tests.
+	maxCreaciones int
+	// retroceso: host/plantilla -> hasta cuándo no se intenta crear.
+	rmu       sync.Mutex
+	retroceso map[string]time.Time
 }
+
+// CreacionesALaVez es cuántas precalentadas crea una vuelta a la vez: la misma
+// cifra que la puerta de creación del daemon, para que el relleno no haga cola
+// delante de las peticiones reales.
+const CreacionesALaVez = 4
+
+// CreacionesPedidas es cuántas crea a la vez la vuelta que dispara Pedir: tras
+// un reclamo el usuario está haciendo sus primeras peticiones sobre la misma
+// máquina, y el relleno no debe competir con ellas por la CPU.
+const CreacionesPedidas = 2
+
+// EsperaPedido es lo que se espera desde el último reclamo antes de rellenar.
+const EsperaPedido = 300 * time.Millisecond
 
 func Nuevo(reg *hosts.Registro, cada time.Duration, l *log.Logger) *Rellenador {
 	if cada <= 0 {
@@ -56,10 +92,42 @@ func Nuevo(reg *hosts.Registro, cada time.Duration, l *log.Logger) *Rellenador {
 	if l == nil {
 		l = log.Default()
 	}
-	return &Rellenador{reg: reg, cada: cada, log: l}
+	return &Rellenador{reg: reg, cada: cada, log: l, pedidos: make(chan struct{}, 1)}
 }
 
-// Vigilar rellena en segundo plano hasta que se cancele el contexto.
+// Pedir avisa de que el frontal acaba de gastar (o de no encontrar) una
+// precalentada de esa plantilla en ese host: Vigilar hace una vuelta de ese
+// host sin esperar al tic, pero tras EsperaPedido desde el último aviso (salvo
+// que el fondo de la plantilla esté vacío). No bloquea ni acumula: los avisos seguidos son una
+// sola vuelta.
+func (r *Rellenador) Pedir(host, plantilla string) {
+	r.pmu.Lock()
+	if r.pedido == nil {
+		r.pedido = map[string]map[string]bool{}
+	}
+	if r.pedido[host] == nil {
+		r.pedido[host] = map[string]bool{}
+	}
+	r.pedido[host][plantilla] = true
+	r.ultimoPedido = time.Now()
+	r.pmu.Unlock()
+	select {
+	case r.pedidos <- struct{}{}:
+	default:
+	}
+}
+
+// tomarPedidos vacía y devuelve lo pedido desde la última vez.
+func (r *Rellenador) tomarPedidos() map[string]map[string]bool {
+	r.pmu.Lock()
+	defer r.pmu.Unlock()
+	p := r.pedido
+	r.pedido = nil
+	return p
+}
+
+// Vigilar rellena en segundo plano hasta que se cancele el contexto: una vuelta
+// entera por tic y, entre tics, la del host y la plantilla que pide Pedir.
 func (r *Rellenador) Vigilar(ctx context.Context) {
 	go func() {
 		t := time.NewTicker(r.cada)
@@ -71,9 +139,118 @@ func (r *Rellenador) Vigilar(ctx context.Context) {
 				return
 			case <-t.C:
 				r.Vuelta(ctx)
+			case <-r.pedidos:
+				r.esperarPedidos(ctx)
+				r.vueltaPedida(ctx, r.tomarPedidos())
 			}
 		}
 	}()
+}
+
+// esperarPedidos deja pasar EsperaPedido desde el último Pedir (los reclamos
+// seguidos la van alargando). Si el fondo de alguna plantilla pedida está
+// vacío no espera: el siguiente create caería al restore.
+func (r *Rellenador) esperarPedidos(ctx context.Context) {
+	for {
+		r.pmu.Lock()
+		falta := EsperaPedido - time.Since(r.ultimoPedido)
+		pedido := map[string]map[string]bool{}
+		for h, ps := range r.pedido {
+			pedido[h] = maps.Clone(ps)
+		}
+		r.pmu.Unlock()
+		if falta <= 0 || r.fondoVacio(ctx, pedido) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(falta):
+		}
+	}
+}
+
+// fondoVacio dice si alguna de las plantillas pedidas no tiene ninguna
+// precalentada reclamable en su host.
+func (r *Rellenador) fondoVacio(ctx context.Context, pedido map[string]map[string]bool) bool {
+	for _, h := range r.reg.Todos() {
+		solo := pedido[h.Nombre]
+		if len(solo) == 0 {
+			continue
+		}
+		vivas, err := h.Cliente.Sandboxes(ctx)
+		if err != nil {
+			continue
+		}
+		hay := map[string]bool{}
+		for _, mc := range vivas {
+			if n := mc.Labels[LabelTemplate]; n != "" && mc.Labels[LabelTenant] == "" &&
+				plantilla.DelFrontal(mc.Labels) && !rota(mc) && mc.State != api.StateWarm {
+				hay[n] = true
+			}
+		}
+		for n := range solo {
+			if !hay[n] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// vueltaPedida rellena solo lo pedido (host -> plantillas), de
+// CreacionesPedidas en CreacionesPedidas. Si hay otra vuelta en curso el pedido
+// vuelve al mapa y se reintenta al acabar ésta.
+func (r *Rellenador) vueltaPedida(ctx context.Context, pedido map[string]map[string]bool) {
+	if len(pedido) == 0 {
+		return
+	}
+	if !r.mu.TryLock() {
+		r.devolverPedido(pedido)
+		return
+	}
+	for _, h := range r.reg.Todos() {
+		solo := pedido[h.Nombre]
+		if solo == nil {
+			continue
+		}
+		hctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		r.vueltaHost(hctx, h, solo, CreacionesPedidas)
+		cancel()
+	}
+	r.mu.Unlock()
+	r.reavisar()
+}
+
+// devolverPedido reincorpora un pedido que no se pudo atender.
+func (r *Rellenador) devolverPedido(pedido map[string]map[string]bool) {
+	r.pmu.Lock()
+	if r.pedido == nil {
+		r.pedido = map[string]map[string]bool{}
+	}
+	for h, ps := range pedido {
+		if r.pedido[h] == nil {
+			r.pedido[h] = map[string]bool{}
+		}
+		for p := range ps {
+			r.pedido[h][p] = true
+		}
+	}
+	r.pmu.Unlock()
+}
+
+// reavisar despierta a Vigilar si quedó algún pedido sin atender. Se llama con
+// el cerrojo ya suelto, para no girar mientras otra vuelta lo tiene.
+func (r *Rellenador) reavisar() {
+	r.pmu.Lock()
+	hay := len(r.pedido) > 0
+	r.pmu.Unlock()
+	if hay {
+		select {
+		case r.pedidos <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // Vuelta mira cada host y crea lo que falte. Solo destruye las precalentadas
@@ -85,24 +262,36 @@ func (r *Rellenador) Vuelta(ctx context.Context) {
 	if !r.mu.TryLock() {
 		return
 	}
-	defer r.mu.Unlock()
 
 	for _, h := range r.reg.Todos() {
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		r.vueltaHost(hctx, h)
+		r.vueltaHost(hctx, h, nil, 0)
 		r.vueltaGrafos(hctx, h)
 		cancel()
 	}
+	r.mu.Unlock()
+	r.reavisar()
 }
 
-func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
+// vueltaHost deja el fondo del host como lo quieren sus plantillas; con solo
+// no nil, crea únicamente las de esas plantillas (la limpieza es siempre de
+// todo el host). simultaneas acota las creaciones a la vez (0: el valor de
+// maxCreaciones o CreacionesALaVez).
+func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[string]bool, simultaneas int) {
 	snaps, err := h.Cliente.Snapshots(ctx)
 	if err != nil {
-		return // el host no contesta; ya lo dice `kling sbx hosts`
+		r.log.Printf("pool %s: listing snapshots: %v", h.Nombre, err)
+		return
 	}
 	vivas, err := h.Cliente.Sandboxes(ctx)
 	if err != nil {
+		r.log.Printf("pool %s: listing sandboxes: %v", h.Nombre, err)
 		return
+	}
+	// Con sandbox-claim el frontal solo reclama running: una warm no sirve.
+	reclama := false
+	if info, err := h.Cliente.Info(ctx); err == nil {
+		reclama = info.Has(api.CapabilityClaim)
 	}
 
 	// La versión de cada plantilla que el host tiene ahora. Una precalentada sin
@@ -129,7 +318,7 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 			motivo = "orphaned (its template is gone)"
 		case mc.Labels[plantilla.LabelVersion] != v:
 			motivo = "stale (its template was rebuilt)"
-		case rota(mc):
+		case rota(mc) || (reclama && mc.State == api.StateWarm):
 			// Una rota no la reclama el frontal (esPrecalentadaDe): contarla
 			// dejaría la plaza ocupada para siempre y cada create caería al
 			// restore. Se borra y se fabrica otra.
@@ -137,6 +326,11 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 		}
 		if motivo == "" {
 			hay[nombre]++
+			if mc.State == api.StateRunning && seVaADormir(mc) {
+				if _, err := h.Cliente.RenewSandbox(ctx, mc.ID, TTLPrecalentada); err != nil {
+					r.log.Printf("pool %s/%s: renewing prewarmed %s: %v", h.Nombre, nombre, shortID(mc.ID), err)
+				}
+			}
 			continue
 		}
 		if err := h.Cliente.Remove(ctx, mc.ID); err != nil {
@@ -146,40 +340,93 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 		}
 	}
 
+	// Lo que falta se crea en paralelo, de CreacionesALaVez en
+	// CreacionesALaVez. Cada plantilla se para al primer fallo (que no quepa
+	// no es un fallo del fondo: es el host diciendo que la RAM es para quien
+	// la pide de verdad; se reintenta en la vuelta siguiente, sin ruido en el
+	// log) y se sigue con las demás: puede caber aunque esta no.
+	tope := simultaneas
+	if tope <= 0 {
+		tope = r.maxCreaciones
+	}
+	if tope <= 0 {
+		tope = CreacionesALaVez
+	}
+	sem := make(chan struct{}, tope)
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for _, s := range snaps {
 		nombre, quiere := DeseoDe(s)
-		if quiere <= 0 {
+		if quiere <= 0 || (solo != nil && !solo[nombre]) {
 			continue
 		}
+		etiquetas := map[string]string{LabelTemplate: nombre}
+		if v := version[nombre]; v != "" {
+			etiquetas[plantilla.LabelVersion] = v
+		}
+		if r.enRetroceso(h.Nombre + "/" + nombre) {
+			continue
+		}
+		var parada atomic.Bool
+		var hechas atomic.Int32
+		hechas.Store(int32(hay[nombre]))
 		for i := hay[nombre]; i < quiere; i++ {
+			sem <- struct{}{}
 			if ctx.Err() != nil {
+				<-sem
 				return
 			}
-			etiquetas := map[string]string{LabelTemplate: nombre}
-			if v := version[nombre]; v != "" {
-				etiquetas[plantilla.LabelVersion] = v
-			}
-			mc, err := h.Cliente.CreateSandbox(ctx, api.SandboxRequest{
-				From:       s.Name,
-				TTLSeconds: TTLPrecalentada,
-				OnTTL:      api.OnTTLFreeze,
-				Egress:     "none",
-				Labels:     etiquetas,
-			})
-			if err != nil {
-				// Que no quepa no es un fallo del fondo: es el host diciendo que
-				// la RAM es para quien la pide de verdad. Se reintenta en la
-				// vuelta siguiente, sin ruido en el log. Y se sigue con la
-				// siguiente plantilla: puede caber aunque esta no, y un fallo de
-				// una no debe dejar sin fondo a las demás del host.
-				if !api.IsInsufficientMemory(err) && !api.IsMachineLimit(err) {
-					r.log.Printf("pool %s/%s: %v", h.Nombre, nombre, err)
-				}
+			if parada.Load() {
+				<-sem
 				break
 			}
-			r.log.Printf("pool %s/%s: prewarmed %s (%d/%d)", h.Nombre, nombre, shortID(mc.ID), i+1, quiere)
+			wg.Add(1)
+			go func(from string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				mc, err := h.Cliente.CreateSandbox(ctx, api.SandboxRequest{
+					From:       from,
+					TTLSeconds: TTLPrecalentada,
+					OnTTL:      api.OnTTLFreeze,
+					Egress:     "none",
+					Labels:     etiquetas,
+				})
+				if err != nil {
+					r.retroceder(h.Nombre + "/" + nombre)
+					if !parada.Swap(true) && !api.IsInsufficientMemory(err) && !api.IsMachineLimit(err) {
+						r.log.Printf("pool %s/%s: %v", h.Nombre, nombre, err)
+					}
+					return
+				}
+				r.log.Printf("pool %s/%s: prewarmed %s (%d/%d)", h.Nombre, nombre, shortID(mc.ID), hechas.Add(1), quiere)
+			}(s.Name)
 		}
 	}
+}
+
+func (r *Rellenador) enRetroceso(clave string) bool {
+	r.rmu.Lock()
+	defer r.rmu.Unlock()
+	return time.Now().Before(r.retroceso[clave])
+}
+
+func (r *Rellenador) retroceder(clave string) {
+	r.rmu.Lock()
+	defer r.rmu.Unlock()
+	if r.retroceso == nil {
+		r.retroceso = map[string]time.Time{}
+	}
+	r.retroceso[clave] = time.Now().Add(retrocesoCreacion)
+}
+
+// seVaADormir dice si a una precalentada running le queda menos de un cuarto
+// de su plazo. Sin reloj conocido (TTLAt) no se toca.
+func seVaADormir(mc *api.Machine) bool {
+	if mc.TTLSeconds <= 0 || mc.TTLAt == nil {
+		return false
+	}
+	plazo := time.Duration(mc.TTLSeconds) * time.Second
+	return time.Until(mc.TTLAt.Add(plazo)) < plazo/4
 }
 
 // rota dice si una precalentada ya no sirve: ni corre ni duerme, y no va a

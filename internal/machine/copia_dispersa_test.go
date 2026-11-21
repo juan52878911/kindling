@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 )
@@ -121,5 +122,45 @@ func TestCopiarDispersoCancelado(t *testing.T) {
 	cancel()
 	if err := copiarDisperso(ctx, in, out); err == nil {
 		t.Error("siguió copiando con el contexto cancelado")
+	}
+}
+
+// Una extensión de datos con ceros en medio: mismos bytes y menos bloques que
+// el origen (los ceros quedan como hueco en el destino).
+func TestCopiarDispersoCerosEnMedioDeExtension(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		// APFS rellena los ceros que caen dentro de una extensión ya escrita:
+		// el destino no tiene cómo quedar con hueco. El caso que importa
+		// (overlays en el almacén XFS) es de Linux.
+		t.Skip("APFS no deja hueco en ceros dentro de una extensión")
+	}
+	d := t.TempDir()
+	src := filepath.Join(d, "src")
+	cont := append(append(bytes.Repeat([]byte{1}, 1<<20), make([]byte, 4<<20)...), bytes.Repeat([]byte{2}, 1<<20)...)
+	if err := os.WriteFile(src, cont, 0o600); err != nil { // escrito de corrido: una sola extensión
+		t.Fatal(err)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	dst := filepath.Join(d, "dst")
+	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copiarDisperso(context.Background(), in, out); err != nil {
+		t.Fatal(err)
+	}
+	out.Close()
+	if b, _ := os.ReadFile(dst); !bytes.Equal(b, cont) {
+		t.Fatal("contenido distinto")
+	}
+	var a, b syscall.Stat_t
+	syscall.Stat(src, &a)
+	syscall.Stat(dst, &b)
+	if b.Blocks*512 > 3<<20 || b.Blocks >= a.Blocks {
+		t.Errorf("destino %d KiB, origen %d KiB: los ceros no quedaron como hueco", b.Blocks*512>>10, a.Blocks*512>>10)
 	}
 }

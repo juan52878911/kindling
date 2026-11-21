@@ -133,3 +133,23 @@ El sistema de ficheros del Pod es de solo lectura, así que `gateway.audit.path`
 (se pierde al reiniciar) o, con `persistence.enabled`, un PVC `<gateway>-audit` (se conserva al borrar el
 release). Con PVC no se admite más de una réplica. Ejemplo completo en
 `deploy/helm/kindling-sandbox/ci/gateway-observabilidad.yaml`.
+
+## Desglose de cada creación desde un snapshot
+
+Cada `run -from` (y cada copia de plantilla) deja su desglose por fases, en `/metrics` y en la máquina
+(`Machine.create`, `kling inspect`; el banco lo lee por API):
+
+- `kling_create_duration_ms`: histograma del total, desde la entrada a `runFromCon` hasta tener la copia lista.
+- `kling_create_phase_ms{phase}`: histograma por fase, sin solapes (su suma es el total salvo redondeo):
+  `checks`, `disk`, `net`, `persist`, `gate_wait`, `vmm`, `load`, `resume`, `resync`, `start`, `finish`.
+- `kling_resync_guest_seconds` y `kling_resync_wake_seconds` (resúmenes `_sum`/`_count`): de qué está hecha la
+  espera de `POST /resync` en cada restauración. `guest` es el camino crítico dentro del agente
+  (`critical_us` de su respuesta) y `wake` el resto de lo que esperó el daemon: despertar del invitado, ARP,
+  TCP y respuesta. Solo cuentan agentes que mandan `critical_us`. Con `KLING_RESYNC_TRACE=1` cada resync deja
+  `resync split: connect=… first_byte=… guest_critical=… guest_origin=…` en el log; `first_byte −
+  guest_critical` es el despertar. El `/healthz` del agente (con `Accept: application/json`) trae
+  `segundos_tiempos_vencidos`: cuántos segundos tiempos de resync pasaron su tope y se dejaron colgados.
+
+`persist` (escribir el estado en disco antes de lanzar el VMM) va ANTES de la puerta de arranque, así que ya
+no ocupa un hueco de ella: `gate_wait` es solo la cola. `kling_operation_duration_ms{kind="restore"}` no
+cambia de significado: sigue cubriendo solo la carga (desde el lanzamiento del VMM hasta cargar y reanudar).

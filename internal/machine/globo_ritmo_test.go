@@ -121,3 +121,39 @@ func TestRitmoGloboReposo(t *testing.T) {
 		t.Errorf("intervalos = %v", g.intervalos)
 	}
 }
+
+// Con el dato en el meta (marca del dorado) no se manda el PATCH; sin él, sí.
+func TestRitmoGloboReposoSiSalta(t *testing.T) {
+	if globoSinEstadisticas {
+		t.Skip("en esta plataforma el globo no da estadísticas")
+	}
+	g, c := nuevoGloboFalso(t, &fc.BalloonStats{})
+	ritmoGloboReposoSi(context.Background(), c, true)
+	g.mu.Lock()
+	n := len(g.intervalos)
+	g.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("con la marca se mandó el PATCH: %v", g.intervalos)
+	}
+	ritmoGloboReposoSi(context.Background(), c, false)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !slices.Equal(g.intervalos, []int{balloonStatsPollSec}) {
+		t.Errorf("sin marca: intervalos = %v", g.intervalos)
+	}
+}
+
+// La marca solo se escribe si se sabe que la máquina estaba en reposo.
+func TestMarcaGloboReposoDelDorado(t *testing.T) {
+	dir := t.TempDir()
+	m := &Manager{}
+	m.escribirMarcaGloboReposo(dir, "aaaa0000bbbb0001")
+	if doradoConGloboReposo(dir) {
+		t.Fatal("marca sin saber que estaba en reposo")
+	}
+	m.marcarGloboReposo("aaaa0000bbbb0001")
+	m.escribirMarcaGloboReposo(dir, "aaaa0000bbbb0001")
+	if !doradoConGloboReposo(dir) {
+		t.Fatal("sin marca")
+	}
+}

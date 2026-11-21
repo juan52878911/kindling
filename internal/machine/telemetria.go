@@ -13,6 +13,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -90,6 +91,26 @@ type telemetria struct {
 	// en µs. Con la cuenta del histograma de la clase da la media por fase:
 	// dónde se va el despertar, no solo cuánto dura.
 	fases map[string]*[len(FasesDespertar)]atomic.Int64
+
+	// durCreacion y fasesCreacion: el total de cada creación desde un
+	// snapshot (desde la entrada a runFromCon) y su desglose por fase
+	// (FasesCreacion), en histogramas.
+	durCreacion   histograma
+	fasesCreacion [numFasesCreacion]histograma
+
+	// Reparto del /resync de las restauraciones cuyo agente manda critical_us:
+	// resyncN respuestas, resyncGuestUS la suma de su camino crítico dentro
+	// del invitado y resyncWakeUS la del resto de lo que esperó el daemon
+	// (despertar del invitado, ARP, TCP y la respuesta), en µs.
+	resyncN, resyncGuestUS, resyncWakeUS atomic.Int64
+}
+
+// resyncRepartido anota una respuesta de /resync que trae critical_us: total
+// es lo que esperó el daemon desde que empezó la petición.
+func (t *telemetria) resyncRepartido(total time.Duration, criticalUS int64) {
+	t.resyncN.Add(1)
+	t.resyncGuestUS.Add(criticalUS)
+	t.resyncWakeUS.Add(max(total.Microseconds()-criticalUS, 0))
 }
 
 // FasesDespertar son las fases de api.WakePhases que se suman en /metrics,
@@ -189,6 +210,16 @@ type Telemetria struct {
 	// FasesMS es, por clase de despertar (DurThaw, DurResume) y fase
 	// (FasesDespertar), lo que sumaron todos los que salieron bien, en ms.
 	FasesMS map[string]map[string]float64
+	// DuracionCreacion y FasesCreacionH son el histograma del total de cada
+	// creación desde un snapshot y el de cada una de sus fases (FasesCreacion).
+	DuracionCreacion Histograma
+	FasesCreacionH   map[string]Histograma
+	// ResyncRepartidos es cuántos /resync trajeron el reparto del agente;
+	// ResyncGuestSeg y ResyncWakeSeg, la suma (s) de su camino crítico en el
+	// invitado y del resto de la espera del daemon.
+	ResyncRepartidos int64
+	ResyncGuestSeg   float64
+	ResyncWakeSeg    float64
 }
 
 // Telemetria toma la foto de los contadores, el disco libre y la memoria
@@ -205,6 +236,10 @@ func (m *Manager) Telemetria() Telemetria {
 		PresionApretones:     tel.presionAprieta.Load(),
 		PresionCongelaciones: tel.presionCongela.Load(),
 		PresionDevueltaMiB:   tel.presionDevueltaMiB.Load(),
+
+		ResyncRepartidos: tel.resyncN.Load(),
+		ResyncGuestSeg:   float64(tel.resyncGuestUS.Load()) / 1e6,
+		ResyncWakeSeg:    float64(tel.resyncWakeUS.Load()) / 1e6,
 	}
 	for o, c := range tel.ops {
 		out.OK[o], out.Fallos[o] = c.ok.Load(), c.fallos.Load()
@@ -219,6 +254,18 @@ func (m *Manager) Telemetria() Telemetria {
 			por[f] = float64(s[i].Load()) / 1000
 		}
 		out.FasesMS[d] = por
+	}
+	snapH := func(h *histograma) Histograma {
+		hh := Histograma{Cubos: make([]int64, len(h.cubos)), Suma: h.suma.Load(), Cuenta: h.cuenta.Load()}
+		for i := range h.cubos {
+			hh.Cubos[i] = h.cubos[i].Load()
+		}
+		return hh
+	}
+	out.DuracionCreacion = snapH(&tel.durCreacion)
+	out.FasesCreacionH = make(map[string]Histograma, numFasesCreacion)
+	for i, f := range FasesCreacion {
+		out.FasesCreacionH[f] = snapH(&tel.fasesCreacion[i])
 	}
 	for d, h := range tel.dur {
 		hh := Histograma{Cubos: make([]int64, len(h.cubos)), Suma: h.suma.Load(), Cuenta: h.cuenta.Load()}

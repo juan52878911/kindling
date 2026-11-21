@@ -261,6 +261,8 @@ func (m *Manager) limpiarMaquina(mc *api.Machine) error {
 		v.(*atomic.Uint64).Add(1)
 	}
 	m.ganchosPendientes.Delete(mc.ID)
+	// Su marca de globo en reposo (globo_ritmo.go): el mapa es global.
+	m.olvidarGloboReposo(mc.ID)
 	m.invalidarSesiones(mc.ID, "removed")
 	// Con el dueño: ya no está en byID, y el filtro por inquilino del bus no
 	// tendría a quién preguntar (daemon/authz.go, eventoVisible). Una tumba

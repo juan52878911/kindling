@@ -78,6 +78,20 @@ type Net struct {
 	NSIP   string // IP del namespace en el enlace; por aquí se alcanza la microVM
 	Index  int
 
+	// VecinoInvitado: si es true, la red deja una entrada de vecino
+	// GuestIP → GuestMAC en nud stale (no permanente) en tap0 al aplicarse
+	// lo propio de la petición. Por defecto false.
+	VecinoInvitado bool
+
+	// baseLista: la base (netns, veth, tap, sysctl, barrera IPv6, DNAT) ya
+	// está montada: es una ranura (ranuras_fc.go) y Setup solo aplica lo
+	// propio. Se consume en Setup.
+	baseLista bool
+	// baseEgress: las reglas de salida que lleva la base montada de una
+	// ranura (siempre none: lo más restrictivo mientras espera). Vacío si no
+	// es una ranura.
+	baseEgress Egress
+
 	// reserva es el fichero de DirReservas que aparta Index mientras se
 	// monta la red (ver subredes.go). Vacío si no hay reserva.
 	reserva string

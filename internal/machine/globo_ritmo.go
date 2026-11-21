@@ -2,6 +2,8 @@ package machine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -81,6 +83,46 @@ func informeNuevo(a, b *fc.BalloonStats) bool {
 	return a.MinorFaults != b.MinorFaults || a.MajorFaults != b.MajorFaults ||
 		a.FreeMemory != b.FreeMemory || a.AvailableMemory != b.AvailableMemory ||
 		a.DiskCaches != b.DiskCaches
+}
+
+// globoReposoMarca es el fichero que lleva un dorado cuya memoria se congeló con
+// las estadísticas del globo ya en el intervalo de reposo: restaurarlo no
+// necesita el PATCH (~1 ms por creación, y una llamada más al VMM). Sin la marca
+// —dorados de antes, o de los que no se sabe— se manda, como siempre.
+const globoReposoMarca = "globo_reposo"
+
+// marcarGloboReposo apunta que el globo de la máquina id está en reposo
+// (Manager.globoEnReposo: las máquinas de las que este daemon sabe que su globo
+// está en el intervalo de reposo, id → true; las restauradas con
+// ritmoGloboReposo y las que configurarGlobo arranque con él).
+func (m *Manager) marcarGloboReposo(id string) { m.globoEnReposo.Store(id, true) }
+
+// olvidarGloboReposo la quita (la máquina se borra o se aprieta).
+func (m *Manager) olvidarGloboReposo(id string) { m.globoEnReposo.Delete(id) }
+
+// escribirMarcaGloboReposo deja la marca en el directorio de un dorado recién
+// congelado de la máquina id, si se sabe que estaba en reposo. Un fallo no
+// importa: sin marca se manda el PATCH.
+func (m *Manager) escribirMarcaGloboReposo(dir, id string) {
+	if _, ok := m.globoEnReposo.Load(id); !ok {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, globoReposoMarca), []byte("1\n"), 0o644)
+}
+
+// dorado dice si el dorado en dir trae la marca.
+func doradoConGloboReposo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, globoReposoMarca))
+	return err == nil
+}
+
+// ritmoGloboReposoSi es ritmoGloboReposo que se salta el PATCH si el snapshot
+// ya trae el intervalo de reposo (yaEnReposo); ante la duda, se manda.
+func ritmoGloboReposoSi(ctx context.Context, c *fc.Client, yaEnReposo bool) {
+	if yaEnReposo {
+		return
+	}
+	ritmoGloboReposo(ctx, c)
 }
 
 // ritmoGloboReposo deja las estadísticas del globo en el intervalo de reposo.

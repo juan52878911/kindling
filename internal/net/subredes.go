@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -126,25 +127,81 @@ var avisoReservas sync.Once
 // si otro daemon lo está montando o ya lo usa en el host. La reserva se suelta
 // con SoltarReserva, en cuanto Setup termina.
 func (n *Net) Reservar() bool {
+	ok, _ := n.reservar()
+	return ok
+}
+
+// reservar es Reservar con el error de no poder mirar el host, para que
+// Asignar distinga "ocupado" de "no se pudo mirar".
+func (n *Net) reservar() (bool, error) {
 	if !redEnHost {
-		return true
+		return true, nil
 	}
 	if n.Index <= 0 {
-		return false
+		return false, nil
 	}
 	if !n.reservarFichero() {
-		return false
+		return false, nil
 	}
 	dirs, err := DireccionesHost()
 	if err != nil {
-		// Sin poder mirar el host, lo de siempre: el índice de este daemon.
-		return true
+		// Sin poder mirar el host no se sabe si una ranura en espera, otro
+		// daemon o un huérfano ocupan el índice: no se reparte a ciegas.
+		n.SoltarReserva()
+		avisoVolcado(err)
+		return false, err
 	}
 	if OcupadosEnHost(dirs, n.HostIf)[n.Index] {
 		n.SoltarReserva()
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
+}
+
+var (
+	repetidas   atomic.Int64
+	ultAvisoVol atomic.Int64 // UnixNano del último aviso de volcado fallido
+)
+
+// SubredesRepetidas cuenta las /30 vistas en más de una interfaz del host
+// (VerificarUnica) desde que arrancó el daemon. Para /metrics.
+func SubredesRepetidas() int64 { return repetidas.Load() }
+
+// avisoVolcado deja en el log, como mucho una vez por minuto, que no se pudo
+// mirar las direcciones del host.
+func avisoVolcado(err error) {
+	ahora := time.Now().UnixNano()
+	ult := ultAvisoVol.Load()
+	if ult != 0 && ahora-ult < int64(time.Minute) || !ultAvisoVol.CompareAndSwap(ult, ahora) {
+		return
+	}
+	log.Printf("network: cannot list the host's addresses (%v): not assigning subnets blind", err)
+}
+
+// VerificarUnica comprueba, con un volcado, que las direcciones de la /30 de
+// n.Index están solo en n.HostIf. Se llama al acabar de montar la base: si dos
+// interfaces comparten la /30, el host enruta la NSIP por una de ellas y una
+// máquina llega al agente de otra.
+func (n *Net) VerificarUnica() error {
+	if !redEnHost {
+		return nil
+	}
+	dirs, err := DireccionesHost()
+	if err != nil {
+		return fmt.Errorf("cannot verify that the /30 of %s is unique on the host: %w", n.HostIf, err)
+	}
+	var otras []string
+	for _, d := range dirs {
+		if d.If != n.HostIf && IndiceDe(d.IP) == n.Index {
+			otras = append(otras, d.If+" "+d.IP.String())
+		}
+	}
+	if len(otras) > 0 {
+		repetidas.Add(1)
+		log.Printf("network: DUPLICATE /30 for index %d (%s): also on %v", n.Index, n.HostIf, otras)
+		return fmt.Errorf("the /30 of %s (index %d) is also on %v: two links share a subnet", n.HostIf, n.Index, otras)
+	}
+	return nil
 }
 
 // reservarFichero crea la reserva en DirReservas. false si otro daemon la
@@ -269,8 +326,13 @@ func Asignar(cursor *int, espacio int, usado func(int) bool, id string) (*Net, e
 			continue
 		}
 		n := Plan(idx, id)
-		if n.Reservar() {
+		ok, err := n.reservar()
+		if ok {
 			return n, nil
+		}
+		if err != nil {
+			// El host no se puede mirar: probar otro índice no ayuda.
+			return nil, fmt.Errorf("cannot check the host's addresses for a free /30 (%w): refusing to assign a subnet blind", err)
 		}
 	}
 	return nil, fmt.Errorf("no free subnet for the machine's network: all %d /30 in %s.0.0/16 are in use on this host", espacio, hostPrefix)

@@ -11,7 +11,7 @@ scripts/recetas/claude-code.sh "tu prompt"             # necesita el daemon
 ## Pasos
 
 1. **Plantilla** (una vez): imagen pública de node con el agente instalado y guardada como plantilla, que arranca en ms.
-   `kling image import node:22-slim -warm -template claude-code -egress internet -step 'npm install -g @anthropic-ai/claude-code'`
+   `kling image import node:22-slim -warm -template claude-code -disk 2G -egress internet -step 'npm install -g @anthropic-ai/claude-code'`
    Esta fase tiene internet para npm, pero aún no hay ninguna clave.
 2. **Sandbox**: `kling sandbox create -from claude-code -egress allowlist -allow api.anthropic.com -ttl 30m -wait-ready -q` imprime el id.
 3. **Credencial**: la clave entra por stdin a `kling machine credential <id> -domain api.anthropic.com -env ANTHROPIC_API_KEY -allow-request 'POST /v1/messages'`. En la VM, `ANTHROPIC_API_KEY` vale `kling-cred-…`.

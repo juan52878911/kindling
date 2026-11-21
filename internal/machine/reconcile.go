@@ -1264,13 +1264,17 @@ func (m *Manager) vmmTermino(id, detalle string) {
 	if m.cerrado() {
 		return
 	}
+	// Antes de esperar el cerrojo: si lo tiene la creación, este aviso es de
+	// una máquina que aún no se ha entregado (y cuenta para la puerta).
+	origen, creando := m.creando.Load(id)
 	soltar := m.lifecycle.tomar(id)
 	defer soltar()
 	// Close pudo llegar mientras se esperaba el cerrojo.
 	if m.cerrado() {
 		return
 	}
-	m.comprobarVMMLocked(id, detalle)
+	o, _ := origen.(string)
+	m.comprobarVMMLocked(id, detalle, creando, o)
 }
 
 // cerrado dice si Close ya paró la escritura del estado.
@@ -1286,7 +1290,7 @@ func (m *Manager) cerrado() bool {
 // comprobarVMMLocked marca failed la máquina id si figura running o pausada
 // y su VMM ya no existe. Con el cerrojo de ciclo de vida de id tomado (no
 // m.mu). Dice si la marcó.
-func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
+func (m *Manager) comprobarVMMLocked(id, detalle string, creando bool, origen string) bool {
 	m.mu.RLock()
 	mc := m.byID[id]
 	if mc == nil || (mc.State != api.StateRunning && mc.State != api.StatePaused) {
@@ -1311,6 +1315,12 @@ func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
 	m.persist()
 	copia := mc.Clone()
 	m.mu.Unlock()
+	// Antes de trasMorir, que borra el cgroup y el jail.
+	var diag string
+	if detalle == detalleEnjaulado {
+		diag = m.diagnosticoVMM(id)
+	}
+	m.puertaRetroceder("unexpected VMM death", origen, !creando)
 	// Lo que dijo el VMM al acabar (fin_vmm.go): con el código de salida
 	// solo, un reinicio del invitado era "exit status 0".
 	if motivo := m.motivoFinVMM(id); motivo != "" {
@@ -1324,6 +1334,9 @@ func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
 		if l := m.ultimaLineaConsola(id); l != "" {
 			detalle += "; last console line: " + l
 		}
+	}
+	if diag != "" {
+		detalle += "; " + diag
 	}
 	if detalle != "" {
 		log.Printf("watch: the VMM of %s (pid %d) exited (%s): failed", shortID(id), pid, detalle)

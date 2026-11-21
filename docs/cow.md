@@ -217,7 +217,9 @@ Si faltan `xfs_quota` o `btrfs`, o un almacén XFS ya montado no tiene `prjquota
 apagadas, y el daemon lo vuelve a montar con ella), el almacén funciona como antes, sin
 cuota, con un aviso en el log y en `kling doctor`. Si la cuota está activa y no se puede
 aplicar a una instancia, esa instancia va a copia completa en lugar de al almacén. Las
-instancias creadas antes de la cuota siguen sin ella. Los tests con un almacén de verdad
+instancias creadas antes de la cuota siguen sin ella. Con `KLING_COW_QUOTA=require` el daemon
+no mete en el almacén ninguna instancia sin cuota: si no se puede aplicar, todas van a copia
+completa y el log lo dice al arrancar. Los tests con un almacén de verdad
 (`TestCuotaXFSDeVerdad`, `TestCuotaBtrfsDeVerdad`) necesitan root y `KLING_TEST_MOUNTS=1`.
 
 **Sin almacén** (macOS siempre, Linux sin `daemon.cow`) no hay cuota del núcleo. Ahí el

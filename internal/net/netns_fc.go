@@ -31,12 +31,24 @@ func nsIP(third, fourth int) string {
 // falta ninguna capacidad.
 // domains solo se usa cuando egress es EgressAllowlist: son los dominios a los
 // que se deja salir. En los demás modos se ignora.
-func (n *Net) Setup(egress Egress, domains []string, owner int) error {
+func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
+	tr := nuevaTrazaSetup(n.NS)
+	defer func() { tr.fin(err) }()
 	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
 	// si un reload del cortafuegos las borró, se reponen; si no se puede,
 	// la máquina no arranca con el host abierto.
-	if err := asegurarHostInput(); err != nil {
+	if err := asegurarHost(); err != nil {
 		return fmt.Errorf("host INPUT rules: %w", err)
+	}
+	tr.fase("host_check")
+	// Una ranura (ranuras_fc.go) llega con la base montada: solo se añade lo
+	// propio de la petición. Se consume aquí: un segundo Setup del mismo *Net
+	// ya no la encuentra y monta todo, como cualquier red sin ranura.
+	if n.baseLista {
+		n.baseLista = false
+		base := n.baseEgress
+		n.baseEgress = ""
+		return n.aplicarSobreRanura(tr, base, egress, domains)
 	}
 	// Restos de una ejecución anterior se derriban; lo de otro daemon, no. Si
 	// el veth existe con otra IP, no es un resto nuestro: es la red de otra
@@ -48,13 +60,47 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 		}
 	}
 	n.Teardown()
+	tr.fase("teardown")
+	// Sin ranura, el montaje completo hace cola: a lo sumo 4 a la vez.
+	montajesCompletos <- struct{}{}
+	err = n.montarBase(tr, owner, false)
+	<-montajesCompletos
+	if err != nil {
+		return err
+	}
+	return n.aplicarPropio(tr, egress, domains, false)
+}
 
+// nsEn ejecuta una orden dentro del netns de n. `ip` entra solo (`ip -n NS`,
+// un proceso); lo demás (iptables, sysctl) lo lanza ordenEnNetns con setns, sin el
+// `ip netns exec` de antes.
+func (n *Net) nsEn(args ...string) error {
+	if args[0] == "ip" {
+		return ejecutar(append([]string{"ip", "-n", n.NS}, args[1:]...)...)
+	}
+	return ordenEnNetns(n.NS, args...)
+}
+
+// reglaDNAT: lo que llegue a la IP del namespace va a la microVM. Así el host
+// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
+func (n *Net) reglaDNAT() []string {
+	return []string{"-t", "nat", "-A", "PREROUTING", "-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP}
+}
+
+// montarBase monta lo que no depende de la petición: netns, veth, tap, sysctl,
+// barrera IPv6 y, si conDNAT (una ranura), la entrada DNAT junto con las reglas
+// de none (forwardBase, el cierre, los topes y las del DNS): es lo más
+// restrictivo, y la petición solo cambia lo que difiere (aplicarSobreRanura).
+// Sin conDNAT, el DNAT va en el iptables-restore de aplicarPropio (un proceso
+// menos en Setup) y la base no lleva ninguna regla de salida.
+func (n *Net) montarBase(tr *trazaSetup, owner int, conDNAT bool) error {
 	// Los 11 procesos de ip del enlace son 3: el netns y un `ip -batch`
 	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
 	// iproute2, el resto de líneas acabaría dentro del netns nuevo.
-	if err := run("ip", "netns", "add", n.NS); err != nil {
+	if err := ejecutar("ip", "netns", "add", n.NS); err != nil {
 		return err
 	}
+	tr.fase("netns")
 	// El extremo del namespace nace ya dentro de él. Crearlo fuera y moverlo
 	// después (`ip link set ... netns`) espera un periodo de gracia de RCU en
 	// el kernel: 14 ms medidos en un i7-8700T, un tercio de todo el montaje.
@@ -65,6 +111,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	); err != nil {
 		return err
 	}
+	tr.fase("veth")
 	// Lado namespace, con el TAP de nombre e IP fijos: idénticos en todos los
 	// namespaces.
 	tap := "tuntap add " + TapName + " mode tap"
@@ -82,16 +129,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	); err != nil {
 		return err
 	}
-
-	ns := func(args ...string) error {
-		// `ip -n NS ...` entra en el namespace dentro del propio ip: un
-		// proceso en vez de dos (`ip netns exec NS ip ...`). Lo demás
-		// (iptables, sysctl) no sabe entrar solo y va con netns exec.
-		if args[0] == "ip" {
-			return run(append([]string{"ip", "-n", n.NS}, args[1:]...)...)
-		}
-		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
-	}
+	tr.fase("tap")
 
 	// Los sysctl del netns, en un solo proceso (aplicarSysctls): el reenvío,
 	// el endurecimiento de sysctlsNetns y la capa 1 de la barrera IPv6.
@@ -109,31 +147,93 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	// la vieja en su caché, y lo que se la corrige es justo la petición ARP del
 	// host (despertar.md, palanca 8). Con la entrada permanente el host no
 	// pregunta y esas restauraciones se quedaban sin red.
-	if err := aplicarSysctls(ns, n.NS, n.NSIf); err != nil {
+	if err := aplicarSysctls(n.nsEn, n.NS, n.NSIf); err != nil {
 		return err
 	}
+	tr.fase("sysctl")
 
-	// Capa 2 de la barrera IPv6 (firewall.go): va AQUÍ, antes de la rama
-	// rápida de iptables-restore de más abajo, y no dentro de applyEgress. Esa
-	// rama devuelve sin pasar por applyEgress para none/internet cuando hay
-	// iptables-restore, así que si esta llamada viviera solo dentro de
-	// applyEgress se saltaría en el camino más común. Se aplica igual en los
-	// tres modos, por eso no depende de egress.
-	if err := n.applyIPv6Barrier(ns); err != nil {
+	// Capa 2 de la barrera IPv6 (firewall.go): va en la base y no dentro de
+	// applyEgress. Esa rama devuelve sin pasar por applyEgress para
+	// none/internet cuando hay iptables-restore, así que si esta llamada
+	// viviera solo dentro de applyEgress se saltaría en el camino más común.
+	// Se aplica igual en los tres modos, por eso no depende de egress.
+	if err := n.applyIPv6Barrier(n.nsEn); err != nil {
 		return err
 	}
+	tr.fase("ip6")
+	if conDNAT {
+		if err := n.restoreRules(n.reglasBaseRanura()); err != nil {
+			return err
+		}
+		tr.fase("dnat")
+	}
+	return nil
+}
 
-	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
-	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
-	dnat := []string{"-t", "nat", "-A", "PREROUTING", "-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP}
+// reglasBaseRanura son las reglas de una ranura recién montada: el DNAT y
+// todo lo de none, en el orden de un montaje completo en none.
+func (n *Net) reglasBaseRanura() [][]string {
+	reglas := append([][]string{n.reglaDNAT()}, n.egressRules(EgressNone)...)
+	return append(reglas, n.reglasGrafo(EgressNone, false)...)
+}
+
+// aplicarSobreRanura es aplicarPropio para una base ya montada con las reglas
+// de base (hoy siempre none). En none no queda nada que poner: ni un
+// iptables-restore, solo el resolver y el registro. En los demás modos se
+// quita lo propio de none y se pone lo del modo pedido en UN restore (las
+// reglas comunes se quedan donde están, salvo el cierre de FORWARD, que
+// diferenciaDeReglas recoloca). El resultado es el del montaje completo.
+func (n *Net) aplicarSobreRanura(tr *trazaSetup, base, egress Egress, domains []string) error {
+	if base != EgressNone || !hayRestore() {
+		return n.aplicarPropio(tr, egress, domains, true)
+	}
+	if egress == EgressNone {
+		tr.fase("restore")
+		if err := n.arrancarRegistroNone(egress); err != nil {
+			return err
+		}
+		return n.vecinoInvitado()
+	}
+	borrar, anadir := diferenciaDeReglas(n.reglasDeModo(base), n.reglasDeModo(egress))
+	var tx [][]string
+	for _, r := range borrar {
+		tx = append(tx, comoBorrado(r))
+	}
+	tx = append(tx, anadir...)
+	if egress == EgressAllowlist {
+		if err := n.allowlistConReglas(n.nsEn, domains, tx, true); err != nil {
+			return err
+		}
+		return n.vecinoInvitado()
+	}
+	if err := n.restoreRules(tx); err != nil {
+		return err
+	}
+	tr.fase("restore")
+	return n.vecinoInvitado()
+}
+
+// aplicarPropio añade lo que depende de la petición sobre la base montada:
+// las reglas de salida (en un solo iptables-restore), el resolver de none o
+// el de allowlist, y el registro de nft. dnatHecho dice que montarBase ya
+// puso el DNAT.
+func (n *Net) aplicarPropio(tr *trazaSetup, egress Egress, domains []string, dnatHecho bool) error {
+	ns := n.nsEn
+	var dnat [][]string
+	if !dnatHecho {
+		dnat = [][]string{n.reglaDNAT()}
+	}
 	// Los tres modos van en UN iptables-restore con todas sus reglas: cada
 	// iptables por separado es un proceso que relee el conjunto de reglas (~3
 	// ms cada uno). allowlist además crea su ipset y arranca su resolver.
-	if _, err := exec.LookPath("iptables-restore"); err == nil {
+	if hayRestore() {
 		if egress == EgressAllowlist {
-			return n.applyAllowlist(ns, domains, [][]string{dnat}, true)
+			if err := n.applyAllowlist(ns, domains, dnat, true); err != nil {
+				return err
+			}
+			return n.vecinoInvitado()
 		}
-		reglas := append([][]string{dnat}, n.egressRules(egress)...)
+		reglas := append(dnat, n.egressRules(egress)...)
 		if egress == EgressNone {
 			// El DNS del invitado pasa por nuestro resolver (NXDOMAIN a
 			// todo): así sabemos QUÉ nombre quiso y el aviso de red
@@ -143,10 +243,16 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 		if err := n.restoreRules(reglas); err != nil {
 			return err
 		}
-		return n.arrancarRegistroNone(egress)
+		tr.fase("restore")
+		if err := n.arrancarRegistroNone(egress); err != nil {
+			return err
+		}
+		return n.vecinoInvitado()
 	}
-	if err := ns(append([]string{"iptables"}, dnat...)...); err != nil {
-		return err
+	if !dnatHecho {
+		if err := ns(append([]string{"iptables"}, n.reglaDNAT()...)...); err != nil {
+			return err
+		}
 	}
 	if err := n.applyEgress(egress, domains); err != nil {
 		return err
@@ -156,7 +262,22 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 			return err
 		}
 	}
-	return n.arrancarRegistroNone(egress)
+	if err := n.arrancarRegistroNone(egress); err != nil {
+		return err
+	}
+	return n.vecinoInvitado()
+}
+
+// vecinoInvitado deja, si Net.VecinoInvitado, la entrada de vecino
+// GuestIP → GuestMAC en tap0 como STALE, no permanente: el host no tiene que
+// preguntar por el invitado en el primer paquete, pero si el invitado cambia
+// de MAC (un dorado viejo) la primera sonda la corrige. Ver el comentario de
+// montarBase sobre por qué NO es permanente.
+func (n *Net) vecinoInvitado() error {
+	if !n.VecinoInvitado {
+		return nil
+	}
+	return ejecutar("ip", "-n", n.NS, "neigh", "replace", GuestIP, "lladdr", GuestMAC, "dev", TapName, "nud", "stale")
 }
 
 // arrancarRegistroNone monta, en egress none, lo que ve los destinos cortados:
@@ -166,12 +287,16 @@ func (n *Net) arrancarRegistroNone(egress Egress) error {
 	if egress != EgressNone {
 		return nil
 	}
-	if err := startDNSResolverModo(n, nil, modoSoloGrafo); err != nil {
+	if err := iniciarResolverNone(n); err != nil {
 		return err
 	}
 	n.instalarRegistroIP()
 	return nil
 }
+
+// iniciarResolverNone arranca el resolver de none (NXDOMAIN a todo). Variable
+// para los tests, que no pueden atar la IP del veth.
+var iniciarResolverNone = func(n *Net) error { return startDNSResolverModo(n, nil, modoSoloGrafo) }
 
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,
 // pero lo intentamos por si el namespace ya no está.
@@ -202,7 +327,7 @@ func borrarEnlace(ns, hostIf string) {
 
 // ipBatch ejecuta varias órdenes de ip en un solo proceso (`ip -batch -`),
 // dentro del netns ns si no está vacío. Para en la primera que falla.
-func ipBatch(ns string, ordenes ...string) error {
+func ipBatchReal(ns string, ordenes ...string) error {
 	args := []string{"ip"}
 	if ns != "" {
 		args = append(args, "-n", ns)
@@ -215,6 +340,12 @@ func ipBatch(ns string, ordenes ...string) error {
 	}
 	return nil
 }
+
+// Sustituibles en tests: lanzar procesos de verdad pide root e `ip`.
+var (
+	asegurarHost = asegurarHostInput
+	ipBatch      = ipBatchReal
+)
 
 // Sustituibles en tests: mirar la red de verdad pide /sys y un veth.
 var (

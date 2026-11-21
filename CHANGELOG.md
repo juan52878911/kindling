@@ -8,6 +8,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- kling-sandbox gateway: experimental Python interpreter, `POST /v1/sandboxes/{id}/code` and `/code/contexts` (stateful contexts as background processes in the sandbox, NDJSON events, 8 contexts per sandbox, 422 without `python3`).
+- `KLING_COW_QUOTA=require` keeps instances out of the copy-on-write store (they get a full copy of their overlay) when no per-instance disk quota can be applied; `KLING_FORWARD_CHAIN=1` adds an opt-in `KINDLING-FWD` chain for hosts whose FORWARD policy is DROP (Docker).
+- Resync: the guest agent reports its critical-path and origin-check times in the `/resync` reply; `KLING_RESYNC_TRACE=1` logs the split and `/metrics` exposes `kling_resync_guest_seconds` and `kling_resync_wake_seconds`.
+- kling-sandbox gateway: `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume` and `PATCH /v1/sandboxes/{id}/egress` (owner check as in the other sandbox routes, in the OpenAPI spec).
+- `scripts/bench`: hygiene check between variants (no stray VMMs, netns or store mounts), c50 twice, pause measured at rest and during refill.
+- Atomic sandbox claim: `POST /sandboxes/claim` (capability `sandbox-claim`) picks a running pool machine whose labels match, and labels it, names it and renews its TTL in one critical section; `404 no_claimable` when there is none.
+- `scripts/bench/`: reproducible benchmark (`bench.py`, a per-phase table read from `/metrics`, and `ec2.sh`, which launches a nested c8i instance that terminates itself; `--dry-run` prints the plan).
+- Every creation from a snapshot records its phase breakdown: `kling_create_duration_ms` and `kling_create_phase_ms{phase}` histograms in `/metrics`, and an additive `create` field on the machine (`api.CreatePhases`). `kling_operation_duration_ms{kind="restore"}` is unchanged (load only).
+- `kling image import -warm -disk 2G`: sets the writable disk of the warm template and its copies (default 512 MiB). The Claude Code and Codex recipes use 2G: `npm install` did not fit in 512 MiB. Fails early against a daemon without the disk capability.
 - kling-sandbox gateway: `GET /v1/sandboxes/{id}/files?list=1` lists a directory (same owner check as the other file routes, in the OpenAPI spec); the console and the Python/TypeScript SDKs (`files.list`) use it instead of `ls -la`.
 - kling-sandbox gateway: `-console` flag (chart value `gateway.console`); the console is on by default with TLS or on loopback and off on plain HTTP outside loopback, and `/console/` answers 404 when off. The console `index.html` is now tracked (it was hidden by `.gitignore`).
 - `api.Client.WrapTransport` (additive) wraps the HTTP transport; the gateway uses it with OTLP on so the `traceparent` reaches the daemons, and the daemon adds a well-formed `traceparent` to its request error log lines.
@@ -43,7 +52,36 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
+### Changed
+
+- Network slots come with the `none` egress rules installed, so a `none` sandbox skips its `iptables-restore`; other modes apply only the difference in one transaction. The daemon warns at startup when `ipset` is missing (the egress allowlist needs it).
+- `POST /sandboxes/claim` requires a `kling.sandbox.claim` or `kling.owner` label in `labels`.
+- docs/benchmarks.md: kindling vs OpenSandbox 1.2.1 on EC2, with its caveats; the bench records KVM counters, the network pool and pause on fresh vs idle sandboxes.
+- kling-sandbox gateway: the pool refills 300 ms after the last claim and 2 at a time, so refills no longer compete with sandboxes in use; requests that arrive during a refill round are no longer lost.
+- Guest agent: `/resync` answers once entropy and clock are set and finishes machine-id, the generation file and process cleanup behind a gate that holds exec, files and sessions; `GET /resync` returns per-step timings.
+- Creating from a snapshot clones the overlay and sets up the network in parallel, and skips the balloon stats PATCH when the golden snapshot is already at the idle interval.
+- kling-sandbox gateway: the prewarmed pool keeps its TTL alive and replaces frozen machines (it froze after an hour and every create went cold); failed atomic claims are cleaned up by nonce, claimed machines with open egress are rejected, a daemon that stops announcing `sandbox-claim` falls back to two phases, and pool creation backs off after failures.
+- kling-sandbox gateway: claims a warm sandbox with one atomic call when the daemon announces `sandbox-claim` (the two-phase claim with its fixed 50 ms wait stays only for older daemons), and refills the pool when a sandbox is claimed, with bounded parallel creation, instead of waiting for the 30 s tick.
+- Creating a machine no longer re-hashes the base image after every jail hard link or removal (the `checks` phase, ~28 ms per creation on EC2).
+- Copy-on-write store: concurrent clones no longer serialize on a global lock; XFS project ids are allocated in memory, quotas are set with `quotactl` (falling back to `xfs_quota`), free space is cached for 100 ms, and copy-mode disks are copied in-process keeping holes.
+- Network setup keeps a pool of pre-mounted network slots (`KLING_NET_POOL`, default 16, 0 disables), enters the machine netns with `setns` instead of `ip netns exec`, and runs at most 4 full network mounts at a time.
+- Sandboxes with `on_ttl=remove` no longer track dirty guest pages on restore; `KLING_RESYNC_TRACE=1` logs the resync connect/agent split.
+- Restoring from a snapshot now writes the machine state to disk before taking a slot in the launch gate (still before the VMM exists), so the fsync no longer holds a slot.
+- Launch gate: on nested hosts with 8 or more cores, NumCPU/2 boots run at once (up to 8) instead of 2; hosts with fewer cores keep 2. `KLING_MAX_PARALLEL_BOOT` still overrides it, and the daemon logs the value it picked.
+- API client: requests over the local unix socket reuse connections instead of dialing one per request; `ssh://` endpoints are unchanged.
+- Network setup checks the host firewall rules once per concurrent burst with a single `iptables-save`, and `iptables-restore` waits for the xtables lock itself (`--wait`, iptables 1.6.2 or later) instead of sleeping and retrying. `KLING_NET_TRACE=1` logs the timing of each setup step.
+- kling-sandbox gateway: per-stage creation latency histogram (`kling_sandbox_create_stage_seconds{stage}`); cold creations from templates without a pool no longer list sandboxes, and the template snapshot is fetched by name instead of listing every snapshot.
+
 ### Fixed
+- A restored copy whose guest never answers no longer holds the creation for 12 s: it is discarded and restored again once (`kling_restore_dead_copies_total`), and the failure diagnostics use the real VMM pid.
+- Unexpected deaths of jailed VMMs log the `firecracker.log` tail, the last console line and the cgroup `oom_kill` count, and the launch gate backs off to half (minimum 2), recovering one step per minute.
+- Daemon shutdown destroys the pooled network slots and stops their collector; expired slots are collected under the machine lifecycle lock.
+- Guest agent: the `dns`, `service`, `procs`, `machine/start` and `share` routes also wait behind the resync gate; the second resync phase has a watchdog and recovers from panics; after a thaw that delivered the machine without setting its clock, exec waits up to 2 s for the background resync.
+- Copy-on-write store: a `quotactl` marked broken is retried after a minute, and removing a machine forgets its idle-balloon mark.
+- Guests no longer wake from freeze/thaw or golden restores with a stale clock when the agent is slow or cuts the connection: a cut connection counts as a failed resync, thaw retries it (long timeout, then in the background), the timeout grows with concurrent resyncs, and each failure logs vCPU and tap0 diagnostics.
+- `POST /sandboxes/claim` takes the machine's lifecycle lock without waiting, revalidates the candidate and checks name, TTL and merged labels.
+- Copy-on-write store: project ids are reused per file instead of leaking on every freeze/thaw, the in-process sparse copy is used only where holes are reliable, a transient `quotactl` error no longer disables it for good, failed seeding is retried, and the jail link-stable digest is trusted only for root-owned images.
+- Restore: with a guest agent, the resync now waits up to 6 s for the guest network instead of failing after one retry. Under load (10-20 concurrent restores on a 4-core host) ARP took over 250 ms and creates failed with "the guest agent did not resync after the restore"; with the fix, 120 of 120 concurrent creates succeed.
 - DNS resolver: waits up to 1 s for a port another resolver just released, so a live `kling egress set` no longer fails with "address already in use" on a busy host.
 
 - kling-sandbox gateway: port ingress (`<port>-<id>.<domain>`) answered 502 against a real daemon: the daemon's tunnel and `/guest` only reach ports listed in the machine's `kling.ports` label, and the gateway never added them. It now merges the port into the label (capped at 16 per sandbox) before opening the tunnel; the port stays listed after the endpoint expires (sandboxes are ephemeral). The test daemon enforces the same rule.
@@ -197,6 +235,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- Network setup retries interrupted netlink address dumps and never assigns a /30 subnet when the dump fails, so two machines can no longer end up sharing a subnet (and one machine's exec, resync or credentials reaching another's agent).
+- The launch gate no longer backs off for VMM deaths of already-delivered machines or for repeated dead copies from a single origin, so a guest that reboots itself in a loop cannot hold the gate down for everyone.
 - `kling ai serve -listen … -no-auth` refuses (403) requests whose `Host` or `Origin` is not loopback, and every `POST` must be `application/json` (415).
 - MCP gateway: the "types repaired" log line no longer includes the tool's arguments, only its name and size.
 - `POST /graphs/{ref}/snapshot`: a template name already in use gives a neutral 409 that no longer confirms another tenant's template or how to remove it.

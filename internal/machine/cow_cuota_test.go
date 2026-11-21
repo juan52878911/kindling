@@ -3,6 +3,7 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,8 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
+	"unsafe"
 )
 
 func TestProyectoLibre(t *testing.T) {
@@ -328,5 +332,220 @@ func TestCuotaXFSMemoriaYOverlayNoComparten(t *testing.T) {
 	defer g.Close()
 	if id2, err := proyectoDe(g); err != nil || id2 == idMem {
 		t.Fatalf("el overlay nuevo tiene el proyecto %d (%v), el mismo que el mem.full de otra copia", id2, err)
+	}
+}
+
+// 1 000 asignaciones concurrentes dan ids distintos; un id liberado se reutiliza.
+func TestAsignadorProyectosUnicosYReutiliza(t *testing.T) {
+	p := &asignadorProyectos{}
+	const n = 1000
+	ids := make([]uint32, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ids[i] = p.asignar(fmt.Sprintf("d%d", i))
+		}()
+	}
+	wg.Wait()
+	vistos := map[uint32]bool{}
+	for _, id := range ids {
+		if id < primerProyecto || vistos[id] {
+			t.Fatalf("id %d repetido o menor que %d", id, primerProyecto)
+		}
+		vistos[id] = true
+	}
+	liberado := ids[500]
+	p.liberar("d500")
+	if got := p.asignar("nuevo"); got != liberado {
+		t.Errorf("tras liberar %d se asignó %d", liberado, got)
+	}
+	if got := p.asignar("otro"); vistos[got] {
+		t.Errorf("id %d ya en uso", got)
+	}
+}
+
+// Se siembra una vez del disco: los ids existentes no se reparten y se
+// liberan con su directorio.
+func TestAsignadorProyectosResiembra(t *testing.T) {
+	llamadas := 0
+	p := &asignadorProyectos{sembrar: func() (map[string][]uint32, error) {
+		llamadas++
+		return map[string][]uint32{"/x/a": {1000, 1001}, "/x/b": {1003}}, nil
+	}}
+	if got := p.asignar("/x/c"); got != 1002 {
+		t.Errorf("primer id %d, quería 1002", got)
+	}
+	if got := p.asignar("/x/d"); got != 1004 {
+		t.Errorf("segundo id %d, quería 1004", got)
+	}
+	p.liberar("/x/a")
+	if got := p.asignar("/x/e"); got != 1000 {
+		t.Errorf("tras liberar /x/a: %d, quería 1000", got)
+	}
+	if llamadas != 1 {
+		t.Errorf("el escaneo se hizo %d veces", llamadas)
+	}
+}
+
+func TestLimiteQuotactlXFS(t *testing.T) {
+	if sz := unsafe.Sizeof(fsDiskQuota{}); sz != 112 {
+		t.Errorf("struct fs_disk_quota de %d bytes, quería 112", sz)
+	}
+	q := limiteQuotactlXFS(1234, 1025)
+	if q.BlkHard != 3 || q.ID != 1234 || q.Flags != 2 || q.Fieldmask != 8 || q.Version != 1 {
+		t.Errorf("%+v", q)
+	}
+	if qXSetQLim != 0x580402 {
+		t.Errorf("cmd %#x", qXSetQLim)
+	}
+}
+
+// copiarDisco en proceso conserva el contenido y los huecos.
+func TestCopiarDiscoConservaHuecos(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
+	f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteAt([]byte("inicio"), 1<<20)
+	f.WriteAt([]byte("fin"), 40<<20)
+	f.Truncate(64 << 20)
+	f.Close()
+	if err := copiarDispersoEnProceso(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := os.ReadFile(src)
+	b, _ := os.ReadFile(dst)
+	if !bytes.Equal(a, b) {
+		t.Fatal("el contenido difiere")
+	}
+	blq := func(p string) int64 {
+		var st syscall.Stat_t
+		if err := syscall.Stat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Blocks
+	}
+	// Bloques de 512 bytes: 2048 = 1 MiB, muy por debajo de los 64 MiB lógicos.
+	if bs, bd := blq(src), blq(dst); bd > 2048 || bd > bs+2048 {
+		t.Errorf("bloques asignados: src=%d dst=%d", bs, bd)
+	}
+	if out, err := copiarDisco(context.Background(), src, dst); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	if c, _ := os.ReadFile(dst); !bytes.Equal(a, c) {
+		t.Fatal("copiarDisco: el contenido difiere")
+	}
+}
+
+// H7: recrear mem.full/mem.diff sin borrar la instancia pedía un id nuevo cada
+// vez; el asignador recuerda el id por (directorio, fichero).
+func TestAsignadorReutilizaIdPorFichero(t *testing.T) {
+	p := &asignadorProyectos{}
+	vistos := map[uint32]bool{}
+	for range 1000 {
+		for _, f := range []string{"overlay.ext4", "mem.full", "mem.diff"} {
+			id, _ := p.asignarFichero("/x/a", f)
+			vistos[id] = true
+		}
+	}
+	if len(vistos) > 3 {
+		t.Fatalf("%d ids distintos para 3 ficheros", len(vistos))
+	}
+	a, _ := p.asignarFichero("/x/a", "mem.full")
+	b, _ := p.asignarFichero("/x/b", "mem.full")
+	if a == b {
+		t.Fatalf("dos instancias comparten el id %d", a)
+	}
+	p.liberar("/x/a")
+	if len(p.porDir["/x/a"]) != 0 {
+		t.Fatal("liberar no soltó los ids")
+	}
+}
+
+// Un fallo pasajero (EINTR) no desactiva quotactl para siempre.
+func TestQuotactlPasajeroNoEsRoto(t *testing.T) {
+	llamadas := 0
+	var err error = syscall.EINTR
+	q := &quotactlXFS{dev: "/dev/x", llamar: func(string, uint32, int64) error { llamadas++; return err }}
+	if q.fijar(1, 10) {
+		t.Fatal("debía fallar")
+	}
+	err = nil
+	if !q.fijar(1, 10) || llamadas != 2 {
+		t.Fatalf("la segunda llamada no volvió a quotactl (llamadas=%d)", llamadas)
+	}
+	err = syscall.ENOSYS
+	q.fijar(1, 10)
+	if q.fijar(1, 10) || llamadas != 3 {
+		t.Fatalf("ENOSYS debía ser permanente (llamadas=%d)", llamadas)
+	}
+}
+
+// Un quotactl roto caduca al minuto: un fallo permanente de un momento (el
+// montaje aún no estaba listo) no condena a xfs_quota para toda la vida.
+func TestQuotactlRotoCaduca(t *testing.T) {
+	llamadas := 0
+	var err error = syscall.ENOSYS
+	ahora := time.Unix(1000, 0)
+	q := &quotactlXFS{dev: "/dev/x", ahora: func() time.Time { return ahora },
+		llamar: func(string, uint32, int64) error { llamadas++; return err }}
+	q.fijar(1, 10)
+	ahora = ahora.Add(59 * time.Second)
+	if q.fijar(1, 10) || llamadas != 1 {
+		t.Fatalf("roto debía seguir en pie a los 59 s (llamadas=%d)", llamadas)
+	}
+	err = nil
+	ahora = ahora.Add(2 * time.Second)
+	if !q.fijar(1, 10) || llamadas != 2 {
+		t.Fatalf("roto debía caducar al minuto (llamadas=%d)", llamadas)
+	}
+}
+
+// Si el escaneo de la siembra falló, no se da por hecha: se reintenta.
+func TestAsignadorSiembraFallidaSeReintenta(t *testing.T) {
+	llamadas := 0
+	p := &asignadorProyectos{sembrar: func() (map[string][]uint32, error) {
+		llamadas++
+		if llamadas == 1 {
+			return nil, syscall.EIO
+		}
+		return map[string][]uint32{"/x/a": {1000}}, nil
+	}}
+	// Con el escaneo fallido no se reparte nada: el id libre podría ser de
+	// una instancia que no se llegó a leer (dos ficheros vivos con la misma
+	// cuota).
+	if id, err := p.asignarFichero("/x/b", "overlay.ext4"); err == nil || id != 0 {
+		t.Fatalf("con el escaneo fallido se repartió %d (err %v)", id, err)
+	}
+	if got := p.asignar("/x/c"); got == 1000 {
+		t.Fatalf("se repartió el id 1000, ya usado por /x/a")
+	}
+	if llamadas < 2 {
+		t.Fatalf("el escaneo se hizo %d veces", llamadas)
+	}
+}
+
+// Con KLING_COW_QUOTA=require un almacén sin cuota aplicable no deja entrar
+// instancias: el límite falla en vez de dejarlo "como antes".
+func TestCuotaRequeridaFallaSinCuota(t *testing.T) {
+	t.Setenv("KLING_COW_QUOTA", "require")
+	for _, fs := range []string{"xfs", "btrfs", "ext4"} {
+		a := &almacenCoW{fs: fs, dir: t.TempDir()}
+		a.activarCuota()
+		if a.detectarCuota == nil || a.limitar == nil {
+			t.Fatalf("%s: sin hooks de cuota en modo require", fs)
+		}
+		a.cuota = a.detectarCuota(context.Background())
+		if a.cuota == "" {
+			t.Fatalf("%s: la cuota queda vacía y la instancia entraría sin límite", fs)
+		}
+		err := a.limitar(filepath.Join(a.dir, "m", "x"), filepath.Join(a.dir, "m", "x", "overlay.ext4"), 1<<30)
+		if err == nil || !strings.Contains(err.Error(), "KLING_COW_QUOTA") {
+			t.Errorf("%s: err = %v", fs, err)
+		}
 	}
 }

@@ -148,6 +148,7 @@ kling image import:  -H
 kling image import:  -arch
 kling image import:  -archive
 kling image import:  -cpus
+kling image import:  -disk
 kling image import:  -e
 kling image import:  -egress
 kling image import:  -emulate
