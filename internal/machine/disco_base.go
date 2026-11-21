@@ -62,15 +62,23 @@ type digestCacheado struct {
 // si es de la misma huella.
 func (m *Manager) digestDiscoBase(path string) (string, error) {
 	for {
+		// Espera a un enlaceEstable en curso sobre esta ruta: su ctime a
+		// medias no es un cambio del contenido.
+		mu, _ := cerrojosEnlace.LoadOrStore(path, new(sync.Mutex))
+		mu.(*sync.Mutex).Lock()
 		st, err := os.Stat(path)
+		var cacheado *digestCacheado
+		if v, ok := m.discosBase.Load(path); ok {
+			c := v.(digestCacheado)
+			cacheado = &c
+		}
+		mu.(*sync.Mutex).Unlock()
 		if err != nil {
 			return "", err
 		}
 		huella := huellaDeDisco(st)
-		if v, ok := m.discosBase.Load(path); ok {
-			if c := v.(digestCacheado); c.huella == huella {
-				return c.hash, nil
-			}
+		if cacheado != nil && cacheado.huella == huella {
+			return cacheado.hash, nil
 		}
 		v := &vueloDigest{hecho: make(chan struct{}), huella: huella}
 		if otro, enCurso := m.discosEnVuelo.LoadOrStore(path, v); enCurso {
