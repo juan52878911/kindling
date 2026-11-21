@@ -1,8 +1,8 @@
 package net
 
 import (
-	"runtime"
 	"errors"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
