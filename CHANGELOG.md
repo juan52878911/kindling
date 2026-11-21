@@ -9,7 +9,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Added
 
 - kling-sandbox gateway: experimental Python interpreter, `POST /v1/sandboxes/{id}/code` and `/code/contexts` (stateful contexts as background processes in the sandbox, NDJSON events, 8 contexts per sandbox, 422 without `python3`).
-- `KLING_COW_QUOTA=require` refuses copy-on-write instances when no disk quota can be applied; `KLING_FORWARD_CHAIN=1` adds an opt-in `KINDLING-FWD` chain for hosts whose FORWARD policy is DROP (Docker).
+- `KLING_COW_QUOTA=require` keeps instances out of the copy-on-write store (they get a full copy of their overlay) when no per-instance disk quota can be applied; `KLING_FORWARD_CHAIN=1` adds an opt-in `KINDLING-FWD` chain for hosts whose FORWARD policy is DROP (Docker).
 - Resync: the guest agent reports its critical-path and origin-check times in the `/resync` reply; `KLING_RESYNC_TRACE=1` logs the split and `/metrics` exposes `kling_resync_guest_seconds` and `kling_resync_wake_seconds`.
 - kling-sandbox gateway: `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume` and `PATCH /v1/sandboxes/{id}/egress` (owner check as in the other sandbox routes, in the OpenAPI spec).
 - `scripts/bench`: hygiene check between variants (no stray VMMs, netns or store mounts), c50 twice, pause measured at rest and during refill.
@@ -237,7 +237,6 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Network setup retries interrupted netlink address dumps and never assigns a /30 subnet when the dump fails, so two machines can no longer end up sharing a subnet (and one machine's exec, resync or credentials reaching another's agent).
 - The launch gate no longer backs off for VMM deaths of already-delivered machines or for repeated dead copies from a single origin, so a guest that reboots itself in a loop cannot hold the gate down for everyone.
-
 - `kling ai serve -listen … -no-auth` refuses (403) requests whose `Host` or `Origin` is not loopback, and every `POST` must be `application/json` (415).
 - MCP gateway: the "types repaired" log line no longer includes the tool's arguments, only its name and size.
 - `POST /graphs/{ref}/snapshot`: a template name already in use gives a neutral 409 that no longer confirms another tenant's template or how to remove it.

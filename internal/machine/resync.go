@@ -524,7 +524,13 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	_ = json.Unmarshal(b, &out)
 	// Un agente anterior no manda critical_us: no hay reparto que anotar.
 	if out.CriticalUS > 0 {
-		tel.resyncRepartido(time.Since(ini), out.CriticalUS)
+		// Lo manda el invitado: no puede pasar del tiempo que tardó la
+		// petición entera, o falsearía las métricas globales.
+		total := time.Since(ini)
+		if max := total.Microseconds(); out.CriticalUS > max {
+			out.CriticalUS = max
+		}
+		tel.resyncRepartido(total, out.CriticalUS)
 		traza.reparto(out)
 	}
 	return out, nil

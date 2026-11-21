@@ -1,6 +1,7 @@
 package net
 
 import (
+	"runtime"
 	"errors"
 	"slices"
 	"strings"
@@ -142,6 +143,9 @@ func TestForwardSinSalidaConLaCadena(t *testing.T) {
 }
 
 func TestFaltaParaAllowlist(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ipset y la allowlist solo existen en Linux")
+	}
 	old := hayIpset
 	t.Cleanup(func() { hayIpset = old })
 	hayIpset = func() error { return errors.New("falso") }

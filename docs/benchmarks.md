@@ -178,11 +178,11 @@ not in the repository; rerun them instead of quoting older numbers. Reproduce wi
 |---|---|---|---|---|
 | create from pool, serial | ~1 ms | 34 ms | 15 | pre-warmed machine claimed vs. pod from the pool |
 | create from pool, c10 | 7–10 ms | 180 ms (k8s Pool) | 10 per burst | |
-| create from pool, c50 | 404–427 ms | 6.4 s with 25/50 failed (k8s Pool) | 50 per burst | pool of 10, refilled while the burst runs |
+| create with a pool of 10, c50 (about 40 cold) | 404–427 ms | 6.4 s with 25/50 failed (k8s Pool) | 50 per burst | pool of 10, refilled while the burst runs |
 | create cold, serial | 88–105 ms | 0.91–1.11 s (k8s) · 524–543 ms (docker) | 15 | restored microVM vs. new container |
 | create cold, c50 | p50 613–647 ms, **p95 ~1030 ms** | 4.0–4.6 s with 19/50 failed (k8s) · 7.6–7.7 s (docker) | 50 per burst, 2 bursts per round | default gate (4); the p95 always goes with the p50 |
 | exec `echo` | 1.9 ms | 1003 ms | 30 | through the gateway, HTTP; OSB looks like a fixed 1 s poll |
-| pause → exec | 5.9–6.8 ms | 1027 ms (docker) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
+| pause → exec | 5.9–6.8 ms | 1027 ms (docker; includes the same ~1 s exec poll) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
 | freeze → exec | 89–101 ms | no equivalent | 5 | dumps memory to disk and releases it |
 | failures | 0 in ~1700 creations | 19/50 (k8s cold c50), 25/50 (k8s Pool c50) | | clean host |
 

@@ -487,7 +487,7 @@ func (a *almacenCoW) activarCuota() {
 		}
 		disponible.Store(c != "")
 		if c == "" {
-			log.Printf("ERROR: copy-on-write store %s: KLING_COW_QUOTA=require and no per-instance disk quota can be applied; instances will not start", a.dir)
+			log.Printf("ERROR: copy-on-write store %s: KLING_COW_QUOTA=require and no per-instance disk quota can be applied; nothing goes into the store, instances get a full copy of their overlay instead", a.dir)
 			return cuotaNoDisponible
 		}
 		return c

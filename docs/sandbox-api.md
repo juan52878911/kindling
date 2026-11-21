@@ -121,6 +121,11 @@ Un error del código es un evento, no un código HTTP. Topes: 8 contextos por sa
 1 MiB de código (`413`), plazo por ejecución 60 s por defecto y 600 s como máximo. Sin
 `python3` en la imagen, `422`. Los contextos de otro inquilino dan `404`. No hay salidas
 ricas de Jupyter, y una ejecución a la vez por contexto (las demás esperan).
+El plazo se impone con `SIGALRM`: un código que atrape `BaseException` o que esté dentro de
+una llamada larga en C no se corta, y el contexto queda ocupado hasta su `DELETE` (la respuesta
+HTTP vuelve igual pasado el plazo; un contexto efímero se mata siempre). El tope de 8 se
+comprueba antes de crear, sin cerrojo: peticiones simultáneas pueden pasarlo por poco, siempre
+dentro del sandbox del propio inquilino.
 
 ## Sesiones
 
