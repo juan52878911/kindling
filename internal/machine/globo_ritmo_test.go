@@ -146,13 +146,13 @@ func TestRitmoGloboReposoSiSalta(t *testing.T) {
 // La marca solo se escribe si se sabe que la máquina estaba en reposo.
 func TestMarcaGloboReposoDelDorado(t *testing.T) {
 	dir := t.TempDir()
-	escribirMarcaGloboReposo(dir, "aaaa0000bbbb0001")
+	m := &Manager{}
+	m.escribirMarcaGloboReposo(dir, "aaaa0000bbbb0001")
 	if doradoConGloboReposo(dir) {
 		t.Fatal("marca sin saber que estaba en reposo")
 	}
-	marcarGloboReposo("aaaa0000bbbb0001")
-	t.Cleanup(func() { olvidarGloboReposo("aaaa0000bbbb0001") })
-	escribirMarcaGloboReposo(dir, "aaaa0000bbbb0001")
+	m.marcarGloboReposo("aaaa0000bbbb0001")
+	m.escribirMarcaGloboReposo(dir, "aaaa0000bbbb0001")
 	if !doradoConGloboReposo(dir) {
 		t.Fatal("sin marca")
 	}

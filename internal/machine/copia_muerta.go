@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -75,22 +74,4 @@ func conCopiaDeRepuesto(ctx context.Context, nombre string, muerta func(), inten
 		muerta()
 	}
 	return intento()
-}
-
-// enParalelo lanza f ya y devuelve una función que espera su resultado. Puede
-// llamarse varias veces (y desde un defer): todas dan el mismo error.
-func enParalelo(f func() error) func() error {
-	var (
-		once sync.Once
-		err  error
-	)
-	hecho := make(chan struct{})
-	go func() {
-		err = f()
-		close(hecho)
-	}()
-	return func() error {
-		once.Do(func() { <-hecho })
-		return err
-	}
 }
