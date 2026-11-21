@@ -204,12 +204,42 @@ func ResyncHandler() http.HandlerFunc {
 			return
 		}
 		diferido = true
-		go func() {
-			defer resyncMu.Unlock()
-			defer puertaResync.Abrir()
-			segundoTiempo(req.Restore, gen)
-		}()
+		go vigilarSegundoTiempo(req.Restore, gen)
 	}
+}
+
+// Tope del segundo tiempo y el paso que se ejecuta; variables para los tests.
+var (
+	topeSegundoTiempo  = 5 * time.Second
+	hacerSegundoTiempo = segundoTiempo
+)
+
+// vigilarSegundoTiempo corre el segundo tiempo con recover y un tope: si
+// entra en pánico o se cuelga (E/S bloqueada), abre la puerta y suelta
+// resyncMu igualmente, y lo deja en el log. Lo que quede colgado termina por
+// su cuenta sin bloquear a nadie. Se llama con resyncMu tomado y la puerta
+// cerrada; los libera siempre, una sola vez.
+func vigilarSegundoTiempo(restore string, gen uint64) {
+	fn, topeT := hacerSegundoTiempo, topeSegundoTiempo
+	hecho := make(chan struct{})
+	go func() {
+		defer close(hecho)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("resync: second phase panicked: %v", r)
+			}
+		}()
+		fn(restore, gen)
+	}()
+	tope := time.NewTimer(topeT)
+	defer tope.Stop()
+	select {
+	case <-hecho:
+	case <-tope.C:
+		log.Printf("resync: second phase still running after %s; opening the door anyway", topeT)
+	}
+	puertaResync.Abrir()
+	resyncMu.Unlock()
 }
 
 // segundoTiempo es lo que se hace tras contestar. Se llama con resyncMu

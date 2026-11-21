@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/guest/share"
 )
 
 // Tabla de rutas del agente y su decisión: detrás de la puerta del resync o no.
