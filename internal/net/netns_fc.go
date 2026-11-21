@@ -37,7 +37,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
 	// si un reload del cortafuegos las borró, se reponen; si no se puede,
 	// la máquina no arranca con el host abierto.
-	if err := asegurarHostInput(); err != nil {
+	if err := asegurarHost(); err != nil {
 		return fmt.Errorf("host INPUT rules: %w", err)
 	}
 	tr.fase("host_check")
@@ -56,7 +56,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
 	// iproute2, el resto de líneas acabaría dentro del netns nuevo.
 	tr.fase("teardown")
-	if err := run("ip", "netns", "add", n.NS); err != nil {
+	if err := ejecutar("ip", "netns", "add", n.NS); err != nil {
 		return err
 	}
 	tr.fase("netns")
@@ -95,9 +95,9 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 		// proceso en vez de dos (`ip netns exec NS ip ...`). Lo demás
 		// (iptables, sysctl) no sabe entrar solo y va con netns exec.
 		if args[0] == "ip" {
-			return run(append([]string{"ip", "-n", n.NS}, args[1:]...)...)
+			return ejecutar(append([]string{"ip", "-n", n.NS}, args[1:]...)...)
 		}
-		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
+		return ejecutar(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
 	}
 
 	// Los sysctl del netns, en un solo proceso (aplicarSysctls): el reenvío,
@@ -138,7 +138,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	// Los tres modos van en UN iptables-restore con todas sus reglas: cada
 	// iptables por separado es un proceso que relee el conjunto de reglas (~3
 	// ms cada uno). allowlist además crea su ipset y arranca su resolver.
-	if _, err := exec.LookPath("iptables-restore"); err == nil {
+	if hayRestore() {
 		if egress == EgressAllowlist {
 			return n.applyAllowlist(ns, domains, [][]string{dnat}, true)
 		}
@@ -212,7 +212,7 @@ func borrarEnlace(ns, hostIf string) {
 
 // ipBatch ejecuta varias órdenes de ip en un solo proceso (`ip -batch -`),
 // dentro del netns ns si no está vacío. Para en la primera que falla.
-func ipBatch(ns string, ordenes ...string) error {
+func ipBatchReal(ns string, ordenes ...string) error {
 	args := []string{"ip"}
 	if ns != "" {
 		args = append(args, "-n", ns)
@@ -225,6 +225,12 @@ func ipBatch(ns string, ordenes ...string) error {
 	}
 	return nil
 }
+
+// Sustituibles en tests: lanzar procesos de verdad pide root e `ip`.
+var (
+	asegurarHost = asegurarHostInput
+	ipBatch      = ipBatchReal
+)
 
 // Sustituibles en tests: mirar la red de verdad pide /sys y un veth.
 var (

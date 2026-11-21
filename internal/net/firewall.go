@@ -225,9 +225,12 @@ func sysctlsIPv6(nsIf string) []string {
 	return s
 }
 
+// hayIp6tables dice si hay ip6tables en el host. Sustituible en tests.
+var hayIp6tables = func() bool { _, err := exec.LookPath("ip6tables"); return err == nil }
+
 // applyIPv6Barrier es la capa 2 de la barrera IPv6 (ver sysctlsIPv6).
 func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
-	if _, err := exec.LookPath("ip6tables"); err != nil {
+	if !hayIp6tables() {
 		log.Printf("net: ip6tables no está instalado; %s queda solo con la barrera de sysctl para IPv6", n.NS)
 		return nil
 	}
