@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,8 @@ type Rellenador struct {
 	pedidos chan struct{}
 	pmu     sync.Mutex
 	pedido  map[string]map[string]bool
+	// ultimoPedido es el instante del último Pedir (bajo pmu).
+	ultimoPedido time.Time
 	// maxCreaciones acota las creaciones simultáneas de una vuelta (0:
 	// CreacionesALaVez). Solo lo cambian los tests.
 	maxCreaciones int
@@ -74,6 +77,14 @@ type Rellenador struct {
 // delante de las peticiones reales.
 const CreacionesALaVez = 4
 
+// CreacionesPedidas es cuántas crea a la vez la vuelta que dispara Pedir: tras
+// un reclamo el usuario está haciendo sus primeras peticiones sobre la misma
+// máquina, y el relleno no debe competir con ellas por la CPU.
+const CreacionesPedidas = 2
+
+// EsperaPedido es lo que se espera desde el último reclamo antes de rellenar.
+const EsperaPedido = 300 * time.Millisecond
+
 func Nuevo(reg *hosts.Registro, cada time.Duration, l *log.Logger) *Rellenador {
 	if cada <= 0 {
 		cada = 30 * time.Second
@@ -85,8 +96,9 @@ func Nuevo(reg *hosts.Registro, cada time.Duration, l *log.Logger) *Rellenador {
 }
 
 // Pedir avisa de que el frontal acaba de gastar (o de no encontrar) una
-// precalentada de esa plantilla en ese host: Vigilar hace ya una vuelta de ese
-// host sin esperar al tic. No bloquea ni acumula: los avisos seguidos son una
+// precalentada de esa plantilla en ese host: Vigilar hace una vuelta de ese
+// host sin esperar al tic, pero tras EsperaPedido desde el último aviso (salvo
+// que el fondo de la plantilla esté vacío). No bloquea ni acumula: los avisos seguidos son una
 // sola vuelta.
 func (r *Rellenador) Pedir(host, plantilla string) {
 	r.pmu.Lock()
@@ -97,6 +109,7 @@ func (r *Rellenador) Pedir(host, plantilla string) {
 		r.pedido[host] = map[string]bool{}
 	}
 	r.pedido[host][plantilla] = true
+	r.ultimoPedido = time.Now()
 	r.pmu.Unlock()
 	select {
 	case r.pedidos <- struct{}{}:
@@ -127,26 +140,116 @@ func (r *Rellenador) Vigilar(ctx context.Context) {
 			case <-t.C:
 				r.Vuelta(ctx)
 			case <-r.pedidos:
+				r.esperarPedidos(ctx)
 				r.vueltaPedida(ctx, r.tomarPedidos())
 			}
 		}
 	}()
 }
 
-// vueltaPedida rellena solo lo pedido (host -> plantillas).
+// esperarPedidos deja pasar EsperaPedido desde el último Pedir (los reclamos
+// seguidos la van alargando). Si el fondo de alguna plantilla pedida está
+// vacío no espera: el siguiente create caería al restore.
+func (r *Rellenador) esperarPedidos(ctx context.Context) {
+	for {
+		r.pmu.Lock()
+		falta := EsperaPedido - time.Since(r.ultimoPedido)
+		pedido := map[string]map[string]bool{}
+		for h, ps := range r.pedido {
+			pedido[h] = maps.Clone(ps)
+		}
+		r.pmu.Unlock()
+		if falta <= 0 || r.fondoVacio(ctx, pedido) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(falta):
+		}
+	}
+}
+
+// fondoVacio dice si alguna de las plantillas pedidas no tiene ninguna
+// precalentada reclamable en su host.
+func (r *Rellenador) fondoVacio(ctx context.Context, pedido map[string]map[string]bool) bool {
+	for _, h := range r.reg.Todos() {
+		solo := pedido[h.Nombre]
+		if len(solo) == 0 {
+			continue
+		}
+		vivas, err := h.Cliente.Sandboxes(ctx)
+		if err != nil {
+			continue
+		}
+		hay := map[string]bool{}
+		for _, mc := range vivas {
+			if n := mc.Labels[LabelTemplate]; n != "" && mc.Labels[LabelTenant] == "" &&
+				plantilla.DelFrontal(mc.Labels) && !rota(mc) && mc.State != api.StateWarm {
+				hay[n] = true
+			}
+		}
+		for n := range solo {
+			if !hay[n] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// vueltaPedida rellena solo lo pedido (host -> plantillas), de
+// CreacionesPedidas en CreacionesPedidas. Si hay otra vuelta en curso el pedido
+// vuelve al mapa y se reintenta al acabar ésta.
 func (r *Rellenador) vueltaPedida(ctx context.Context, pedido map[string]map[string]bool) {
-	if len(pedido) == 0 || !r.mu.TryLock() {
+	if len(pedido) == 0 {
 		return
 	}
-	defer r.mu.Unlock()
+	if !r.mu.TryLock() {
+		r.devolverPedido(pedido)
+		return
+	}
 	for _, h := range r.reg.Todos() {
 		solo := pedido[h.Nombre]
 		if solo == nil {
 			continue
 		}
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		r.vueltaHost(hctx, h, solo)
+		r.vueltaHost(hctx, h, solo, CreacionesPedidas)
 		cancel()
+	}
+	r.mu.Unlock()
+	r.reavisar()
+}
+
+// devolverPedido reincorpora un pedido que no se pudo atender.
+func (r *Rellenador) devolverPedido(pedido map[string]map[string]bool) {
+	r.pmu.Lock()
+	if r.pedido == nil {
+		r.pedido = map[string]map[string]bool{}
+	}
+	for h, ps := range pedido {
+		if r.pedido[h] == nil {
+			r.pedido[h] = map[string]bool{}
+		}
+		for p := range ps {
+			r.pedido[h][p] = true
+		}
+	}
+	r.pmu.Unlock()
+}
+
+// reavisar despierta a Vigilar si quedó algún pedido sin atender. Se llama con
+// el cerrojo ya suelto, para no girar mientras otra vuelta lo tiene.
+func (r *Rellenador) reavisar() {
+	r.pmu.Lock()
+	hay := len(r.pedido) > 0
+	r.pmu.Unlock()
+	if hay {
+		select {
+		case r.pedidos <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -159,20 +262,22 @@ func (r *Rellenador) Vuelta(ctx context.Context) {
 	if !r.mu.TryLock() {
 		return
 	}
-	defer r.mu.Unlock()
 
 	for _, h := range r.reg.Todos() {
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		r.vueltaHost(hctx, h, nil)
+		r.vueltaHost(hctx, h, nil, 0)
 		r.vueltaGrafos(hctx, h)
 		cancel()
 	}
+	r.mu.Unlock()
+	r.reavisar()
 }
 
 // vueltaHost deja el fondo del host como lo quieren sus plantillas; con solo
 // no nil, crea únicamente las de esas plantillas (la limpieza es siempre de
-// todo el host).
-func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[string]bool) {
+// todo el host). simultaneas acota las creaciones a la vez (0: el valor de
+// maxCreaciones o CreacionesALaVez).
+func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[string]bool, simultaneas int) {
 	snaps, err := h.Cliente.Snapshots(ctx)
 	if err != nil {
 		r.log.Printf("pool %s: listing snapshots: %v", h.Nombre, err)
@@ -240,7 +345,10 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host, solo map[str
 	// no es un fallo del fondo: es el host diciendo que la RAM es para quien
 	// la pide de verdad; se reintenta en la vuelta siguiente, sin ruido en el
 	// log) y se sigue con las demás: puede caber aunque esta no.
-	tope := r.maxCreaciones
+	tope := simultaneas
+	if tope <= 0 {
+		tope = r.maxCreaciones
+	}
 	if tope <= 0 {
 		tope = CreacionesALaVez
 	}

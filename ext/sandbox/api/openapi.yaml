@@ -208,6 +208,80 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/pause:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Pausa un sandbox running sin volcar su memoria
+      responses:
+        "200":
+          description: Sandbox pausado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/resume:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Reanuda un sandbox pausado o congelado
+      responses:
+        "200":
+          description: Sandbox en marcha
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/egress:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    patch:
+      tags: [sandboxes]
+      summary: Cambia en caliente la política de salida de red
+      description: |
+        Cuerpo y respuesta son los del daemon (`EgressRequest` y
+        `EgressPolicy`): `egress` (none, internet, allowlist) y `allow_domains`.
+        `applied` dice si vale ya (`live`), en el próximo arranque
+        (`next_start`) o si no cambió (`unchanged`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EgressRequest"
+      responses:
+        "200":
+          description: Política resultante
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EgressPolicy"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/endpoints:
     parameters:
       - $ref: "#/components/parameters/id"
@@ -1357,6 +1431,31 @@ components:
       properties:
         ttl_seconds:
           type: integer
+    EgressRequest:
+      type: object
+      properties:
+        egress:
+          type: string
+        allow_domains:
+          type: array
+          items:
+            type: string
+    EgressPolicy:
+      type: object
+      properties:
+        egress:
+          type: string
+        allow_domains:
+          type: array
+          items:
+            type: string
+        applied:
+          type: string
+          enum: [live, next_start, unchanged]
+        narrowed:
+          type: boolean
+        connections_closed:
+          type: boolean
     ExecRequest:
       type: object
       required: [cmd]
