@@ -39,6 +39,7 @@ kindling)
   for par in ${PARALELO:-def}; do for jl in ${JAILER:-def}; do for cu in $CUOTAS_LISTA; do
     etq="par${par}-jail${jl}-cuota${cu}"; etq=${etq//:/_}
     paso "daemon kindling $etq"
+    export KLING_NET_POOL   # si viene del entorno, lo hereda el daemon y bench.py lo anota (net_pool)
     [ "$par" = def ] || export KLING_MAX_PARALLEL_BOOT=$par
     [ "$jl" = def ] || export KLING_JAILER=$jl
     bash "$KB/remoto/higiene.sh" inicio
