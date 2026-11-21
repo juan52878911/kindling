@@ -54,7 +54,6 @@ var (
 	reglaPresente = func(ns string, r []string) bool {
 		return exec_ok(append([]string{"ip", "netns", "exec", ns, "iptables"}, comprobacionDe(r)...))
 	}
-	hayIpset   = func() error { _, err := exec.LookPath("ipset"); return err }
 	semillasDe = resolverSemillas
 )
 

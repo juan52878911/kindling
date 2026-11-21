@@ -226,6 +226,10 @@ func sysctlsIPv6(nsIf string) []string {
 	return s
 }
 
+// hayIpset dice si ipset está instalado (el modo allowlist no funciona sin
+// él). Sustituible en tests.
+var hayIpset = func() error { _, err := exec.LookPath("ipset"); return err }
+
 // hayIp6tables dice si hay ip6tables en el host. Sustituible en tests.
 var hayIp6tables = func() bool { _, err := exec.LookPath("ip6tables"); return err == nil }
 
@@ -565,7 +569,14 @@ func setNameFromNS(ns string) string {
 // eran ~25 procesos de iptables que releen el conjunto entero cada uno. Sin
 // restore (no está instalado), una a una.
 func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas [][]string, restore bool) error {
-	if _, err := exec.LookPath("ipset"); err != nil {
+	return n.allowlistConReglas(ns, domains, append(append([][]string{}, previas...), n.reglasAllowlist()...), restore)
+}
+
+// allowlistConReglas es applyAllowlist con las reglas ya calculadas: crea el
+// ipset, las pone, siembra y arranca el resolver. Las reglas pueden ser el
+// montaje entero o, en una ranura, solo la diferencia con none.
+func (n *Net) allowlistConReglas(ns func(...string) error, domains []string, reglas [][]string, restore bool) error {
+	if err := hayIpset(); err != nil {
 		return fmt.Errorf("allowlist mode needs ipset and it is not installed: %w", err)
 	}
 
@@ -591,7 +602,6 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 	semillas := make(chan []string, 1)
 	go func() { semillas <- resolverSemillas(domains) }()
 
-	reglas := append(append([][]string{}, previas...), n.reglasAllowlist()...)
 	var errReglas error
 	if restore {
 		errReglas = n.restoreRules(reglas)
@@ -612,8 +622,12 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 	// ANTES de devolver: es quien siembra el ipset con las IP reales (y su TTL) que
 	// el invitado va a usar. Si no arranca, el DNAT de arriba apunta a un puerto sin
 	// nadie escuchando y el invitado se queda sin DNS, así que su fallo es fatal.
-	return startDNSResolver(n, domains)
+	return iniciarResolverAllowlist(n, domains)
 }
+
+// iniciarResolverAllowlist arranca el resolver de allowlist. Variable para los
+// tests, que no pueden atar la IP del veth.
+var iniciarResolverAllowlist = startDNSResolver
 
 // semillaTTL (segundos) es la vida de una IP del sembrado estático: la del
 // techo del resolver (dnsMaxTTL). Antes iban sin timeout, y una IP que el

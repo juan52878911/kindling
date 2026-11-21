@@ -22,7 +22,7 @@ import (
 // Aislamiento: una ranura es de UN solo uso. Se monta, se entrega una vez, y se
 // destruye con su máquina; nunca vuelve al fondo, así que no hay estado que
 // arrastrar de una máquina a otra. Sus reglas son las más restrictivas (ni una
-// regla de salida) y no tiene invitado ni VMM: nadie emite por ella mientras
+// regla que abra la salida: ya lleva las de none) y no tiene invitado ni VMM: nadie emite por ella mientras
 // espera. El netns, el veth y el cgroup se nombran por el id de la máquina
 // (Corto), por eso la ranura ya lleva SU id y su índice de subred.
 
@@ -57,13 +57,20 @@ func (n *Net) MontarRanura(owner int) error {
 		n.Teardown()
 		return err
 	}
+	// La /30 tiene que ser solo nuestra antes de entregarla (subredes.go).
+	if err := n.VerificarUnica(); err != nil {
+		n.Teardown()
+		return err
+	}
 	n.baseLista = true
+	n.baseEgress = EgressNone
 	return nil
 }
 
 // DestruirRanura derriba una ranura que no llegó a máquina.
 func (n *Net) DestruirRanura() {
 	n.baseLista = false
+	n.baseEgress = ""
 	n.Teardown()
 	n.SoltarReserva()
 }

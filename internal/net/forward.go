@@ -2,6 +2,7 @@ package net
 
 import (
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -133,3 +134,17 @@ func LeerFiltro() (string, error) {
 // argsLeerFiltro es el iptables de LeerFiltro, con -w (conEspera): sin él,
 // con iptables-legacy y un arranque a la vez, fallaba y el aviso no salía.
 func argsLeerFiltro() []string { return conEspera([]string{"iptables", "-S"}) }
+
+// FaltaParaAllowlist dice, si el host no puede ofrecer el modo allowlist, por
+// qué (qué paquete falta); "" si puede, o si el sistema no usa ipset (macOS).
+// Available no lo exige a propósito: sin ipset el daemon sirve none e
+// internet, y solo falla quien pide allowlist, tarde y con un error suelto.
+func FaltaParaAllowlist() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	if err := hayIpset(); err != nil {
+		return "ipset is not installed: -egress allowlist will fail (apt install ipset conntrack)"
+	}
+	return ""
+}
