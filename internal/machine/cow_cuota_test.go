@@ -369,9 +369,9 @@ func TestAsignadorProyectosUnicosYReutiliza(t *testing.T) {
 // liberan con su directorio.
 func TestAsignadorProyectosResiembra(t *testing.T) {
 	llamadas := 0
-	p := &asignadorProyectos{sembrar: func() map[string][]uint32 {
+	p := &asignadorProyectos{sembrar: func() (map[string][]uint32, error) {
 		llamadas++
-		return map[string][]uint32{"/x/a": {1000, 1001}, "/x/b": {1003}}
+		return map[string][]uint32{"/x/a": {1000, 1001}, "/x/b": {1003}}, nil
 	}}
 	if got := p.asignar("/x/c"); got != 1002 {
 		t.Errorf("primer id %d, quería 1002", got)
@@ -437,5 +437,65 @@ func TestCopiarDiscoConservaHuecos(t *testing.T) {
 	}
 	if c, _ := os.ReadFile(dst); !bytes.Equal(a, c) {
 		t.Fatal("copiarDisco: el contenido difiere")
+	}
+}
+
+// H7: recrear mem.full/mem.diff sin borrar la instancia pedía un id nuevo cada
+// vez; el asignador recuerda el id por (directorio, fichero).
+func TestAsignadorReutilizaIdPorFichero(t *testing.T) {
+	p := &asignadorProyectos{}
+	vistos := map[uint32]bool{}
+	for range 1000 {
+		for _, f := range []string{"overlay.ext4", "mem.full", "mem.diff"} {
+			vistos[p.asignarFichero("/x/a", f)] = true
+		}
+	}
+	if len(vistos) > 3 {
+		t.Fatalf("%d ids distintos para 3 ficheros", len(vistos))
+	}
+	if a, b := p.asignarFichero("/x/a", "mem.full"), p.asignarFichero("/x/b", "mem.full"); a == b {
+		t.Fatalf("dos instancias comparten el id %d", a)
+	}
+	p.liberar("/x/a")
+	if len(p.porDir["/x/a"]) != 0 {
+		t.Fatal("liberar no soltó los ids")
+	}
+}
+
+// Un fallo pasajero (EINTR) no desactiva quotactl para siempre.
+func TestQuotactlPasajeroNoEsRoto(t *testing.T) {
+	llamadas := 0
+	var err error = syscall.EINTR
+	q := &quotactlXFS{dev: "/dev/x", llamar: func(string, uint32, int64) error { llamadas++; return err }}
+	if q.fijar(1, 10) {
+		t.Fatal("debía fallar")
+	}
+	err = nil
+	if !q.fijar(1, 10) || llamadas != 2 {
+		t.Fatalf("la segunda llamada no volvió a quotactl (llamadas=%d)", llamadas)
+	}
+	err = syscall.ENOSYS
+	q.fijar(1, 10)
+	if q.fijar(1, 10) || llamadas != 3 {
+		t.Fatalf("ENOSYS debía ser permanente (llamadas=%d)", llamadas)
+	}
+}
+
+// Si el escaneo de la siembra falló, no se da por hecha: se reintenta.
+func TestAsignadorSiembraFallidaSeReintenta(t *testing.T) {
+	llamadas := 0
+	p := &asignadorProyectos{sembrar: func() (map[string][]uint32, error) {
+		llamadas++
+		if llamadas == 1 {
+			return nil, syscall.EIO
+		}
+		return map[string][]uint32{"/x/a": {1000}}, nil
+	}}
+	p.asignar("/x/b")
+	if got := p.asignar("/x/c"); got == 1000 {
+		t.Fatalf("se repartió el id 1000, ya usado por /x/a")
+	}
+	if llamadas < 2 {
+		t.Fatalf("el escaneo se hizo %d veces", llamadas)
 	}
 }

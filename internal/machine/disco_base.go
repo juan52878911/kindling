@@ -182,6 +182,10 @@ func (m *Manager) comprobarDiscoBase(snap *api.Snapshot) error {
 	return nil
 }
 
+// huellaConfiable dice si el fichero (de st) solo lo puede modificar root, de
+// modo que conservar su digest tras la operación es seguro.
+var huellaConfiable = func(st os.FileInfo) bool { return true }
+
 // cerrojosEnlace serializa, por ruta, las operaciones de enlaceEstable.
 var cerrojosEnlace sync.Map // ruta → *sync.Mutex
 

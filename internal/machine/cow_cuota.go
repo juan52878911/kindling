@@ -109,7 +109,7 @@ func abrirSinSeguir(ruta string) (*os.File, error) {
 // única fuente de ids: dos instancias con el mismo proyecto compartirían cuota.
 type asignadorProyectos struct {
 	mu      sync.Mutex
-	sembrar func() map[string][]uint32 // el escaneo del disco (dir → ids); nil = vacío
+	sembrar func() (map[string][]uint32, error) // el escaneo del disco (dir → ids); nil = vacío
 	listo   bool
 	usados  map[uint32]string   // id → directorio de la instancia
 	porDir  map[string][]uint32 // directorio → ids
@@ -126,7 +126,8 @@ func (p *asignadorProyectos) sembrarSiHaceFalta() {
 	p.porDir = map[string][]uint32{}
 	p.sig = primerProyecto
 	if p.sembrar != nil {
-		for dir, ids := range p.sembrar() {
+		ids0, _ := p.sembrar()
+		for dir, ids := range ids0 {
 			for _, id := range ids {
 				p.usados[id] = dir
 				p.porDir[dir] = append(p.porDir[dir], id)
@@ -154,6 +155,11 @@ func (p *asignadorProyectos) asignar(d string) uint32 {
 	p.porDir[d] = append(p.porDir[d], id)
 	p.sig = id + 1
 	return id
+}
+
+// asignarFichero reserva un id para el fichero nombre de la instancia d.
+func (p *asignadorProyectos) asignarFichero(d, nombre string) uint32 {
+	return p.asignar(d)
 }
 
 // liberar devuelve los ids de la instancia d. El siguiente reparto vuelve a
@@ -300,6 +306,26 @@ func limiteXFSQuotactl(dev string, id uint32, bytes int64) error {
 	return nil
 }
 
+// quotactlXFS fija límites por quotactl y recuerda si el núcleo no lo admite.
+type quotactlXFS struct {
+	dev    string
+	roto   atomic.Bool
+	llamar func(dev string, id uint32, bytes int64) error
+}
+
+// fijar intenta el límite por quotactl y dice si quedó hecho.
+func (q *quotactlXFS) fijar(id uint32, bytes int64) bool {
+	if q.roto.Load() || q.dev == "" {
+		return false
+	}
+	if err := q.llamar(q.dev, id, bytes); err != nil {
+		q.roto.Store(true)
+		log.Printf("warning: copy-on-write store: quotactl on %s failed (%v); using xfs_quota", q.dev, err)
+		return false
+	}
+	return true
+}
+
 // ejecutar corre una herramienta del sistema con un tope de tiempo.
 func ejecutar(bin string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -371,15 +397,14 @@ func (a *almacenCoW) activarCuota() {
 		}
 		// Los ids se reparten desde memoria, sembrados una vez con el escaneo
 		// del almacén; se liberan al borrar la instancia (rmdirInstancia).
-		ids := &asignadorProyectos{sembrar: func() map[string][]uint32 {
-			return proyectosPorDir(filepath.Join(a.dir, "m"))
+		ids := &asignadorProyectos{sembrar: func() (map[string][]uint32, error) {
+			return proyectosPorDir(filepath.Join(a.dir, "m")), nil
 		}}
 		a.liberarProyectos = ids.liberar
 		var devOnce sync.Once
-		var dev string
-		var quotactlRoto atomic.Bool
+		qc := &quotactlXFS{llamar: limiteXFSQuotactl}
 		a.limitar = func(d, overlay string, bytes int64) error {
-			id := ids.asignar(d)
+			id := ids.asignarFichero(d, filepath.Base(overlay))
 			ok := false
 			defer func() {
 				if !ok {
@@ -389,22 +414,12 @@ func (a *almacenCoW) activarCuota() {
 			// Primero el límite, luego el proyecto: si el fichero no cupiera, el
 			// cambio de proyecto falla y la instancia no entra al almacén. Por
 			// quotactl; si falla (o no hay dispositivo), el proceso xfs_quota.
-			hecho := false
-			if !quotactlRoto.Load() {
-				devOnce.Do(func() {
-					if mt, found := montajeDe(a.dir); found && strings.HasPrefix(mt.fuente, "/dev/") {
-						dev = mt.fuente
-					}
-				})
-				if dev != "" {
-					if err := limiteXFSQuotactl(dev, id, bytes); err == nil {
-						hecho = true
-					} else {
-						quotactlRoto.Store(true)
-						log.Printf("warning: copy-on-write store: quotactl on %s failed (%v); using xfs_quota", dev, err)
-					}
+			devOnce.Do(func() {
+				if mt, found := montajeDe(a.dir); found && strings.HasPrefix(mt.fuente, "/dev/") {
+					qc.dev = mt.fuente
 				}
-			}
+			})
+			hecho := qc.fijar(id, bytes)
 			if !hecho {
 				bin := buscarE2fs("xfs_quota")
 				if bin == "" {
