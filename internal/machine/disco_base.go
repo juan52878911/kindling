@@ -190,8 +190,7 @@ var cerrojosEnlace sync.Map // ruta → *sync.Mutex
 // siguiente comprobación rehashea. Un camino que no pase por aquí solo cuesta
 // un rehash, nunca da por bueno un disco distinto.
 func (m *Manager) enlaceEstable(path string, op func() error) error {
-	v, ok := m.discosBase.Load(path)
-	if !ok {
+	if _, ok := m.discosBase.Load(path); !ok {
 		return op()
 	}
 	mu, _ := cerrojosEnlace.LoadOrStore(path, new(sync.Mutex))
@@ -203,7 +202,8 @@ func (m *Manager) enlaceEstable(path string, op func() error) error {
 		return op()
 	}
 	hAntes := huellaDeDisco(antes)
-	if v, ok = m.discosBase.Load(path); !ok || v.(digestCacheado).huella != hAntes {
+	v, ok := m.discosBase.Load(path)
+	if !ok || v.(digestCacheado).huella != hAntes {
 		return op()
 	}
 	c := v.(digestCacheado)
