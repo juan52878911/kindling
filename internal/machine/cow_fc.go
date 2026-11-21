@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -490,7 +491,42 @@ func (m *Manager) borrarJail(id string) error {
 			}
 		}
 	}
+	m.soltarEnlacesBase(base)
 	return borrarArbolSinCruzar(base)
+}
+
+// soltarEnlacesBase borra, cada uno bajo enlaceEstable, los enlaces duros del
+// jail que apuntan a un disco base con digest cacheado. Borrarlos a pelo con el
+// resto del árbol cambia el ctime de la imagen y la siguiente creación la
+// rehashea entera (la fase checks). Lo que falle aquí lo borra el árbol igual.
+func (m *Manager) soltarEnlacesBase(jail string) {
+	type ino struct{ dev, ino uint64 }
+	cacheados := map[ino]string{}
+	m.discosBase.Range(func(k, _ any) bool {
+		if p, ok := k.(string); ok {
+			var st syscall.Stat_t
+			if syscall.Stat(p, &st) == nil {
+				cacheados[ino{uint64(st.Dev), st.Ino}] = p
+			}
+		}
+		return true
+	})
+	if len(cacheados) == 0 {
+		return
+	}
+	_ = filepath.WalkDir(jail, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		var st syscall.Stat_t
+		if syscall.Lstat(p, &st) != nil || st.Nlink < 2 {
+			return nil
+		}
+		if src, ok := cacheados[ino{uint64(st.Dev), st.Ino}]; ok {
+			_ = m.enlaceEstable(src, func() error { return os.Remove(p) })
+		}
+		return nil
+	})
 }
 
 // barrerBindsJail desmonta, al arrancar, los binds del almacén que quedaron en
