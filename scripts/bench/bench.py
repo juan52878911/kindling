@@ -14,6 +14,11 @@ SERIE = int(os.environ.get("SERIE", "15"))
 CONC = [int(x) for x in os.environ.get("CONC", "10,20").split(",")]  # "…,50,50": dos c50 por separado
 EXECS = int(os.environ.get("EXECS", "30"))
 ESPERA_POOL = int(os.environ.get("ESPERA_POOL", "0"))
+E5_N = int(os.environ.get("E5_N", "5"))  # sandboxes por variante de pausa→exec (E5)
+E5_OCIOSA_S = int(os.environ.get("E5_OCIOSA_S", "60"))  # reposo antes de la pausa "ociosa"
+# KLING_NET_POOL lo lee el daemon (daemon-up.sh hereda el entorno); aquí solo se anota en el JSON.
+NET_POOL = os.environ.get("KLING_NET_POOL", "")
+KVM_DIR = os.environ.get("KB_KVM_DEBUGFS", "/sys/kernel/debug/kvm")
 KB = os.environ.get("KB", "/opt/kbench")
 KB_URL = os.environ.get("KB_URL", "http://127.0.0.1:18099")
 SOCK = os.environ.get("KB_DAEMON_SOCK", "/run/kt-bench/kling.sock")
@@ -115,6 +120,46 @@ def resync_agente(sock, mid):
         return {"error": str(e)[:100]}
 
 
+def kvm_contadores():
+    # pf_fixed y exits de KVM (debugfs, root): None si no se pueden leer.
+    try:
+        return {k: int(open(os.path.join(KVM_DIR, k)).read()) for k in ("pf_fixed", "exits")}
+    except (OSError, ValueError):
+        return None
+
+
+def kvm_delta(a, b):
+    if a is None or b is None:
+        return None
+    return {k: b[k] - a[k] for k in a}
+
+
+def pausa_exec(s, kling_cli, env, mid):
+    # Una pausa→exec: ms desde `thaw` hasta que responde el primer exec.
+    subprocess.run([kling_cli, "pause", mid], env=env, check=True, capture_output=True)
+    t = time.perf_counter()
+    subprocess.run([kling_cli, "thaw", mid], env=env, check=True, capture_output=True)
+    s.exec(["echo", "ack"])
+    return (time.perf_counter() - t) * 1000
+
+
+def medir_pausa_e5(crear, borrar, res, kling_cli, env):
+    # E5: pausa→exec con un sandbox recién creado (sin ejecutar nada antes) y con uno ocioso
+    # E5_OCIOSA_S s. Un sandbox por muestra; los ociosos se crean juntos y esperan a la vez.
+    nuevas = []
+    for _ in range(E5_N):
+        s, _ms = crear()
+        nuevas.append(pausa_exec(s, kling_cli, env, s.id.split("/")[-1]))
+        borrar(s)
+    res["pausa_exec_nueva_ms"] = resumen(nuevas)
+    ociosas = [crear()[0] for _ in range(E5_N)]
+    time.sleep(E5_OCIOSA_S)
+    oc = [pausa_exec(s, kling_cli, env, s.id.split("/")[-1]) for s in ociosas]
+    for s in ociosas:
+        borrar(s)
+    res["pausa_exec_ociosa_ms"] = resumen(oc) | {"ocioso_s": E5_OCIOSA_S}
+
+
 def medir_ciclo(s, res, sufijo, kling_cli, env, mid, execs):
     # Exec y pausa/congelar sobre un sandbox. `sufijo` dice en qué momento: "rafaga" (justo al
     # volver la ráfaga, con el relleno del pool en marcha) o "reposo" (pool ya relleno).
@@ -155,18 +200,21 @@ def bench_k(plantilla, Sandbox=None, F=None):
         except Exception:
             pass
 
-    res = {"fases": {}}
+    res = {"fases": {}, "net_pool": NET_POOL}
     s, _ = crear(); borrar(s)  # calentamiento, no cuenta
-    serie, resyncs = [], []
+    serie, resyncs, kvm = [], [], []
     antes = F.leer(fuentes)
     t0 = time.time()
     for _ in range(SERIE):
+        k0 = kvm_contadores()
         s, ms = crear()
+        kvm.append(kvm_delta(k0, kvm_contadores()))
         serie.append(ms)
         resyncs.append(resync_agente(SOCK, s.id.split("/")[-1]))  # antes de borrarla
         borrar(s)
     res["create_serial_ms"] = resumen(serie)
     res["resync_serie"] = resyncs
+    res["kvm_serie"] = kvm  # delta de pf_fixed/exits por creación (None sin debugfs)
     res["fases"]["serie"] = F.tabla(antes, F.leer(fuentes), serie)
     cerrar_tanda(res, "serie", t0)
 
@@ -208,6 +256,8 @@ def bench_k(plantilla, Sandbox=None, F=None):
             list(ex.map(borrar, ok))
         cerrar_tanda(res, nombre, t0)
         time.sleep(2)
+    env = dict(os.environ, KLING_HOST="unix://" + SOCK, KLING_CONFIG=KB_CONFIG)
+    medir_pausa_e5(crear, borrar, res, KLING, env)
     return res
 
 
