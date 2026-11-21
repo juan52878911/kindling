@@ -64,6 +64,12 @@ func congelarEnDiff() bool {
 	return backendVMM == BackendFirecracker && restaurarComparteMemoria && os.Getenv("KLING_DIFF_FREEZE") != "0"
 }
 
+// cargarConSeguimiento dice si una copia se carga con seguimiento de páginas
+// sucias (diferencial al congelar). porImagen: viene de un snapshot por imagen.
+func cargarConSeguimiento(porImagen bool, onTTL string) bool {
+	return congelarEnDiff() && !porImagen
+}
+
 // existe dice si hay algo en path.
 func existe(path string) bool {
 	_, err := os.Stat(path)
