@@ -1835,15 +1835,15 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		ai.id = id
 	}
 
-	// La máquina se escribe en disco (persistirYa) EN PARALELO con la puerta y
-	// la restauración: el fsync no está en el camino crítico ni ocupa un hueco
-	// de las restauraciones que cargan en KVM. Se espera justo antes de entregar
-	// la máquina (tras el resync), y en cualquier salida antes (defer), para que
-	// ninguna escritura sobreviva a su borrado. Si falla, se aborta como antes. Una caída a medias deja un VMM sin estado
-	// en disco, que killOrphanVMMs mata, y su directorio y su red marcada los
-	// barren sweepMachineDirs y barrerNamespaces (no están en byID).
-	esperarPersist := enParalelo(m.persistirYa)
-	defer func() { _ = esperarPersist() }()
+	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa);
+	// si no puede, no se lanza. Va ANTES de la puerta: la escritura (fsync) no
+	// debe ocupar un hueco de las restauraciones que cargan en KVM.
+	if err := m.persistirYa(); err != nil {
+		m.desmontarRed(netcfg, id)
+		m.fail(mc, err)
+		return nil, err
+	}
+	fases.marca(fcPersist)
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
@@ -2077,11 +2077,6 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		return m.descartarCopia(id, soltarCiclo, abortar, fmt.Errorf("snapshot %s: %w", req.From, err))
 	}
 	fases.marca(fcResync)
-	// La escritura de la máquina tiene que haber acabado antes de entregarla.
-	if err := esperarPersist(); err != nil {
-		return abortar(err)
-	}
-	fases.marca(fcPersist)
 	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
 	// agente lanza el servicio. Sin resync no: sus procesos nacerían con el
 	// CSPRNG de la plantilla.
