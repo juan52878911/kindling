@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -223,5 +225,52 @@ func TestResyncReanudarSoloSiHaceFalta(t *testing.T) {
 func TestCapsAnunciaResyncReloj(t *testing.T) {
 	if !slices.Contains((&Agent{}).Caps(), CapResyncClock) {
 		t.Fatalf("caps %v without %s", (&Agent{}).Caps(), CapResyncClock)
+	}
+}
+
+// fifoGeneracion deja en generationFile+".tmp" una tubería: escribir la
+// generación se queda esperando a que alguien la lea, y así el test controla
+// cuándo acaba el paso lento sin tocar el código.
+func fifoGeneracion(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(generationFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(generationFile+".tmp", 0o644); err != nil {
+		t.Skipf("sin mkfifo: %v", err)
+	}
+}
+
+// La respuesta no espera a lo lento: con la escritura de la generación
+// bloqueada, /resync contesta igual (entropía y reloj ya están puestos).
+func TestResyncRespondeAntesDeLoLento(t *testing.T) {
+	reloj, ent := falsos(t, nil, nil)
+	fifoGeneracion(t)
+	semilla := bytes.Repeat([]byte{3}, api.GuestResyncEntropy)
+	host := time.Now().Add(time.Minute)
+
+	hecho := make(chan *httptest.ResponseRecorder, 1)
+	go func() { hecho <- postResync(t, cuerpo(t, host.UnixNano(), semilla)) }()
+	// Pase lo que pase, se libera la tubería para que nada quede colgado.
+	t.Cleanup(func() {
+		if f, err := os.Open(generationFile + ".tmp"); err == nil {
+			_, _ = io.Copy(io.Discard, f)
+			f.Close()
+		}
+	})
+	select {
+	case rr := <-hecho:
+		if rr.Code != http.StatusOK {
+			t.Fatalf("código %d: %s", rr.Code, rr.Body)
+		}
+		var res api.GuestResyncResult
+		if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil || res.Generation != 1 {
+			t.Fatalf("generation %d (%v), quiero 1", res.Generation, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("/resync espera a escribir el fichero de generación antes de contestar")
+	}
+	if !reloj.Equal(host) || !bytes.Equal(*ent, semilla) {
+		t.Fatal("la respuesta llegó sin reloj o sin entropía")
 	}
 }
