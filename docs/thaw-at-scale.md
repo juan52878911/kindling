@@ -349,3 +349,15 @@ result of the matrix and must not be quoted as such:
 The full matrix needs a host with at least ~40 GiB of free disk for `N=50`.
 
 En kling-ascci sobraba disco y el límite fue la RAM (ver arriba).
+
+## Puerta de arranque adaptativa
+
+`KLING_MAX_PARALLEL_BOOT` manda siempre. Sin ella, el tope de encendidos simultáneos es:
+
+| Host | Núcleos | Tope |
+|---|---|---|
+| anidado | < 8 | 2 (el laboratorio de 4 vCPU no cambia) |
+| anidado | ≥ 8 | `min(núcleos/2, 8)` |
+| hierro | cualquiera | `min(max(2, núcleos/2), 8)` |
+
+El valor y el motivo salen una vez en el log (`launch gate: N simultaneous boots (...)`). Criterio de medición en EC2: c50 en frío en c8i.2xlarge < 600 ms con 0 fallos y c100 en 4xlarge sin fallos; si hay pico de memoria, fijar la variable a mano.
