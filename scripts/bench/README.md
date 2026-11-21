@@ -34,6 +34,25 @@ scripts/bench/ec2.sh --limpiar <ID>              # si algo quedó a medias
 Doble tope: `trap` (EXIT/INT/TERM) termina instancia, grupo de seguridad y clave; y la instancia nace
 con `InstanceInitiatedShutdownBehavior=terminate` + `shutdown -h +TOPE_MIN` (300 por defecto).
 
+## Higiene entre variantes y qué trae el JSON
+
+Cada vuelta del barrido (`remoto/fases.sh`) hace `higiene.sh inicio` (apunta el espacio libre),
+y al acabar `higiene.sh rm` (`kling rm -f` de todo), parar daemon y gateway, `daemon-down.sh`
+(mata los firecracker restantes, borra los netns `kl-*`, desmonta `cow.xfs` y sus loop) y
+`higiene.sh verificar`: 0 firecracker, 0 netns `kl-*`, 0 montajes de `cow.xfs` y el mismo espacio
+libre (±100 MiB, `TOL_LIBRE_MIB`); si no, el banco aborta. **Solo en la instancia del banco**:
+mata procesos por nombre, nunca en el laboratorio.
+
+`bench.py` añade al JSON: `create_c50_ms` y `create_c50b_ms` (con `CONC=…,50,50` por defecto en
+`fases.sh`; un tamaño repetido lleva sufijo `b`, `c`…), `exec_echo_rafaga_ms` / `exec_echo_reposo_ms`
+y lo mismo para `resume_hasta_exec_*` y `thaw_desde_freeze_hasta_exec_*` (ráfaga = justo al volver,
+con el relleno del pool en marcha; reposo = tras `ESPERA_POOL`; las claves sin sufijo son las de
+ráfaga, como antes), `resync_serie` (`GET /resync` del agente tras cada creación en serie, con
+`critico_us` y pasos; ruta en `KB_RESYNC_RUTA`, `{id}` = máquina; si el daemon no la sirve queda
+`{"error": …}`), `vmm_muertos` (líneas `watch:` del journal de la unidad `KB_UNIT` por tanda) y
+`diag` (dmesg filtrado y `memory.events` al acabar cada tanda).
+`bench.py --self-test` lo comprueba con un gateway falso, sin KVM ni root.
+
 ## Barrido
 
 `PARALELO="2 4 8 16"` (`KLING_MAX_PARALLEL_BOOT`), `JAILER="0 1"`, `CUOTAS_LISTA="- 200:50"`
