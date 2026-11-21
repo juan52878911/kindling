@@ -11,11 +11,15 @@ import (
 // devuelve, en orden, una línea por proceso que Setup habría lanzado.
 func grabarSetup(t *testing.T, egress Egress) []string {
 	t.Helper()
-	oldE, oldB, oldR, oldH, oldX, oldI, oldA := ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost
+	oldO, oldE, oldB, oldR, oldH, oldX, oldI, oldA := ordenEnNetns, ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost
 	t.Cleanup(func() {
-		ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost = oldE, oldB, oldR, oldH, oldX, oldI, oldA
+		ordenEnNetns, ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost = oldO, oldE, oldB, oldR, oldH, oldX, oldI, oldA
 	})
 	var procs []string
+	ordenEnNetns = func(ns string, args ...string) error {
+		procs = append(procs, "en-netns "+ns+" "+strings.Join(args, " "))
+		return nil
+	}
 	ejecutar = func(args ...string) error { procs = append(procs, strings.Join(args, " ")); return nil }
 	ipBatch = func(ns string, o ...string) error { procs = append(procs, "ip-batch "+ns); return nil }
 	ejecutarRestore = func(ns, _ string) ([]byte, error) { procs = append(procs, "iptables-restore "+ns); return nil, nil }
@@ -40,5 +44,30 @@ func TestSetupNoUsaIPNetnsExec(t *testing.T) {
 		if strings.HasPrefix(p, "ip netns exec") {
 			t.Errorf("Setup lanza %.60q...: debe entrar en el netns con setns, sin `ip netns exec`", p)
 		}
+	}
+}
+
+// Con el fondo de ranuras apagado, la secuencia de procesos de Setup es la de
+// siempre: netns add, ip batch del host, ip batch del netns, sysctl, ip6tables
+// y un único iptables-restore con el DNAT y las reglas de salida.
+func TestSetupSecuenciaDeOro(t *testing.T) {
+	procs := grabarSetup(t, EgressInternet)
+	var got []string
+	for _, p := range procs {
+		if f := strings.Fields(p); len(f) > 4 {
+			p = strings.Join(f[:4], " ")
+		}
+		got = append(got, p)
+	}
+	want := []string{
+		"ip netns add kl-abcd1234",
+		"ip-batch ",
+		"ip-batch kl-abcd1234",
+		"en-netns kl-abcd1234 sysctl -q",
+		"en-netns kl-abcd1234 ip6tables -A",
+		"iptables-restore kl-abcd1234",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("secuencia de Setup:\n got %q\nwant %q", got, want)
 	}
 }
