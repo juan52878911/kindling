@@ -2337,12 +2337,22 @@ func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
 func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, dir string, n *knet.Net, id string,
 	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, error) {
 	fases.marca(fcDisk)
-	t0 := time.Now()
-	modo, errClon := clon(ctx)
-	dClon := time.Since(t0)
+	var (
+		modo    string
+		errClon error
+		dClon   time.Duration
+		hecho   = make(chan struct{})
+	)
+	go func() {
+		defer close(hecho)
+		t0 := time.Now()
+		modo, errClon = clon(ctx)
+		dClon = time.Since(t0)
+	}()
 	t1 := time.Now()
 	errRed := m.montarRed(n, id, egress, domains)
 	dRed := time.Since(t1)
+	<-hecho
 	fases.d[fcDisk] += dClon
 	fases.d[fcNet] += dRed
 	fases.ultima = time.Now()
