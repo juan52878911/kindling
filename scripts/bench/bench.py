@@ -295,9 +295,9 @@ def F_UNIX(ruta):
 
 def self_test():
     # Gateway falso: Sandbox y fases de mentira, y un registro del orden en que se mide.
-    global SERIE, CONC, EXECS, ESPERA_POOL, subprocess
+    global SERIE, CONC, EXECS, ESPERA_POOL, E5_N, E5_OCIOSA_S, subprocess
     import types
-    SERIE, CONC, EXECS, ESPERA_POOL = 2, [2, 3, 3], 2, 0
+    SERIE, CONC, EXECS, ESPERA_POOL, E5_N, E5_OCIOSA_S = 2, [2, 3, 3], 2, 0, 2, 0
     ev = []
 
     class R:
@@ -346,14 +346,17 @@ def self_test():
     claves = list(out)
     for k in ("create_serial_ms", "create_c2_ms", "create_c3_ms", "create_c3b_ms", "exec_echo_rafaga_ms",
               "exec_echo_reposo_ms", "resume_hasta_exec_reposo_ms", "thaw_desde_freeze_hasta_exec_rafaga_ms",
-              "exec_echo_ms", "vmm_muertos", "diag", "resync_serie"):
+              "exec_echo_ms", "vmm_muertos", "diag", "resync_serie", "kvm_serie", "net_pool",
+              "pausa_exec_nueva_ms", "pausa_exec_ociosa_ms"):
         assert k in out, f"falta {k}: {claves}"
     assert out["resync_serie"] == [{"critico_us": 7}] * 2
+    assert len(out["kvm_serie"]) == 2 and out["pausa_exec_nueva_ms"]["n"] == 2, out
+    assert out["pausa_exec_ociosa_ms"]["n"] == 2, out
     assert set(out["vmm_muertos"]) == {"serie", "c2", "c3", "c3b"}, out["vmm_muertos"]
     assert claves.index("create_c3_ms") < claves.index("create_c3b_ms")
     # Orden: ráfaga → ciclo "rafaga" (exec, pause, thaw, freeze, thaw) → ciclo "reposo".
     pos = [i for i, e in enumerate(ev) if e == "pause"]
-    assert len(pos) == 10 and ev.count("freeze") == 10, ev
+    assert len(pos) == 14 and ev.count("freeze") == 10, ev
     assert ev.index("pause") > ev.index("exec") and ev.index("freeze") > ev.index("pause")
     print("self-test ok")
 
