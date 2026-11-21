@@ -4527,7 +4527,6 @@ func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, error) {
 		return nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
 	egress, _ := knet.ParseEgress(mc.Egress)
-	n.VecinoInvitado = true // como al restaurar (ver runFromCon)
 	if err := m.montarRed(n, mc.ID, egress, mc.AllowDomains); err != nil {
 		return nil, fmt.Errorf("rebuilding the network: %w", err)
 	}

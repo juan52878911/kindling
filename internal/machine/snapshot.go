@@ -1759,11 +1759,6 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		return nil, err
 	}
 	fases.marca(fcDisk)
-	// La copia vuelve con la MAC del dorado: sin vecino, el primer paquete del
-	// resync espera a un ARP que bajo carga (c50) el invitado tarda más de 6 s
-	// en contestar ("no route to host"). La entrada va en STALE: si la MAC
-	// fuera otra, la primera sonda la corrige.
-	netcfg.VecinoInvitado = true
 	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("setting up network: %w", err)
