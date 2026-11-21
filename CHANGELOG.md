@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Every creation from a snapshot records its phase breakdown: `kling_create_duration_ms` and `kling_create_phase_ms{phase}` histograms in `/metrics`, and an additive `create` field on the machine (`api.CreatePhases`). `kling_operation_duration_ms{kind="restore"}` is unchanged (load only).
 - `kling image import -warm -disk 2G`: sets the writable disk of the warm template and its copies (default 512 MiB). The Claude Code and Codex recipes use 2G: `npm install` did not fit in 512 MiB. Fails early against a daemon without the disk capability.
 - kling-sandbox gateway: `GET /v1/sandboxes/{id}/files?list=1` lists a directory (same owner check as the other file routes, in the OpenAPI spec); the console and the Python/TypeScript SDKs (`files.list`) use it instead of `ls -la`.
 - kling-sandbox gateway: `-console` flag (chart value `gateway.console`); the console is on by default with TLS or on loopback and off on plain HTTP outside loopback, and `/console/` answers 404 when off. The console `index.html` is now tracked (it was hidden by `.gitignore`).
@@ -43,6 +44,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
+
+### Changed
+
+- Restoring from a snapshot now writes the machine state to disk before taking a slot in the launch gate (still before the VMM exists), so the fsync no longer holds a slot.
 
 ### Fixed
 - Restore: with a guest agent, the resync now waits up to 6 s for the guest network instead of failing after one retry. Under load (10-20 concurrent restores on a 4-core host) ARP took over 250 ms and creates failed with "the guest agent did not resync after the restore"; with the fix, 120 of 120 concurrent creates succeed.

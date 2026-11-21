@@ -133,3 +133,16 @@ El sistema de ficheros del Pod es de solo lectura, así que `gateway.audit.path`
 (se pierde al reiniciar) o, con `persistence.enabled`, un PVC `<gateway>-audit` (se conserva al borrar el
 release). Con PVC no se admite más de una réplica. Ejemplo completo en
 `deploy/helm/kindling-sandbox/ci/gateway-observabilidad.yaml`.
+
+## Desglose de cada creación desde un snapshot
+
+Cada `run -from` (y cada copia de plantilla) deja su desglose por fases, en `/metrics` y en la máquina
+(`Machine.create`, `kling inspect`; el banco lo lee por API):
+
+- `kling_create_duration_ms`: histograma del total, desde la entrada a `runFromCon` hasta tener la copia lista.
+- `kling_create_phase_ms{phase}`: histograma por fase, sin solapes (su suma es el total salvo redondeo):
+  `checks`, `disk`, `net`, `persist`, `gate_wait`, `vmm`, `load`, `resume`, `resync`, `start`, `finish`.
+
+`persist` (escribir el estado en disco antes de lanzar el VMM) va ANTES de la puerta de arranque, así que ya
+no ocupa un hueco de ella: `gate_wait` es solo la cola. `kling_operation_duration_ms{kind="restore"}` no
+cambia de significado: sigue cubriendo solo la carga (desde el lanzamiento del VMM hasta cargar y reanudar).
