@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -481,6 +482,26 @@ func TestQuotactlPasajeroNoEsRoto(t *testing.T) {
 	q.fijar(1, 10)
 	if q.fijar(1, 10) || llamadas != 3 {
 		t.Fatalf("ENOSYS debía ser permanente (llamadas=%d)", llamadas)
+	}
+}
+
+// Un quotactl roto caduca al minuto: un fallo permanente de un momento (el
+// montaje aún no estaba listo) no condena a xfs_quota para toda la vida.
+func TestQuotactlRotoCaduca(t *testing.T) {
+	llamadas := 0
+	var err error = syscall.ENOSYS
+	ahora := time.Unix(1000, 0)
+	q := &quotactlXFS{dev: "/dev/x", ahora: func() time.Time { return ahora },
+		llamar: func(string, uint32, int64) error { llamadas++; return err }}
+	q.fijar(1, 10)
+	ahora = ahora.Add(59 * time.Second)
+	if q.fijar(1, 10) || llamadas != 1 {
+		t.Fatalf("roto debía seguir en pie a los 59 s (llamadas=%d)", llamadas)
+	}
+	err = nil
+	ahora = ahora.Add(2 * time.Second)
+	if !q.fijar(1, 10) || llamadas != 2 {
+		t.Fatalf("roto debía caducar al minuto (llamadas=%d)", llamadas)
 	}
 }
 
