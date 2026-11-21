@@ -59,6 +59,13 @@ type GuestResyncResult struct {
 	// copia (Restore = ResyncInstance): hoy, los machine-id con valor
 	// (/etc/machine-id, /var/lib/dbus/machine-id). Issue #176.
 	Renewed []string `json:"renewed,omitempty"`
+	// CriticalUS es lo que tardó el agente (µs) desde que recibió la petición
+	// hasta justo antes de escribir esta respuesta, y OriginUS lo que de eso
+	// fue la comprobación del origen. El daemon resta CriticalUS de lo que
+	// esperó para saber cuánto fue despertar del invitado, ARP y TCP. 0 =
+	// agente anterior (o sin medir).
+	CriticalUS int64 `json:"critical_us,omitempty"`
+	OriginUS   int64 `json:"origin_us,omitempty"`
 }
 
 // GuestGenerationFile es donde el agente deja, tras cada /resync, cuántas

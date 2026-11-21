@@ -474,6 +474,7 @@ var (
 
 func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, error) {
 	var out api.GuestResyncResult
+	ini := time.Now()
 	ent := make([]byte, api.GuestResyncEntropy)
 	if _, err := rand.Read(ent); err != nil {
 		return out, err
@@ -521,6 +522,11 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	}
 	// Un cuerpo ilegible no invalida el resync: el agente ya contestó 200.
 	_ = json.Unmarshal(b, &out)
+	// Un agente anterior no manda critical_us: no hay reparto que anotar.
+	if out.CriticalUS > 0 {
+		tel.resyncRepartido(time.Since(ini), out.CriticalUS)
+		traza.reparto(out)
+	}
 	return out, nil
 }
 
@@ -678,4 +684,25 @@ func (t *trazaResync) fin(err error) {
 	log.Printf("resync trace %s: connect=%v write=%v agent=%v total=%v err=%v", t.base,
 		desde(t.ini, t.conectado), desde(t.conectado, t.escrito), desde(t.escrito, t.respuesta),
 		time.Since(t.ini).Round(10*time.Microsecond), err)
+}
+
+// reparto escribe, con la traza activa, de qué está hecha la espera del
+// resync: connect y first_byte son del lado del daemon (ARP + SYN, y hasta el
+// primer byte de la respuesta); guest_critical y guest_origin los midió el
+// agente. first_byte − guest_critical es el despertar del invitado.
+func (t *trazaResync) reparto(res api.GuestResyncResult) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	desde := func(b time.Time) time.Duration {
+		if b.IsZero() {
+			return -1
+		}
+		return b.Sub(t.ini).Round(10 * time.Microsecond)
+	}
+	log.Printf("resync split: connect=%v first_byte=%v guest_critical=%v guest_origin=%v",
+		desde(t.conectado), desde(t.respuesta),
+		time.Duration(res.CriticalUS)*time.Microsecond, time.Duration(res.OriginUS)*time.Microsecond)
 }

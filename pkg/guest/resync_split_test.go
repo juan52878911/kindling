@@ -36,7 +36,7 @@ func TestResyncRespondeCriticoYOrigen(t *testing.T) {
 	mux := http.NewServeMux()
 	a.Register(mux)
 
-	rr := peticionHost(t, mux, cuerpo(t, time.Now().UnixNano(), make([]byte, api.GuestResyncEntropy)))
+	rr := peticionHost(t, mux, cuerpoArranque(t))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("código %d: %s", rr.Code, rr.Body)
 	}
@@ -69,7 +69,7 @@ func TestDireccionesPropiasSeCachean(t *testing.T) {
 	mux := http.NewServeMux()
 	a.Register(mux)
 	for i := 0; i < 3; i++ {
-		if rr := peticionHost(t, mux, cuerpo(t, time.Now().UnixNano(), make([]byte, api.GuestResyncEntropy))); rr.Code != http.StatusOK {
+		if rr := peticionHost(t, mux, cuerpoArranque(t)); rr.Code != http.StatusOK {
 			t.Fatalf("resync sin restauración: %d: %s", rr.Code, rr.Body)
 		}
 	}
@@ -81,7 +81,7 @@ func TestDireccionesPropiasSeCachean(t *testing.T) {
 		t.Fatalf("resync con restauración: %d: %s", rr.Code, rr.Body)
 	}
 	esperarSegundoTiempo(t)
-	peticionHost(t, mux, cuerpo(t, time.Now().UnixNano(), make([]byte, api.GuestResyncEntropy)))
+	peticionHost(t, mux, cuerpoArranque(t))
 	if lecturas != 2 {
 		t.Fatalf("lecturas tras la restauración = %d, quería 2", lecturas)
 	}
@@ -119,4 +119,14 @@ func TestHealthzCuentaSegundosTiemposVencidos(t *testing.T) {
 	if d := leer() - antes; d != 1 {
 		t.Fatalf("segundos_tiempos_vencidos subió %d, quería 1", d)
 	}
+}
+
+// cuerpoArranque es un resync que no es restauración (arranque en frío).
+func cuerpoArranque(t *testing.T) string {
+	b, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(),
+		Entropy: make([]byte, api.GuestResyncEntropy), Restore: ResyncBoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
