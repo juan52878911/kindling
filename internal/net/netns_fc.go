@@ -59,7 +59,11 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	}
 	n.Teardown()
 	tr.fase("teardown")
-	if err := n.montarBase(tr, owner, false); err != nil {
+	// Sin ranura, el montaje completo hace cola: a lo sumo 4 a la vez.
+	montajesCompletos <- struct{}{}
+	err = n.montarBase(tr, owner, false)
+	<-montajesCompletos
+	if err != nil {
 		return err
 	}
 	return n.aplicarPropio(tr, egress, domains, false)
