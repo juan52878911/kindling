@@ -63,6 +63,10 @@ func (mc *Machine) Clone() *Machine {
 		w := *mc.Wake
 		out.Wake = &w
 	}
+	if mc.Create != nil {
+		c := *mc.Create
+		out.Create = &c
+	}
 	if mc.Agent != nil {
 		// slices.Clone y no append(nil, ...): unas Caps vacías pero no nil
 		// son "anuncia y no tiene nada", y nil es "no anuncia" (GuestAgent).

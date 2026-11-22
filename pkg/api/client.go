@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,20 @@ func NewClient(endpoint string) *Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	if esSocketUnix(d.Endpoint) {
+		// Con socket unix el connect por petición es un coste sin motivo:
+		// se reutilizan conexiones. Con SSH detrás se queda como estaba.
+		// Tras reiniciar el daemon, la primera petición sobre una conexión
+		// ociosa ya muerta falla con "server closed idle connection": el
+		// http.Transport solo la repite si es idempotente, y un POST no lo
+		// es. reintentoOciosa la repite una vez (ver internal/apiclienttest).
+		t := c.http.Transport.(*http.Transport)
+		t.DisableKeepAlives = false
+		t.MaxIdleConnsPerHost = 16
+		t.MaxIdleConns = 16
+		t.IdleConnTimeout = 30 * time.Second
+		c.http.Transport = reintentoOciosa{t}
+	}
 	// El daemon no redirige nunca. Sin esto, http.Client seguiría la
 	// redirección que ServeMux hace de una ruta con ".." conservando método y
 	// token, y la petición acabaría en el handler de otra ruta.
@@ -108,6 +123,31 @@ func sinRedirecciones(*http.Request, []*http.Request) error { return http.ErrUse
 // autorización que lo declare (docs/authz.md); sin ella, el daemon lo ignora.
 const AuthzTokenEnv = "KLING_AUTHZ_TOKEN"
 
+// reintentoOciosa repite UNA vez la petición que falló porque el daemon cerró
+// la conexión ociosa antes de que se escribiera nada en ella (un daemon
+// reiniciado): el servidor no la llegó a ver, así que repetirla es seguro
+// aunque no sea idempotente. Solo si el cuerpo se puede rebobinar.
+type reintentoOciosa struct{ rt http.RoundTripper }
+
+func (t reintentoOciosa) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.rt.RoundTrip(r)
+	if err == nil || !strings.Contains(err.Error(), "server closed idle connection") {
+		return resp, err
+	}
+	if r.Body != nil && r.Body != http.NoBody {
+		if r.GetBody == nil {
+			return resp, err
+		}
+		b, gerr := r.GetBody()
+		if gerr != nil {
+			return resp, err
+		}
+		r = r.Clone(r.Context())
+		r.Body = b
+	}
+	return t.rt.RoundTrip(r)
+}
+
 // conToken añade el token de inquilino a cada petición al daemon.
 type conToken struct {
 	rt  http.RoundTripper
@@ -119,6 +159,10 @@ func (t conToken) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Authorization", "Bearer "+t.tok)
 	return t.rt.RoundTrip(r)
 }
+
+// esSocketUnix dice si el endpoint es un socket local (con o sin esquema):
+// todo lo que no sea ssh://.
+func esSocketUnix(endpoint string) bool { return !strings.HasPrefix(endpoint, "ssh://") }
 
 func (c *Client) Endpoint() string { return c.d.Describe() }
 

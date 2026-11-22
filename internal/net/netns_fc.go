@@ -31,13 +31,16 @@ func nsIP(third, fourth int) string {
 // falta ninguna capacidad.
 // domains solo se usa cuando egress es EgressAllowlist: son los dominios a los
 // que se deja salir. En los demás modos se ignora.
-func (n *Net) Setup(egress Egress, domains []string, owner int) error {
+func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
+	tr := nuevaTrazaSetup(n.NS)
+	defer func() { tr.fin(err) }()
 	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
 	// si un reload del cortafuegos las borró, se reponen; si no se puede,
 	// la máquina no arranca con el host abierto.
 	if err := asegurarHostInput(); err != nil {
 		return fmt.Errorf("host INPUT rules: %w", err)
 	}
+	tr.fase("host_check")
 	// Restos de una ejecución anterior se derriban; lo de otro daemon, no. Si
 	// el veth existe con otra IP, no es un resto nuestro: es la red de otra
 	// máquina (otro daemon con un id que empieza igual), y Teardown la dejaría
@@ -52,9 +55,11 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	// Los 11 procesos de ip del enlace son 3: el netns y un `ip -batch`
 	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
 	// iproute2, el resto de líneas acabaría dentro del netns nuevo.
+	tr.fase("teardown")
 	if err := run("ip", "netns", "add", n.NS); err != nil {
 		return err
 	}
+	tr.fase("netns")
 	// El extremo del namespace nace ya dentro de él. Crearlo fuera y moverlo
 	// después (`ip link set ... netns`) espera un periodo de gracia de RCU en
 	// el kernel: 14 ms medidos en un i7-8700T, un tercio de todo el montaje.
@@ -65,6 +70,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	); err != nil {
 		return err
 	}
+	tr.fase("veth")
 	// Lado namespace, con el TAP de nombre e IP fijos: idénticos en todos los
 	// namespaces.
 	tap := "tuntap add " + TapName + " mode tap"
@@ -82,6 +88,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	); err != nil {
 		return err
 	}
+	tr.fase("tap")
 
 	ns := func(args ...string) error {
 		// `ip -n NS ...` entra en el namespace dentro del propio ip: un
@@ -112,6 +119,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := aplicarSysctls(ns, n.NS, n.NSIf); err != nil {
 		return err
 	}
+	tr.fase("sysctl")
 
 	// Capa 2 de la barrera IPv6 (firewall.go): va AQUÍ, antes de la rama
 	// rápida de iptables-restore de más abajo, y no dentro de applyEgress. Esa
@@ -122,6 +130,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := n.applyIPv6Barrier(ns); err != nil {
 		return err
 	}
+	tr.fase("ip6")
 
 	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
 	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
@@ -143,6 +152,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 		if err := n.restoreRules(reglas); err != nil {
 			return err
 		}
+		tr.fase("restore")
 		return n.arrancarRegistroNone(egress)
 	}
 	if err := ns(append([]string{"iptables"}, dnat...)...); err != nil {

@@ -29,6 +29,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/plantilla"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -394,6 +395,7 @@ func leerJSON(r *http.Request, v any) error {
 // ---- creación
 
 func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
+	entrada := time.Now()
 	t := tenantDe(r)
 	var pet CrearPeticion
 	if err := leerJSON(r, &pet); err != nil {
@@ -416,8 +418,12 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// el snapshot: se averigua aquí para acotar el tamaño EFECTIVO, que es el
 	// que ocupa RAM en el host, y no solo el pedido.
 	var snaps map[string]*api.Snapshot
+	var durSnap time.Duration
 	if pet.Template != "" {
+		tramo := time.Now()
 		snaps = s.snapshotsDe(r.Context(), plantilla.SnapshotDe(pet.Template))
+		durSnap = time.Since(tramo)
+		s.metricas.observar(tramoSnapshot, durSnap)
 		if len(snaps) == 0 {
 			err := &errSinPlantilla{pet.Template}
 			s.metricas.registrar(resultadoDe(err), 0)
@@ -463,12 +469,18 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// prepasos: todo lo anterior a hablar con el daemon para crear, menos el
+	// snapshot, que tiene su tramo.
+	s.metricas.observar(tramoPrepasos, time.Since(entrada)-durSnap)
+
 	if pet.Count != nil {
 		s.respuestaLote(w, r, t, pet, snaps, n, hVol, clonados)
+		s.metricas.observar(tramoTotal, time.Since(entrada))
 		return
 	}
 
 	inicio := time.Now()
+	defer func() { s.metricas.observar(tramoTotal, time.Since(entrada)) }()
 	h, mc, err := s.crear(r.Context(), t, pet, snaps)
 	if err != nil {
 		s.metricas.registrar(resultadoDe(err), time.Since(inicio))
@@ -872,6 +884,7 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 	var sirve func(*hosts.Host) bool
 	if p.Template == "" {
 		req.Image = p.Image
+		tramoImg := time.Now()
 		tienen := s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
 			imgs, err := h.Cliente.Images(ctx)
 			if err != nil {
@@ -884,6 +897,7 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 			}
 			return false, nil
 		})
+		s.metricas.observar(tramoImagenes, time.Since(tramoImg))
 		if len(tienen) == 0 {
 			return nil, nil, &api.StatusError{Code: http.StatusNotFound,
 				Message: fmt.Sprintf("image %q is not on any reachable host", p.Image)}
@@ -897,8 +911,13 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 		}
 		sirve = func(h *hosts.Host) bool { return snaps[h.Nombre] != nil }
 
-		if puedeReclamar(p) {
-			if h, mc := s.reclamarPrecalentada(ctx, t, p, etiquetas, snaps); mc != nil {
+		// Sin pool en ningún snapshot de la plantilla no hay nada que
+		// reclamar: se ahorra el listado de cada host.
+		if puedeReclamar(p) && algunoPideAlPool(snaps) {
+			tramo := time.Now()
+			h, mc := s.reclamarPrecalentada(ctx, t, p, etiquetas, snaps)
+			s.metricas.observar(tramoReclamo, time.Since(tramo))
+			if mc != nil {
 				return h, mc, nil
 			}
 		}
@@ -909,6 +928,8 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 		sirve = func(h *hosts.Host) bool { return solo[h.Nombre] && antes(h) }
 	}
 
+	tramoCreate := time.Now()
+	defer func() { s.metricas.observar(tramoDaemon, time.Since(tramoCreate)) }()
 	mc, h, err := hosts.IntentarRotado(ctx, s.reg, sirve, p.desplazo, func(ctx context.Context, h *hosts.Host) (*api.Machine, error) {
 		mc, err := h.Cliente.CreateSandbox(ctx, req)
 		// El fallo de TSC es DE ESE HOST: su dorado quedó invalidado por un
@@ -928,12 +949,38 @@ func (s *Servidor) crear(ctx context.Context, t *Tenant, p CrearPeticion, snaps 
 	return h, mc, nil
 }
 
+// algunoPideAlPool dice si algún snapshot de la plantilla pide precalentadas
+// (pool > 0). Si ninguno, reclamarPrecalentada solo gastaría un listado por
+// host para no encontrar nada.
+func algunoPideAlPool(snaps map[string]*api.Snapshot) bool {
+	for _, sn := range snaps {
+		if _, quiere := pool.DeseoDe(sn); quiere > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // snapshotsDe devuelve, por host, el snapshot llamado nombre en los hosts que
-// lo tienen.
+// lo tienen. Pide solo ese snapshot (GET /snapshots/{name}); sin caché, porque
+// la versión del snapshot decide qué precalentada vale y un rebuild la dejaría
+// vieja. Un daemon sin esa ruta (404/405 que no es "no existe") cae a la lista.
 func (s *Servidor) snapshotsDe(ctx context.Context, nombre string) map[string]*api.Snapshot {
 	var mu sync.Mutex
 	out := map[string]*api.Snapshot{}
 	s.hostsCon(ctx, func(ctx context.Context, h *hosts.Host) (bool, error) {
+		sn, err := h.Cliente.Snapshot(ctx, nombre)
+		if err == nil {
+			mu.Lock()
+			out[h.Nombre] = sn
+			mu.Unlock()
+			return true, nil
+		}
+		if !api.IsUnsupported(err) {
+			return false, err
+		}
+		// 404: o el host no tiene el snapshot, o es un daemon viejo sin la
+		// ruta. La lista lo distingue.
 		snaps, err := h.Cliente.Snapshots(ctx)
 		if err != nil {
 			return false, err
