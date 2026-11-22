@@ -1430,6 +1430,13 @@ Para que sobrevivan a un reinicio, guárdalas con la herramienta de la distro
 (`iptables-persistent`, firewalld…). No pongas la política en `ACCEPT`: abriría también el
 reenvío de las redes de Docker.
 
+También puedes arrancar el daemon con `KLING_FORWARD_CHAIN=1`: guarda sus barreras y esas dos
+reglas `ACCEPT` en su propia cadena `KINDLING-FWD`, a la que salta desde el principio de
+`FORWARD`, y la repone si una recarga del cortafuegos la vacía.
+
+El egress `allowlist` necesita además `ipset` en el host; sin él el daemon avisa al arrancar y
+`kling egress set -egress allowlist` falla.
+
 ## Secretos que nunca tocan un snapshot: MMDS
 
 Un snapshot congelado es un fichero en disco que sobrevive a la máquina — el sitio
