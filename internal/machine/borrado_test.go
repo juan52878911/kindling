@@ -251,3 +251,23 @@ func TestRemoveConElVMMVivoNoSueltaNadaHastaQueMuera(t *testing.T) {
 		t.Fatal("sigue atascada")
 	}
 }
+
+// La limpieza de una máquina borra su marca de globo en reposo: sin eso el
+// mapa crece con cada máquina que pasó por el daemon.
+func TestLimpiarMaquinaOlvidaGloboReposo(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "dd00000000000001"
+	maquinaConDir(t, m, id, nombreTumba(id))
+	marcarGloboReposo(id)
+	t.Cleanup(func() { olvidarGloboReposo(id) })
+	m.mu.RLock()
+	mc := m.byID[id].Clone()
+	m.mu.RUnlock()
+	if err := m.limpiarMaquina(mc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := globoEnReposo.Load(id); ok {
+		t.Error("el mapa del globo en reposo conserva la máquina borrada")
+	}
+}

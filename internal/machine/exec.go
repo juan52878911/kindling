@@ -96,6 +96,9 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 		}
 		mc = thawed
 	}
+	// Un thaw entregado sin resync lo sigue reintentando en segundo plano: lo
+	// que arranque ahora vería la hora vieja. Se espera, con tope (reloj_pendiente.go).
+	m.esperarRelojPendiente(ctx, mc.ID)
 	if mc.State != api.StateRunning || !mc.Reachable() {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, mc.Name, mc.State)
 	}

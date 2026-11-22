@@ -1311,6 +1311,12 @@ func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
 	m.persist()
 	copia := mc.Clone()
 	m.mu.Unlock()
+	// Antes de trasMorir, que borra el cgroup y el jail.
+	var diag string
+	if detalle == detalleEnjaulado {
+		diag = m.diagnosticoVMM(id)
+	}
+	m.puertaRetroceder("unexpected VMM death")
 	// Lo que dijo el VMM al acabar (fin_vmm.go): con el código de salida
 	// solo, un reinicio del invitado era "exit status 0".
 	if motivo := m.motivoFinVMM(id); motivo != "" {
@@ -1324,6 +1330,9 @@ func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
 		if l := m.ultimaLineaConsola(id); l != "" {
 			detalle += "; last console line: " + l
 		}
+	}
+	if diag != "" {
+		detalle += "; " + diag
 	}
 	if detalle != "" {
 		log.Printf("watch: the VMM of %s (pid %d) exited (%s): failed", shortID(id), pid, detalle)

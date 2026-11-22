@@ -127,7 +127,11 @@ func (a *Agent) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()})
+	_ = json.NewEncoder(w).Encode(struct {
+		api.GuestHealth
+		// ResyncPending: el agente sigue con el segundo tiempo de un resync.
+		ResyncPending bool `json:"resync_pending,omitempty"`
+	}{api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()}, puertaResync.Cerrada()})
 }
 
 // New prepara el agente: arranca el cosechador, añade la ruta a MMDS y monta los
@@ -298,7 +302,7 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// privilegios (el servicio con USER, un agente de IA engañado) no debe
 	// poder ejecutar como root, escribir ganchos, mover el reloj ni desmontar.
 	ruta := func(p string, h http.HandlerFunc) { mux.HandleFunc(p, soloHost(h)) }
-	ruta("/dns", DNSHandler)
+	ruta("/dns", trasResync(DNSHandler))
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).
 	mux.HandleFunc(api.GuestResyncPath, soloHostResync(ResyncHandler()))
@@ -312,14 +316,14 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	ruta(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
-	ruta(api.GuestServicePath, a.enArranque(ServiceHandler()))
-	ruta(api.GuestServiceStopPath, a.enArranque(ServiceStopHandler()))
+	ruta(api.GuestServicePath, trasResync(a.enArranque(ServiceHandler())))
+	ruta(api.GuestServiceStopPath, trasResync(a.enArranque(ServiceStopHandler())))
 	// /procs: los procesos vivos, para que `kling save` avise de los que el
 	// dorado copiaría con sus aleatorios en memoria (procs.go).
-	ruta(api.GuestProcsPath, a.enPreparado(ProcsHandler()))
+	ruta(api.GuestProcsPath, trasResync(a.enPreparado(ProcsHandler())))
 	// /machine/start: solo en una máquina que espera al host.
 	if a.tardio {
-		ruta(api.GuestStartPath, a.handleStart)
+		ruta(api.GuestStartPath, trasResync(a.handleStart))
 	}
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
@@ -349,7 +353,7 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// /share/attach la abre el daemon para cada carpeta compartida en vivo
 	// (docs/compartir.md). No depende de kling.exec: montar una carpeta no da
 	// a nadie una forma de ejecutar nada dentro.
-	ruta(share.AttachPath, shareState.AttachHandler())
+	ruta(share.AttachPath, trasResync(shareState.AttachHandler()))
 
 	if ExecEnabled() {
 		// El entorno de cada exec se lee al llegar: con VolumeWait cambia al

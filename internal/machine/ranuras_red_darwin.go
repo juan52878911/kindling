@@ -9,3 +9,4 @@ func (m *Manager) ranuraTomar() (string, bool)     { return "", false }
 func (m *Manager) ranuraEntregar(string) *knet.Net { return nil }
 func (m *Manager) ranuraPropia(string) bool        { return false }
 func (m *Manager) ranuraPrefijoEnUso(string) bool  { return false }
+func (m *Manager) cerrarFondoRed()                 {}

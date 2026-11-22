@@ -18,18 +18,17 @@ var volcarDirecciones = func() ([]byte, error) {
 // enlace punto a punto IFA_ADDRESS es la del otro extremo), si no
 // IFA_ADDRESS.
 func direccionesHost() ([]DireccionHost, error) {
-	ifs, err := stdnet.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-	nombres := make(map[uint32]string, len(ifs))
-	for _, it := range ifs {
-		nombres[uint32(it.Index)] = it.Name
-	}
+	// Direcciones primero y nombres después: una interfaz que aparece entre los
+	// dos volcados tiene su nombre. Si aun así falta alguno, se relee una vez.
 	tab, err := volcarDirecciones()
 	if err != nil {
 		return nil, err
 	}
+	nombres, err := nombresInterfaces()
+	if err != nil {
+		return nil, err
+	}
+	reintentado := false
 	msgs, err := syscall.ParseNetlinkMessage(tab)
 	if err != nil {
 		return nil, err
@@ -46,7 +45,15 @@ func direccionesHost() ([]DireccionHost, error) {
 		}
 		// IfAddrmsg: familia, prefijo, flags y ámbito (un byte cada uno) y el
 		// índice de la interfaz, en el orden de bytes de la máquina.
-		nombre, ok := nombres[binary.NativeEndian.Uint32(m.Data[4:8])]
+		idx := binary.NativeEndian.Uint32(m.Data[4:8])
+		nombre, ok := nombres[idx]
+		if !ok && !reintentado {
+			reintentado = true
+			if n2, err := nombresInterfaces(); err == nil {
+				nombres = n2
+				nombre, ok = nombres[idx]
+			}
+		}
 		if !ok {
 			continue // la interfaz se fue entre los dos volcados
 		}
@@ -74,4 +81,16 @@ func direccionesHost() ([]DireccionHost, error) {
 		}
 	}
 	return res, nil
+}
+
+func nombresInterfaces() (map[uint32]string, error) {
+	ifs, err := stdnet.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	nombres := make(map[uint32]string, len(ifs))
+	for _, it := range ifs {
+		nombres[uint32(it.Index)] = it.Name
+	}
+	return nombres, nil
 }

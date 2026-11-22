@@ -249,3 +249,49 @@ func TestSetupSinRanuraConCuatroMontajesSimultaneos(t *testing.T) {
 		t.Fatalf("%d montajes completos a la vez; el tope es 4", maximo.Load())
 	}
 }
+
+func TestRecogerConCerrojoOcupadoNoDestruye(t *testing.T) {
+	sustituirProcesos(t)
+	ahora := time.Now()
+	var destruidas atomic.Int64
+	f := NuevoFondo(1, ranuraFalsa, func(*Ranura) { destruidas.Add(1) })
+	f.ahora = func() time.Time { return ahora }
+	var ocupado atomic.Bool
+	ocupado.Store(true)
+	var soltadas atomic.Int64
+	f.Bloquear = func(string) (func(), bool) {
+		if ocupado.Load() {
+			return nil, false
+		}
+		return func() { soltadas.Add(1) }, true
+	}
+	f.Reponer()
+	esperarListas(t, f, 1)
+	r := f.Tomar()
+	ahora = ahora.Add(PlazoRanuraTomada + time.Second)
+	if f.Recoger() != 0 || destruidas.Load() != 0 {
+		t.Fatal("destruyó una ranura cuyo id tiene el cerrojo ocupado")
+	}
+	ocupado.Store(false)
+	if f.Recoger() != 1 || destruidas.Load() != 1 || soltadas.Load() != 1 {
+		t.Fatal("a la vuelta siguiente debía destruirla y soltar el cerrojo")
+	}
+	if f.Entregar(r.ID) != nil {
+		t.Fatal("entregó una ranura recogida")
+	}
+	f.Cerrar()
+}
+
+func TestCerrarDestruyeTodasYParaLaRecogida(t *testing.T) {
+	sustituirProcesos(t)
+	var destruidas atomic.Int64
+	f := NuevoFondo(3, ranuraFalsa, func(*Ranura) { destruidas.Add(1) })
+	f.IniciarRecogida(time.Millisecond)
+	f.Reponer()
+	esperarListas(t, f, 3)
+	f.Cerrar() // espera a la goroutine de recogida: si no acaba, el test se cuelga
+	if destruidas.Load() != 3 {
+		t.Fatalf("destruidas = %d, quería 3", destruidas.Load())
+	}
+	f.Cerrar() // idempotente
+}

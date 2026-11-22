@@ -370,13 +370,28 @@ func limiteXFSQuotactl(dev string, id uint32, bytes int64) error {
 // quotactlXFS fija límites por quotactl y recuerda si el núcleo no lo admite.
 type quotactlXFS struct {
 	dev    string
-	roto   atomic.Bool
+	roto   atomic.Int64 // hasta cuándo (UnixNano) se da por roto; 0 = no lo está
 	llamar func(dev string, id uint32, bytes int64) error
+	ahora  func() time.Time // reloj; nil = time.Now
+}
+
+// quotactlRotoDura es lo que dura la marca de "el núcleo no lo admite": pasado
+// el minuto se vuelve a probar, por si el fallo era del momento.
+const quotactlRotoDura = time.Minute
+
+func (q *quotactlXFS) reloj() time.Time {
+	if q.ahora != nil {
+		return q.ahora()
+	}
+	return time.Now()
 }
 
 // fijar intenta el límite por quotactl y dice si quedó hecho.
 func (q *quotactlXFS) fijar(id uint32, bytes int64) bool {
-	if q.roto.Load() || q.dev == "" {
+	if q.dev == "" {
+		return false
+	}
+	if hasta := q.roto.Load(); hasta != 0 && q.reloj().UnixNano() < hasta {
 		return false
 	}
 	if err := q.llamar(q.dev, id, bytes); err != nil {
@@ -384,7 +399,7 @@ func (q *quotactlXFS) fijar(id uint32, bytes int64) bool {
 		// EINTR o un fallo pasajero se reintenta en la siguiente llamada.
 		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPERM) ||
 			errors.Is(err, syscall.ENOTBLK) || errors.Is(err, syscall.EINVAL) {
-			q.roto.Store(true)
+			q.roto.Store(q.reloj().Add(quotactlRotoDura).UnixNano())
 		}
 		log.Printf("warning: copy-on-write store: quotactl on %s failed (%v); using xfs_quota", q.dev, err)
 		return false

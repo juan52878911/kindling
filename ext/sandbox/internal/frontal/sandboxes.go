@@ -290,6 +290,12 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.handleBorrar(w, r, id)
 	case accion == "renew" && r.Method == http.MethodPost:
 		s.handleRenovar(w, r, id)
+	case accion == "pause" && r.Method == http.MethodPost:
+		s.handlePausar(w, r, id)
+	case accion == "resume" && r.Method == http.MethodPost:
+		s.handleReanudar(w, r, id)
+	case accion == "egress" && r.Method == http.MethodPatch:
+		s.handleEgress(w, r, id)
 	case accion == "exec" && r.Method == http.MethodPost:
 		s.handleExec(w, r, id)
 	case accion == "shell" && r.Method == http.MethodPost:
@@ -302,7 +308,7 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.despachaProcesos(w, r, id, partes[3:])
 	case accion == "sessions":
 		s.despachaSesiones(w, r, id, partes[3:])
-	case accion == "" || accion == "renew" || accion == "exec" || accion == "shell" || accion == "files" || accion == "endpoints":
+	case accion == "" || accion == "renew" || accion == "pause" || accion == "resume" || accion == "egress" || accion == "exec" || accion == "shell" || accion == "files" || accion == "endpoints":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
 		http.NotFound(w, r)

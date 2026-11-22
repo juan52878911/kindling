@@ -1302,6 +1302,7 @@ func (m *Manager) Close() {
 		m.cerrando.Store(true)
 		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
+		m.cerrarFondoRed()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
 		// escritura del estado ya se cerró, esa transición se pierde y el
@@ -4195,12 +4196,23 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	m.mu.Unlock()
 
+	// Entregada sin ponerla en hora: queda apuntado ANTES de avisar, para que
+	// un exec que llegue justo después espere al reloj (esperarRelojPendiente).
+	var finReloj func()
+	if avisoResync != "" {
+		finReloj = m.relojPendiente(mc.ID)
+	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("thawed in %d ms%s%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases), avisoResync)})
 	if avisoResync != "" {
-		// Entregada sin ponerla en hora: se sigue intentando hasta que entre.
+		// Se sigue intentando hasta que entre.
 		if ej, ok := m.ejecucionDe(mc.ID); ok {
-			go m.resyncThawReintentos(mc.ID, ej, mc.AllowExec || mc.Agent != nil)
+			go func() {
+				defer finReloj()
+				m.resyncThawReintentos(mc.ID, ej, mc.AllowExec || mc.Agent != nil)
+			}()
+		} else {
+			finReloj()
 		}
 	}
 	return &out, nil

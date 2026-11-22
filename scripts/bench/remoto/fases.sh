@@ -2,7 +2,7 @@
 # Fases del banco en la EC2, una por sistema para que no compitan entre sí.
 # Uso: fases.sh kindling|k8s|osbk8s|docker   (como root). Resultados en $KB/res/ (KB=/opt/kbench).
 set -uo pipefail
-F=$1; KB=${KB:-/opt/kbench}; export KB; RUNS=${RUNS:-3}; export CONC=${CONC:-10,20,50}
+F=$1; KB=${KB:-/opt/kbench}; export KB; RUNS=${RUNS:-3}; export CONC=${CONC:-10,20,50,50}
 mkdir -p $KB/res; cd "$KB"
 exec > >(tee -a $KB/res/fase-$F.log) 2>&1
 paso(){ echo "== $(date +%T) $*"; }
@@ -41,6 +41,7 @@ kindling)
     paso "daemon kindling $etq"
     [ "$par" = def ] || export KLING_MAX_PARALLEL_BOOT=$par
     [ "$jl" = def ] || export KLING_JAILER=$jl
+    bash "$KB/remoto/higiene.sh" inicio
     bash "$KB/remoto/daemon-up.sh"
     export KLING_HOST=unix:///run/kt-bench/kling.sock KLING_CONFIG=/srv/kt-bench/config.json
     /srv/kt-bench/bin/kling image ls 2>/dev/null | grep -q toolchain || /srv/kt-bench/bin/kling image toolchain
@@ -49,7 +50,9 @@ kindling)
     for r in $(seq 1 $RUNS); do for m in k kpool; do
       paso "$m $r $etq"; timeout 1800 python3 -I "$KB/bench.py" $m > "$KB/res/kindling-$etq-$m-$r.log" 2>&1; sleep 15
     done; done
+    bash "$KB/remoto/higiene.sh" rm   # kling rm -f de todo antes de parar
     pkill -f "[k]ling-sandbox sbx gateway"; bash "$KB/remoto/daemon-down.sh"
+    bash "$KB/remoto/higiene.sh" verificar || { echo "banco abortado: restos de $etq" >&2; exit 1; }
     unset KLING_MAX_PARALLEL_BOOT KLING_JAILER
   done; done; done
   resumen "$KB"/res/kindling-*.log ;;

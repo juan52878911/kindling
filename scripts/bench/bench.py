@@ -2,15 +2,16 @@
 # Banco kindling vs OpenSandbox en el mismo host.
 # Uso: bench.py k|kpool|osb|osbpool  -> imprime una línea JSON con serie, c10/c20/c50 y la
 # tabla de fases (solo en k/kpool: deltas de /metrics del daemon y del gateway por tanda).
+# bench.py --self-test: comprueba claves y orden de las medidas con un gateway falso (sin KVM).
 # Entorno: KTOK (token del inquilino, obligatorio en k/kpool), SERIE, CONC, EXECS, ESPERA_POOL,
 # KB_SDK (ruta del SDK Python), KB_URL (gateway), KB_DAEMON_SOCK, KB_DAEMON_CONFIG, KB_KLING (CLI).
 # Sin dependencias fuera de la librería estándar (y el SDK de cada sistema).
-import asyncio, importlib.util, json, os, subprocess, sys, time
+import asyncio, importlib.util, json, os, re, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
-MODO = sys.argv[1]
+MODO = sys.argv[1] if len(sys.argv) > 1 else ""
 SERIE = int(os.environ.get("SERIE", "15"))
-CONC = [int(x) for x in os.environ.get("CONC", "10,20").split(",")]
+CONC = [int(x) for x in os.environ.get("CONC", "10,20").split(",")]  # "…,50,50": dos c50 por separado
 EXECS = int(os.environ.get("EXECS", "30"))
 ESPERA_POOL = int(os.environ.get("ESPERA_POOL", "0"))
 KB = os.environ.get("KB", "/opt/kbench")
@@ -53,11 +54,94 @@ def mem_usada_mib():
 
 
 # ---------------- kindling ----------------
-def bench_k(plantilla):
-    sys.path.insert(0, os.environ.get("KB_SDK", os.path.join(KB, "sdk")))
-    from kindling_sandbox import Sandbox
-    url, tok = KB_URL, os.environ["KTOK"]
-    F = cargar_fases()
+UNIDAD = os.environ.get("KB_UNIT", "kt-bench")
+RESYNC_RUTA = os.environ.get("KB_RESYNC_RUTA", "/machines/{id}/resync")  # GET en el socket del daemon
+
+
+def clave_tanda(c, vistas):
+    # Dos ráfagas del mismo tamaño no se mezclan: c50, c50b, c50c...
+    n = vistas.get(c, 0)
+    vistas[c] = n + 1
+    return f"c{c}" + ("" if n == 0 else chr(ord("a") + n))
+
+
+def _ejecutar(cmd, **kw):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=20, **kw).stdout
+    except Exception as e:  # el diagnóstico nunca rompe la medición
+        return f"<error: {str(e)[:100]}>"
+
+
+def vmm_muertos_desde(t_unix):
+    # Líneas `watch:` del journal del daemon desde que empezó la tanda: un VMM que muere o un
+    # huérfano que el vigilante mata contamina la tanda y tiene que verse en el JSON.
+    out = _ejecutar(["journalctl", "-u", UNIDAD, "--no-pager", "-o", "cat", "--since", f"@{int(t_unix)}"])
+    lin = [l for l in out.splitlines() if "watch:" in l]
+    muertos = [l for l in lin if "exited" in l or "killing orphan" in l]
+    return {"watch": len(lin), "n": len(muertos), "muestra": [l[:160] for l in muertos[:3]]}
+
+
+def memory_events():
+    try:
+        return open("/sys/fs/cgroup/memory.events").read().split()
+    except OSError:
+        return None
+
+
+def cerrar_tanda(res, nombre, t_unix):
+    # Al final de cada tanda: muertes de VMM, dmesg (OOM, errores de disco) y memory.events.
+    res.setdefault("vmm_muertos", {})[nombre] = vmm_muertos_desde(t_unix)
+    d = _ejecutar(["dmesg", "--ctime"]).splitlines()
+    cola = [l[:160] for l in d if re.search(r"oom|killed process|i/o error|xfs|fail", l, re.I)][-5:]
+    ev = memory_events()
+    res.setdefault("diag", {})[nombre] = {
+        "dmesg": cola, "memory_events": dict(zip(ev[::2], ev[1::2])) if ev else None}
+
+
+def resync_agente(sock, mid):
+    # GET /resync del agente tras una creación en serie: el cronómetro del último arranque
+    # (critico_us y pasos) para ver a qué paso del invitado va a parar la cola.
+    try:
+        c = F_UNIX(sock)
+        c.request("GET", RESYNC_RUTA.format(id=mid))
+        r = c.getresponse()
+        cuerpo = r.read().decode()
+        c.close()
+        if r.status != 200:
+            return {"error": f"HTTP {r.status}"}
+        d = json.loads(cuerpo)
+        return {k: v for k, v in d.items() if k.endswith("_us") or k in ("restore", "diferido_hecho")}
+    except Exception as e:
+        return {"error": str(e)[:100]}
+
+
+def medir_ciclo(s, res, sufijo, kling_cli, env, mid, execs):
+    # Exec y pausa/congelar sobre un sandbox. `sufijo` dice en qué momento: "rafaga" (justo al
+    # volver la ráfaga, con el relleno del pool en marcha) o "reposo" (pool ya relleno).
+    ex_ms = []
+    for _ in range(execs):
+        t = time.perf_counter()
+        r = s.exec(["echo", "ack"])
+        ex_ms.append((time.perf_counter() - t) * 1000)
+        assert r.stdout.strip() == "ack", r
+    res[f"exec_echo_{sufijo}_ms"] = resumen(ex_ms)
+    for parar, clave in (("pause", "resume_hasta_exec"), ("freeze", "thaw_desde_freeze_hasta_exec")):
+        pr = []
+        for _ in range(5):
+            subprocess.run([kling_cli, parar, mid], env=env, check=True, capture_output=True)
+            t = time.perf_counter()
+            subprocess.run([kling_cli, "thaw", mid], env=env, check=True, capture_output=True)
+            s.exec(["echo", "ack"])
+            pr.append((time.perf_counter() - t) * 1000)
+        res[f"{clave}_{sufijo}_ms"] = resumen(pr)
+
+
+def bench_k(plantilla, Sandbox=None, F=None):
+    if Sandbox is None:
+        sys.path.insert(0, os.environ.get("KB_SDK", os.path.join(KB, "sdk")))
+        from kindling_sandbox import Sandbox
+    url, tok = KB_URL, os.environ.get("KTOK", "")
+    F = F or cargar_fases()
     fuentes = F.fuentes(KB_URL, tok, SOCK)
 
     def crear():
@@ -73,20 +157,27 @@ def bench_k(plantilla):
 
     res = {"fases": {}}
     s, _ = crear(); borrar(s)  # calentamiento, no cuenta
-    serie = []
+    serie, resyncs = [], []
     antes = F.leer(fuentes)
+    t0 = time.time()
     for _ in range(SERIE):
         s, ms = crear()
         serie.append(ms)
+        resyncs.append(resync_agente(SOCK, s.id.split("/")[-1]))  # antes de borrarla
         borrar(s)
     res["create_serial_ms"] = resumen(serie)
+    res["resync_serie"] = resyncs
     res["fases"]["serie"] = F.tabla(antes, F.leer(fuentes), serie)
+    cerrar_tanda(res, "serie", t0)
 
-    for c in CONC:
+    vistas = {}
+    for i, c in enumerate(CONC):
+        nombre = clave_tanda(c, vistas)
         time.sleep(ESPERA_POOL)  # dejar que el pool se rellene antes de la ráfaga
         ok, err, ts = [], 0, []
         antes = F.leer(fuentes)
         m0 = mem_usada_mib()
+        t0 = time.time()
         with ThreadPoolExecutor(c) as ex:
             futs = [ex.submit(crear) for _ in range(c)]
             for f in futs:
@@ -97,34 +188,25 @@ def bench_k(plantilla):
                     err += 1
                     res.setdefault("errores", []).append(str(e)[:120])
         m1 = mem_usada_mib()
-        res["fases"][f"c{c}"] = F.tabla(antes, F.leer(fuentes), ts)
-        res[f"create_c{c}_ms"] = resumen(ts) | {"fallos": err}
+        res["fases"][nombre] = F.tabla(antes, F.leer(fuentes), ts)
+        res[f"create_{nombre}_ms"] = resumen(ts) | {"fallos": err}
         if ok and m0 is not None:
-            res[f"mem_por_sandbox_c{c}_mib"] = round((m1 - m0) / len(ok), 1)
-        if c == CONC[0] and ok:
+            res[f"mem_por_sandbox_{nombre}_mib"] = round((m1 - m0) / len(ok), 1)
+        if i == 0 and ok:
             s = ok[0]
-            ex_ms = []
-            for _ in range(EXECS):
-                t = time.perf_counter()
-                r = s.exec(["echo", "ack"])
-                ex_ms.append((time.perf_counter() - t) * 1000)
-                assert r.stdout.strip() == "ack", r
-            res["exec_echo_ms"] = resumen(ex_ms)
-            # pausa/reanudar con el CLI del daemon (el frontal no lo expone)
             env = dict(os.environ, KLING_HOST="unix://" + SOCK, KLING_CONFIG=KB_CONFIG)
-            K = KLING
             mid = s.id.split("/")[-1]
-            for parar, clave in (("pause", "resume_hasta_exec_ms"), ("freeze", "thaw_desde_freeze_hasta_exec_ms")):
-                pr = []
-                for _ in range(5):
-                    subprocess.run([K, parar, mid], env=env, check=True, capture_output=True)
-                    t = time.perf_counter()
-                    subprocess.run([K, "thaw", mid], env=env, check=True, capture_output=True)
-                    r = s.exec(["echo", "ack"])
-                    pr.append((time.perf_counter() - t) * 1000)
-                res[clave] = resumen(pr)
+            # 1) justo al volver la ráfaga: el relleno del pool compite por CPU (medida "durante").
+            medir_ciclo(s, res, "rafaga", KLING, env, mid, EXECS)
+            # 2) con el pool en reposo: lo que ve un usuario cuando nadie reclama.
+            time.sleep(ESPERA_POOL)
+            medir_ciclo(s, res, "reposo", KLING, env, mid, EXECS)
+            # Claves de siempre = justo tras la ráfaga, para comparar con las rondas anteriores.
+            for k in ("exec_echo", "resume_hasta_exec", "thaw_desde_freeze_hasta_exec"):
+                res[f"{k}_ms"] = res[f"{k}_rafaga_ms"]
         with ThreadPoolExecutor(c) as ex:
             list(ex.map(borrar, ok))
+        cerrar_tanda(res, nombre, t0)
         time.sleep(2)
     return res
 
@@ -207,6 +289,78 @@ async def bench_osb(pool=None):
     return res
 
 
+def F_UNIX(ruta):
+    return cargar_fases()._Unix(ruta)
+
+
+def self_test():
+    # Gateway falso: Sandbox y fases de mentira, y un registro del orden en que se mide.
+    global SERIE, CONC, EXECS, ESPERA_POOL, subprocess
+    import types
+    SERIE, CONC, EXECS, ESPERA_POOL = 2, [2, 3, 3], 2, 0
+    ev = []
+
+    class R:
+        stdout = "ack\n"
+
+    class Fake:
+        n = 0
+
+        def __init__(self):
+            Fake.n += 1
+            self.id = f"t/fake{Fake.n}"
+
+        @classmethod
+        def create(cls, **kw):
+            ev.append("create")
+            return cls()
+
+        def delete(self):
+            ev.append("delete")
+
+        def exec(self, cmd):
+            ev.append("exec")
+            return R()
+
+    class FF:
+        def fuentes(self, *a):
+            return {}
+
+        def leer(self, f):
+            return {}
+
+        def tabla(self, a, b, v):
+            return {"n": len(v)}
+
+    def run(cmd, **kw):
+        ev.append(cmd[1])
+        return types.SimpleNamespace(stdout="", returncode=0)
+    globals()["resync_agente"] = lambda sock, mid: {"critico_us": 7}
+    globals()["_ejecutar"] = lambda cmd, **kw: ""
+    sub = subprocess.run
+    subprocess.run = run
+    try:
+        out = bench_k("bench", Fake, FF())
+    finally:
+        subprocess.run = sub
+    claves = list(out)
+    for k in ("create_serial_ms", "create_c2_ms", "create_c3_ms", "create_c3b_ms", "exec_echo_rafaga_ms",
+              "exec_echo_reposo_ms", "resume_hasta_exec_reposo_ms", "thaw_desde_freeze_hasta_exec_rafaga_ms",
+              "exec_echo_ms", "vmm_muertos", "diag", "resync_serie"):
+        assert k in out, f"falta {k}: {claves}"
+    assert out["resync_serie"] == [{"critico_us": 7}] * 2
+    assert set(out["vmm_muertos"]) == {"serie", "c2", "c3", "c3b"}, out["vmm_muertos"]
+    assert claves.index("create_c3_ms") < claves.index("create_c3b_ms")
+    # Orden: ráfaga → ciclo "rafaga" (exec, pause, thaw, freeze, thaw) → ciclo "reposo".
+    pos = [i for i, e in enumerate(ev) if e == "pause"]
+    assert len(pos) == 10 and ev.count("freeze") == 10, ev
+    assert ev.index("pause") > ev.index("exec") and ev.index("freeze") > ev.index("pause")
+    print("self-test ok")
+
+
+if MODO == "--self-test":
+    self_test()
+    sys.exit(0)
 if MODO == "k":
     out = bench_k("bench")
 elif MODO == "kpool":
