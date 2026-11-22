@@ -193,9 +193,13 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 // En proceso, con SEEK_DATA/SEEK_HOLE y copy_file_range, vía io.CopyN (sin lanzar cp, que en
 // el modo "copy" es un proceso por máquina creada); si algo falla, cp.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
-	err := copiarDispersoEnProceso(ctx, src, dst)
-	if err == nil {
-		return nil, nil
+	// Solo si el sistema de ficheros del origen declara bien sus huecos: en
+	// NFSv3 o FUSE todo son datos y la copia en proceso ocuparía el tamaño
+	// lógico; cp --sparse=always detecta los ceros.
+	if huecosFiables(filepath.Dir(src)) {
+		if err := copiarDispersoEnProceso(ctx, src, dst); err == nil {
+			return nil, nil
+		}
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		_ = os.Remove(dst)
@@ -204,6 +208,10 @@ func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
 	_ = os.Remove(dst)
 	return exec.CommandContext(ctx, "cp", "--sparse=always", src, dst).CombinedOutput()
 }
+
+// buscarEn es el lseek del origen; los tests lo sustituyen para simular
+// sistemas de ficheros que mienten con SEEK_HOLE.
+var buscarEn = func(f *os.File, off int64, whence int) (int64, error) { return f.Seek(off, whence) }
 
 // copiarDispersoEnProceso copia src en dst saltando los huecos: solo se copian
 // los tramos de datos, y el fichero acaba con el mismo tamaño lógico.
@@ -237,19 +245,25 @@ func copiarDispersoEnProceso(ctx context.Context, src, dst string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		ini, err := in.Seek(pos, 3) // SEEK_DATA
+		ini, err := buscarEn(in, pos, 3) // SEEK_DATA
 		if err != nil {
 			if errors.Is(err, syscall.ENXIO) {
 				break // el resto es un hueco
 			}
 			return err
 		}
-		fin, err := in.Seek(ini, 4) // SEEK_HOLE
+		fin, err := buscarEn(in, ini, 4) // SEEK_HOLE
 		if err != nil {
 			return err
 		}
+		if ini >= tam {
+			break
+		}
 		if fin > tam {
 			fin = tam
+		}
+		if fin <= ini {
+			return fmt.Errorf("%s: SEEK_HOLE no avanza (datos en %d, hueco en %d)", src, ini, fin)
 		}
 		// io.CopyN entre *os.File usa copy_file_range en Linux (el runtime).
 		if _, err := in.Seek(ini, 0); err != nil {

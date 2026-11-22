@@ -64,11 +64,10 @@ func TestResyncRenuevaMachineIDSoloEnCopias(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s: %d %s", c.restore, rr.Code, rr.Body)
 		}
-		var res api.GuestResyncResult
-		json.Unmarshal(rr.Body.Bytes(), &res)
+		esperarSegundoTiempo(t)
 		despues, _ := os.ReadFile(f)
-		if cambio := string(antes) != string(despues); cambio != c.cambia || (len(res.Renewed) == 1) != c.cambia {
-			t.Fatalf("%s: cambió %v, renewed %v; quiero cambio %v", c.restore, cambio, res.Renewed, c.cambia)
+		if cambio := string(antes) != string(despues); cambio != c.cambia {
+			t.Fatalf("%s: cambió %v; quiero cambio %v", c.restore, cambio, c.cambia)
 		}
 	}
 }

@@ -12,6 +12,9 @@ import (
 // enlaces duros se sueltan bajo enlaceEstable.
 func TestSoltarEnlacesBaseConservaElDigest(t *testing.T) {
 	m := newTestManager(t)
+	antes := huellaConfiable // los tests no corren como root
+	huellaConfiable = func(os.FileInfo) bool { return true }
+	t.Cleanup(func() { huellaConfiable = antes })
 	dir := t.TempDir()
 	img := filepath.Join(dir, "base.ext4")
 	if err := os.WriteFile(img, []byte("imagen base"), 0o644); err != nil {

@@ -49,6 +49,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Guest agent: `/resync` answers once entropy and clock are set and finishes machine-id, the generation file and process cleanup behind a gate that holds exec, files and sessions; `GET /resync` returns per-step timings.
+- Creating from a snapshot clones the overlay and sets up the network in parallel, and skips the balloon stats PATCH when the golden snapshot is already at the idle interval.
 - kling-sandbox gateway: the prewarmed pool keeps its TTL alive and replaces frozen machines (it froze after an hour and every create went cold); failed atomic claims are cleaned up by nonce, claimed machines with open egress are rejected, a daemon that stops announcing `sandbox-claim` falls back to two phases, and pool creation backs off after failures.
 - kling-sandbox gateway: claims a warm sandbox with one atomic call when the daemon announces `sandbox-claim` (the two-phase claim with its fixed 50 ms wait stays only for older daemons), and refills the pool when a sandbox is claimed, with bounded parallel creation, instead of waiting for the 30 s tick.
 - Creating a machine no longer re-hashes the base image after every jail hard link or removal (the `checks` phase, ~28 ms per creation on EC2).
@@ -62,6 +64,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox gateway: per-stage creation latency histogram (`kling_sandbox_create_stage_seconds{stage}`); cold creations from templates without a pool no longer list sandboxes, and the template snapshot is fetched by name instead of listing every snapshot.
 
 ### Fixed
+- Guests no longer wake from freeze/thaw or golden restores with a stale clock when the agent is slow or cuts the connection: a cut connection counts as a failed resync, thaw retries it (long timeout, then in the background), the timeout grows with concurrent resyncs, and each failure logs vCPU and tap0 diagnostics.
+- `POST /sandboxes/claim` takes the machine's lifecycle lock without waiting, revalidates the candidate and checks name, TTL and merged labels.
+- Copy-on-write store: project ids are reused per file instead of leaking on every freeze/thaw, the in-process sparse copy is used only where holes are reliable, a transient `quotactl` error no longer disables it for good, failed seeding is retried, and the jail link-stable digest is trusted only for root-owned images.
 - Restore: with a guest agent, the resync now waits up to 6 s for the guest network instead of failing after one retry. Under load (10-20 concurrent restores on a 4-core host) ARP took over 250 ms and creates failed with "the guest agent did not resync after the restore"; with the fix, 120 of 120 concurrent creates succeed.
 - DNS resolver: waits up to 1 s for a port another resolver just released, so a live `kling egress set` no longer fails with "address already in use" on a busy host.
 
