@@ -3,11 +3,13 @@
 package net
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // nftTabla es la tabla de nftables (dentro del netns de la máquina) cuyo set
@@ -44,23 +46,32 @@ func (n *Net) instalarRegistroIP() {
 	}
 	script := n.reglasRegistroIP()
 	ns := n.NS
+	registrosEnVuelo.Add(1)
 	go func() {
-		cmd := exec.Command("ip", "netns", "exec", ns, "nft", "-f", "-")
+		defer registrosEnVuelo.Done()
+		cmd := exec.Command("nft", "-f", "-")
 		cmd.Stdin = strings.NewReader(script)
-		_ = cmd.Run()
+		_ = ejecutarEnNetns(ns, cmd) // setns, sin `ip netns exec`
 	}()
 }
+
+// registrosEnVuelo cuenta los nft de instalarRegistroIP que siguen corriendo:
+// los tests que cambian opsNetns esperan a que acaben (si no, leen la
+// variable mientras el test la sustituye).
+var registrosEnVuelo sync.WaitGroup
 
 // destinosIP lee el set de nft del netns de n.
 func destinosIP(n *Net) []Destino {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return nil
 	}
-	out, err := exec.Command("ip", "netns", "exec", n.NS, "nft", "-j", "list", "set", "ip", nftTabla, "d").Output()
-	if err != nil {
+	var buf bytes.Buffer
+	cmd := exec.Command("nft", "-j", "list", "set", "ip", nftTabla, "d")
+	cmd.Stdout = &buf
+	if err := ejecutarEnNetns(n.NS, cmd); err != nil {
 		return nil
 	}
-	return parseSetNft(out)
+	return parseSetNft(buf.Bytes())
 }
 
 // parseSetNft extrae los destinos de la salida JSON de `nft -j list set`.

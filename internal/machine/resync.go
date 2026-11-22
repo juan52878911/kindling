@@ -11,6 +11,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -426,7 +428,10 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	}
 	req.ContentLength = int64(body.n)
 	req.Header.Set("Content-Type", "application/json")
+	traza := trazaResyncNueva(base)
+	req = traza.sobre(req)
 	resp, err := resyncClient.Do(req)
+	traza.fin(err)
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {
 			return out, fmt.Errorf("%w: %w: %w: %v", errResyncConexion, errResyncNadie, errResyncRechazada, err)
@@ -556,4 +561,47 @@ func (m *Manager) sondearAgente(ctx context.Context, id string) sondeoAgente {
 	default:
 		return sondeoNoSe
 	}
+}
+
+// trazaResync parte el resync en tramos con KLING_RESYNC_TRACE=1 (solo log, como
+// KLING_NET_TRACE): "conexión" es ARP + SYN/SYN-ACK, es decir, el kernel del
+// invitado recién reanudado; "respuesta" es lo que tarda el agente desde que
+// recibe la petición. Sin la variable es nil y no cambia nada: ni el resultado
+// ni los reintentos.
+type trazaResync struct {
+	base                               string
+	ini, conectado, escrito, respuesta time.Time
+}
+
+func trazaResyncNueva(base string) *trazaResync {
+	if os.Getenv("KLING_RESYNC_TRACE") != "1" {
+		return nil
+	}
+	return &trazaResync{base: base, ini: time.Now()}
+}
+
+func (t *trazaResync) sobre(req *http.Request) *http.Request {
+	if t == nil {
+		return req
+	}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		ConnectDone:          func(string, string, error) { t.conectado = time.Now() },
+		WroteRequest:         func(httptrace.WroteRequestInfo) { t.escrito = time.Now() },
+		GotFirstResponseByte: func() { t.respuesta = time.Now() },
+	}))
+}
+
+func (t *trazaResync) fin(err error) {
+	if t == nil {
+		return
+	}
+	desde := func(a, b time.Time) time.Duration {
+		if a.IsZero() || b.IsZero() {
+			return -1
+		}
+		return b.Sub(a).Round(10 * time.Microsecond)
+	}
+	log.Printf("resync trace %s: connect=%v write=%v agent=%v total=%v err=%v", t.base,
+		desde(t.ini, t.conectado), desde(t.conectado, t.escrito), desde(t.escrito, t.respuesta),
+		time.Since(t.ini).Round(10*time.Microsecond), err)
 }

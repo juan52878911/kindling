@@ -1606,6 +1606,16 @@ const netIndexSpace = 16000
 // Rotando, una IP tarda 16.000 máquinas en repetirse. Y mirando el host, no se
 // repite la de una máquina de otro daemon (ver internal/net/subredes.go).
 func (m *Manager) asignarRed(id string) (*knet.Net, error) {
+	// Si id es de una ranura del fondo (ranuras_red.go), su red ya está
+	// montada con su índice: ni volcado del host ni reserva.
+	if n := m.ranuraEntregar(id); n != nil {
+		return n, nil
+	}
+	return m.asignarRedNueva(id)
+}
+
+// asignarRedNueva es asignarRed sin ranura: busca índice y lo reserva.
+func (m *Manager) asignarRedNueva(id string) (*knet.Net, error) {
 	m.mu.RLock()
 	used := make(map[int]bool, len(m.byID))
 	for _, mc := range m.byID {
@@ -1631,7 +1641,22 @@ func newID() string {
 // repetido haría que Setup, que empieza por Teardown, tirase netns, resolver y
 // credproxy de la máquina viva que ya lo lleva. Se repite el sorteo hasta dar
 // con uno libre, mirando byID y los acuñados que aún no han llegado a él.
-func (m *Manager) nuevoIDMaquina() string { return m.idLibre(newID) }
+//
+// Con el fondo de ranuras de red (ranuras_red.go), el id es el de una ranura
+// lista —ya acuñado por idLibre al crearla— y su red ya está montada.
+func (m *Manager) nuevoIDMaquina() string {
+	if id, ok := m.ranuraTomar(); ok {
+		return id
+	}
+	return m.idLibre(func() string {
+		for {
+			id := newID()
+			if !m.ranuraPrefijoEnUso(knet.Corto(id)) {
+				return id
+			}
+		}
+	})
+}
 
 // acuñados guarda los prefijos recién dados, hasta que la máquina llega a byID o
 // pasa plazoAcuñado: cubre la ventana entre acuñar y publicar, en la que dos
