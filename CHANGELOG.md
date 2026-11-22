@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling image import -warm -disk 2G`: sets the writable disk of the warm template and its copies (default 512 MiB). The Claude Code and Codex recipes use 2G: `npm install` did not fit in 512 MiB. Fails early against a daemon without the disk capability.
 - kling-sandbox gateway: `GET /v1/sandboxes/{id}/files?list=1` lists a directory (same owner check as the other file routes, in the OpenAPI spec); the console and the Python/TypeScript SDKs (`files.list`) use it instead of `ls -la`.
 - kling-sandbox gateway: `-console` flag (chart value `gateway.console`); the console is on by default with TLS or on loopback and off on plain HTTP outside loopback, and `/console/` answers 404 when off. The console `index.html` is now tracked (it was hidden by `.gitignore`).
 - `api.Client.WrapTransport` (additive) wraps the HTTP transport; the gateway uses it with OTLP on so the `traceparent` reaches the daemons, and the daemon adds a well-formed `traceparent` to its request error log lines.
@@ -44,6 +45,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
 ### Fixed
+- Restore: with a guest agent, the resync now waits up to 6 s for the guest network instead of failing after one retry. Under load (10-20 concurrent restores on a 4-core host) ARP took over 250 ms and creates failed with "the guest agent did not resync after the restore"; with the fix, 120 of 120 concurrent creates succeed.
 - DNS resolver: waits up to 1 s for a port another resolver just released, so a live `kling egress set` no longer fails with "address already in use" on a busy host.
 
 - kling-sandbox gateway: port ingress (`<port>-<id>.<domain>`) answered 502 against a real daemon: the daemon's tunnel and `/guest` only reach ports listed in the machine's `kling.ports` label, and the gateway never added them. It now merges the port into the label (capped at 16 per sandbox) before opening the tunnel; the port stays listed after the endpoint expires (sandboxes are ephemeral). The test daemon enforces the same rule.
