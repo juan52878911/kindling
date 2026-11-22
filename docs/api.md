@@ -37,7 +37,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `fork` | v0.15 | `POST /sandboxes/{ref}/fork` |
-| `sandbox-claim` | sin publicar | `POST /sandboxes/claim` (solo admin; lo usa el gateway de kling-sandbox): reclama de forma atómica una máquina en marcha cuyas etiquetas casan con `match` y no llevan las de `absent`; pone `labels`, `name` y TTL en la misma sección crítica. Nunca da máquinas con `kling.owner`, `kling.sandbox.claim` ni del fondo del propio daemon. Si no hay ninguna, `404` `no_claimable` |
+| `sandbox-claim` | sin publicar | `POST /sandboxes/claim` (solo admin; lo usa el gateway de kling-sandbox; `labels` tiene que llevar `kling.sandbox.claim` o `kling.owner`, si no 400): reclama de forma atómica una máquina en marcha cuyas etiquetas casan con `match` y no llevan las de `absent`; pone `labels`, `name` y TTL en la misma sección crítica. Nunca da máquinas con `kling.owner`, `kling.sandbox.claim` ni del fondo del propio daemon. Si no hay ninguna, `404` `no_claimable` |
 | `credaudit` | v0.17 | `GET /machines/{ref}/credaudit` |
 | `db-attach` | v0.17 | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (Linux y macOS), `DELETE /machines/{ref}/credentials/{env}` |
 | `graphs` | v0.17 | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |

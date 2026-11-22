@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -145,6 +146,8 @@ func ResyncHandler() http.HandlerFunc {
 			}
 		}()
 		if restaura {
+			// Las direcciones del invitado pueden cambiar con la restauración.
+			invalidarDireccionesPropias()
 			puertaResync.Cerrar()
 			defer func() {
 				if !diferido {
@@ -193,7 +196,12 @@ func ResyncHandler() http.HandlerFunc {
 		// Renewed sale vacío: el host no lo usa.
 		w.Header().Set("Content-Type", "application/json")
 		t0 = time.Now()
-		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen})
+		// Lo crítico hasta aquí (sin la escritura de la respuesta, que no
+		// cabe en ella) y lo que de eso fue la comprobación del origen. Al
+		// menos 1 µs: 0 significa "agente anterior".
+		origen, _ := r.Context().Value(origenResyncKey{}).(time.Duration)
+		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen,
+			CriticalUS: max(us(time.Since(inicio)+origen), 1), OriginUS: max(us(origen), 1)})
 		tResp := time.Since(t0)
 		critico := time.Since(inicio)
 		guardarTiempos(func(t *ResyncTiempos) {
@@ -207,6 +215,14 @@ func ResyncHandler() http.HandlerFunc {
 		go vigilarSegundoTiempo(req.Restore, gen)
 	}
 }
+
+// segundosTiemposVencidos cuenta los segundos tiempos que pasaron su tope y se
+// dejaron colgados; lo muestra /healthz (segundos_tiempos_vencidos).
+var segundosTiemposVencidos atomic.Uint64
+
+// origenResyncKey es la clave del contexto con lo que tardó la comprobación
+// del origen (time.Duration), que soloHostResync deja para ResyncHandler.
+type origenResyncKey struct{}
 
 // Tope del segundo tiempo y el paso que se ejecuta; variables para los tests.
 var (
@@ -236,6 +252,7 @@ func vigilarSegundoTiempo(restore string, gen uint64) {
 	select {
 	case <-hecho:
 	case <-tope.C:
+		segundosTiemposVencidos.Add(1)
 		log.Printf("resync: second phase still running after %s; opening the door anyway", topeT)
 	}
 	puertaResync.Abrir()

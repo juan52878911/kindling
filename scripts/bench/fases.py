@@ -166,7 +166,25 @@ def _decodificar(j):
     return {f: {(n, tuple(map(tuple, e))): v for n, e, v in filas} for f, filas in j.items()}
 
 
+def _auto_test():
+    """Tabla de una tanda de 50 con histogramas sintéticos: debe dar fila de cliente y de fase."""
+    def snap(c):
+        t = "".join(f'kling_operation_duration_ms_bucket{{kind="create",le="{le}"}} {n}\n'
+                    for le, n in c)
+        return {"daemon": parse(t + f'kling_operation_duration_ms_count{{kind="create"}} {c[-1][1]}\n'
+                                f'kling_operation_duration_ms_sum{{kind="create"}} {c[-1][1] * 500}\n')}
+    a = snap([("100", 0), ("1000", 0), ("+Inf", 0)])
+    b = snap([("100", 5), ("1000", 45), ("+Inf", 50)])
+    t = tabla(a, b, [float(100 + 20 * i) for i in range(50)])
+    assert t[0]["n"] == 50 and t[0]["fuente"] == "cliente", t
+    assert any(f["fuente"] == "daemon" and f["n"] == 50 and f["p95_ms"] is not None for f in t), t
+    print("fases self-test ok")
+    return 0
+
+
 def _main(argv):
+    if argv[:1] == ["--self-test"]:
+        return _auto_test()
     if argv[:1] == ["snap"]:
         fs = fuentes(os.environ.get("KB_URL", "http://127.0.0.1:18099"), os.environ.get("KTOK", ""),
                      os.environ.get("KB_DAEMON_SOCK", "/run/kt-bench/kling.sock"))

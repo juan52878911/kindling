@@ -9,4 +9,7 @@ func (m *Manager) ranuraTomar() (string, bool)     { return "", false }
 func (m *Manager) ranuraEntregar(string) *knet.Net { return nil }
 func (m *Manager) ranuraPropia(string) bool        { return false }
 func (m *Manager) ranuraPrefijoEnUso(string) bool  { return false }
-func (m *Manager) cerrarFondoRed()                 {}
+func (m *Manager) cerrarFondoRed()                 { _ = m.fondoRed }
+
+// fondoRed existe para que Manager compile igual que en Linux; aquí no se usa.
+type fondoRed struct{}

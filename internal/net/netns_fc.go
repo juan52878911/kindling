@@ -46,7 +46,9 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	// ya no la encuentra y monta todo, como cualquier red sin ranura.
 	if n.baseLista {
 		n.baseLista = false
-		return n.aplicarPropio(tr, egress, domains, true)
+		base := n.baseEgress
+		n.baseEgress = ""
+		return n.aplicarSobreRanura(tr, base, egress, domains)
 	}
 	// Restos de una ejecución anterior se derriban; lo de otro daemon, no. Si
 	// el veth existe con otra IP, no es un resto nuestro: es la red de otra
@@ -86,9 +88,11 @@ func (n *Net) reglaDNAT() []string {
 }
 
 // montarBase monta lo que no depende de la petición: netns, veth, tap, sysctl,
-// barrera IPv6 y, si conDNAT, la entrada DNAT. Sin ninguna regla de salida:
-// es lo más restrictivo, y aplicarPropio solo añade. Sin conDNAT, el DNAT va
-// en el iptables-restore de aplicarPropio (un proceso menos en Setup).
+// barrera IPv6 y, si conDNAT (una ranura), la entrada DNAT junto con las reglas
+// de none (forwardBase, el cierre, los topes y las del DNS): es lo más
+// restrictivo, y la petición solo cambia lo que difiere (aplicarSobreRanura).
+// Sin conDNAT, el DNAT va en el iptables-restore de aplicarPropio (un proceso
+// menos en Setup) y la base no lleva ninguna regla de salida.
 func (n *Net) montarBase(tr *trazaSetup, owner int, conDNAT bool) error {
 	// Los 11 procesos de ip del enlace son 3: el netns y un `ip -batch`
 	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
@@ -158,12 +162,55 @@ func (n *Net) montarBase(tr *trazaSetup, owner int, conDNAT bool) error {
 	}
 	tr.fase("ip6")
 	if conDNAT {
-		if err := n.restoreRules([][]string{n.reglaDNAT()}); err != nil {
+		if err := n.restoreRules(n.reglasBaseRanura()); err != nil {
 			return err
 		}
 		tr.fase("dnat")
 	}
 	return nil
+}
+
+// reglasBaseRanura son las reglas de una ranura recién montada: el DNAT y
+// todo lo de none, en el orden de un montaje completo en none.
+func (n *Net) reglasBaseRanura() [][]string {
+	reglas := append([][]string{n.reglaDNAT()}, n.egressRules(EgressNone)...)
+	return append(reglas, n.reglasGrafo(EgressNone, false)...)
+}
+
+// aplicarSobreRanura es aplicarPropio para una base ya montada con las reglas
+// de base (hoy siempre none). En none no queda nada que poner: ni un
+// iptables-restore, solo el resolver y el registro. En los demás modos se
+// quita lo propio de none y se pone lo del modo pedido en UN restore (las
+// reglas comunes se quedan donde están, salvo el cierre de FORWARD, que
+// diferenciaDeReglas recoloca). El resultado es el del montaje completo.
+func (n *Net) aplicarSobreRanura(tr *trazaSetup, base, egress Egress, domains []string) error {
+	if base != EgressNone || !hayRestore() {
+		return n.aplicarPropio(tr, egress, domains, true)
+	}
+	if egress == EgressNone {
+		tr.fase("restore")
+		if err := n.arrancarRegistroNone(egress); err != nil {
+			return err
+		}
+		return n.vecinoInvitado()
+	}
+	borrar, anadir := diferenciaDeReglas(n.reglasDeModo(base), n.reglasDeModo(egress))
+	var tx [][]string
+	for _, r := range borrar {
+		tx = append(tx, comoBorrado(r))
+	}
+	tx = append(tx, anadir...)
+	if egress == EgressAllowlist {
+		if err := n.allowlistConReglas(n.nsEn, domains, tx, true); err != nil {
+			return err
+		}
+		return n.vecinoInvitado()
+	}
+	if err := n.restoreRules(tx); err != nil {
+		return err
+	}
+	tr.fase("restore")
+	return n.vecinoInvitado()
 }
 
 // aplicarPropio añade lo que depende de la petición sobre la base montada:
@@ -240,12 +287,16 @@ func (n *Net) arrancarRegistroNone(egress Egress) error {
 	if egress != EgressNone {
 		return nil
 	}
-	if err := startDNSResolverModo(n, nil, modoSoloGrafo); err != nil {
+	if err := iniciarResolverNone(n); err != nil {
 		return err
 	}
 	n.instalarRegistroIP()
 	return nil
 }
+
+// iniciarResolverNone arranca el resolver de none (NXDOMAIN a todo). Variable
+// para los tests, que no pueden atar la IP del veth.
+var iniciarResolverNone = func(n *Net) error { return startDNSResolverModo(n, nil, modoSoloGrafo) }
 
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,
 // pero lo intentamos por si el namespace ya no está.

@@ -1375,6 +1375,13 @@ sudo iptables -A FORWARD -o vh-+ -d 172.30.0.0/16 -m conntrack --ctstate ESTABLI
 Persist them with your distro's tool (`iptables-persistent`, firewalld…). Don't set the
 policy to `ACCEPT`: that also opens forwarding for Docker's networks.
 
+Alternatively, start the daemon with `KLING_FORWARD_CHAIN=1`: it keeps its barriers and those
+two `ACCEPT` rules in its own `KINDLING-FWD` chain, jumped to from the top of `FORWARD`, and
+puts it back if a firewall reload empties it.
+
+The `allowlist` egress also needs `ipset` on the host; without it the daemon warns at
+startup and `kling egress set -egress allowlist` fails.
+
 ## Secrets that never touch a snapshot: MMDS
 
 A frozen snapshot is a file on disk that outlives the machine — the wrong place for an

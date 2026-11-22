@@ -20,7 +20,7 @@ func TestReclamoAPI(t *testing.T) {
 	}
 
 	// Sin candidata: 404 con su propio código.
-	rr := call(t, h, "POST", "/sandboxes/claim", `{"match":{"pool":"ok"}}`)
+	rr := call(t, h, "POST", "/sandboxes/claim", `{"match":{"pool":"ok"},"labels":{"kling.sandbox.claim":"n"}}`)
 	var e api.Error
 	_ = json.Unmarshal(rr.Body.Bytes(), &e)
 	if rr.Code != 404 || e.Code != api.CodeNoClaimable {
@@ -28,7 +28,7 @@ func TestReclamoAPI(t *testing.T) {
 	}
 	// Match vacío, JSON roto, etiqueta de grafo: 400.
 	for _, body := range []string{`{}`, `{`, `{"match":{"pool":"ok"},"labels":{"kling.graph":"x"}}`,
-		`{"match":{"pool":"ok"},"ttl_seconds":86401}`, `{"match":{"pool":"ok"},"name":"../x"}`} {
+		`{"match":{"pool":"ok"},"ttl_seconds":86401}`, `{"match":{"pool":"ok"},"name":"../x"}`, `{"match":{"pool":"ok"}}`} {
 		if rr := call(t, h, "POST", "/sandboxes/claim", body); rr.Code != 400 {
 			t.Fatalf("%s = %d %s", body, rr.Code, rr.Body)
 		}
@@ -45,7 +45,7 @@ func TestReclamoAPI(t *testing.T) {
 		t.Fatalf("reclamo = %d %s", rr.Code, rr.Body)
 	}
 	// Nombre ocupado: 409 y la otra máquina sigue libre.
-	rr = call(t, h, "POST", "/sandboxes/claim", `{"match":{"pool":"ok"},"name":"uno"}`)
+	rr = call(t, h, "POST", "/sandboxes/claim", `{"match":{"pool":"ok"},"name":"uno","labels":{"kling.sandbox.claim":"n"}}`)
 	if rr.Code != 409 {
 		t.Fatalf("nombre ocupado = %d %s", rr.Code, rr.Body)
 	}
@@ -62,10 +62,10 @@ func TestReclamoAPI(t *testing.T) {
 func TestReclamoSoloAdmin(t *testing.T) {
 	s := servidorAuthz(t, politicaDePrueba(t))
 	h := s.routes()
-	if rr := como(t, h, uidA, "POST", "/sandboxes/claim", `{"match":{"app":"prod-db"}}`); rr.Code != 403 {
+	if rr := como(t, h, uidA, "POST", "/sandboxes/claim", `{"match":{"app":"prod-db"},"labels":{"kling.sandbox.claim":"n"}}`); rr.Code != 403 {
 		t.Fatalf("un inquilino reclama: %d %s", rr.Code, rr.Body)
 	}
-	if rr := como(t, h, uidAdmin, "POST", "/sandboxes/claim", `{"match":{"app":"prod-db"}}`); rr.Code != 404 {
+	if rr := como(t, h, uidAdmin, "POST", "/sandboxes/claim", `{"match":{"app":"prod-db"},"labels":{"kling.sandbox.claim":"n"}}`); rr.Code != 404 {
 		t.Fatalf("admin sin nada que reclamar: %d %s", rr.Code, rr.Body)
 	}
 }

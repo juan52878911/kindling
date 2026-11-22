@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -92,22 +91,20 @@ func informeNuevo(a, b *fc.BalloonStats) bool {
 // —dorados de antes, o de los que no se sabe— se manda, como siempre.
 const globoReposoMarca = "globo_reposo"
 
-// globoEnReposo apunta las máquinas de las que este daemon sabe que su globo
-// está en el intervalo de reposo (id → true): las restauradas con
-// ritmoGloboReposo y las que configurarGlobo arranque con él.
-var globoEnReposo sync.Map
-
-// marcarGloboReposo apunta que el globo de la máquina id está en reposo.
-func marcarGloboReposo(id string) { globoEnReposo.Store(id, true) }
+// marcarGloboReposo apunta que el globo de la máquina id está en reposo
+// (Manager.globoEnReposo: las máquinas de las que este daemon sabe que su globo
+// está en el intervalo de reposo, id → true; las restauradas con
+// ritmoGloboReposo y las que configurarGlobo arranque con él).
+func (m *Manager) marcarGloboReposo(id string) { m.globoEnReposo.Store(id, true) }
 
 // olvidarGloboReposo la quita (la máquina se borra o se aprieta).
-func olvidarGloboReposo(id string) { globoEnReposo.Delete(id) }
+func (m *Manager) olvidarGloboReposo(id string) { m.globoEnReposo.Delete(id) }
 
 // escribirMarcaGloboReposo deja la marca en el directorio de un dorado recién
 // congelado de la máquina id, si se sabe que estaba en reposo. Un fallo no
 // importa: sin marca se manda el PATCH.
-func escribirMarcaGloboReposo(dir, id string) {
-	if _, ok := globoEnReposo.Load(id); !ok {
+func (m *Manager) escribirMarcaGloboReposo(dir, id string) {
+	if _, ok := m.globoEnReposo.Load(id); !ok {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(dir, globoReposoMarca), []byte("1\n"), 0o644)

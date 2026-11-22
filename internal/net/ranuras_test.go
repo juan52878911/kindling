@@ -4,6 +4,10 @@ package net
 
 import (
 	"fmt"
+	"maps"
+	stdnet "net"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,4 +298,132 @@ func TestCerrarDestruyeTodasYParaLaRecogida(t *testing.T) {
 		t.Fatalf("destruidas = %d, quería 3", destruidas.Load())
 	}
 	f.Cerrar() // idempotente
+}
+
+// Una ranura entregada con none ya tiene las reglas de none montadas (S5):
+// aplicarPropio no lanza ningún iptables-restore.
+func TestRanuraConNoneNoLanzaRestoreEnAplicarPropio(t *testing.T) {
+	p := sustituirProcesos(t)
+	r, err := ranuraFalsa()
+	if err != nil {
+		t.Fatal(err)
+	}
+	viejo := iniciarResolverNone
+	t.Cleanup(func() { iniciarResolverNone = viejo })
+	iniciarResolverNone = func(*Net) error { return nil }
+	p.vaciar()
+	if err := r.Net.Setup(EgressNone, nil, 1000); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range p.log {
+		if strings.Contains(l, "iptables") {
+			t.Errorf("Setup en none con ranura lanzó %q", l)
+		}
+	}
+}
+
+// tablasDe aplica la entrada de varios iptables-restore --noflush (-A, -I, -D)
+// y devuelve el conjunto final: "tabla/CADENA" → reglas en orden.
+func tablasDe(entradas []string) map[string][]string {
+	est := map[string][]string{}
+	for _, e := range entradas {
+		tabla := ""
+		for _, l := range strings.Split(e, "\n") {
+			f := strings.Fields(l)
+			if len(f) == 0 || f[0] == "COMMIT" {
+				continue
+			}
+			if strings.HasPrefix(f[0], "*") {
+				tabla = f[0][1:]
+				continue
+			}
+			if len(f) < 2 {
+				continue
+			}
+			k := tabla + "/" + f[1]
+			switch f[0] {
+			case "-A":
+				est[k] = append(est[k], strings.Join(f[2:], " "))
+			case "-I":
+				pos, resto := 1, f[2:]
+				if p, err := strconv.Atoi(f[2]); err == nil {
+					pos, resto = p, f[3:]
+				}
+				est[k] = slices.Insert(est[k], min(pos-1, len(est[k])), strings.Join(resto, " "))
+			case "-D":
+				if i := slices.Index(est[k], strings.Join(f[2:], " ")); i >= 0 {
+					est[k] = slices.Delete(est[k], i, i+1)
+				} else {
+					est[k] = append(est[k], "!!-D sin regla: "+l)
+				}
+			}
+		}
+	}
+	return est
+}
+
+// capturarRestores guarda la entrada de cada iptables-restore.
+func capturarRestores(t *testing.T) *[]string {
+	t.Helper()
+	var entradas []string
+	ejecutarRestore = func(_, e string) ([]byte, error) { entradas = append(entradas, e); return nil, nil }
+	return &entradas
+}
+
+// Una ranura con none + lo que aplica aplicarSobreRanura deja EXACTAMENTE las
+// reglas del montaje completo, en los tres modos, regla a regla y en orden.
+func TestRanuraEquivaleAlMontajeCompleto(t *testing.T) {
+	for _, modo := range []Egress{EgressNone, EgressInternet, EgressAllowlist} {
+		t.Run(string(modo), func(t *testing.T) {
+			p := sustituirProcesos(t)
+			_ = p
+			oldI, oldR, oldS, oldIp := iniciarResolverNone, hayIpset, semillasDe, ipsDelHost
+			t.Cleanup(func() { iniciarResolverNone, hayIpset, semillasDe, ipsDelHost = oldI, oldR, oldS, oldIp })
+			iniciarResolverNone = func(*Net) error { return nil }
+			hayIpset = func() error { return nil }
+			ipsDelHost = func() []stdnet.IP { return []stdnet.IP{stdnet.ParseIP("203.0.113.9"), stdnet.ParseIP("10.1.2.3")} }
+			oldA := iniciarResolverAllowlist
+			t.Cleanup(func() { iniciarResolverAllowlist = oldA })
+			iniciarResolverAllowlist = func(*Net, []string) error { return nil }
+			var dominios []string
+
+			// Montaje completo: sin ranura.
+			completo := capturarRestores(t)
+			n1 := Plan(7, "abcd1234")
+			if err := n1.Setup(modo, dominios, 1000); err != nil {
+				t.Fatal(err)
+			}
+			// Ranura.
+			ranura := capturarRestores(t)
+			n2 := Plan(7, "abcd1234")
+			if err := n2.MontarRanura(1000); err != nil {
+				t.Fatal(err)
+			}
+			if err := n2.Setup(modo, dominios, 1000); err != nil {
+				t.Fatal(err)
+			}
+			a, b := tablasDe(*completo), tablasDe(*ranura)
+			if len(a["filter/FORWARD"]) < 6 || len(a["nat/PREROUTING"]) < 1 {
+				t.Fatalf("el montaje completo no puso lo esperado: %q", a)
+			}
+			if !maps.EqualFunc(a, b, slices.Equal[[]string]) {
+				for k := range a {
+					if !slices.Equal(a[k], b[k]) {
+						t.Errorf("%s difiere:\n completo: %q\n ranura:   %q", k, a[k], b[k])
+					}
+				}
+				for k := range b {
+					if _, ok := a[k]; !ok {
+						t.Errorf("%s solo en la ranura: %q", k, b[k])
+					}
+				}
+			}
+			if modo == EgressNone && len(*ranura) != 1 {
+				t.Errorf("none: %d restores en total con la ranura, quería 1 (el de MontarRanura)", len(*ranura))
+			}
+			if modo != EgressNone && len(*ranura) != 2 {
+				t.Errorf("%s: %d restores con la ranura, quería 2 (montaje + una transacción)", modo, len(*ranura))
+			}
+		})
+	}
 }

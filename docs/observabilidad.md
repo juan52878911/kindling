@@ -142,6 +142,13 @@ Cada `run -from` (y cada copia de plantilla) deja su desglose por fases, en `/me
 - `kling_create_duration_ms`: histograma del total, desde la entrada a `runFromCon` hasta tener la copia lista.
 - `kling_create_phase_ms{phase}`: histograma por fase, sin solapes (su suma es el total salvo redondeo):
   `checks`, `disk`, `net`, `persist`, `gate_wait`, `vmm`, `load`, `resume`, `resync`, `start`, `finish`.
+- `kling_resync_guest_seconds` y `kling_resync_wake_seconds` (resúmenes `_sum`/`_count`): de qué está hecha la
+  espera de `POST /resync` en cada restauración. `guest` es el camino crítico dentro del agente
+  (`critical_us` de su respuesta) y `wake` el resto de lo que esperó el daemon: despertar del invitado, ARP,
+  TCP y respuesta. Solo cuentan agentes que mandan `critical_us`. Con `KLING_RESYNC_TRACE=1` cada resync deja
+  `resync split: connect=… first_byte=… guest_critical=… guest_origin=…` en el log; `first_byte −
+  guest_critical` es el despertar. El `/healthz` del agente (con `Accept: application/json`) trae
+  `segundos_tiempos_vencidos`: cuántos segundos tiempos de resync pasaron su tope y se dejaron colgados.
 
 `persist` (escribir el estado en disco antes de lanzar el VMM) va ANTES de la puerta de arranque, así que ya
 no ocupa un hueco de ella: `gate_wait` es solo la cola. `kling_operation_duration_ms{kind="restore"}` no

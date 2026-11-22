@@ -144,25 +144,3 @@ func TestOtroErrorNoRepite(t *testing.T) {
 		t.Fatalf("err=%v intentos=%d", err, n)
 	}
 }
-
-// persistirYa en paralelo: no alarga la creación y no se devuelve antes de que
-// acabe; su error se propaga.
-func TestEnParaleloNoAlargaYEspera(t *testing.T) {
-	var hecho atomic.Bool
-	ini := time.Now()
-	esperar := enParalelo(func() error {
-		time.Sleep(50 * time.Millisecond)
-		hecho.Store(true)
-		return errors.New("fsync")
-	})
-	time.Sleep(50 * time.Millisecond) // el resto de la creación
-	if err := esperar(); err == nil || !hecho.Load() {
-		t.Fatalf("devolvió antes de acabar o perdió el error: err=%v hecho=%v", err, hecho.Load())
-	}
-	if d := time.Since(ini); d > 95*time.Millisecond {
-		t.Errorf("la creación se alargó a %v (quería ~50 ms, no 100)", d)
-	}
-	if err := esperar(); err == nil {
-		t.Error("la segunda espera perdió el error")
-	}
-}

@@ -87,6 +87,10 @@ type Net struct {
 	// está montada: es una ranura (ranuras_fc.go) y Setup solo aplica lo
 	// propio. Se consume en Setup.
 	baseLista bool
+	// baseEgress: las reglas de salida que lleva la base montada de una
+	// ranura (siempre none: lo más restrictivo mientras espera). Vacío si no
+	// es una ranura.
+	baseEgress Egress
 
 	// reserva es el fichero de DirReservas que aparta Index mientras se
 	// monta la red (ver subredes.go). Vacío si no hay reserva.

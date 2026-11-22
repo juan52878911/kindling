@@ -460,9 +460,47 @@ func montajeDe(dir string) (montaje, bool) {
 	return out, ok
 }
 
+// cuotaRequerida dice si KLING_COW_QUOTA=require: sin cuota aplicable en el
+// almacén, las instancias no arrancan (por defecto, como siempre: aviso en el
+// log y el almacén sigue sin cuota). Protege de un VMM comprometido que llena
+// el almacén compartido.
+func cuotaRequerida() bool { return os.Getenv("KLING_COW_QUOTA") == "require" }
+
+// cuotaNoDisponible es lo que detecta un almacén en modo require sin cuota
+// aplicable: no vacío, para que cada instancia pase por limitar, que falla.
+const cuotaNoDisponible = "unavailable"
+
 // activarCuota engancha en el almacén la cuota que su sistema de ficheros
-// permita, si están las herramientas; si no, deja los hooks a nil.
+// permita, si están las herramientas; si no, deja los hooks a nil. Con
+// KLING_COW_QUOTA=require, en ese caso hace fallar cada instancia.
 func (a *almacenCoW) activarCuota() {
+	a.activarCuotaSegunFS()
+	if !cuotaRequerida() {
+		return
+	}
+	detectar, limitar := a.detectarCuota, a.limitar
+	var disponible atomic.Bool
+	a.detectarCuota = func(ctx context.Context) string {
+		c := ""
+		if detectar != nil {
+			c = detectar(ctx)
+		}
+		disponible.Store(c != "")
+		if c == "" {
+			log.Printf("ERROR: copy-on-write store %s: KLING_COW_QUOTA=require and no per-instance disk quota can be applied; nothing goes into the store, instances get a full copy of their overlay instead", a.dir)
+			return cuotaNoDisponible
+		}
+		return c
+	}
+	a.limitar = func(d, overlay string, bytes int64) error {
+		if !disponible.Load() || limitar == nil {
+			return errors.New("KLING_COW_QUOTA=require: no per-instance disk quota can be applied on this store (see docs/cow.md, \"Disk quota\")")
+		}
+		return limitar(d, overlay, bytes)
+	}
+}
+
+func (a *almacenCoW) activarCuotaSegunFS() {
 	a.liberarProyectos = nil
 	switch a.fs {
 	case "xfs":

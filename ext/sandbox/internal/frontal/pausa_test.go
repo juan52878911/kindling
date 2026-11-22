@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -127,4 +128,41 @@ func TestPausaReanudarYEgress(t *testing.T) {
 	esperaCodigo(t, pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/pause", nil), 405)
 	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes/"+sb.ID+"/egress", nil), 405)
 	esperaCodigo(t, pide(t, srv, tokenAlice, "PATCH", "/v1/sandboxes/"+sb.ID+"/egress", "{"), 400)
+}
+
+// S9: reanudar una congelada no se salta la cuota (la dormida ya contaba, así
+// que el tenant no puede acabar con más de lo que permite) y una pausada sigue
+// sujeta al plazo de abandono.
+func TestReanudarRespetaCuotaYPausadaCaduca(t *testing.T) {
+	f := nuevoFalso(t)
+	ponerPausa(t, f)
+	hace := func(d time.Duration) *time.Time { x := time.Now().Add(-d); return &x }
+	dormida := f.sembrar(&api.Machine{State: api.StateWarm, MemMiB: 256, TTLSeconds: 600, TTLAt: hace(time.Minute),
+		Labels: map[string]string{LabelTenant: "alice"}})
+	f.sembrar(&api.Machine{State: api.StateRunning, MemMiB: 256, TTLSeconds: 600, TTLAt: hace(time.Minute),
+		Labels: map[string]string{LabelTenant: "alice"}})
+	pausada := f.sembrar(&api.Machine{State: api.StatePaused, MemMiB: 256, TTLSeconds: 600, TTLAt: hace(30 * time.Hour),
+		Labels: map[string]string{LabelTenant: "bob"}})
+	srv, s := montar(t, map[string]*falso{"a": f},
+		Tenant{Nombre: "alice", Token: tokenAlice, MaxSandboxes: 2, MaxMemTotalMiB: 512},
+		Tenant{Nombre: "bob", Token: tokenBob})
+
+	// Cupo lleno: crear una más da 429 antes y después de reanudar.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", MemMiB: 256}), 429)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes/a/"+dormida.ID+"/resume", nil), 200)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", MemMiB: 256}), 429)
+	resp := pide(t, srv, tokenAlice, "GET", "/v1/sandboxes", nil)
+	esperaCodigo(t, resp, 200)
+	if l := decodifica[[]Sandbox](t, resp); len(l) != 2 {
+		t.Fatalf("alice has %d sandboxes after the resume, want 2", len(l))
+	}
+
+	// La pausada de bob, vieja, la barre el plazo de abandono como a cualquiera.
+	s.Limpiar(context.Background())
+	if f.maquina(pausada.ID) != nil {
+		t.Fatal("a paused sandbox past the abandonment deadline survived the sweep")
+	}
+	if f.maquina(dormida.ID) == nil {
+		t.Fatal("the recent sandbox was removed")
+	}
 }

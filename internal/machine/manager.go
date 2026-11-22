@@ -396,6 +396,20 @@ type Manager struct {
 	// KVM en el mismo instante— cuelga el kernel bajo virtualización anidada.
 	// Capacidad = KLING_MAX_PARALLEL_BOOT. nil en un Manager de test = sin límite.
 	launchGate chan struct{}
+	// retroceso es el estado del retroceso de launchGate (launch_retroceso.go);
+	// se crea al primer uso con la capacidad de la puerta.
+	retroceso atomic.Pointer[retrocesoPuerta]
+	// creando son las máquinas que Run/runFrom están creando (cerrojo de ciclo
+	// de vida tomado por la creación): una muerte de VMM que avisa mientras
+	// tanto cuenta para la puerta; la de una entregada, nunca.
+	creando sync.Map // id → origen (dueño o snapshot)
+	// fondoRed son las ranuras de red en espera de este daemon (ranuras_red.go).
+	fondoRed fondoRed
+	// relojes son los resync de reloj pendientes (reloj_pendiente.go).
+	relojes relojesPendientes
+	// globoEnReposo: las máquinas cuyo globo está en el intervalo de reposo
+	// (globo_ritmo.go), id → true.
+	globoEnReposo sync.Map
 
 	// lifecycle serializa las operaciones sobre UNA MISMA máquina. Sin esto, dos
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
@@ -2054,6 +2068,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// esperar el cerrojo de OTRA máquina. Ver doc.go.
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
+	defer m.marcarCreando(id, origenPuerta(req))()
 	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
 	if err := m.publicarCon(ctx, mc); err != nil {
 		os.RemoveAll(dir)
@@ -3633,7 +3648,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Running con su VMM vivo; si murió sin que nadie lo viera, queda failed
 	// y sigue abajo como tal (ver comprobarVMMLocked).
 	if cur.State == api.StateRunning {
-		if !m.comprobarVMMLocked(cur.ID, "") {
+		if !m.comprobarVMMLocked(cur.ID, "", false, "") {
 			return cur, nil
 		}
 		if cur, ok = m.Get(mc.ID); !ok {

@@ -1,8 +1,10 @@
 package net
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,5 +48,30 @@ func TestSoltarReservaNoSueltaLaDeOtro(t *testing.T) {
 	b.SoltarReserva()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("la reserva propia no se soltó: %v", err)
+	}
+}
+
+// S1: si el volcado de direcciones falla, Reservar no puede dar el índice por
+// libre (se ve libre uno ocupado por una ranura en espera) y suelta la reserva.
+func TestReservarConVolcadoFallidoDevuelveFalse(t *testing.T) {
+	if !redEnHost {
+		t.Skip("en macOS no hay enlaces en el host")
+	}
+	conDirReservas(t)
+	antes := DireccionesHost
+	t.Cleanup(func() { DireccionesHost = antes })
+	DireccionesHost = func() ([]DireccionHost, error) { return nil, errors.New("volcado roto") }
+
+	n := Plan(9, "aaaaaaaa")
+	if n.Reservar() {
+		t.Fatal("Reservar dio el índice por libre sin poder mirar el host")
+	}
+	if _, err := os.Stat(filepath.Join(DirReservas, "9")); !os.IsNotExist(err) {
+		t.Fatalf("la reserva no se soltó: %v", err)
+	}
+	var c int
+	_, err := Asignar(&c, 4, func(int) bool { return false }, "bbbbbbbb")
+	if err == nil || !strings.Contains(err.Error(), "volcado roto") {
+		t.Fatalf("Asignar debe decir por qué: %v", err)
 	}
 }

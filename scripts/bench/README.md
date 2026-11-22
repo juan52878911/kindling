@@ -50,7 +50,10 @@ con el relleno del pool en marcha; reposo = tras `ESPERA_POOL`; las claves sin s
 ráfaga, como antes), `resync_serie` (`GET /resync` del agente tras cada creación en serie, con
 `critico_us` y pasos; ruta en `KB_RESYNC_RUTA`, `{id}` = máquina; si el daemon no la sirve queda
 `{"error": …}`), `vmm_muertos` (líneas `watch:` del journal de la unidad `KB_UNIT` por tanda) y
-`diag` (dmesg filtrado y `memory.events` al acabar cada tanda).
+`diag` (dmesg filtrado y `memory.events` al acabar cada tanda), `net_pool` (`KLING_NET_POOL` de la
+corrida), `kvm_serie` (delta de `pf_fixed`/`exits` de KVM por creación en serie; hace falta root y debugfs, si no
+`null`) y `pausa_exec_nueva_ms` / `pausa_exec_ociosa_ms` (E5: pausa→exec con un sandbox recién creado y con otro
+ocioso `E5_OCIOSA_S`=60 s; `E5_N`=5 muestras). `fases.py --self-test` comprueba la tabla de fases de una tanda de 50.
 `bench.py --self-test` lo comprueba con un gateway falso, sin KVM ni root.
 
 ## Barrido

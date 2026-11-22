@@ -13,7 +13,7 @@ cd "$KB"
 paso apt
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3-venv python3-pip zstd curl jq iptables e2fsprogs xfsprogs docker.io >/dev/null
+apt-get install -y -qq python3-venv python3-pip zstd curl jq iptables ipset conntrack e2fsprogs xfsprogs docker.io >/dev/null
 systemctl stop docker docker.socket   # Docker solo en su fase
 
 paso firecracker
