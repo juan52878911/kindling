@@ -77,13 +77,15 @@ func NewClient(endpoint string) *Client {
 		// Con socket unix el connect por petición es un coste sin motivo:
 		// se reutilizan conexiones. Con SSH detrás se queda como estaba.
 		// Tras reiniciar el daemon, la primera petición sobre una conexión
-		// ociosa ya muerta la repite el propio http.Transport mientras no
-		// se haya escrito nada (ver internal/apiclienttest).
+		// ociosa ya muerta falla con "server closed idle connection": el
+		// http.Transport solo la repite si es idempotente, y un POST no lo
+		// es. reintentoOciosa la repite una vez (ver internal/apiclienttest).
 		t := c.http.Transport.(*http.Transport)
 		t.DisableKeepAlives = false
 		t.MaxIdleConnsPerHost = 16
 		t.MaxIdleConns = 16
 		t.IdleConnTimeout = 30 * time.Second
+		c.http.Transport = reintentoOciosa{t}
 	}
 	// El daemon no redirige nunca. Sin esto, http.Client seguiría la
 	// redirección que ServeMux hace de una ruta con ".." conservando método y
@@ -120,6 +122,31 @@ func sinRedirecciones(*http.Request, []*http.Request) error { return http.ErrUse
 // al daemon (Authorization: Bearer). Solo tiene efecto con una política de
 // autorización que lo declare (docs/authz.md); sin ella, el daemon lo ignora.
 const AuthzTokenEnv = "KLING_AUTHZ_TOKEN"
+
+// reintentoOciosa repite UNA vez la petición que falló porque el daemon cerró
+// la conexión ociosa antes de que se escribiera nada en ella (un daemon
+// reiniciado): el servidor no la llegó a ver, así que repetirla es seguro
+// aunque no sea idempotente. Solo si el cuerpo se puede rebobinar.
+type reintentoOciosa struct{ rt http.RoundTripper }
+
+func (t reintentoOciosa) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.rt.RoundTrip(r)
+	if err == nil || !strings.Contains(err.Error(), "server closed idle connection") {
+		return resp, err
+	}
+	if r.Body != nil && r.Body != http.NoBody {
+		if r.GetBody == nil {
+			return resp, err
+		}
+		b, gerr := r.GetBody()
+		if gerr != nil {
+			return resp, err
+		}
+		r = r.Clone(r.Context())
+		r.Body = b
+	}
+	return t.rt.RoundTrip(r)
+}
 
 // conToken añade el token de inquilino a cada petición al daemon.
 type conToken struct {
