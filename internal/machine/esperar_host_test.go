@@ -77,7 +77,15 @@ func TestRunFromNoReanudaSiFallanLasBarrerasDelHost(t *testing.T) {
 	m, logPath := managerVZ(t)
 	desmontadas := barreraCaida(t)
 	m.snapPending = map[string]int{}
-	snapDir := escribirSnapshot(t, m, "dorado", api.Snapshot{VMM: m.origenActual().vmm, MemMiB: 64, VCPUs: 1,
+	// Un dorado real lleva su imagen: el reapuntado de macOS (kling_repoint)
+	// resuelve con ella el disco base antes de cargar el volcado.
+	if err := os.MkdirAll(filepath.Dir(m.imagePath("min")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.imagePath("min"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapDir := escribirSnapshot(t, m, "dorado", api.Snapshot{VMM: m.origenActual().vmm, Image: "min", MemMiB: 64, VCPUs: 1,
 		CreatedAt: time.Now()})
 	for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
 		if err := os.WriteFile(filepath.Join(snapDir, f), []byte("x"), 0o644); err != nil {
