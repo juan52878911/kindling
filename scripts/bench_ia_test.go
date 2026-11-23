@@ -201,6 +201,7 @@ case "$1 $2" in
 "image ls") echo '[{"name":"img","disk_bytes":1048576}]' ;;
 "ps -a") printf '['; s=""; for f in "$D"/m/*; do [ -e "$f" ] || continue; printf '%s' "$s"; maquina "$(basename "$f")"; s=,; done; echo ']' ;;
 "top -json") printf '{"available_mib":1000,"machines":['; s=""; for f in "$D"/m/*; do [ -e "$f" ] || continue; [ "$(cat "$f")" = running ] || continue; printf '%s{"name":"%s","pid":%d,"pss_mib":10,"disk_read_bytes":4096,"state":"running"}' "$s" "$(basename "$f")" "$$"; s=,; done; echo ']}' ;;
+"ai serve") shift 2; exec python3 -I "$KFALSO_GW" "$@" ;;
 "ai model") echo '{"request_ms":3,"response":{"choices":[{"message":{"content":"x"}}],"timings":{"prompt_per_second":100,"predicted_per_second":10,"prompt_n":5,"predicted_n":8}}}' ;;
 *)
   case "$1" in
@@ -277,6 +278,170 @@ func TestVonBenchSacaJSON(t *testing.T) {
 	}
 	if out, err := exec.Command("python3", "-I", "bench/ia.py", salida).CombinedOutput(); err != nil || !strings.Contains(string(out), "von-falso") {
 		t.Errorf("ia.py resumen: %v\n%s", err, out)
+	}
+}
+
+// gatewayFalso hace de `kling ai serve`: escucha en el socket, crea réplicas
+// (ficheros en $KFALSO/m con el prefijo del gateway) hasta max_replicas y un
+// segador las congela o las borra tras -idle según el "idle" del modelo.
+const gatewayFalso = `import json, os, socketserver, sys, threading, time
+from http.server import BaseHTTPRequestHandler
+args = sys.argv[1:]
+def opt(n, d=None):
+    return args[args.index(n) + 1] if n in args else d
+cfg = json.load(open(opt("-config")))
+sock, pref = opt("-socket"), opt("-name-prefix")
+idle = float(opt("-idle", "5s").rstrip("s"))
+(nombre, m), = cfg["models"].items()
+pol, maxr = m.get("idle") or "freeze", m.get("max_replicas") or int(opt("-max-replicas", "2"))
+D = os.path.join(os.environ["KFALSO"], "m")
+os.makedirs(D, exist_ok=True)
+mu, uso, vuelo, cuenta = threading.Lock(), {}, {}, [0]
+def estado(r):
+    try:
+        return open(os.path.join(D, r)).read().strip()
+    except OSError:
+        return None
+def poner(r, e):
+    open(os.path.join(D, r), "w").write(e + "\n")
+def mias():
+    return sorted(f for f in os.listdir(D) if f.startswith(pref))
+def tomar():
+    while True:
+        with mu:
+            ms = mias()
+            r = next((x for x in ms if estado(x) == "running" and not vuelo.get(x)), None)
+            r = r or next((x for x in ms if estado(x) == "frozen"), None)
+            if r is None and len(ms) < maxr:
+                cuenta[0] += 1
+                r = "%s%d" % (pref, cuenta[0])
+            if r:
+                poner(r, "running")
+                vuelo[r] = True
+                return r
+        time.sleep(0.01)
+def soltar(r):
+    with mu:
+        vuelo[r], uso[r] = False, time.time()
+def segador():
+    while True:
+        time.sleep(0.1)
+        with mu:
+            for r in mias():
+                if estado(r) == "running" and not vuelo.get(r) and time.time() - uso.get(r, 0) > idle:
+                    if pol == "remove":
+                        os.remove(os.path.join(D, r))
+                    else:
+                        poner(r, "frozen")
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def responder(self, code, body):
+        b = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def do_GET(self):
+        self.responder(200 if self.path == "/healthz" else 404, {})
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if not self.path.startswith("/v1/m/%s/" % nombre):
+            return self.responder(404, {"error": "ruta"})
+        r = tomar()
+        time.sleep(0.02)
+        soltar(r)
+        self.responder(200, {"replica": r})
+class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+threading.Thread(target=segador, daemon=True).start()
+S(sock, H).serve_forever()
+`
+
+// Las partes de gateway del banco (remove, ociosa por gateway y carga) con un
+// gateway de mentira: el segador del falso borra o congela según el "idle" que
+// el banco escribe en su ai.json, y el JSON lo refleja.
+func TestVonBenchConGatewayFalso(t *testing.T) {
+	for _, b := range []string{"jq", "perl", "python3", "curl", "go"} {
+		if _, err := exec.LookPath(b); err != nil {
+			t.Skip("sin " + b)
+		}
+	}
+	dir, err := os.MkdirTemp("", "vbg") // corto: la ruta del socket Unix tiene tope
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	iab := filepath.Join(dir, "ia-bench")
+	if out, err := exec.Command("go", "build", "-o", iab, "./ia-bench").CombinedOutput(); err != nil {
+		t.Fatalf("go build ia-bench: %v\n%s", err, out)
+	}
+	k, gw := filepath.Join(dir, "kling"), filepath.Join(dir, "gw.py")
+	if err := os.WriteFile(k, []byte(klingFalsoBanco), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gw, []byte(gatewayFalso), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	salida := filepath.Join(dir, "von.json")
+	cmd := exec.Command("bash", "96-von-bench.sh", "von-falso")
+	cmd.Env = append(os.Environ(), "KLING="+k, "KFALSO="+filepath.Join(dir, "e"), "KFALSO_GW="+gw, "JSON_OUT="+salida,
+		"TMPDIR="+dir, "REPLICAS=2", "CYCLES=2", "IDLE_S=1", "CARGA_S=1", "CLIENTES=1 2", "IA_BENCH="+iab,
+		"DROP_CACHES=0", "SECCIONES=memoria ociosa carga")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("96-von-bench.sh: %v\n%s", err, out)
+	}
+	var j struct {
+		Memoria struct {
+			Remove []struct {
+				Replicas int `json:"replicas"`
+				Vivas    int `json:"vivas"`
+				Dormidas struct {
+					Estado string `json:"estado"`
+				} `json:"dormidas"`
+			} `json:"remove"`
+		} `json:"memoria"`
+		Ociosa struct {
+			Gateway struct {
+				Freeze []struct {
+					MS       float64 `json:"ms"`
+					Dormidas struct {
+						Estado string `json:"estado"`
+					} `json:"dormidas"`
+				} `json:"idle_freeze"`
+				Remove []struct {
+					Dormidas struct {
+						Estado string `json:"estado"`
+					} `json:"dormidas"`
+				} `json:"idle_remove"`
+			} `json:"gateway"`
+		} `json:"ociosa"`
+		Carga struct {
+			Ruta    string `json:"ruta"`
+			Gateway struct {
+				Puntos []struct {
+					Clientes, N, Errores int
+				} `json:"puntos"`
+			} `json:"gateway"`
+		} `json:"carga"`
+	}
+	if err := json.Unmarshal([]byte(leer(t, salida)), &j); err != nil {
+		t.Fatalf("%v\n%s", err, leer(t, salida))
+	}
+	if r := j.Memoria.Remove; len(r) != 2 || r[1].Vivas != 2 || r[0].Dormidas.Estado != "borradas" || r[1].Dormidas.Estado != "borradas" {
+		t.Errorf("memoria.remove: %+v\n%s", r, out)
+	}
+	g := j.Ociosa.Gateway
+	if len(g.Freeze) != 2 || len(g.Remove) != 2 || g.Freeze[0].Dormidas.Estado != "congeladas" || g.Remove[0].Dormidas.Estado != "borradas" || g.Freeze[0].MS <= 0 {
+		t.Errorf("ociosa.gateway: %+v", g)
+	}
+	if c := j.Carga; c.Ruta != "/v1/m/von-falso/v1/chat/completions" || len(c.Gateway.Puntos) != 2 || c.Gateway.Puntos[1].Errores != 0 || c.Gateway.Puntos[1].N == 0 {
+		t.Errorf("carga: %+v", c)
+	}
+	if ms, _ := filepath.Glob(filepath.Join(dir, "e", "m", "*")); len(ms) != 0 {
+		t.Errorf("quedaron máquinas: %v", ms)
 	}
 }
 
