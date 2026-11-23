@@ -1083,7 +1083,7 @@ kling db branch hook install                  # una copia por rama de git, que c
 kling db doctor t1                            # hallazgos de seguridad (sale con 1 si hay alguno)
 kling db tenant-check t1                      # ejercita RLS: cada inquilino ve solo sus filas
 kling db ask t1 "¿cuántos clientes hay por país?"   # un modelo escribe la SQL; tú la confirmas; solo lectura
-kling db ask-web t1                           # lo mismo en una página web local (loopback, URL de un uso)
+kling db ask-web t1                           # lo mismo en una página web local (loopback, URL con token que vale mientras dura)
 kling db diff t1 t2                           # qué cambió entre dos copias: esquema y filas, sin datos
 kling db class -n 30 -prefix student pg       # una copia por alumno; class reset / ls / rm
 kling db report add weekly -golden pg -every 1w -question "clientes nuevos esta semana"   # lánzalo desde cron
