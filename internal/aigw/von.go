@@ -179,7 +179,7 @@ func (g *Gateway) chatVON(ctx context.Context, snap string, req chatReq) (*von.C
 		return nil, fmt.Errorf("replica answer larger than %d bytes", maxChatAnswerBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("replica answered %d: %s", resp.StatusCode, truncUTF8(string(b), 200))
+		return nil, fmt.Errorf("replica answered %d: %q", resp.StatusCode, truncUTF8(string(b), 200))
 	}
 	var out von.ChatResponse
 	if err := json.Unmarshal(b, &out); err != nil {
