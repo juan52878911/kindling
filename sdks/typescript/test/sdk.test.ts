@@ -2,7 +2,7 @@ import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { inspect } from "node:util";
 import { randomBytes } from "node:crypto";
-import { Admin, Client, Sandbox, Forbidden, NotFound, Unauthorized, RateLimited, ApiError, ServerError, TransportError, ConfigError, Conflict } from "../src/index.js";
+import { Admin, Client, Sandbox, Forbidden, NotFound, Unauthorized, RateLimited, ApiError, ServerError, TransportError, ConfigError, Conflict, BadRequest } from "../src/index.js";
 import { FakeGateway, TOKEN, TOKEN_USER } from "./fake_server.ts";
 
 const gw = new FakeGateway();
@@ -359,6 +359,39 @@ test("ficheros: range, move, mkdir, search", async () => {
   await sb.files.move("/d/b.txt", "/d/c.txt", { overwrite: true });
   assert.equal(await sb.files.readText("/d/c.txt"), "y");
   assert.equal((await sb.files.mkdir("/d/sub/x")).is_dir, true);
+});
+
+test("ficheros: chmod y replace", async () => {
+  limpia();
+  const sb = await Sandbox.create(conn());
+  await sb.files.write("/d/app.conf", "host=a\nport=1\nport=1\n");
+  assert.equal((await sb.files.chmod("/d/app.conf", 0o755)).mode, "0755");
+  assert.equal(gw.lastBody.mode, "755");
+  assert.equal((await sb.files.chmod("/d/app.conf", "600", { recursive: true })).mode, "0600");
+  assert.equal(gw.lastBody.recursive, true);
+  await assert.rejects(sb.files.chmod("/d/nada", 0o644), NotFound);
+  assert.equal((await sb.files.replace("/d/app.conf", "host=a", "host=b")).replacements, 1);
+  await assert.rejects(sb.files.replace("/d/app.conf", "port=1", "port=2"), Conflict);
+  assert.equal((await sb.files.replace("/d/app.conf", "port=1", "port=2", { all: true })).replacements, 2);
+  assert.equal(await sb.files.readText("/d/app.conf"), "host=b\nport=2\nport=2\n");
+});
+
+test("metadata, fork y metrics", async () => {
+  limpia();
+  const sb = await Sandbox.create({ ...conn(), labels: { env: "dev", equipo: "x" } });
+  const info = await sb.setMetadata({ labels: { env: "prod" }, remove: ["equipo"] });
+  assert.deepEqual(info.labels, { env: "prod" });
+  assert.deepEqual(sb.info.labels, { env: "prod" });
+  assert.deepEqual(gw.lastBody, { labels: { env: "prod" }, remove: ["equipo"] });
+  await assert.rejects(sb.setMetadata({ labels: { tenant: "otro" } }), BadRequest);
+  const copias = await sb.fork({ count: 2, ttl: 120 });
+  assert.equal(copias.length, 2);
+  assert.notEqual(copias[0].id, sb.id);
+  assert.equal(copias[0].info.ttl_seconds, 120);
+  assert.deepEqual(gw.lastBody, { count: 2, ttl_seconds: 120 });
+  assert.equal((await sb.fork()).length, 1);
+  const m = await sb.metrics();
+  assert.deepEqual([m.memory_mib, m.memory_kind, m.cpu_seconds], [123, "pss", 4.5]);
 });
 
 test("tar de subida y de bajada", async () => {

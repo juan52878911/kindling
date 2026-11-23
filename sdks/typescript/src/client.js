@@ -174,6 +174,23 @@ export class Client {
     return this._json("PATCH", `/v1/sandboxes/${id}/egress`, { cuerpo });
   }
 
+  /** Añade/cambia (`labels`) y quita (`remove`) etiquetas propias; devuelve el sandbox. */
+  patchMetadata(id, { labels, remove } = {}) {
+    const cuerpo = {};
+    if (labels && Object.keys(labels).length) cuerpo.labels = { ...labels };
+    if (remove && remove.length) cuerpo.remove = [...remove];
+    return this._json("PATCH", `/v1/sandboxes/${id}/metadata`, { cuerpo });
+  }
+  /** Ramifica en `count` copias; devuelve la lista de sandboxes (info). */
+  async forkSandbox(id, { count, ttl_seconds } = {}) {
+    const cuerpo = {};
+    if (count != null) cuerpo.count = Math.trunc(count);
+    if (ttl_seconds != null) cuerpo.ttl_seconds = Math.trunc(ttl_seconds);
+    const r = await this._json("POST", `/v1/sandboxes/${id}/fork`, { cuerpo });
+    return r?.sandboxes ?? [];
+  }
+  sandboxMetrics(id) { return this._json("GET", `/v1/sandboxes/${id}/metrics`); }
+
   // ---- endpoints
   createEndpoint(id, { port, ttl_seconds, public: publico } = {}) {
     const cuerpo = { port };
@@ -296,6 +313,12 @@ export class Client {
   }
   async moveFile(id, from, to, overwrite = false) {
     await this._json("POST", `/v1/sandboxes/${id}/files/move`, { cuerpo: { from, to, ...(overwrite && { overwrite: true }) } });
+  }
+  chmodFile(id, path, mode, recursive = false) {
+    return this._json("POST", `/v1/sandboxes/${id}/files/chmod`, { cuerpo: { path, mode, ...(recursive && { recursive: true }) } });
+  }
+  replaceInFile(id, path, old, nuevo, all = false) {
+    return this._json("POST", `/v1/sandboxes/${id}/files/replace`, { cuerpo: { path, old, new: nuevo, ...(all && { all: true }) } });
   }
   mkdirFile(id, path) { return this._json("POST", `/v1/sandboxes/${id}/files/mkdir`, { cuerpo: { path } }); }
   searchFiles(id, path, glob) {

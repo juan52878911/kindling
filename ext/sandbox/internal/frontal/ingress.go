@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -92,6 +93,10 @@ type IngresoOpciones struct {
 	// SoloGuest fuerza el camino de hosts remotos (/guest) también en locales.
 	// Solo lo usan los tests.
 	SoloGuest bool
+	// RepasoCada cada cuánto se vuelve a autorizar lo que está abierto, para
+	// cortar lo que una revocación hecha en OTRA réplica del gateway dejó sin
+	// permiso (0 = 5 s). Solo corre mientras haya peticiones en curso.
+	RepasoCada time.Duration
 }
 
 type ingreso struct {
@@ -106,8 +111,20 @@ type ingreso struct {
 	conns map[string]int
 	// vivas: peticiones en curso (también WebSocket) por (sandbox, puerto),
 	// para cortarlas al revocar el puerto o borrar el sandbox.
-	vivas   map[claveViva]map[uint64]context.CancelFunc
+	vivas   map[claveViva]map[uint64]*viva
 	sigViva uint64
+	// epoca sube con cada olvidar: un listado que empezó antes de una
+	// invalidación no puede guardarse en la caché (traería lo de antes).
+	epoca uint64
+	// repasando: hay una vuelta de repaso en marcha.
+	repasando bool
+}
+
+// viva es una petición en curso: cómo cortarla y con qué credencial entró,
+// para volver a autorizarla en el repaso.
+type viva struct {
+	cancel context.CancelFunc
+	tok    string
 }
 
 type claveViva struct {
@@ -151,6 +168,9 @@ func nuevoIngreso(s *Servidor, o IngresoOpciones) (*ingreso, error) {
 	if o.MaxConexiones <= 0 {
 		o.MaxConexiones = 64
 	}
+	if o.RepasoCada <= 0 {
+		o.RepasoCada = 5 * time.Second
+	}
 	if o.EsperaCabeceras <= 0 {
 		o.EsperaCabeceras = 60 * time.Second
 	}
@@ -171,7 +191,7 @@ func nuevoIngreso(s *Servidor, o IngresoOpciones) (*ingreso, error) {
 			IdleConnTimeout:       30 * time.Second,
 		},
 		cache: map[string]*entrada{}, conns: map[string]int{},
-		vivas: map[claveViva]map[uint64]context.CancelFunc{},
+		vivas: map[claveViva]map[uint64]*viva{},
 	}, nil
 }
 
@@ -431,6 +451,17 @@ func (s *Servidor) handleEndpoints(w http.ResponseWriter, r *http.Request, id st
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (g *ingreso) dormir(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
+	}
+}
+
+// intentosRevocar son las veces que se intenta dejar escrita una revocación
+// frente a otra réplica del gateway que escribe las mismas etiquetas.
+const intentosRevocar = 8
+
 // handleEndpointRevocar sirve DELETE .../endpoints/{port}: quita el puerto de
 // los públicos y revoca los tokens de endpoint de ese puerto emitidos hasta
 // ahora. Los emitidos después valen.
@@ -454,30 +485,56 @@ func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	// Leer etiquetas, calcular y escribir, bajo el cerrojo del sandbox: dos
-	// revocaciones a la vez no se pisan.
+	// revocaciones a la vez en este proceso no se pisan. Entre réplicas del
+	// gateway no hay cerrojo común: tras escribir se espera lo que tardó la
+	// escritura (la de otra réplica que ya iba de camino llega en ese plazo),
+	// se relee y, si la marca propia no está, se repite desde la lectura.
 	c := g.s.cerrojoDe(id + "\x00endpoints")
 	c.Lock()
 	defer c.Unlock()
-	_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
-	if err != nil {
-		fail(w, codigoBuscar(err), err)
-		return
-	}
-	ahora := time.Now()
-	pub := publicosDe(mc.Labels[LabelPublico], ahora)
-	delete(pub, p)
-	var l []string
-	for q, e := range pub {
-		l = append(l, strconv.Itoa(q)+":"+strconv.FormatInt(e, 10))
-	}
-	sort.Strings(l)
-	err = h.Cliente.SetLabels(r.Context(), mc.ID, map[string]string{
-		LabelPublico:   strings.Join(l, ","),
-		LabelRevocados: revocadosCon(mc.Labels[LabelRevocados], p, ahora),
-	})
-	if err != nil {
-		fail(w, http.StatusBadGateway, deHost(h, err))
-		return
+	for intento := 0; ; intento++ {
+		_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+		if err != nil {
+			fail(w, codigoBuscar(err), err)
+			return
+		}
+		ahora := time.Now()
+		pub := publicosDe(mc.Labels[LabelPublico], ahora)
+		delete(pub, p)
+		var l []string
+		for q, e := range pub {
+			l = append(l, strconv.Itoa(q)+":"+strconv.FormatInt(e, 10))
+		}
+		sort.Strings(l)
+		inicio := time.Now()
+		err = h.Cliente.SetLabels(r.Context(), mc.ID, map[string]string{
+			LabelPublico:   strings.Join(l, ","),
+			LabelRevocados: revocadosCon(mc.Labels[LabelRevocados], p, ahora),
+		})
+		if err != nil {
+			fail(w, http.StatusBadGateway, deHost(h, err))
+			return
+		}
+		// Lo escrito ya manda: lo que esta réplica tenga en caché es de antes.
+		g.olvidar(id)
+		g.cortar(id, p)
+		dur := min(time.Since(inicio), 250*time.Millisecond)
+		g.dormir(r.Context(), 2*dur)
+		_, ver, err := s.buscar(r.Context(), tenantDe(r), id)
+		if err != nil {
+			fail(w, codigoBuscar(err), err)
+			return
+		}
+		if _, sigue := publicosDe(ver.Labels[LabelPublico], time.Now())[p]; !sigue && revocado(revocadosDe(ver.Labels[LabelRevocados], time.Now()), p, ahora.UnixMicro()) {
+			break
+		}
+		// Otra réplica pisó la marca: se espera un tiempo al azar, creciente, para
+		// que las dos no vuelvan a coincidir.
+		g.dormir(r.Context(), time.Duration(mrand.Int64N(int64(dur)*int64(intento+1)+1)))
+		if intento+1 >= intentosRevocar {
+			fail(w, http.StatusConflict, errors.New("the revocation could not be confirmed: another gateway is writing the same labels; retry"))
+			return
+		}
 	}
 	g.olvidar(id)
 	g.cortar(id, p)
@@ -541,7 +598,17 @@ func (g *ingreso) servir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok, delQuery := credencial(r)
-	e, err := g.entrada(r.Context(), id)
+	// Antes de resolver y de autorizar: una revocación que llegue desde aquí
+	// corta también esta petición, y una que ya pasó dejó la caché sin lo viejo.
+	ctx, baja := g.registrar(r.Context(), id, puerto, tok)
+	defer baja()
+	cliente := r.Context()
+	r = r.WithContext(ctx)
+	e, err := g.entrada(ctx, id)
+	if ctx.Err() != nil && cliente.Err() == nil {
+		g.revocada(w)
+		return
+	}
 	if err != nil {
 		// Sin credencial no se dice si el sandbox existe.
 		if tok == "" || errors.As(err, new(*errHost)) {
@@ -551,10 +618,6 @@ func (g *ingreso) servir(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, err)
 		return
 	}
-	// Antes de autorizar: una revocación que llegue entre medias corta también esta.
-	ctx, baja := g.registrar(r.Context(), id, puerto)
-	defer baja()
-	r = r.WithContext(ctx)
 	if code, err := g.autorizar(e.mc, id, puerto, tok); err != nil {
 		if code == http.StatusUnauthorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="kindling-sandbox-endpoint"`)
@@ -595,6 +658,13 @@ func (g *ingreso) servir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.proxy(w, r, e, id, puerto, hp)
+}
+
+// revocada contesta a una petición que se cortó porque el puerto se revocó (o
+// el sandbox se borró) mientras entraba.
+func (g *ingreso) revocada(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="kindling-sandbox-endpoint"`)
+	fail(w, http.StatusUnauthorized, errors.New("this endpoint needs a valid token"))
 }
 
 // fallo contesta cuando no se pudo ni resolver el sandbox.
@@ -691,16 +761,20 @@ func limpiar(r *http.Request) {
 // contexto, que cortar cancela, y cómo darla de baja. El ReverseProxy cierra
 // la conexión al servidor y la del cliente (incluso la secuestrada de un
 // WebSocket) cuando el contexto de la petición se cancela.
-func (g *ingreso) registrar(ctx context.Context, id string, puerto int) (context.Context, func()) {
+func (g *ingreso) registrar(ctx context.Context, id string, puerto int, tok string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	k := claveViva{id, puerto}
 	g.mu.Lock()
 	g.sigViva++
 	n := g.sigViva
 	if g.vivas[k] == nil {
-		g.vivas[k] = map[uint64]context.CancelFunc{}
+		g.vivas[k] = map[uint64]*viva{}
 	}
-	g.vivas[k][n] = cancel
+	g.vivas[k][n] = &viva{cancel: cancel, tok: tok}
+	if !g.repasando {
+		g.repasando = true
+		go g.repasar()
+	}
 	g.mu.Unlock()
 	return ctx, func() {
 		g.mu.Lock()
@@ -719,8 +793,8 @@ func (g *ingreso) cortar(id string, puerto int) {
 	var cs []context.CancelFunc
 	for k, m := range g.vivas {
 		if k.id == id && (puerto == 0 || k.puerto == puerto) {
-			for _, c := range m {
-				cs = append(cs, c)
+			for _, v := range m {
+				cs = append(cs, v.cancel)
 			}
 		}
 	}
@@ -728,6 +802,71 @@ func (g *ingreso) cortar(id string, puerto int) {
 	for _, c := range cs {
 		c()
 	}
+}
+
+// repasar vuelve a autorizar, cada RepasoCada, lo que está abierto y corta lo
+// que ya no vale: es lo que alcanza a una conexión abierta aquí cuando la
+// revocación o el borrado se hicieron en otra réplica (cortar solo ve las de
+// su proceso). Termina cuando no queda nada en curso; registrar lo relanza.
+func (g *ingreso) repasar() {
+	for {
+		time.Sleep(g.o.RepasoCada)
+		g.mu.Lock()
+		type pet struct {
+			puerto int
+			tok    string
+			cancel context.CancelFunc
+		}
+		porID := map[string][]pet{}
+		for k, m := range g.vivas {
+			for _, v := range m {
+				porID[k.id] = append(porID[k.id], pet{k.puerto, v.tok, v.cancel})
+			}
+		}
+		if len(porID) == 0 {
+			g.repasando = false
+			g.mu.Unlock()
+			return
+		}
+		g.mu.Unlock()
+		for id, ps := range porID {
+			ctx, cancel := context.WithTimeout(context.Background(), g.o.RepasoCada)
+			mc, existe, err := g.leer(ctx, id)
+			cancel()
+			if err != nil {
+				continue // sin saberlo, no se corta: lo reintenta la vuelta siguiente
+			}
+			for _, p := range ps {
+				if !existe {
+					p.cancel()
+				} else if code, _ := g.autorizar(mc, id, p.puerto, p.tok); code != 0 {
+					p.cancel()
+				}
+			}
+		}
+	}
+}
+
+// leer lista el host del sandbox id, sin caché. existe=false: ya no está.
+func (g *ingreso) leer(ctx context.Context, id string) (mc *api.Machine, existe bool, err error) {
+	nombre, ref, ok := partirID(id)
+	if !ok {
+		return nil, false, nil
+	}
+	h, ok := g.s.reg.Host(nombre)
+	if !ok {
+		return nil, false, nil
+	}
+	ms, err := h.Cliente.Sandboxes(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, m := range ms {
+		if m.ID == ref && m.Labels[LabelTenant] != "" {
+			return m, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 func (g *ingreso) tomar(id string) bool {
@@ -754,6 +893,7 @@ func (g *ingreso) olvidar(id string) {
 	g.mu.Lock()
 	e := g.cache[id]
 	delete(g.cache, id)
+	g.epoca++
 	g.mu.Unlock()
 	if e != nil {
 		e.mu.Lock()
@@ -784,6 +924,9 @@ func (g *ingreso) entrada(ctx context.Context, id string) (*entrada, error) {
 	if !ok {
 		return nil, noSandbox(id)
 	}
+	g.mu.Lock()
+	epoca := g.epoca
+	g.mu.Unlock()
 	ms, err := h.Cliente.Sandboxes(ctx)
 	if err != nil {
 		return nil, deHost(h, err)
@@ -792,10 +935,15 @@ func (g *ingreso) entrada(ctx context.Context, id string) (*entrada, error) {
 		if mc.ID == ref && mc.Labels[LabelTenant] != "" {
 			e := &entrada{h: h, mc: mc, hasta: time.Now().Add(vidaCache), puertos: map[int]int{}}
 			g.mu.Lock()
-			if len(g.cache) > 4096 {
-				g.cache = map[string]*entrada{}
+			// Si hubo una invalidación mientras se listaba, esto puede ser
+			// de antes de ella: sirve a esta petición (que ya está registrada
+			// y la cortó la invalidación) pero no se guarda.
+			if g.epoca == epoca {
+				if len(g.cache) > 4096 {
+					g.cache = map[string]*entrada{}
+				}
+				g.cache[id] = e
 			}
-			g.cache[id] = e
 			g.mu.Unlock()
 			return e, nil
 		}

@@ -30,6 +30,12 @@ class AsyncFiles:
     async def mkdir(self, path):
         return await _hilo(self._f.mkdir, path)
 
+    async def chmod(self, path, mode, recursive=False):
+        return await _hilo(self._f.chmod, path, mode, recursive)
+
+    async def replace(self, path, old, new, all=False):
+        return await _hilo(self._f.replace, path, old, new, all)
+
     async def search(self, path, glob):
         return await _hilo(self._f.search, path, glob)
 
@@ -208,6 +214,15 @@ class AsyncSandbox:
 
     async def set_egress(self, *a, **k):
         return await _hilo(self._sb.set_egress, *a, **k)
+
+    async def set_metadata(self, labels=None, remove=None):
+        return await _hilo(self._sb.set_metadata, labels, remove)
+
+    async def fork(self, count=1, ttl=None):
+        return [AsyncSandbox(s) for s in await _hilo(self._sb.fork, count, ttl)]
+
+    async def metrics(self):
+        return await _hilo(self._sb.metrics)
 
     async def delete(self):
         await _hilo(self._sb.delete)

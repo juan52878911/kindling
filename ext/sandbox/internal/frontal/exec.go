@@ -59,8 +59,18 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	// Sin sesión propia, un sandbox creado con env corre con la del env. Si ya
+	// caducó, el daemon lo dice antes de ejecutar nada y se repite sin ella.
+	porDefecto := req.Session == "" && sesionPorDefecto(mc) != ""
+	if porDefecto {
+		req.Session = idSesionPorDefecto
+	}
 	if r.URL.Query().Get("wait") == "1" {
 		res, err := h.Cliente.Exec(r.Context(), mc.ID, req, nil)
+		if err != nil && porDefecto && esSesionPerdida(err) {
+			req.Session = ""
+			res, err = h.Cliente.Exec(r.Context(), mc.ID, req, nil)
+		}
 		if err != nil {
 			fail(w, codigoExec(err), err)
 			return
@@ -89,9 +99,14 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		}
 		return nil
 	}
-	res, err := h.Cliente.Exec(r.Context(), mc.ID, req, func(stream string, data []byte) error {
+	salida := func(stream string, data []byte) error {
 		return emitir(api.ExecEvent{Stream: stream, Data: data})
-	})
+	}
+	res, err := h.Cliente.Exec(r.Context(), mc.ID, req, salida)
+	if err != nil && !empezado && porDefecto && esSesionPerdida(err) {
+		req.Session = ""
+		res, err = h.Cliente.Exec(r.Context(), mc.ID, req, salida)
+	}
 	switch {
 	case err != nil && !empezado:
 		fail(w, codigoExec(err), err)

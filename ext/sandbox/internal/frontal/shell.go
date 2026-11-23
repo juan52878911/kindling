@@ -59,6 +59,18 @@ func (s *Servidor) handleShell(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
+	// El entorno de la creación (sesión "default") vale también aquí: se lee al
+	// abrir y lo que el cliente pida encima manda. Si la sesión no está, se abre
+	// sin ella.
+	if sesionPorDefecto(mc) != "" {
+		if se, err := h.Cliente.GetSession(r.Context(), mc.ID, idSesionPorDefecto); err == nil {
+			req.Env = append(append([]string(nil), se.Env...), req.Env...)
+			if req.Dir == "" {
+				req.Dir = se.Dir
+			}
+		}
+	}
+
 	// Cuota de shells abiertas. Se comprueba DESPUÉS de resolver el sandbox
 	// (así un id ajeno sigue dando 404 y no delata la cuota de otro) y ANTES de
 	// tocar el daemon: no hay por qué abrir una sesión que se va a rechazar.

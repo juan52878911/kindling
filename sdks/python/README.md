@@ -43,7 +43,14 @@ with Sandbox.create(template="python", ttl=600, env={"MODE": "demo"}) as sb:  # 
 
 - `Sandbox.list(state=, label={"k": "v"}, limit=, cursor=)`: with `limit` it returns a
   page and `.next_cursor` (header `X-Kindling-Next-Cursor`); `.partial` is `X-Kindling-Partial`.
-- `Sandbox.create(env={...})` stores the variables as the sandbox's `default` session.
+- `Sandbox.create(env={...})` stores the variables as the sandbox's `default` session, which
+  `exec`, background processes, `code` and `shell` use when they don't ask for another one
+  (each use renews it; it expires after 24 h without use, and the sandbox keeps working without it).
+- `sb.set_metadata({"k": "v"}, remove=["old"])` patches your labels (reserved ones are a `BadRequest`);
+  `sb.fork(count=2, ttl=300)` branches the live sandbox into copies that count against your quota;
+  `sb.metrics()` gives `memory_mib` and, if the daemon measures it, `cpu_seconds`.
+- `files.chmod(path, 0o755, recursive=False)` and `files.replace(path, old, new, all=False)`
+  (without `all`, `old` must appear exactly once, else `Conflict`).
 - `exec_stream(...)` and `code.run(...)` return iterators; the last event is `exit`/`error`
   and `done` respectively. `code.run_wait(...)` aggregates stdout, stderr, result and error.
 - `files.read(path, range=(a, b))` asks for a byte range (206); `files.upload_tar` /
@@ -126,6 +133,11 @@ method nor an explicit exclusion (today only `shell`). Refresh with
 | `PUT /v1/sandboxes/{id}/files` | `Files.write()` |
 | `DELETE /v1/sandboxes/{id}/files` | `Files.delete()` |
 | `POST /v1/sandboxes/{id}/files/move` | `Files.move()` |
+| `PATCH /v1/sandboxes/{id}/metadata` | `Sandbox.set_metadata()` |
+| `POST /v1/sandboxes/{id}/fork` | `Sandbox.fork()` |
+| `GET /v1/sandboxes/{id}/metrics` | `Sandbox.metrics()` |
+| `POST /v1/sandboxes/{id}/files/chmod` | `Files.chmod()` |
+| `POST /v1/sandboxes/{id}/files/replace` | `Files.replace()` |
 | `POST /v1/sandboxes/{id}/files/mkdir` | `Files.mkdir()` |
 | `GET /v1/sandboxes/{id}/files/search` | `Files.search()` |
 | `GET /v1/volumes` | `Client.list_volumes()` |

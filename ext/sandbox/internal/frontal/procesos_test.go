@@ -20,7 +20,9 @@ type procsFalsos struct {
 	procs    []api.ProcessInfo
 	sesiones map[string]*api.Session
 	ultimaSe api.SessionRequest
-	senales  []string
+	// ultimoProc es el último POST processes recibido.
+	ultimoProc api.ProcessStartRequest
+	senales    []string
 }
 
 func (f *falso) rutasProcesos(m *http.ServeMux) {
@@ -30,6 +32,7 @@ func (f *falso) rutasProcesos(m *http.ServeMux) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		pf.mu.Lock()
 		defer pf.mu.Unlock()
+		pf.ultimoProc = req
 		p := api.ProcessInfo{PID: len(pf.procs) + 1, Cmd: req.Cmd, State: api.ProcessRunning}
 		pf.procs = append(pf.procs, p)
 		writeJSON(w, 201, p)

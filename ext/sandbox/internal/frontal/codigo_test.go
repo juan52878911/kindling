@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,11 @@ type daemonReal struct {
 	// sinInterprete: el exec que busca ese intérprete contesta 127.
 	sinInterprete string
 	senales       []string
+	// antesMv, si no es nil, corre justo antes de ejecutar un mv: es la carrera
+	// entre la comprobación del destino y el mv.
+	antesMv func(req api.ExecRequest)
+	// arranques son los procesos de fondo que se pidieron.
+	arranques []api.ProcessStartRequest
 	// dirsCodigo son los directorios de contexto que el daemon vio escribir.
 	dirsCodigo []string
 }
@@ -120,6 +126,7 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		d.mu.Lock()
 		d.execs = append(d.execs, req)
+		antesMv := d.antesMv
 		sinPy := d.sinPython
 		sinInt := d.sinInterprete
 		corta := d.corta && len(req.Cmd) > 2 && req.Cmd[2] == "run"
@@ -138,6 +145,21 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 			code := 127
 			_ = enc.Encode(api.ExecEvent{Exit: &code})
 			return
+		}
+		if req.Cmd[0] == "mv" {
+			if antesMv != nil {
+				antesMv(req)
+			}
+			if runtime.GOOS == "darwin" {
+				// El mv de BSD no tiene -T (el del invitado, Linux, sí).
+				var sin []string
+				for _, a := range req.Cmd {
+					if a != "-T" {
+						sin = append(sin, a)
+					}
+				}
+				req.Cmd = sin
+			}
 		}
 		c := exec.CommandContext(r.Context(), req.Cmd[0], req.Cmd[1:]...)
 		c.Stdin = bytes.NewReader(req.Stdin)
@@ -223,6 +245,9 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 	m.HandleFunc("POST /machines/{ref}/processes", func(w http.ResponseWriter, r *http.Request) {
 		var req api.ProcessStartRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.mu.Lock()
+		d.arranques = append(d.arranques, req)
+		d.mu.Unlock()
 		c := exec.Command(req.Cmd[0], req.Cmd[1:]...)
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := c.Start(); err != nil {

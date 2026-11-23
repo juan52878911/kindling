@@ -102,6 +102,12 @@ export class Files {
   move(from, to, { overwrite = false } = {}) { return this.#c.moveFile(this.#id, from, to, overwrite); }
   /** Crea el directorio y los que falten (`mkdir -p`). */
   mkdir(path) { return this.#c.mkdirFile(this.#id, path); }
+  /** Cambia permisos. `mode` es un entero (0o755) o una cadena octal ("755"). */
+  chmod(path, mode, { recursive = false } = {}) {
+    return this.#c.chmodFile(this.#id, path, typeof mode === "number" ? mode.toString(8) : String(mode), recursive);
+  }
+  /** Sustituye `old` por `new` en el fichero. Sin `all`, `old` tiene que aparecer una vez (si no, Conflict). */
+  replace(path, old, nuevo, { all = false } = {}) { return this.#c.replaceInFile(this.#id, path, old, nuevo, all); }
   /** Busca por NOMBRE (`*.log`) bajo `path`, recursivo; `truncated` si se cortó. */
   search(path, glob) { return this.#c.searchFiles(this.#id, path, glob); }
   /** Extrae un tar dentro del directorio `path` del sandbox. */
@@ -241,6 +247,18 @@ export class Sandbox {
     return this.#client.setEgress(this.id, { egress, allow_domains: allowDomains });
   }
   set_egress(egress, allowDomains) { return this.setEgress(egress, allowDomains); }
+  /** Añade o cambia etiquetas propias (`labels`) y quita otras (`remove`). Las reservadas dan BadRequest. */
+  async setMetadata({ labels, remove } = {}) {
+    this.info = await this.#client.patchMetadata(this.id, { labels, remove });
+    return this.info;
+  }
+  /** Ramifica en `count` copias (memoria, procesos y disco tal como están); cuentan para la cuota. */
+  async fork({ count = 1, ttl } = {}) {
+    const infos = await this.#client.forkSandbox(this.id, { count, ttl_seconds: ttl });
+    return infos.map((i) => new Sandbox(i, this.#client));
+  }
+  /** Memoria (`memory_mib`) y CPU (`cpu_seconds`, si el daemon la mide). */
+  metrics() { return this.#client.sandboxMetrics(this.id); }
   delete() { return this.#client.deleteSandbox(this.id); }
   kill() { return this.delete(); }
 

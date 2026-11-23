@@ -165,6 +165,7 @@ func (s *Servidor) handleCrearTenant(w http.ResponseWriter, r *http.Request) {
 		errAlmacen(w, err)
 		return
 	}
+	s.avisarCuotasAbiertas(s.deAlmacen(q))
 	writeJSON(w, http.StatusCreated, vistaDeAlmacen(q))
 }
 
@@ -194,6 +195,7 @@ func (s *Servidor) handleCambiarTenant(w http.ResponseWriter, r *http.Request) {
 		errAlmacen(w, err)
 		return
 	}
+	s.avisarCuotasAbiertas(s.deAlmacen(q))
 	writeJSON(w, http.StatusOK, vistaDeAlmacen(q))
 }
 
