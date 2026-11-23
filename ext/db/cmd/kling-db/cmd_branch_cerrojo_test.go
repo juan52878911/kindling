@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +130,72 @@ func TestBranchHuerfanaEnPreparingSeRehace(t *testing.T) {
 	mc := ta.copyOf(t, "feat")
 	if mc == nil || mc.ID == orphan.ID || mc.Labels[labelState] != stateReady {
 		t.Fatalf("copy of feat = %+v", mc)
+	}
+}
+
+// avisoEspera es un stderr que avisa (una vez) cuando alguien dice que espera
+// al cerrojo.
+type avisoEspera struct {
+	mu   sync.Mutex
+	buf  strings.Builder
+	once sync.Once
+	ch   chan struct{}
+}
+
+func (w *avisoEspera) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf.Write(p)
+	if strings.Contains(w.buf.String(), "waiting for another kling db branch") {
+		w.once.Do(func() { close(w.ch) })
+	}
+	return len(p), nil
+}
+
+// -prune que espera el cerrojo detrás de un checkout que crea una rama nueva
+// no borra la copia de esa rama: las ramas de git se leen con el cerrojo ya
+// tomado, a la vez que las copias.
+func TestPruneLeeLasRamasConElCerrojo(t *testing.T) {
+	ta, dir := branchTestApp(t)
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	main := ta.copyOf(t, "main")
+	ri, _ := ta.repo(ctx)
+	old := branchLockWait
+	branchLockWait = 10 * time.Second
+	t.Cleanup(func() { branchLockWait = old })
+	un, err := dbstate.Lock(ctx, "branch-"+ri.repo, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &avisoEspera{ch: make(chan struct{})}
+	ta.app.stderr = w
+	done := make(chan error, 1)
+	go func() { done <- ta.branchPrune(ctx, defaultOwner, false) }()
+	select {
+	case <-w.ch:
+	case err := <-done:
+		un()
+		t.Fatalf("prune did not wait for the lock: %v", err)
+	case <-time.After(5 * time.Second):
+		un()
+		t.Fatal("prune neither waited nor finished")
+	}
+	// Lo que hace el checkout que tiene el cerrojo: la rama y su copia.
+	gitT(t, dir, "branch", "nueva")
+	l := clone(main.Labels)
+	l[labelBranch] = branchKey("nueva")
+	ta.f.mu.Lock()
+	nueva := ta.f.newMachine("nueva", l)
+	ta.f.mu.Unlock()
+	un()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ta.f.find(nueva.ID) == nil {
+		t.Fatal("prune removed the copy of a branch created while it waited for the lock")
 	}
 }
 
