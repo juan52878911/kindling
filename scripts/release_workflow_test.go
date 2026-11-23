@@ -101,3 +101,36 @@ func TestReleaseWorkflowSinCacheNiCredenciales(t *testing.T) {
 		t.Fatal("release.yml sin ningún checkout")
 	}
 }
+
+// F-02: release.yml no se fía de que la etiqueta saliera de release.sh. Desde
+// 1.0 el job release pide el commit status del e2e de kling-hv (el mismo
+// e2e-hv-estado.sh que release.sh) antes de firmar nada, con permiso de
+// lectura de los status y el token del job.
+func TestReleaseWorkflowExigeElE2EDeKlingHV(t *testing.T) {
+	jobs := jobsDeWorkflow(t, "../.github/workflows/release.yml")
+	rel, ok := jobs["release"]
+	if !ok {
+		t.Fatal("release.yml sin job release")
+	}
+	if !regexp.MustCompile(`(?m)^      statuses:\s*read\s*$`).MatchString(rel) {
+		t.Error("job release sin permissions statuses: read")
+	}
+	puerta, firma := -1, -1
+	for i, p := range strings.Split(rel, "\n      - ") {
+		if puerta < 0 && strings.Contains(p, "scripts/e2e-hv-estado.sh") {
+			puerta = i
+			if !strings.Contains(p, "GH_TOKEN:") {
+				t.Errorf("el paso del e2e de kling-hv sin GH_TOKEN:\n%s", p)
+			}
+		}
+		if firma < 0 && strings.Contains(p, "name: firmar SHA256SUMS") {
+			firma = i
+		}
+	}
+	if puerta < 0 {
+		t.Fatal("job release: ningún paso corre scripts/e2e-hv-estado.sh")
+	}
+	if firma < 0 || puerta > firma {
+		t.Errorf("job release: el e2e de kling-hv (paso %d) no va antes de firmar (paso %d)", puerta, firma)
+	}
+}
