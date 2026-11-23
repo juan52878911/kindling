@@ -336,9 +336,10 @@ func TestInstallMinKlingConPrerelease(t *testing.T) {
 	}
 }
 
-// Una 0.x sin firma se instala con aviso, también como «latest» (hoy es lo que
-// resuelve el one-liner del README); una 1.x sin firma se rechaza.
-func TestInstallCeroXSinFirmaSoloConTag(t *testing.T) {
+// Una 0.x sin firma solo se instala pidiéndola (--tag o KLING_VERSION), con
+// aviso: como «latest» se rechaza, con o sin minisign, y el error da la orden.
+// Una 1.x sin firma se rechaza siempre.
+func TestInstallLatestCeroXSinFirmaFalla(t *testing.T) {
 	casos := []struct {
 		nombre string
 		rel    releaseFalsa
@@ -346,7 +347,8 @@ func TestInstallCeroXSinFirmaSoloConTag(t *testing.T) {
 		motivo string
 	}{
 		{"0.x pedida con --tag", releaseFalsa{tag: "v0.20.1", sinFirma: true}, true, "checking with sha256 only"},
-		{"0.x sin firma como latest (el one-liner del README)", releaseFalsa{tag: "v0.20.1", sinFirma: true, latest: true}, true, "checking with sha256 only"},
+		{"0.x sin firma como latest", releaseFalsa{tag: "v0.20.1", sinFirma: true, latest: true}, false, "KLING_VERSION=v0.20.1"},
+		{"0.x sin firma como latest, sin minisign", releaseFalsa{tag: "v0.20.1", sinFirma: true, latest: true, sinMinisign: true}, false, "KLING_VERSION=v0.20.1"},
 		{"0.x firmada como latest", releaseFalsa{tag: "v0.20.1", latest: true}, true, "SHA256SUMS signature"},
 		{"1.x firmada como latest", releaseFalsa{latest: true}, true, "SHA256SUMS signature"},
 		{"1.x sin firma como latest", releaseFalsa{sinFirma: true, latest: true}, false, "has no SHA256SUMS.minisig"},

@@ -281,3 +281,6 @@ func instalarUnidadSystemd() error {
 	}
 	return nil
 }
+
+// comprobarBinarioDeRoot: pendiente (R22).
+func comprobarBinarioDeRoot(exe string) error { return nil }
