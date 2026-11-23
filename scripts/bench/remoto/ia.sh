@@ -57,7 +57,7 @@ primero() { for f in "$@"; do [ -e "$f" ] && { echo "$f"; return 0; }; done; ret
 
 medir() {
   mkdir -p "$RES"
-  exec > >(tee -a "$RES/fase-ia.log") 2>&1
+  exec > >(tee -a "$RES/medir-ia.log") 2>&1
   local HIG=0
   if [ "${USAR_DAEMON:-0}" = 1 ]; then
     K=${KLING:-kling}
