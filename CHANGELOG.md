@@ -64,6 +64,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- kling-hv: `F_FULLFSYNC` is capped per disk at 32/s (bursts of 32); above that a FLUSH settles with `F_BARRIERFSYNC` and the missing full sync follows, so a power cut can lose ~31 ms of FLUSHes but never their order (`docs/backend-hv.md`).
+- Releases ship `kling-unpack` (Linux static, darwin arm64) and `install.sh` puts it in the daemon's `lib/` (`docs/imagenes.md`).
+- Daemon: the system caller's role is resolved once per connection, so a group change applies from the caller's next connection (`docs/authz.md`).
+- Pause and resume keep the "agent seen" cache (new `vmm_started_at`), so the first exec after a resume no longer probes the agent; on macOS `kling inspect` shows the VMM's own restore phases in `wake.vmm` and `create.vmm`, read after the reply.
+- MCP gateway: the multi-host router queries hosts in parallel and remembers their services for 5 s; kling-bridge replaces the warm child after a session spends it; aggregator requests list snapshots once and catalog refreshes are single-flight.
+- kling-sandbox gateway: a sandbox is resolved by id instead of listing the host, and key last-use is dumped outside the store lock.
+- Python SDK reuses one connection per thread and one TLS context per client; the Go client keeps connections alive for long calls over the unix socket; the guest exec stream has an absolute deadline and `Client.Exec` enforces the output cap.
+- Machines: pool refills yield the launch gate to waiting requests, the restore gate is taken after the VMM is spawned, an image-snapshot copy resyncs and starts over one guest connection, and the state.json snapshot is taken by the writer; kling-hv keeps only offered virtio features on negotiation and restore.
+
 - The network slot pool grows with burst demand up to `KLING_NET_POOL_MAX` (default 64), refills 4 at a time when idle and shrinks 2 slots per 15 s when quiet.
 - Cold boot: guests whose agent announces "net" get eth0 and lo configured by the agent over netlink (`kling.net=`) instead of the kernel's `ip=` (about 24 ms less on hv); older agents keep `ip=`.
 
