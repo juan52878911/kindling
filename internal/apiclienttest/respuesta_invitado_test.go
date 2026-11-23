@@ -22,7 +22,8 @@ func TestRespuestaDeInvitadoSinTope(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	const viajan = 8 << 20
+	// Margen real sobre el tope de las listas del agente (no unos bytes).
+	viajan := int(api.MaxListResponseBytes) + 4<<20
 	trozo := strings.Repeat("{},", 4096)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/machines/m/processes", func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +36,9 @@ func TestRespuestaDeInvitadoSinTope(t *testing.T) {
 	})
 	mux.HandleFunc("/machines/m/files", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"entries":[`))
-		for n := 0; n < 8<<20; n += len(trozo) {
+		// Margen real sobre MaxFileListBytes. ListFiles del daemon sigue sin tope
+		// de entradas: pendiente de B-5.
+		for n := 0; n < int(api.MaxFileListBytes)+1<<20; n += len(trozo) {
 			_, _ = w.Write([]byte(trozo))
 		}
 		_, _ = w.Write([]byte("{}]}"))
