@@ -31,6 +31,9 @@ type evCodigo struct {
 	Evalue    string   `json:"evalue"`
 	Traceback []string `json:"traceback"`
 	OK        *bool    `json:"ok"`
+
+	Results        map[string]string `json:"results"`
+	ExecutionCount int               `json:"execution_count"`
 }
 
 // daemonReal pone delante del daemon falso uno que SÍ ejecuta: exec, procesos
@@ -46,6 +49,9 @@ type daemonReal struct {
 	execs     []api.ExecRequest
 	// corta hace que el exec "run" mande un evento y corte la conexión.
 	corta bool
+	// sinInterprete: el exec que busca ese intérprete contesta 127.
+	sinInterprete string
+	senales       []string
 }
 
 func (d *daemonReal) vivo(pid int) bool {
@@ -97,6 +103,7 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		d.mu.Lock()
 		d.execs = append(d.execs, req)
 		sinPy := d.sinPython
+		sinInt := d.sinInterprete
 		corta := d.corta && len(req.Cmd) > 2 && req.Cmd[2] == "run"
 		d.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson")
@@ -108,7 +115,8 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 			fl.Flush()
 			panic(http.ErrAbortHandler)
 		}
-		if sinPy && len(req.Cmd) > 2 && strings.Contains(req.Cmd[2], "python3") {
+		if len(req.Cmd) > 2 && ((sinPy && strings.Contains(req.Cmd[2], "python3")) ||
+			(sinInt != "" && strings.Contains(req.Cmd[2], "command -v "+sinInt+" "))) {
 			code := 127
 			_ = enc.Encode(api.ExecEvent{Exit: &code})
 			return
@@ -203,6 +211,25 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		}
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		w.WriteHeader(204)
+	})
+	m.HandleFunc("POST /machines/{ref}/processes/{pid}/signal", func(w http.ResponseWriter, r *http.Request) {
+		pid, _ := strconv.Atoi(r.PathValue("pid"))
+		var req api.ProcessSignalRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		sig := syscall.SIGTERM
+		if strings.TrimPrefix(req.Signal, "SIG") == "INT" {
+			sig = syscall.SIGINT
+		}
+		d.mu.Lock()
+		_, ok := d.procs[pid]
+		d.senales = append(d.senales, req.Signal)
+		d.mu.Unlock()
+		if !ok {
+			failDaemon(w, 404, os.ErrNotExist)
+			return
+		}
+		_ = syscall.Kill(-pid, sig)
+		writeJSON(w, 200, api.ProcessInfo{PID: pid, State: api.ProcessRunning})
 	})
 	m.Handle("/", proxy)
 	srv := httptest.NewUnstartedServer(m)
