@@ -133,3 +133,22 @@ func BenchmarkReiniciosErrores(b *testing.B) {
 	}
 	b.ReportMetric(float64(total)/float64(b.N), "err/restart")
 }
+
+// Un SIGTERM con una generación en curso la deja terminar: servirHastaApagar
+// no vuelve (y el proceso no sale) hasta que Shutdown haya drenado lo que
+// estaba en vuelo (R8-03).
+func TestApagadoEsperaPeticionEnVuelo(t *testing.T) {
+	if n := reinicioConPeticiones(t, 1, 200*time.Millisecond, 5*time.Second); n != 0 {
+		t.Fatalf("%d request(s) in flight failed on shutdown, want 0", n)
+	}
+}
+
+// Pasado el plazo de drenado, servirHastaApagar vuelve igual: un cliente
+// colgado no retiene el apagado más que -drain.
+func TestApagadoRespetaElPlazo(t *testing.T) {
+	t0 := time.Now()
+	reinicioConPeticiones(t, 1, 3*time.Second, 100*time.Millisecond)
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("shutdown took %s with a 100ms drain", d)
+	}
+}
