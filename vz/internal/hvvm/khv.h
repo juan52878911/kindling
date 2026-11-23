@@ -365,6 +365,7 @@ void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaura
 void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
 uint64_t vblk_prueba_sincs(void);                    // sincronizaciones de los FLUSH (pruebas)
+uint64_t vblk_prueba_fullsincs(void);                // de ellas, F_FULLFSYNC (pruebas)
 int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del disco (pruebas)
 // Bytes de datos por tanda del hilo de un disco, y por petición IN/OUT (ver
 // b_procesar). Variable solo para que las pruebas lo bajen.

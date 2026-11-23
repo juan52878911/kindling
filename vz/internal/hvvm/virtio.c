@@ -566,8 +566,9 @@ static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, in
   return 0;
 }
 
-// vblk_sincs: los F_FULLFSYNC/F_BARRIERFSYNC que mandaron los FLUSH (pruebas).
-static uint64_t vblk_sincs;
+// vblk_sincs: los F_FULLFSYNC/F_BARRIERFSYNC que mandaron los FLUSH (pruebas);
+// vblk_fullsincs, de ellos los F_FULLFSYNC.
+static uint64_t vblk_sincs, vblk_fullsincs;
 
 // Atiende las peticiones pendientes de la cola. Solo desde el hilo del disco,
 // con ocupado puesto. *irq: hay que interrumpir al invitado (hubo respuestas y
@@ -741,6 +742,7 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         // none de vz; el núcleo lo asienta antes de conservar el disco,
         // internal/machine/desechable.go) o un volumen que se pidió así.
         int op = b->sinc == KHV_SINC_BARRIER ? F_BARRIERFSYNC : F_FULLFSYNC;
+        if (op == F_FULLFSYNC) __atomic_fetch_add(&vblk_fullsincs, 1, __ATOMIC_RELAXED);
         if (fcntl(b->fd, op) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) {
           estado = 1;
           b->sucio = true;  // el siguiente FLUSH lo vuelve a intentar
@@ -804,6 +806,7 @@ void vblk_prueba(int idx) {
 }
 
 uint64_t vblk_prueba_sincs(void) { return __atomic_load_n(&vblk_sincs, __ATOMIC_RELAXED); }
+uint64_t vblk_prueba_fullsincs(void) { return __atomic_load_n(&vblk_fullsincs, __ATOMIC_RELAXED); }
 
 // vblk_prueba_modo cambia ro y sinc del disco idx (solo pruebas, con la cola
 // quieta); el disco queda sucio, como recién abierto.

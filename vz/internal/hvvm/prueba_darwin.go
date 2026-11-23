@@ -124,6 +124,9 @@ func modoDisco(ro bool, sinc int) { C.vblk_prueba_modo(0, C.bool(ro), C.int(sinc
 // sincsDisco: las sincronizaciones con el SSD que mandaron los FLUSH.
 func sincsDisco() uint64 { return uint64(C.vblk_prueba_sincs()) }
 
+// fullSincsDisco: de ellas, las F_FULLFSYNC (vacían la caché del SSD del Mac).
+func fullSincsDisco() uint64 { return uint64(C.vblk_prueba_fullsincs()) }
+
 // Los modos de sincronización de khv.h, para las pruebas.
 const (
 	sincFull    = int(C.KHV_SINC_FULL)
