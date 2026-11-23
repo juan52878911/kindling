@@ -82,7 +82,9 @@ EOF
 }
 
 SHA=$(git -C "$TOP" rev-parse --short=12 HEAD) || die "not a git checkout"
-SUCIO=""; [ -n "$(git -C "$TOP" status --porcelain --untracked-files=no)" ] && SUCIO=1
+# Sucio también con ficheros sin añadir (no ignorados): un .go nuevo entra en
+# go build, y el sello iría a un commit que no es lo que se probó.
+SUCIO=""; [ -n "$(git -C "$TOP" status --porcelain --untracked-files=normal)" ] && SUCIO=1
 V=$(git -C "$TOP" describe --tags --always)
 WORK=$(mktemp -d "$TMPBASE/kling-e2e-release.XXXXXX") || die "mktemp"
 fin() {
@@ -164,7 +166,9 @@ for p in $E2E; do
       say "92-e2e-mac.sh (VMM=hv)"
       borra_marca 92
       rm -rf "$LOGS/$SHA-92"
-      VMM=hv KLING="$BIN/kling" KLING_DB="$WORK/plugins/kling-db" IMAGES_DIR="$IMGS" \
+      # KLING_E2E_STRICT=1: una parte saltada (sin psql, sin git, sin golden)
+      # no gana el mismo sello que una pasada completa.
+      KLING_E2E_STRICT=1 VMM=hv KLING="$BIN/kling" KLING_DB="$WORK/plugins/kling-db" IMAGES_DIR="$IMGS" \
         ROOT="$WORK/92/Library/Application Support/kindling-e2e-a-deliberately-long-root" \
         LOG="$WORK/92/daemon.log" KLING_E2E_LOGS="$LOGS/$SHA-92" bash "$HERE/92-e2e-mac.sh"
       R92=$?
@@ -175,7 +179,16 @@ for p in $E2E; do
       say "95-e2e-upgrade-mac.sh (VMM=hv)"
       borra_marca 95
       rm -rf "$LOGS/$SHA-95"
-      VMM=hv NEW_DIR="$BIN" IMAGES_DIR="$IMGS" BASE="$WORK/95" KLING_E2E_CACHE="$KLING_E2E_CACHE" \
+      # La release de partida se elige aquí para que quede en la marca y en el
+      # status (y se diga si fue la fija porque el API no contestó).
+      if [ -z "${OLD_TAG:-}" ]; then
+        OLD_TAG=$(ultima_release_anterior "$V")
+        if [ -z "$OLD_TAG" ]; then
+          OLD_TAG="$RELEASE_ANTERIOR_FIJA"; OLD_TAG_NOTA=" (fixed: the GitHub API did not answer)"
+        fi
+      fi
+      echo "95 starts from $OLD_TAG${OLD_TAG_NOTA:-}"
+      OLD_TAG="$OLD_TAG" VMM=hv NEW_DIR="$BIN" IMAGES_DIR="$IMGS" BASE="$WORK/95" KLING_E2E_CACHE="$KLING_E2E_CACHE" \
         KLING_E2E_LOGS="$LOGS/$SHA-95" bash "$HERE/95-e2e-upgrade-mac.sh"
       R95=$?
       logs_de 95 "$R95"
@@ -194,13 +207,18 @@ done
 say "result"
 res() { case "$2" in -) echo "$1: not run";; 0) echo "$1: passed";; agent) echo "$1: not run (your $LABEL is in the way)";; *) echo "$1: FAILED (exit $2)";; esac; }
 res 92-e2e-mac.sh "$R92"; res 95-e2e-upgrade-mac.sh "$R95"
+[ "$R95" = 0 ] && echo "95 upgraded from $OLD_TAG${OLD_TAG_NOTA:-}"
 [ "$R96" = - ] || res 96-e2e-primer-uso.sh "$R96"
 [ "$R95" = agent ] && explica_agente
 if [ -z "$SUCIO" ]; then
   mkdir -p "$HECHO"
   [ "$R92" = 0 ] && : > "$HECHO/$SHA.92"
-  [ "$R95" = 0 ] && : > "$HECHO/$SHA.95"
+  # La marca de 95 guarda de qué release partió: el status puede publicarse
+  # en otra pasada (E2E=92 después) y tiene que decir la de esta.
+  [ "$R95" = 0 ] && printf '%s\n' "$OLD_TAG${OLD_TAG_NOTA:-}" > "$HECHO/$SHA.95"
 fi
+# desde_95: la release de partida de la marca de 95 ("?" si es de antes).
+desde_95() { local d; d=$(head -n 1 "$HECHO/$SHA.95" 2>/dev/null); printf '%s' "${d:-?}"; }
 # El rastro en GitHub: un commit status sobre el commit entero, con el mismo
 # contexto que busca scripts/release.sh (si cambia, en los dos). Necesita gh
 # autenticado con escritura en el repo y el commit ya empujado; si no se
@@ -235,7 +253,7 @@ fi
 if [ -f "$HECHO/$SHA.92" ] && [ -f "$HECHO/$SHA.95" ] && [ -z "$SUCIO" ]; then
   echo
   echo "92 and 95 passed with VMM=hv on $SHA"
-  publicar_estado success "92 and 95 passed" || { echo "without the commit status release.sh will not tag $SHA: push it, check gh auth and run E2E=95 scripts/e2e-mac-release.sh again" >&2; exit 1; }
+  publicar_estado success "92 and 95 (from $(desde_95)) passed" || { echo "without the commit status release.sh will not tag $SHA: push it, check gh auth and run E2E=95 scripts/e2e-mac-release.sh again" >&2; exit 1; }
   exit 0
 fi
 [ -n "$SUCIO" ] && echo "the tree has uncommitted changes: nothing counts for the release; commit and run it again" >&2

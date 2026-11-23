@@ -179,6 +179,9 @@ jobs:
         id: e92
         if: contains(inputs.parts || 'e2e upgrade', 'e2e')
         env:
+          # Una parte saltada hace fallar el paso: el commit status no se gana
+          # con una pasada a medias.
+          KLING_E2E_STRICT: '1'
           KLING: ${{ steps.bin.outputs.dir }}/kling
           IMAGES_DIR: ${{ steps.pre.outputs.images }}
           IMG: ${{ steps.pre.outputs.img }}

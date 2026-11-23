@@ -1845,8 +1845,10 @@ b, spare = sys.argv[1], len(sys.argv) > 2
 for r in json.load(sys.stdin):
     if r["branch"] == b and bool(r.get("spare")) == spare:
         print(r["copy"]); break' "$@"; }
-  # bidle: espera a que acabe el trabajo de segundo plano del gancho.
-  bidle() { local i; for i in $(seq 1 600); do pgrep -f "branch -settle" >/dev/null || return 0; sleep 0.2; done; }
+  # bidle: espera a que acabe el trabajo de segundo plano del gancho de ESTE
+  # repo (el settle cuyo directorio de trabajo es $BR, no cualquiera del
+  # sistema) y, si no acaba en 120 s, lo dice y devuelve 1.
+  bidle() { local i p br ocupado; br=$(readlink -f "$BR"); for i in $(seq 1 600); do ocupado=; for p in $(pgrep -f "kling-db branch -settle"); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$br" ] && ocupado=1; done; [ -n "$ocupado" ] || return 0; sleep 0.2; done; bad "kling db branch -settle" "acabado en 120 s" "sigue corriendo"; return 1; }
   # bco: git checkout con la salida del gancho al registro; deja en BMS lo que tardó.
   bco() { local t0 t1; t0=$(date +%s%N); (cd "$BR" && git checkout -q "$@" 2>>"$BLOG"); t1=$(date +%s%N); BMS=$(( (t1 - t0) / 1000000 )); }
   benv() { grep '^PGPASSWORD=' "$BR/.git/kling-db.env" 2>/dev/null; }
