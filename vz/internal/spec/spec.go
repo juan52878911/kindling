@@ -73,6 +73,9 @@ type VirtioFS struct {
 type BootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
 	BootArgs        string `json:"boot_args"`
+	// DelVolcado: la ruta viene de un snap.file cargado y el daemon aún no
+	// la ha reapuntado (MarcarVolcado). Nunca se serializa.
+	DelVolcado bool `json:"-"`
 }
 
 type MachineConfig struct {
@@ -108,6 +111,8 @@ type Drive struct {
 	// vuelve a decir siempre (PATCH), así que una réplica no hereda el modo
 	// del dorado. Un kling-vz anterior lo ignora al leerlo (full, lo seguro).
 	Sync string `json:"kling_sync,omitempty"`
+	// DelVolcado: ver BootSource.DelVolcado. Nunca se serializa.
+	DelVolcado bool `json:"-"`
 }
 
 // Modos de Drive.Sync.
@@ -247,6 +252,7 @@ func (s *Spec) PatchDriveModes(id, path string, disposable *bool, sync *string) 
 	for i := range s.Drives {
 		if s.Drives[i].DriveID == id {
 			s.Drives[i].PathOnHost = path
+			s.Drives[i].DelVolcado = false
 			if disposable != nil {
 				s.Drives[i].Disposable = *disposable
 			}
@@ -257,6 +263,33 @@ func (s *Spec) PatchDriveModes(id, path string, disposable *bool, sync *string) 
 		}
 	}
 	return fmt.Errorf("drive %q is not configured", id)
+}
+
+// MarcarVolcado marca el kernel y cada disco como «ruta del volcado»: lo que
+// escribió otro VMM en un snap.file no decide qué abre este. PatchDrive y
+// PUT /boot-source (el daemon) quitan la marca; con alguna puesta no se crea
+// la VM (RutasDelVolcado).
+func (s *Spec) MarcarVolcado() {
+	if s.BootSource != nil {
+		s.BootSource.DelVolcado = true
+	}
+	for i := range s.Drives {
+		s.Drives[i].DelVolcado = true
+	}
+}
+
+// RutasDelVolcado devuelve las rutas aún sin reapuntar por el daemon.
+func (s *Spec) RutasDelVolcado() []string {
+	var out []string
+	if s.BootSource != nil && s.BootSource.DelVolcado {
+		out = append(out, s.BootSource.KernelImagePath)
+	}
+	for _, d := range s.Drives {
+		if d.DelVolcado {
+			out = append(out, d.PathOnHost)
+		}
+	}
+	return out
 }
 
 // ValidateVCPUs comprueba vcpu_count contra el tope del VMM (max; 0 = sin

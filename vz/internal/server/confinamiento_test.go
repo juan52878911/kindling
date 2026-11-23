@@ -51,13 +51,13 @@ func TestConfinamientoAlRestaurar(t *testing.T) {
 	snap, mem := writeSnapshot(t, t.TempDir())
 	r.must("PUT", "/kling/network", `{"egress":"none"}`)
 	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":false}`)
-	r.must("PATCH", "/drives/overlay", `{"drive_id":"overlay","path_on_host":"/m/1/overlay.ext4"}`)
+	r.reapuntar("rootfs", "overlay")
 	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
 	if len(got) != 1 {
 		t.Fatalf("Confine llamado %d veces", len(got))
 	}
 	c := got[0]
-	if !slices.Contains(c.Lectura, mem) || !slices.Contains(c.Lectura, "/k") {
+	if !slices.Contains(c.Lectura, mem) || !slices.Contains(c.Lectura, "/m/1/vmlinux") {
 		t.Fatalf("Lectura = %v: faltan el estado o el kernel", c.Lectura)
 	}
 	if !slices.Equal(c.Escritura, []string{"/m/1/overlay.ext4"}) {
