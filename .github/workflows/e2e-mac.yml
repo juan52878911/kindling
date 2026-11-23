@@ -141,6 +141,11 @@ jobs:
           for f in vmlinux min.ext4 "$IMG.layer.ext4"; do
             [ -f "$dir/$f" ] || { echo "::error::$dir/$f is missing (see the header of e2e-mac.yml)"; exit 1; }
           done
+          # El kernel de este commit (kernel.pin), no uno de otra versión que
+          # quedara en el directorio: el commit status no puede ganarse con él.
+          . scripts/lib-e2e-upgrade.sh
+          kernel_del_pin "$dir/vmlinux" scripts/builders/kernel/kernel.pin \
+            || { echo "::error::$dir/vmlinux is not the kernel that scripts/builders/kernel/kernel.pin fixes"; exit 1; }
           # El agente del usuario de esta cuenta no se toca: 95 lo reemplazaría.
           if launchctl print "gui/$(id -u)/dev.kindling.daemon" >/dev/null 2>&1 \
              || [ -e "$HOME/Library/LaunchAgents/dev.kindling.daemon.plist" ]; then
@@ -203,6 +208,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           R92: ${{ steps.e92.outcome }}
           R95: ${{ steps.e95.outcome }}
+          IMAGES_DIR: ${{ steps.pre.outputs.images }}
         run: |
           set -euo pipefail
           if [ "$R92" = success ] && [ "$R95" = success ]; then
@@ -210,7 +216,10 @@ jobs:
           else
             st=failure; d="92: $R92, 95: $R95"
           fi
-          d="$d with VMM=hv (e2e-mac.yml, macOS $(sw_vers -productVersion))"
+          # Con qué kernel y qué min (sha256 cortos), como e2e-mac-release.sh.
+          kh=$(shasum -a 256 "$IMAGES_DIR/vmlinux" | cut -c1-12)
+          mh=$(shasum -a 256 "$IMAGES_DIR/min.ext4" | cut -c1-12)
+          d="$d with VMM=hv, vmlinux $kh, min $mh (e2e-mac.yml, macOS $(sw_vers -productVersion))"
           # curl y no gh: el Mac del runner no tiene por qué tener gh.
           curl -fsS -o /dev/null -X POST \
             -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \

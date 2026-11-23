@@ -72,6 +72,26 @@ release_anterior() {
   printf '%s\n' "$t"
 }
 
+# kernel_del_pin VMLINUX KERNEL_PIN: 0 si VMLINUX es el kernel propio de la
+# versión que fija KERNEL_PIN (scripts/builders/kernel/kernel.pin), por la
+# cadena «Linux version <versión>-kindling» que lleva el binario (sin
+# comprimir: el vmlinux de x86_64 y el Image de arm64). El e2e del Mac no
+# compila el kernel: así no gana el sello con uno de otra versión (el del
+# daemon de quien lo corre o el de la release anterior). Dice cuál encontró.
+kernel_del_pin() {
+  local quiero tengo
+  quiero=$(sed -n 's/^KERNEL_VERSION=//p' "$2" | head -n 1)
+  [ -n "$quiero" ] || { echo "no KERNEL_VERSION in $2" >&2; return 1; }
+  tengo=$(LC_ALL=C grep -a -o -m 1 'Linux version [^ ]*' "$1" 2>/dev/null | head -n 1)
+  tengo=${tengo#Linux version }
+  if [ "$tengo" = "$quiero-kindling" ]; then
+    echo "kernel $tengo, the one kernel.pin fixes"
+    return 0
+  fi
+  echo "$1 is kernel \"${tengo:-unknown}\", and this commit pins $quiero-kindling ($2)" >&2
+  return 1
+}
+
 # sha256_de FICHERO: su sha256 (sha256sum en Linux, shasum en macOS).
 sha256_de() {
   if command -v sha256sum >/dev/null 2>&1; then

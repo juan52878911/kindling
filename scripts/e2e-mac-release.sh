@@ -125,7 +125,14 @@ else
   rm -rf "$WORK/dl"
   echo "downloaded from release $TAG, checked against its SHA256SUMS"
 fi
-echo "vmlinux sha256 $(sha256_de "$IMGS/vmlinux" | cut -c1-12)"
+# El kernel tiene que ser el de kernel.pin de este commit: si el del daemon (o
+# el de la release anterior) es de otra versión, el sello no probaría el que
+# va a salir. Los sha256 cortos de los dos van en la descripción del status.
+kernel_del_pin "$IMGS/vmlinux" "$HERE/builders/kernel/kernel.pin" \
+  || die "the kernel in $IMGS/vmlinux is not the one kernel.pin fixes: put the vmlinux built from this commit (scripts/builders/kernel/build.sh on a Linux arm64) in KLING_E2E_DATA"
+VMLINUX_SHA=$(sha256_de "$IMGS/vmlinux" | cut -c1-12)
+MIN_SHA=$(sha256_de "$IMGS/min.ext4" | cut -c1-12)
+echo "vmlinux sha256 $VMLINUX_SHA, min.ext4 sha256 $MIN_SHA"
 
 # ── las pruebas ──────────────────────────────────────────────────────────────
 # Los logs de una prueba que falla sobreviven al borrado de $WORK: el log de su
@@ -206,8 +213,10 @@ publicar_estado() { # publicar_estado <state> <description>
   full=$(git -C "$TOP" rev-parse HEAD) || return 1
   repo="${KLING_E2E_REPO:-juan52878911/kindling}"
   mac="macOS $(sw_vers -productVersion 2>/dev/null), $(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+  # GitHub corta la descripción en 140 caracteres: lo del Mac, al final.
+  local d="$2 with VMM=hv, vmlinux $VMLINUX_SHA, min $MIN_SHA ($mac)"
   if gh api -X POST "repos/$repo/statuses/$full" -f state="$1" -f context="$CONTEXTO" \
-       -f description="$2 with VMM=hv ($mac)" >/dev/null; then
+       -f description="${d:0:140}" >/dev/null; then
     echo "commit status $CONTEXTO=$1 on $repo@$SHA"
   else
     echo "could not publish the commit status on $repo@$SHA (pushed? gh auth with write access?)" >&2
