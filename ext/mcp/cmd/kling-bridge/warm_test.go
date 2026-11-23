@@ -114,7 +114,7 @@ func TestAdopcionVetadaConSecretosDeSesion(t *testing.T) {
 	b.warm = w
 
 	b.mu.Lock()
-	s := b.adoptWarmLocked("abcdef0123456789", true)
+	s := b.adoptWarmLocked("abcdef0123456789", append(append([]string(nil), b.env...), "SECRETO=1"))
 	b.mu.Unlock()
 	if s != nil {
 		t.Fatal("adoptó un caliente sin los secretos que la sesión exige")
@@ -146,7 +146,7 @@ func TestAdopcionVetadaSiElCalienteMurio(t *testing.T) {
 	w.exitCh <- syscall.WaitStatus(9)
 
 	b.mu.Lock()
-	s := b.adoptWarmLocked("abcdef0123456789", false)
+	s := b.adoptWarmLocked("abcdef0123456789", b.env)
 	b.mu.Unlock()
 	if s != nil {
 		s.close()

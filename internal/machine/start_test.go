@@ -17,7 +17,7 @@ import (
 
 // paradaParaStart registra una máquina parada con lo que Start mira antes de
 // lanzar nada: su overlay, una imagen y un kernel de pega. La red no se toca
-// de verdad (montarRedHost/desmontarRedHost falsos, que apuntan lo que se
+// de verdad (ganchos de red falsos, que apuntan lo que se
 // monta y desmonta).
 func paradaParaStart(t *testing.T, m *Manager, id string) (*api.Machine, *[]string) {
 	t.Helper()
@@ -42,13 +42,13 @@ func paradaParaStart(t *testing.T, m *Manager, id string) (*api.Machine, *[]stri
 		t.Fatal(err)
 	}
 	var red []string
-	oldM, oldD := montarRedHost, desmontarRedHost
-	t.Cleanup(func() { montarRedHost, desmontarRedHost = oldM, oldD })
-	montarRedHost = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
-		red = append(red, "+"+n.NS)
-		return nil
-	}
-	desmontarRedHost = func(n *knet.Net) { red = append(red, "-"+n.NS) }
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
+			red = append(red, "+"+n.NS)
+			return nil
+		}
+		g.desmontar = func(n *knet.Net) { red = append(red, "-"+n.NS) }
+	})
 	// e2fsck de pega: el overlay de aquí no es un ext4 (ver
 	// TestStartRevisaSuDiscoAntesDeArrancar).
 	orden := ordenE2fsck

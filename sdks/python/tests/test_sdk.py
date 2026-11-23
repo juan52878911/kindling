@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import socket
 import sys
 import unittest
 
@@ -584,6 +585,54 @@ class TestAsync(Base):
                 self.assertEqual(len(await AsyncSandbox.list(**self.kw)), 1)
             self.assertEqual(self.srv.estado.sandboxes, {})
         asyncio.run(main())
+
+
+class TestConexiones(Base):
+    """D-09: el cliente reutiliza la conexión entre peticiones del mismo hilo."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = Client(**self.kw)
+        self.addCleanup(self.c.close)
+        self.id = self.c.create_sandbox(image="base").id
+
+    def test_reutiliza_la_conexion(self):
+        antes = self.srv.estado.conexiones
+        for _ in range(20):
+            self.c.get_sandbox(self.id)
+        evs = list(self.c.exec_stream(self.id, {"cmd": ["y"]}))
+        self.assertEqual(evs[-1].exit, 3)
+        self.c.get_sandbox(self.id)
+        self.assertEqual(self.srv.estado.conexiones - antes, 0)
+
+    def test_conexion_cerrada_por_el_servidor_se_sustituye(self):
+        self.c.get_sandbox(self.id)
+        # El servidor cierra la conexión ociosa: no se reutiliza, se abre otra.
+        self.c._local.conn.sock.shutdown(socket.SHUT_RDWR)
+        self.c.get_sandbox(self.id)
+
+    def test_carrera_con_el_cierre_repite_solo_lo_idempotente(self):
+        import kindling_sandbox.client as cl
+        orig = cl._viva
+        self.addCleanup(setattr, cl, "_viva", orig)
+        cl._viva = lambda conn: conn.sock is not None  # no ve el cierre a tiempo
+        self.c.get_sandbox(self.id)
+        self.c._local.conn.sock.shutdown(socket.SHUT_RDWR)
+        self.c.get_sandbox(self.id)  # GET: se repite en una conexión nueva
+        n = len(self.srv.estado.sandboxes)
+        self.c._local.conn.sock.shutdown(socket.SHUT_RDWR)
+        with self.assertRaises(TransportError):
+            self.c.create_sandbox(image="base")  # POST: no se manda dos veces
+        self.assertEqual(len(self.srv.estado.sandboxes), n)
+
+    def test_flujo_abandonado_no_deja_la_conexion(self):
+        it = self.c.exec_stream(self.id, {"cmd": ["y"]})
+        next(it)
+        it.close()
+        self.assertIsNone(getattr(self.c._local, "conn", None))
+        antes = self.srv.estado.conexiones
+        self.c.get_sandbox(self.id)
+        self.assertEqual(self.srv.estado.conexiones - antes, 1)
 
 
 if __name__ == "__main__":

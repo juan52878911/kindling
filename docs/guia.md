@@ -638,6 +638,26 @@ agente de IA. Los números medidos de arriba se tomaron con ella. Su guía es
 Si vienes de v0.5 o anterior: el daemon migra en su sitio snapshots, catálogos, salud y
 links; instala la extensión y todos los comandos que usabas siguen funcionando.
 
+Dos comportamientos del gateway y del puente que conviene saber:
+
+- **Con varios hosts** (`-hosts` / `mcp.hosts`), el router pregunta a todos los daemons a
+  la vez qué servicios tienen y **recuerda la respuesta 5 s**: cada `call_tool` por
+  `/mcp/_all` y cada POST sin sesión a `/mcp/<servicio>` ya no recorre los hosts uno
+  detrás de otro. Si el servicio no está en lo recordado se relee enseguida (un
+  `kling mcp import` recién hecho se ve sin esperar), pero nunca más de una vez cada
+  100 ms aunque lleguen muchas peticiones a un servicio que no existe. Un host que deja
+  de contestar conserva su última lista 30 s; pasado eso deja de ser candidato, como
+  antes. A un servicio que aísla cada sesión no se le hace la sonda compartida (no
+  despierta una instancia compartida que no debe tener).
+- **El puente repone el hijo caliente.** Antes, solo la primera sesión tras restaurar
+  adoptaba el proceso ya arrancado del dorado; las demás de la misma instancia pagaban
+  el arranque del runtime entero. Ahora, en cuanto una sesión gasta el caliente (lo
+  adopta o lo descarta), el puente lanza otro en segundo plano para la siguiente, con
+  el entorno de MMDS, así que también sirve a las sesiones con secretos. Solo si queda
+  plaza para otra sesión (el caliente ocupa lo mismo que una, y los procesos no pasan
+  de `maxSessions`), uno a la vez y nunca en modo navegador. Un caliente con secretos
+  no llega al dorado: un `/reset` lo cambia por uno con el entorno base.
+
 ## kling-sandbox: sandboxes multiinquilino
 
 [`ext/sandbox`](../ext/sandbox) pone un gateway delante de `kling sandbox`: inquilinos con

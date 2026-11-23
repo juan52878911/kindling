@@ -493,6 +493,17 @@ está, Go descomprime igual que siempre.
   `KLING_LIB_DIR` del constructor (`/usr/local/lib/kindling/kling-unpack`, o
   `lib/` de la raíz de datos en macOS). Si está pero no arranca (otra
   arquitectura), un aviso y Go.
+- **De dónde sale.** Cada release publica `kling-unpack-linux-amd64` y
+  `kling-unpack-linux-arm64` (estáticos, con musl) y `kling-unpack-darwin-arm64`,
+  en `SHA256SUMS` como el resto, y `install.sh` lo instala en el `lib/` del
+  daemon tras comprobar su sha256: en macOS
+  `~/Library/Application Support/kindling/lib/kling-unpack` (o
+  `$KLING_ROOT/lib`), en Linux como root `/usr/local/lib/kindling/kling-unpack`;
+  `KLING_LIB_DIR` manda en los dos. En Linux sin root no se puede escribir el
+  `lib/` del daemon de systemd: lo deja verificado en
+  `~/.local/lib/kindling/kling-unpack` y la orden `sudo` del final lo copia. Si
+  la release no lo trae (las primeras 1.x) o no se puede escribir, la
+  instalación sigue y las capas se descomprimen en Go.
 - **El contrato.** Lee la capa por stdin (el descriptor tal cual) y escribe el
   tar por stdout, sin argumentos ni entorno. Solo cuenta si sale con 0, que es
   cuando comprobó el CRC32 de cada miembro gzip y el xxhash64 de cada marco zstd

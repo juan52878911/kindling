@@ -76,15 +76,16 @@ func (m *Manager) montarRedModo(n *knet.Net, id string, egress knet.Egress, doma
 	}
 	var esperar func() error
 	var err error
+	g := ganchosRedActuales()
 	switch {
-	case montarRedHost != nil: // los tests
-		err = montarRedHost(n, egress, domains, uid)
+	case g.montar != nil: // los tests
+		err = g.montar(n, egress, domains, uid)
 		esperar = func() error { return nil }
 	case !aparte:
 		err = n.Setup(egress, domains, uid)
 		esperar = func() error { return nil }
 	default:
-		esperar, err = montarRedHostAparte(n, egress, domains, uid)
+		esperar, err = g.montarAparte(n, egress, domains, uid)
 	}
 	if err != nil {
 		if errors.Is(err, knet.ErrRedAjena) {
@@ -114,17 +115,34 @@ func (m *Manager) montarRedModo(n *knet.Net, id string, egress knet.Egress, doma
 	}, nil
 }
 
-// Sustituibles en tests: montar y desmontar la red de verdad pide root e `ip`.
-var (
-	// montarRedHost es nil salvo en los tests, que lo sustituyen por un
-	// montaje sin comprobación aparte.
-	montarRedHost func(n *knet.Net, egress knet.Egress, domains []string, uid int) error
+// ganchosRed son las operaciones de red del host, sustituibles en tests:
+// montar y desmontar la red de verdad pide root e `ip`.
+type ganchosRed struct {
+	// montar es nil salvo en los tests, que lo sustituyen por un montaje
+	// sin comprobación aparte.
+	montar       func(n *knet.Net, egress knet.Egress, domains []string, uid int) error
+	montarAparte func(n *knet.Net, egress knet.Egress, domains []string, uid int) (func() error, error)
+	desmontar    func(n *knet.Net)
+}
 
-	montarRedHostAparte = func(n *knet.Net, egress knet.Egress, domains []string, uid int) (func() error, error) {
-		return n.SetupAparte(egress, domains, uid)
+// Tras un cerrojo: un test los cambia mientras el trabajo de fondo de otro
+// Manager (un esperarVMM que llega tarde) aún puede leerlos.
+var (
+	ganchosRedMu sync.RWMutex
+	ganchosRedV  = ganchosRed{
+		montarAparte: func(n *knet.Net, egress knet.Egress, domains []string, uid int) (func() error, error) {
+			return n.SetupAparte(egress, domains, uid)
+		},
+		desmontar: func(n *knet.Net) { n.Teardown() },
 	}
-	desmontarRedHost = func(n *knet.Net) { n.Teardown() }
 )
+
+// ganchosRedActuales da una copia de los ganchos vigentes.
+func ganchosRedActuales() ganchosRed {
+	ganchosRedMu.RLock()
+	defer ganchosRedMu.RUnlock()
+	return ganchosRedV
+}
 
 // redParaRehacer da la red con la que rehacer la de una máquina que ya tenía
 // índice (thaw sin la red montada): la de su índice si sigue libre en el host,
@@ -160,7 +178,7 @@ func (m *Manager) redParaRehacer(mc *api.Machine) (*knet.Net, error) {
 // de una máquina: si se desmontara por otro camino, redLista la daría por buena.
 func (m *Manager) desmontarRed(n *knet.Net, id string) {
 	m.redMontada.Delete(id)
-	desmontarRedHost(n)
+	ganchosRedActuales().desmontar(n)
 	m.olvidarRedPropia(n.NS)
 	if f := m.redCaida.Load(); f != nil {
 		(*f)(n.NSIP)

@@ -51,7 +51,7 @@ func (g *Gateway) aislado(ctx context.Context, service string) (bool, error) {
 	modo, fresco := c.modo, c.modo != nil && time.Since(c.at) <= isolationTTL
 	c.mu.Unlock()
 	if !fresco {
-		snaps, err := g.Client().Snapshots(ctx)
+		snaps, err := listarSnapshots(ctx, g.Client())
 		switch {
 		case err == nil:
 			modo = map[string]string{}

@@ -67,6 +67,7 @@ type catalog struct {
 	mu      sync.Mutex
 	tools   map[string][]Tool // servicio -> herramientas
 	fetched map[string]time.Time
+	vuelos  map[string]*vueloCatalogo // refrescos en curso, uno por servicio
 }
 
 func newCatalog(gw *Gateway, ttl time.Duration) *catalog {
@@ -74,12 +75,13 @@ func newCatalog(gw *Gateway, ttl time.Duration) *catalog {
 		gw: gw, ttl: ttl,
 		tools:   map[string][]Tool{},
 		fetched: map[string]time.Time{},
+		vuelos:  map[string]*vueloCatalogo{},
 	}
 }
 
 // services devuelve los servicios disponibles: microVMs y servidores externos.
 func (c *catalog) services(ctx context.Context) ([]string, error) {
-	snaps, err := c.gw.Client().Snapshots(ctx)
+	snaps, err := listarSnapshots(ctx, c.gw.Client())
 	if err != nil {
 		return nil, err
 	}
@@ -177,50 +179,98 @@ func (c *catalog) externalSet(ctx context.Context) map[string]bool {
 // debería costar arrancar máquinas.
 func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 	c.mu.Lock()
-	if at, ok := c.fetched[service]; ok && time.Since(at) < c.ttl {
-		t := c.tools[service]
+	at, hay := c.fetched[service]
+	viejas := c.tools[service]
+	if hay && time.Since(at) < c.ttl {
 		c.mu.Unlock()
-		return t, nil
+		return viejas, nil
 	}
+	// Un solo refresco por servicio a la vez: al caducar la entrada, K
+	// call_tool simultáneos repetían el trabajo, y sin catálogo en el
+	// snapshot cada uno abría una sesión (un proceso MCP) en la microVM.
+	if v := c.vuelos[service]; v != nil {
+		c.mu.Unlock()
+		select {
+		case <-v.hecho:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		// Si el que refrescaba se rindió por SU contexto, el nuestro sigue
+		// vivo: no heredamos su cancelación, refrescamos nosotros.
+		if v.err != nil && ctx.Err() == nil &&
+			(errors.Is(v.err, context.Canceled) || errors.Is(v.err, context.DeadlineExceeded)) {
+			return c.refrescar(ctx, service, viejas, hay)
+		}
+		return v.tools, v.err
+	}
+	v := &vueloCatalogo{hecho: make(chan struct{})}
+	c.vuelos[service] = v
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.vuelos, service)
+		c.mu.Unlock()
+		close(v.hecho)
+	}()
+	v.err = errListadoSinAcabar // si refrescar entrara en pánico
+	v.tools, v.err = c.refrescar(ctx, service, viejas, hay)
+	return v.tools, v.err
+}
 
+// vueloCatalogo es un refresco del catálogo de un servicio en curso.
+type vueloCatalogo struct {
+	hecho chan struct{}
+	tools []Tool
+	err   error
+}
+
+// refrescar lee de nuevo las herramientas del servicio y las guarda. viejas es
+// la copia caducada, si la hay (hay).
+func (c *catalog) refrescar(ctx context.Context, service string, viejas []Tool, hay bool) ([]Tool, error) {
 	if l := c.gw.linkFor(ctx, service); l != nil {
 		out := make([]Tool, 0, len(l.Tools))
 		for _, t := range l.Tools {
 			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
-		c.mu.Lock()
-		c.tools[service] = out
-		c.fetched[service] = time.Now()
-		c.mu.Unlock()
+		c.guardar(service, out)
 		return out, nil
 	}
 
-	if tools, ok := c.fromSnapshot(ctx, service); ok {
-		c.mu.Lock()
-		c.tools[service] = tools
-		c.fetched[service] = time.Now()
-		c.mu.Unlock()
+	tools, ok, err := c.fromSnapshot(ctx, service)
+	if ok {
+		c.guardar(service, tools)
 		return tools, nil
 	}
+	if err != nil && hay {
+		// El daemon no contesta al listado, pero ya sabíamos qué ofrece el
+		// servicio: un fallo pasajero cada diez minutos no debe convertirse
+		// en errores de herramienta con la instancia despierta y sana. No se
+		// apunta como fresca: la siguiente petición vuelve a intentarlo.
+		log.Printf("catalog of %s: cannot list snapshots (%v); serving the expired copy", service, err)
+		return viejas, nil
+	}
 
-	tools, err := c.fetch(ctx, service)
+	tools, err = c.fetch(ctx, service)
 	if err != nil {
 		return nil, err
 	}
+	c.guardar(service, tools)
+	return tools, nil
+}
 
+func (c *catalog) guardar(service string, tools []Tool) {
 	c.mu.Lock()
 	c.tools[service] = tools
 	c.fetched[service] = time.Now()
 	c.mu.Unlock()
-	return tools, nil
 }
 
-// fromSnapshot lee el catálogo que se capturó al importar el servicio.
-func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, bool) {
-	snaps, err := c.gw.Client().Snapshots(ctx)
+// fromSnapshot lee el catálogo que se capturó al importar el servicio. ok es
+// que lo trae; err, que no se pudo listar.
+func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, bool, error) {
+	snaps, err := listarSnapshots(ctx, c.gw.Client())
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	for _, s := range snaps {
 		if s.Service() != service && s.Name != service {
@@ -228,15 +278,15 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 		}
 		tools, _ := mcp.ToolsOf(s)
 		if len(tools) == 0 {
-			return nil, false // importado sin catálogo: habrá que preguntar
+			return nil, false, nil // importado sin catálogo: habrá que preguntar
 		}
 		out := make([]Tool, 0, len(tools))
 		for _, t := range tools {
 			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
-		return out, true
+		return out, true, nil
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 // fetch hace un initialize + tools/list contra el servicio real.

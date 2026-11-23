@@ -25,7 +25,7 @@ const (
 
 // montar levanta un frontal sobre los daemons falsos dados y devuelve el
 // servidor de pruebas y el frontal.
-func montar(t *testing.T, daemons map[string]*falso, tenants ...Tenant) (*httptest.Server, *Servidor) {
+func montar(t testing.TB, daemons map[string]*falso, tenants ...Tenant) (*httptest.Server, *Servidor) {
 	t.Helper()
 	endpoints := map[string]string{}
 	for n, f := range daemons {
@@ -43,9 +43,9 @@ func montar(t *testing.T, daemons map[string]*falso, tenants ...Tenant) (*httpte
 	return srv, s
 }
 
-func testLog(t *testing.T) *log.Logger { return log.New(&logT{t}, "", 0) }
+func testLog(t testing.TB) *log.Logger { return log.New(&logT{t}, "", 0) }
 
-type logT struct{ t *testing.T }
+type logT struct{ t testing.TB }
 
 func (l *logT) Write(p []byte) (int, error) {
 	l.t.Log(strings.TrimSpace(string(p)))
@@ -53,7 +53,7 @@ func (l *logT) Write(p []byte) (int, error) {
 }
 
 // pide hace una petición con token y devuelve la respuesta.
-func pide(t *testing.T, srv *httptest.Server, token, method, path string, body any) *http.Response {
+func pide(t testing.TB, srv *httptest.Server, token, method, path string, body any) *http.Response {
 	t.Helper()
 	resp, err := http.DefaultClient.Do(peticion(t, srv, token, method, path, body))
 	if err != nil {
@@ -63,7 +63,7 @@ func pide(t *testing.T, srv *httptest.Server, token, method, path string, body a
 }
 
 // peticion arma la petición de pide sin mandarla.
-func peticion(t *testing.T, srv *httptest.Server, token, method, path string, body any) *http.Request {
+func peticion(t testing.TB, srv *httptest.Server, token, method, path string, body any) *http.Request {
 	t.Helper()
 	var rd io.Reader
 	switch b := body.(type) {
@@ -86,7 +86,7 @@ func peticion(t *testing.T, srv *httptest.Server, token, method, path string, bo
 	return req
 }
 
-func decodifica[T any](t *testing.T, resp *http.Response) T {
+func decodifica[T any](t testing.TB, resp *http.Response) T {
 	t.Helper()
 	defer resp.Body.Close()
 	var v T
@@ -96,7 +96,7 @@ func decodifica[T any](t *testing.T, resp *http.Response) T {
 	return v
 }
 
-func esperaCodigo(t *testing.T, resp *http.Response, code int) {
+func esperaCodigo(t testing.TB, resp *http.Response, code int) {
 	t.Helper()
 	if resp.StatusCode != code {
 		b, _ := io.ReadAll(resp.Body)
@@ -104,7 +104,7 @@ func esperaCodigo(t *testing.T, resp *http.Response, code int) {
 	}
 }
 
-func crea(t *testing.T, srv *httptest.Server, token string, pet any) Sandbox {
+func crea(t testing.TB, srv *httptest.Server, token string, pet any) Sandbox {
 	t.Helper()
 	resp := pide(t, srv, token, "POST", "/v1/sandboxes", pet)
 	esperaCodigo(t, resp, 201)

@@ -171,6 +171,43 @@ void khv_traza_resumen(char *b, size_t n) {
   (void)o;
 }
 
+// khv_traza_fases da en números lo mismo que khv_traza_resumen, para que el
+// API lo devuelva al daemon sin KLING_HV_TRACE (GET /kling/info). Los tiempos
+// van en ms y -1 es «no pasó»: fase[i] la duración de cada fase de antes de
+// soltar la VM (las del freeze no), hito[i] cada hito contado desde que se
+// soltó. Devuelve si es una restauración.
+bool khv_traza_fases(KhvFases *out) {
+  memset(out, 0, sizeof *out);
+  out->proceso = proceso_ms;
+  out->espera = out->total = -1;
+  uint64_t soltar = h_t[KHV_H_SOLTAR];
+  uint64_t hecho = 0;
+  for (int i = 0; i < KHV_F_N; i++) {
+    out->fase[i] = -1;
+    if (i >= KHV_F_PAUSA || !f_ini[i]) continue;
+    out->fase[i] = a_ms(f_dur[i]);
+    if (i != KHV_F_CPU && (!soltar || f_ini[i] <= soltar)) hecho += f_dur[i];
+  }
+  for (int i = 0; i < KHV_H_N; i++) out->hito[i] = soltar && h_t[i] >= soltar ? a_ms(h_t[i] - soltar) : -1;
+  if (soltar) {
+    uint64_t pre = soltar - t0;
+    out->espera = pre > hecho ? a_ms(pre - hecho) : 0.0;
+  }
+  if (soltar && h_t[KHV_H_AGENTE]) out->total = a_ms(h_t[KHV_H_AGENTE] - t0);
+  return restaura;
+}
+
+const char *khv_traza_nombre_fase(int i) { return i >= 0 && i < KHV_F_N ? nombres_f[i] : ""; }
+
+const char *khv_traza_nombre_hito(int i) {
+  static const char *const n[KHV_H_N] = {
+#define KHV_NOMBRE_(e, s) s,
+      KHV_HITOS(KHV_NOMBRE_)
+#undef KHV_NOMBRE_
+  };
+  return i >= 0 && i < KHV_H_N ? n[i] : "";
+}
+
 void khv_traza_freeze(void) {
   if (!resumen) return;
   char b[512];

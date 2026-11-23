@@ -14,6 +14,7 @@ state.json api.CreatePhases resume_ms float64 ignorable
 state.json api.CreatePhases resync_ms float64 ignorable
 state.json api.CreatePhases start_ms float64 ignorable
 state.json api.CreatePhases total_ms float64 ignorable
+state.json api.CreatePhases vmm *api.VMMPhases ignorable
 state.json api.CreatePhases vmm_ms float64 ignorable
 state.json api.GuestAgent agent string
 state.json api.GuestAgent caps []string
@@ -80,6 +81,7 @@ state.json api.Machine ttl_at *time.Time
 state.json api.Machine ttl_seconds int
 state.json api.Machine vcpus int
 state.json api.Machine vmm string ignorable
+state.json api.Machine vmm_started_at *time.Time ignorable
 state.json api.Machine volume_wait bool effect:3
 state.json api.Machine volumes []api.VolumeAttachment
 state.json api.Machine wake *api.WakePhases
@@ -94,6 +96,21 @@ state.json api.ShareAttachment status string
 state.json api.ShareAttachment transport string ignorable
 state.json api.ShareAttachment used_bytes int64 ignorable
 state.json api.ShareAttachment used_files int64 ignorable
+state.json api.VMMInside kind string ignorable
+state.json api.VMMInside phases_ms map[string]float64 ignorable
+state.json api.VMMInside process_ms float64 ignorable
+state.json api.VMMInside since_release_ms map[string]float64 ignorable
+state.json api.VMMInside total_ms float64 ignorable
+state.json api.VMMInside wait_ms float64 ignorable
+state.json api.VMMPhases create_ms float64 ignorable
+state.json api.VMMPhases kind string ignorable
+state.json api.VMMPhases net_ms float64 ignorable
+state.json api.VMMPhases restore_ms float64 ignorable
+state.json api.VMMPhases resume_ms float64 ignorable
+state.json api.VMMPhases sandbox_ms float64 ignorable
+state.json api.VMMPhases start_ms float64 ignorable
+state.json api.VMMPhases total_ms float64 ignorable
+state.json api.VMMPhases vmm *api.VMMInside ignorable
 state.json api.VolumeAttachment drive_id string
 state.json api.VolumeAttachment mount string
 state.json api.VolumeAttachment name string
@@ -114,6 +131,7 @@ state.json api.WakePhases spawn_ms float64
 state.json api.WakePhases store_ms float64
 state.json api.WakePhases tier string
 state.json api.WakePhases total_ms float64
+state.json api.WakePhases vmm *api.VMMPhases ignorable
 state.json api.WakePhases wait_ms float64
 meta.json api.Snapshot allow_domains []string
 meta.json api.Snapshot allow_exec bool

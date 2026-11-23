@@ -98,6 +98,12 @@ pausada es un `Resume` (sin resync: es la misma máquina sin clones, y el reloj
 del invitado sigue al del host). Una pausada cuenta como viva para el vigilante,
 el TTL (que la congela), la reconciliación (sobrevive a un reinicio del daemon
 sin despertarse) y los VMM huérfanos. Freeze, Stop y Remove la aceptan.
+Reanudar no cambia `vmm_started_at` (cuándo se lanzó el proceso VMM que corre;
+`started_at` sí se reescribe): con el PID es lo que identifica esa vida del VMM
+para el daemon, así que el primer exec tras reanudar no vuelve a sondear al
+agente antes de hablarle (un connect y close en Linux; en macOS una sonda al
+VMM). Un thaw, un start o cualquier VMM nuevo lo cambian, aunque repitieran el
+PID, y entonces sí se sondea.
 
 En el planificador, el segador duerme cada réplica ociosa así: puntuación =
 popularidad / `mem_mib`; de mayor a menor, se pausan mientras la suma de
@@ -144,6 +150,11 @@ En marcha, `kling thaw <máquina>` imprime el desglose del daemon, `kling events
 lo lleva en el mensaje de cada thaw, el log de `kling ai serve` tiene una línea
 por despertar (`replica ready (thaw 23.3 ms: list 0.4, ... ), first request 2.7
 ms`) y `/metrics` el histograma `kling_ai_wake_phase_seconds{model,how,phase}`.
+En macOS, `kling inspect <máquina>` lleva además en `wake.vmm` (y en `create.vmm`
+tras una creación desde un snapshot) lo que el propio `kling-vz`/`kling-hv` midió
+por dentro: confinarse, crear la VM, cargar el estado y reanudar
+([backend-hv.md](backend-hv.md#trazas-dónde-se-va-el-arranque)). Llega en segundo
+plano, justo después del despertar.
 
 ## Lo que queda
 

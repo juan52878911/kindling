@@ -177,7 +177,7 @@ func TestUnaFotoViejaNoPisaAUnaNueva(t *testing.T) {
 
 	// Una foto anterior que llega tarde.
 	m.stateMu.Lock()
-	m.pending, m.hasPend, m.pendGen = nil, true, escrito-1
+	m.hasPend, m.pendGen = true, escrito-1
 	m.stateMu.Unlock()
 	m.writePending()
 	if m.escritoGen != escrito {

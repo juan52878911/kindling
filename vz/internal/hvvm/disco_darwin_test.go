@@ -294,6 +294,75 @@ func TestFlushModos(t *testing.T) {
 	}
 }
 
+// BenchmarkFlushAlternado: un invitado que alterna una escritura de 4 KiB y un
+// FLUSH en un disco full. Cuenta los F_FULLFSYNC por segundo que eso le cuesta
+// al Mac entero (fullsyncs/s) y lo que tarda cada par en el host.
+func BenchmarkFlushAlternado(b *testing.B) {
+	defer modoDisco(false, sincFull)
+	cfgDisco(0)
+	modoDisco(false, sincFull)
+	buf := make([]byte, 4096)
+	antes := fullSincsDisco()
+	i := 0
+	for b.Loop() {
+		if e, _ := esDisco(1, uint64(i%256)*8, []uint32{4096}, buf, -1); e != 0 {
+			b.Fatalf("OUT status %d", e)
+		}
+		if e := flushDisco(); e != 0 {
+			b.Fatalf("FLUSH status %d", e)
+		}
+		i++
+	}
+	b.ReportMetric(float64(fullSincsDisco()-antes)/b.Elapsed().Seconds(), "fullsyncs/s")
+}
+
+// F-04: un invitado que alterna escritura y FLUSH no fuerza más F_FULLFSYNC
+// que la cuota (ráfaga + ritmo): los de más se asientan con F_BARRIERFSYNC,
+// todos los FLUSH contestan bien, y el F_FULLFSYNC que falta llega solo
+// aunque el invitado no mande otro FLUSH.
+func TestFlushCuotaFull(t *testing.T) {
+	defer modoDisco(false, sincFull)
+	cfgDisco(0)
+	modoDisco(false, sincFull)
+	buf := make([]byte, 4096)
+	full0, sincs0 := fullSincsDisco(), sincsDisco()
+	t0 := time.Now()
+	const n = 300
+	for i := 0; i < n; i++ {
+		if e, _ := esDisco(1, uint64(i%256)*8, []uint32{4096}, buf, -1); e != 0 {
+			t.Fatalf("OUT status %d", e)
+		}
+		if e := flushDisco(); e != 0 {
+			t.Fatalf("FLUSH status %d", e)
+		}
+	}
+	d := time.Since(t0)
+	full, sincs := fullSincsDisco()-full0, sincsDisco()-sincs0
+	tope := uint64(fullRafaga) + uint64(d.Seconds()*float64(fullPorS)) + 2
+	if full > tope {
+		t.Errorf("%d × (OUT + FLUSH) in %v: %d F_FULLFSYNC, want at most %d", n, d, full, tope)
+	}
+	if sincs < n {
+		t.Errorf("%d FLUSH after writes synced %d times: every one must reach the SSD (barrier at least)", n, sincs)
+	}
+	t.Logf("%d × (OUT + FLUSH) in %v: %d full, %d barrier", n, d, full, sincs-full)
+	// El hilo del disco hace el que falta al reponerse una ficha (puede que
+	// ya mientras tanto: también compite por ellas).
+	pendiente := fullDebeDisco()
+	antesFull := fullSincsDisco()
+	if !diferidoDisco(2000) {
+		t.Fatal("the pending F_FULLFSYNC was not done within 2 s without another FLUSH")
+	}
+	if pendiente && fullSincsDisco() != antesFull+1 {
+		t.Fatalf("the disk thread did %d F_FULLFSYNC for the pending one, want 1", fullSincsDisco()-antesFull)
+	}
+	// Ya asentado, un FLUSH sin escrituras no sincroniza.
+	antes := sincsDisco()
+	if e := flushDisco(); e != 0 || sincsDisco() != antes {
+		t.Fatalf("FLUSH with nothing pending: status %d, %d syncs", e, sincsDisco()-antes)
+	}
+}
+
 // P11: en un disco rw, un FLUSH sin escrituras desde el anterior no asienta
 // nada (ni F_FULLFSYNC); tras un OUT o un DISCARD, sí.
 func TestFlushSinEscriturasNoSincroniza(t *testing.T) {

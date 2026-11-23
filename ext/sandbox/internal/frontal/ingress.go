@@ -870,7 +870,7 @@ func (g *ingreso) repasar() {
 	}
 }
 
-// leer lista el host del sandbox id, sin caché. existe=false: ya no está.
+// leer pide al host el sandbox id, sin caché. existe=false: ya no está.
 func (g *ingreso) leer(ctx context.Context, id string) (mc *api.Machine, existe bool, err error) {
 	nombre, ref, ok := partirID(id)
 	if !ok {
@@ -880,14 +880,17 @@ func (g *ingreso) leer(ctx context.Context, id string) (mc *api.Machine, existe 
 	if !ok {
 		return nil, false, nil
 	}
-	ms, err := h.Cliente.Sandboxes(ctx)
+	// Por id, no listando el host (D-01): repasar lo llama por cada sandbox
+	// con conexiones abiertas.
+	m, err := h.Cliente.Get(ctx, ref)
 	if err != nil {
+		if api.IsNotFound(err) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
-	for _, m := range ms {
-		if m.ID == ref && m.Labels[LabelTenant] != "" {
-			return m, true, nil
-		}
+	if m.ID == ref && m.Labels[api.LabelKind] == api.KindSandbox && m.Labels[LabelTenant] != "" {
+		return m, true, nil
 	}
 	return nil, false, nil
 }

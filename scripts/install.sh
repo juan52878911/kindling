@@ -200,6 +200,33 @@ detect_platform() {
 detect_platform
 [ -n "${KLING_VERSION:-}" ] && TAG="$KLING_VERSION"
 
+# ── lib/ del daemon ─────────────────────────────────────────────────────────
+# Donde el constructor de imágenes busca sus ayudantes (kling-guest,
+# kling-unpack): KLING_LIB_DIR si lo hay; si no, en el Mac el lib/ de la raíz
+# de datos (el daemon es tu usuario) y en Linux /usr/local/lib/kindling, el del
+# daemon de systemd (root).
+case "$PLAT" in
+    darwin-*) DAEMON_LIB="${KLING_LIB_DIR:-${KLING_ROOT:-$HOME/Library/Application Support/kindling}/lib}" ;;
+    *)        DAEMON_LIB="${KLING_LIB_DIR:-/usr/local/lib/kindling}" ;;
+esac
+# kling-unpack descomprime las capas de las imágenes de Docker ~1,7× más
+# rápido que el camino de Go (que sigue si falta). Solo donde corre un daemon.
+# En Linux como usuario no se puede escribir en el lib del daemon: se deja
+# verificado en ~/.local/lib/kindling y la orden final lo copia con sudo.
+UNPACK_ASSET=""
+UNPACK_DEST="$DAEMON_LIB/kling-unpack"
+UNPACK_SUDO_SRC=""
+case "$PLAT" in
+    linux-*|darwin-arm64) UNPACK_ASSET="kling-unpack-$PLAT" ;;
+esac
+case "$PLAT" in
+    linux-*)
+        if [ "$INSTALL_UID" != "0" ] && [ -z "${KLING_LIB_DIR:-}" ]; then
+            UNPACK_SUDO_SRC="$HOME/.local/lib/kindling/kling-unpack"
+            UNPACK_DEST="$UNPACK_SUDO_SRC"
+        fi ;;
+esac
+
 # ── extensiones pedidas con --with ──────────────────────────────────────────
 # El catálogo es corto y fijo a propósito: son las extensiones que publica esta
 # misma release (kling-<n>-<os>-<arch>). Una de fuera se instala con
@@ -338,6 +365,7 @@ if [ "$DRY_RUN" = "1" ]; then
         info "$BASE/$BIN_NAME"
         [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-guest-linux-arm64  ->  \$KLING_ROOT/lib/kling-guest (if the release has it)"
         [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (if the release has it)" && info "$BASE/kling-credproxy-darwin-arm64 (if the release has it)"
+        [ -n "$UNPACK_ASSET" ] && info "$BASE/$UNPACK_ASSET  ->  $UNPACK_DEST (if the release has it)"
     fi
     for e in $EXTS; do
         info "$BASE/kling-${e}-${PLAT}  ->  $PLUGIN_DIR/kling-$e"
@@ -531,6 +559,12 @@ if [ "$SKIP_KLING" != "1" ]; then
             GUEST_NAME="kling-guest-linux-arm64"
         fi
     fi
+    # kling-unpack: una release que no lo trae (las primeras 1.x) se instala
+    # igual y las capas se descomprimen en Go.
+    if [ -n "$UNPACK_ASSET" ] && grep -Eq "[ *]${UNPACK_ASSET}\$" "$WORK/SHA256SUMS"; then
+        get "$UNPACK_ASSET"
+        UNPACK_NAME="$UNPACK_ASSET"
+    fi
 fi
 for e in $EXTS; do
     get "kling-${e}-${PLAT}"
@@ -606,10 +640,21 @@ if [ "$SKIP_KLING" != "1" ]; then
         fi
         # lib/ de la raíz de datos: donde el daemon de Mac busca kling-guest.
         if [ -n "${GUEST_NAME:-}" ]; then
-            LIB_DIR="${KLING_ROOT:-$HOME/Library/Application Support/kindling}/lib"
-            mkdir -p "$LIB_DIR" 2>/dev/null || fail "cannot create $LIB_DIR"
-            place "$WORK/$GUEST_NAME" "$LIB_DIR/kling-guest" || fail "cannot write to $LIB_DIR"
-            ok "installed $LIB_DIR/kling-guest (guest agent)"
+            mkdir -p "$DAEMON_LIB" 2>/dev/null || fail "cannot create $DAEMON_LIB"
+            place "$WORK/$GUEST_NAME" "$DAEMON_LIB/kling-guest" || fail "cannot write to $DAEMON_LIB"
+            ok "installed $DAEMON_LIB/kling-guest (guest agent)"
+        fi
+    fi
+    if [ -n "${UNPACK_NAME:-}" ]; then
+        [ "$PLAT" = "darwin-arm64" ] && { xattr -d com.apple.quarantine "$WORK/$UNPACK_NAME" 2>/dev/null || true; }
+        # Ya verificado; si no se puede escribir, kling sigue valiendo (las
+        # capas se descomprimen en Go) y se dice en vez de abortar a medias.
+        UNPACK_DIR="$(dirname "$UNPACK_DEST")"
+        if mkdir -p "$UNPACK_DIR" 2>/dev/null && place "$WORK/$UNPACK_NAME" "$UNPACK_DEST"; then
+            ok "installed $UNPACK_DEST (fast layer decompression for Docker images)"
+        else
+            warn "cannot write $UNPACK_DEST: image layers will be decompressed in Go (slower); KLING_LIB_DIR picks another directory"
+            UNPACK_NAME=""
         fi
     fi
 fi
@@ -715,6 +760,10 @@ case "$PLAT" in
             ORDEN_UNIDAD="sudo /usr/local/bin/kling up -install"
         else
             ORDEN_UNIDAD="sudo install -m755 $PREFIX/kling /usr/local/bin/kling && sudo /usr/local/bin/kling up -install"
+        fi
+        # kling-unpack, ya verificado, al lib del daemon de systemd.
+        if [ -n "${UNPACK_NAME:-}" ] && [ -n "$UNPACK_SUDO_SRC" ]; then
+            ORDEN_UNIDAD="sudo install -D -m755 $UNPACK_SUDO_SRC /usr/local/lib/kindling/kling-unpack && $ORDEN_UNIDAD"
         fi
 cat <<EOF
   The daemon runs as a systemd service, which needs root and a root-owned kling

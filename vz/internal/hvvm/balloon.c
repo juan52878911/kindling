@@ -545,5 +545,6 @@ void vballoon_reafirmar(void) {
 void vballoon_set(const struct vballoon_state *i) {
   pthread_mutex_lock(&mu);
   s = *i;
+  vmmio_restaurado(&s.m, (1u << F_STATS_VQ) | (1u << F_DEFLATE_ON_OOM) | (1u << F_REPORTING));
   pthread_mutex_unlock(&mu);
 }

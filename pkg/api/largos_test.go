@@ -14,7 +14,7 @@ import (
 
 // clienteDePrueba sirve mux en un socket unix corto (sun_path en macOS) y
 // devuelve un cliente que le habla.
-func clienteDePrueba(t *testing.T, mux http.Handler) *Client {
+func clienteDePrueba(t testing.TB, mux http.Handler) *Client {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "kl")
 	if err != nil {

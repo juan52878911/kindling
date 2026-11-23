@@ -11,14 +11,14 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 )
 
-// fakeRed cambia montarRedHost/desmontarRedHost por falsos y cuenta los desmontajes.
+// fakeRed cambia el montaje y el desmontaje de la red por falsos y cuenta los desmontajes.
 func fakeRed(t *testing.T, montar func() error) *int {
 	t.Helper()
-	oldM, oldD := montarRedHost, desmontarRedHost
-	t.Cleanup(func() { montarRedHost, desmontarRedHost = oldM, oldD })
 	desmontados := new(int)
-	montarRedHost = func(*knet.Net, knet.Egress, []string, int) error { return montar() }
-	desmontarRedHost = func(*knet.Net) { *desmontados++ }
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = func(*knet.Net, knet.Egress, []string, int) error { return montar() }
+		g.desmontar = func(*knet.Net) { *desmontados++ }
+	})
 	return desmontados
 }
 

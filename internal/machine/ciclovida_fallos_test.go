@@ -442,10 +442,11 @@ func TestFreezeFallidaNoPideLosVolumenes(t *testing.T) {
 	}
 }
 
-// M-03: la foto de persist() no puede compartir arrays ni mapas con la
+// M-03: la foto de state.json no puede compartir arrays ni mapas con la
 // máquina viva. Con la copia por valor, escribir en su sitio sobre Volumes o
-// Labels de la viva cambiaba también la foto pendiente, que se serializa fuera
-// del candado.
+// Labels de la viva cambiaba también la foto, que se serializa fuera del
+// candado. La foto la saca el escritor (fotoEstadoLocked, ver persist): se
+// toma aquí igual, con m.mu, y se escribe encima de la viva después.
 func TestPersistNoComparteMemoriaConLaViva(t *testing.T) {
 	m := newTestManager(t)
 	id := newID()
@@ -456,7 +457,7 @@ func TestPersistNoComparteMemoriaConLaViva(t *testing.T) {
 	mc.AllowDomains = []string{"example.com"}
 	mc.Labels = map[string]string{"k": "v"}
 	mc.Forwards = map[string]string{"8080": "127.0.0.1:1"}
-	m.persist()
+	lista := m.fotoEstadoLocked()
 	// Lo que hacía withDriveIDs antes: escribir en su sitio.
 	mc.Volumes[0].DriveID = "otro"
 	mc.Shares[0].Source = "/b"
@@ -465,18 +466,14 @@ func TestPersistNoComparteMemoriaConLaViva(t *testing.T) {
 	mc.Forwards["8080"] = "127.0.0.1:2"
 	m.mu.Unlock()
 
-	// Close vuelca la última foto y para persistLoop: lo que queda en disco es
-	// la foto tomada ANTES de las escrituras de arriba, se escribiera cuando se
-	// escribiera.
-	m.Close()
 	var foto *api.Machine
-	for _, f := range readState(t, m) {
-		if f.ID == id {
-			foto = &f
+	for i := range lista {
+		if lista[i].ID == id {
+			foto = &lista[i]
 		}
 	}
 	if foto == nil {
-		t.Fatal("la máquina no está en state.json")
+		t.Fatal("la máquina no está en la foto")
 	}
 	if foto.Volumes[0].DriveID != "volume0" {
 		t.Errorf("Volumes de la foto = %q: comparte el array con la viva", foto.Volumes[0].DriveID)

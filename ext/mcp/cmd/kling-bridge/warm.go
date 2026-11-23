@@ -68,14 +68,22 @@ type warmChild struct {
 	stdin  io.WriteCloser
 	out    *bufio.Reader
 	exitCh chan syscall.WaitStatus
+	// huella es huellaEnv del entorno con que se lanzó: solo lo adopta una
+	// sesión cuyo entorno dé la misma.
+	huella string
 }
 
 // prewarm lanza un hijo con el entorno BASE (sin secretos de sesión: aún no hay
 // sesión) y espera a que conteste el ping. Si no llega a estar listo, lo mata y
 // devuelve error: mejor un dorado lento y correcto que uno congelado a medias.
-func (b *bridge) prewarm() (*warmChild, error) {
+func (b *bridge) prewarm() (*warmChild, error) { return b.prewarmCon(b.env) }
+
+// prewarmCon es prewarm con el entorno dado. Solo el caliente que se repone
+// tras una adopción (reponerCaliente) lleva el de MMDS: ese no se congela en
+// el dorado, porque /reset lo descarta (ver replenishWarm).
+func (b *bridge) prewarmCon(env []string) (*warmChild, error) {
 	cmd := exec.Command(b.argv[0], b.argv[1:]...)
-	cmd.Env = b.env
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -91,7 +99,7 @@ func (b *bridge) prewarm() (*warmChild, error) {
 		return nil, fmt.Errorf("could not start the MCP server to prewarm: %w", err)
 	}
 	w := &warmChild{cmd: cmd, stdin: stdin,
-		out: bufio.NewReaderSize(stdout, 64<<10), exitCh: exitCh}
+		out: bufio.NewReaderSize(stdout, 64<<10), exitCh: exitCh, huella: huellaEnv(env)}
 	log.Printf("prewarm: MCP server started (pid %d), waiting for its pong", cmd.Process.Pid)
 	if err := w.waitReady(warmupTimeout); err != nil {
 		w.discard()
@@ -203,14 +211,23 @@ func (b *bridge) replenishWarm() error {
 		return nil
 	}
 
+	// Un caliente que se esté reponiendo en segundo plano no debe acabar
+	// congelado a medio arrancar: se le espera (ya sabe que hubo un /reset y
+	// se descartará solo).
+	b.esperarReposicion()
+
+	base := huellaEnv(b.env)
 	b.mu.Lock()
 	if w := b.warm; w != nil {
-		if w.alive() {
+		if w.alive() && w.huella == base {
 			// El que hay sigue limpio por construcción (nunca se le escribió
 			// más que el ping): no hay nada que reponer.
 			b.mu.Unlock()
 			return nil
 		}
+		// Muerto, o lanzado con el entorno de MMDS: los secretos de esta
+		// instancia no pueden quedar congelados en el dorado que compartirán
+		// las demás.
 		b.warm = nil
 		go w.discard()
 	}
@@ -224,7 +241,7 @@ func (b *bridge) replenishWarm() error {
 	}
 
 	b.mu.Lock()
-	if b.warm != nil && b.warm.alive() {
+	if b.warm != nil && b.warm.alive() && b.warm.huella == base {
 		// Otro /reset concurrente repuso antes. Con un caliente basta.
 		b.mu.Unlock()
 		w.discard()
@@ -244,18 +261,18 @@ func (b *bridge) replenishWarm() error {
 //
 // Las condiciones son deliberadamente estrictas, porque un hijo adoptado tiene
 // que ser INDISTINGUIBLE de uno recién lanzado para esta sesión:
-//   - sin secretos MMDS: el caliente se lanzó con el entorno base, y el entorno
-//     de un proceso no se puede cambiar después de exec. Si esta sesión trae
-//     secretos, el caliente no los tiene y además ya no los tendrá nunca: se
-//     descarta para no retener un proceso inadoptable.
+//   - con el mismo entorno: el entorno de un proceso no se puede cambiar
+//     después de exec. Si el de esta sesión (base + MMDS) no da la huella del
+//     caliente, este no lleva sus secretos ni los llevará nunca: se descarta
+//     para no retener un proceso inadoptable.
 //   - vivo: un caliente que murió esperando solo aportaría un 502.
-func (b *bridge) adoptWarmLocked(id string, secrets bool) *session {
+func (b *bridge) adoptWarmLocked(id string, env []string) *session {
 	w := b.warm
 	if w == nil {
 		return nil
 	}
 	b.warm = nil
-	if secrets || !w.alive() {
+	if w.huella != huellaEnv(env) || !w.alive() {
 		go w.discard()
 		return nil
 	}
@@ -272,4 +289,78 @@ func (b *bridge) adoptWarmLocked(id string, secrets bool) *session {
 	go s.readLoop(w.out)
 	log.Printf("session %s: adopted the prewarmed MCP server (pid %d)", s.id[:8], w.cmd.Process.Pid)
 	return s
+}
+
+// reponerCaliente deja, en segundo plano, otro hijo caliente para la sesión
+// SIGUIENTE de esta instancia. Lo llama spawn tras gastar el que había (por
+// adoptarlo o por descartarlo).
+//
+// Sin esto solo la primera sesión tras restaurar se ahorraba el arranque del
+// runtime: las demás de la misma instancia lo pagaban entero. Se lanza con el
+// entorno de MMDS, así que también sirve a las sesiones con secretos, que el
+// caliente del dorado nunca puede servir.
+//
+// Solo si queda plaza: el caliente ocupa lo que ocuparía una sesión, y con él
+// los procesos del servidor no pasan nunca de maxSessions, que es lo que se
+// derivó de la memoria. Uno a la vez, y nunca en modo navegador (ver
+// replenishWarm).
+func (b *bridge) reponerCaliente() {
+	if b.browser != nil || len(b.sessionArgs) > 0 {
+		return
+	}
+	b.mu.Lock()
+	// spawning incluye a la sesión que llama: hace falta otra plaza libre.
+	if b.warm != nil || b.reponiendo != nil || len(b.sessions)+b.spawning >= b.maxSessions {
+		b.mu.Unlock()
+		return
+	}
+	hecho := make(chan struct{})
+	b.reponiendo = hecho
+	gen := b.gen
+	b.mu.Unlock()
+
+	go func() {
+		defer func() {
+			b.mu.Lock()
+			b.reponiendo = nil
+			b.mu.Unlock()
+			close(hecho)
+		}()
+		// El mismo entorno que vería una sesión ahora: así su huella coincide.
+		env, _, err := b.entornoMMDS()
+		if err != nil {
+			env = b.env // como sessionEnv: sin MMDS, el entorno base
+		}
+		w, err := b.prewarmCon(env)
+		if err != nil {
+			log.Printf("prewarm: could not replace the adopted MCP server: %v", err)
+			return
+		}
+		b.mu.Lock()
+		if b.gen != gen || b.warm != nil || len(b.sessions)+b.spawning >= b.maxSessions {
+			// Un /reset o el apagado pasaron mientras arrancaba, otro ya
+			// repuso, o se llenó: sobra.
+			b.mu.Unlock()
+			w.discard()
+			return
+		}
+		b.warm = w
+		b.mu.Unlock()
+	}()
+}
+
+// esperarReposicion espera a que acabe un reponerCaliente en curso, con plazo:
+// /reset y el apagado no deben dejarlo a medio arrancar ni colgarse por él.
+func (b *bridge) esperarReposicion() {
+	b.mu.Lock()
+	hecho := b.reponiendo
+	b.mu.Unlock()
+	if hecho == nil {
+		return
+	}
+	select {
+	case <-hecho:
+	case <-time.After(warmupTimeout + 5*time.Second):
+		log.Printf("prewarm: the background replacement did not finish in time")
+	}
 }

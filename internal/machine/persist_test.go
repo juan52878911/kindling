@@ -30,7 +30,7 @@ func newTestManager(t testing.TB) *Manager {
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
-	t.Cleanup(m.Close)
+	t.Cleanup(func() { m.Close(); esperarSueltas(t, m) })
 	return m
 }
 
