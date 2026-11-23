@@ -315,10 +315,13 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// kling.exec: ejecutan lo que la imagen trae, nunca lo que pida quien llama.
 	ruta(api.GuestReadyPath, a.enArranque(ReadyHandler()))
 	ruta(api.GuestHooksPath, trasResync(a.enArranque(HooksHandler())))
-	ruta(api.GuestMemInfoPath, trasResync(MemInfoHandler()))
+	ruta(api.GuestMemInfoPath, MemInfoHandler())
 	// /drop-caches: el host la pide antes de apretar, congelar o guardar un
 	// dorado (dropcaches.go).
-	ruta(api.GuestDropCachesPath, trasResync(DropCachesHandler()))
+	// Fuera de la puerta del resync (decidido): ninguna toca lo que el segundo
+	// tiempo cambia (machine-id, execs, procesos, generación), y retenerlas
+	// retrasaría al host en el camino de apretar/congelar.
+	ruta(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
 	ruta(api.GuestServicePath, trasResync(a.enArranque(ServiceHandler())))
