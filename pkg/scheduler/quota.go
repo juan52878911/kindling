@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -69,10 +70,68 @@ func tenantFrom(ctx context.Context) *tenant {
 	return &tenant{name: defaultTenant}
 }
 
-// SetTenants registra los tokens con nombre y sus cuotas. Debe llamarse ANTES de
-// Handler(). Lista vacía = solo el token único (comportamiento de siempre).
+// SetTenants registra los tokens con nombre y sus cuotas, y SUSTITUYE los que
+// hubiera. Puede llamarse en cualquier momento, también con handlers ya
+// construidos: la siguiente petición ya resuelve contra la lista nueva (así un
+// reload revoca un token, R8-02). Lista vacía = solo el token único.
+//
+// Guarda una copia propia: el llamante puede reutilizar su slice, y cada
+// llamada deja un array distinto, que es lo que authHandler compara para saber
+// si su registro sigue valiendo.
 func (g *Scheduler) SetTenants(ts []TenantLimit) {
-	g.extraTenants = ts
+	cp := make([]TenantLimit, len(ts))
+	copy(cp, ts)
+	g.tenantMu.Lock()
+	g.extraTenants = cp
+	g.tenantMu.Unlock()
+}
+
+// tenantsActuales devuelve la lista vigente de SetTenants. No se modifica
+// nunca en sitio (SetTenants pone una nueva), así que leerla fuera del
+// candado es seguro.
+func (g *Scheduler) tenantsActuales() []TenantLimit {
+	g.tenantMu.Lock()
+	defer g.tenantMu.Unlock()
+	return g.extraTenants
+}
+
+// tokenConocido es un secreto aceptado y el tenant al que resuelve.
+type tokenConocido struct {
+	secret string
+	t      *tenant
+}
+
+// registroAuth es lo que authHandler compara en cada petición, construido a
+// partir de una lista concreta de SetTenants (desde).
+type registroAuth struct {
+	desde []TenantLimit
+	reg   []tokenConocido
+}
+
+// mismaLista dice si a y b son el MISMO slice de SetTenants (mismo array y
+// longitud), no solo iguales: SetTenants siempre deja uno nuevo.
+func mismaLista(a, b []TenantLimit) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+func construirRegistro(token string, ts []TenantLimit) *registroAuth {
+	r := &registroAuth{desde: ts}
+	if token != "" {
+		r.reg = append(r.reg, tokenConocido{token, &tenant{name: defaultTenant}})
+	}
+	for _, tl := range ts {
+		// Un token con nombre sin secreto no protege nada: se ignora en vez de
+		// registrar una entrada que aceptaría la cadena vacía.
+		if tl.Token == "" {
+			continue
+		}
+		r.reg = append(r.reg, tokenConocido{tl.Token, &tenant{
+			name:         tl.Name,
+			maxInstances: tl.MaxInstances,
+			maxInflight:  tl.MaxInflight,
+		}})
+	}
+	return r
 }
 
 // authHandler protege el mux resolviendo el Bearer a un tenant y colgándolo del
@@ -82,35 +141,32 @@ func (g *Scheduler) SetTenants(ts []TenantLimit) {
 // con nombre traen sus cuotas. Un token vacío y sin tokens con nombre desactiva
 // la autenticación: es el `-no-auth` de siempre, y que sea seguro depende de que
 // se escuche en loopback (ver resolveGatewayToken).
+//
+// Los tokens con nombre se leen de SetTenants en CADA petición: el registro
+// construido se guarda tras un atomic.Pointer y solo se rehace cuando
+// SetTenants puso una lista nueva. Si con el handler ya hecho aparecen tenants
+// donde no había ningún token, desde ese momento se exige token: nunca queda
+// abierto con tokens registrados.
 func (g *Scheduler) authHandler(h http.Handler, token string) http.Handler {
-	type known struct {
-		secret string
-		t      *tenant
-	}
-	var reg []known
-	if token != "" {
-		reg = append(reg, known{token, &tenant{name: defaultTenant}})
-	}
-	for _, tl := range g.extraTenants {
-		// Un token con nombre sin secreto no protege nada: se ignora en vez de
-		// registrar una entrada que aceptaría la cadena vacía.
-		if tl.Token == "" {
-			continue
+	var actual atomic.Pointer[registroAuth]
+	registro := func() []tokenConocido {
+		ts := g.tenantsActuales()
+		if r := actual.Load(); r != nil && mismaLista(r.desde, ts) {
+			return r.reg
 		}
-		reg = append(reg, known{tl.Token, &tenant{
-			name:         tl.Name,
-			maxInstances: tl.MaxInstances,
-			maxInflight:  tl.MaxInflight,
-		}})
-	}
-
-	// Sin ningún token: autenticación desactivada, handler sin envolver (el
-	// gateway MCP lo envuelve en SoloLoopback; ver AuthDisabled).
-	if len(reg) == 0 {
-		return h
+		r := construirRegistro(token, ts)
+		actual.Store(r)
+		return r.reg
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reg := registro()
+		// Sin ningún token: autenticación desactivada (el gateway MCP lo
+		// envuelve en SoloLoopback; ver AuthDisabled).
+		if len(reg) == 0 {
+			h.ServeHTTP(w, r)
+			return
+		}
 		// /healthz queda abierto: systemd y cualquier monitor tienen que poder
 		// preguntar si el proceso vive sin que le repartamos ningún token.
 		if r.URL.Path == "/healthz" {
@@ -140,14 +196,14 @@ func (g *Scheduler) authHandler(h http.Handler, token string) http.Handler {
 	})
 }
 
-// authFail responde el 401 con la pista de cómo autenticarse.
-// AuthDisabled dice si AuthHandler(h, token) dejaría pasar sin token: ni token
-// único ni tenants con secreto.
+// AuthDisabled dice si AuthHandler(h, token) dejaría pasar sin token AHORA: ni
+// token único ni tenants con secreto. Un SetTenants posterior puede cambiarlo
+// (ver authHandler).
 func (g *Scheduler) AuthDisabled(token string) bool {
 	if token != "" {
 		return false
 	}
-	for _, tl := range g.extraTenants {
+	for _, tl := range g.tenantsActuales() {
 		if tl.Token != "" {
 			return false
 		}
@@ -192,10 +248,13 @@ func esLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// authFail responde el 401 con la pista de cómo autenticarse. El mismo
+// planificador sirve al gateway MCP y al de IA, cada uno con su fichero de
+// token: se nombran los dos.
 func authFail(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kindling"`)
 	api.HTTPError(w, "missing Authorization header: Bearer <token>, or the token is invalid.\n"+
-		"The token lives in gateway.token on the host where the gateway runs.", http.StatusUnauthorized)
+		"The token lives on the host where the gateway runs: ai.token for the AI gateway (kling ai serve), gateway.token for the MCP gateway.", http.StatusUnauthorized)
 }
 
 // tenantBegin contabiliza una petición en vuelo para el tenant y comprueba su

@@ -334,7 +334,7 @@ func TestSetTenantsTrasElHandler(t *testing.T) {
 	if c, b := pide("tok-main"); c != 200 || b != "default/0" {
 		t.Fatalf("main token: %d %q", c, b)
 	}
-	if g.AuthDisabled("") {
+	if !g.AuthDisabled("") {
 		t.Fatal("AuthDisabled with no tenants and no token must be true")
 	}
 }
