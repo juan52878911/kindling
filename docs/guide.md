@@ -1431,6 +1431,11 @@ before. The list belongs to the key: when you rotate a key, pass `-allow-request
 the new key has no restrictions (the CLI prints which one applies). `kling template
 credential` takes the same flag.
 
+With `-allow-request` the proxy also strips the headers some providers (or the framework they
+run on) honour to change the method or the path: `X-HTTP-Method-Override`, `X-HTTP-Method`,
+`X-Method-Override`, `X-Original-URL`, `X-Original-Method` and `X-Rewrite-URL`. What was
+checked is the request line; with them the provider would run another operation.
+
 With `-allow-request` in place, a request whose **raw** path is ambiguous — an encoded
 slash or dot (`%2F`, `%5C`, `%2E`), a literal backslash, a double slash, a `;`-style path
 parameter, or a `.`/`..` segment before decoding — gets a 403 without being normalized and

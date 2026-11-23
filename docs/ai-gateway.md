@@ -246,7 +246,7 @@ validación, la orden escala como una duda con `reason: "chispa_error"` y
 | `POST /v1/admin/reload` | relee el registro; solo el token principal |
 | `POST /v1/feedback` | etiqueta humana (token principal) o voto de un maestro externo para una respuesta (`id`) o un texto ([mejora-continua.md](mejora-continua.md)) |
 | `POST /v1/admin/review`, `/retrain`, `/promote`, `/rollback` | la mejora continua: cola de revisión, reentreno con puerta, promoción de una versión microvm y vuelta atrás |
-| `GET /metrics` | Prometheus |
+| `GET /metrics` | Prometheus; solo el token principal (un token de inquilino recibe 403) |
 | `GET /healthz` | sin token |
 
 Una clasificación en la que Chispa duda, sin cascada:

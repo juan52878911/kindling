@@ -264,6 +264,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: a shared-folder session that watches more than 1024 paths, or finds the daemon out of watch descriptors, polls the rest every 2 s (up to 4096, as on Linux) instead of silently dropping them; it is logged once per session.
 - Linux: a copy of a template given live shared folders (run -from with shares, sandboxes) gets the 256 MiB/s network floor instead of the 16 MiB/s left in its snapshot (1 GiB through a rw share: 17 to 58 MB/s writing, 17 to 87 MB/s reading, the same as a cold boot).
 - The 256 MiB/s network floor for machines with live shared folders no longer overrides a lower `daemon.net_mibps` (or `KLING_NET_MIBPS`) set on purpose.
+- `kling db`: reset, undo and rm of branch copies take the repo lock, an orphan branch copy left in `preparing` is rebuilt, a ready spare left running is frozen, and SIGHUP cancels like Ctrl-C.
+- Scheduler: reaper and eviction freezes are bounded and skip reserved instances, a failed thaw moves on to the next machine, and the isolated sweep only removes its own gateway's machines.
+- Shared folders (guest): FUSE interrupts are answered, read-only calls are retried once after a cut, the cache is invalidated on reconnect, nodes with open handles are never evicted, and a lost exit status is an error instead of exit 0.
+- Published ports are restored one by one and retried when they cannot be reopened; an empty SigV4 body keeps `Content-Length: 0`.
+- kling-sandbox gateway: a hung host no longer stalls placement (hosts are probed in parallel) and ingress caches missing ids briefly.
+- aigw: agreement counts distinct teachers; a microVM task with its own thresholds escalates with candidates.
+- kling-bridge reclaims idle sessions at the cap only when the cap is 1; `kling mcp heal` keeps `-isolation` when reimporting.
 
 ### Security
 
@@ -336,6 +343,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: the daemon checks the host firewall rules every 10 s while it has machines with a network, and before a thaw that keeps the frozen network, so a firewall reload no longer leaves running machines without them until another machine starts.
 - Linux: the `KL-ACCESO` jump in OUTPUT and the agent drop in mangle PREROUTING are put back first in their chain when another firewall inserts above them.
 - Linux: the group 0 permission without `--suppl-groups` left by older versions is removed from `KL-ACCESO` too.
+- Credential proxy: with `-allow-request` rules on a domain, method and path rewrite headers (`X-HTTP-Method-Override` and similar) are stripped.
+- kling-sandbox gateway: a public port stops being served once its tenant is deleted; guest paths over 4096 bytes are rejected (400).
+- The ext4 reader detects directory cycles, caps directory bytes and file size, and reads guest-written ext4 with a 30 s deadline; symlink targets and debugfs paths are validated.
+- OCI: a loopback token realm is accepted only from a local registry; `-run-as` users resolving to uid/gid 0 are rejected; `mcp image` chroot commands run with a fixed `PATH`; the `mcp add` remote import ssh command is quoted.
+- aigw: the audit sample is keyed with a gateway secret instead of the text hash.
 
 ### Changed
 
@@ -372,6 +384,19 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
 - Machines with shares started through the API (gateway, sandbox) get at least 256 MiB/s of network, as `kling run -share` already did.
 - Shared folders watched by polling no longer re-read every watched directory each 2 s when its date has not changed (100 directories of 500 entries: 22 ms to 0.21 ms per poll on Linux, 71 ms to 0.2 ms on macOS).
+
+#### Behaviour changes
+
+- kling-sandbox gateway: `DELETE /v1/tenants/{id}` returns 409 (with counts) while the tenant still has sandboxes, graphs or volumes; `?force=true` destroys them first; 503 if a host cannot be listed.
+- kling-sandbox gateway: `files/replace` caps the file and the result at 8 MiB (was 64 MiB) and allows 4 concurrent calls per tenant (429 beyond).
+- kling-sandbox gateway: in `/v1/metrics` a non-admin tenant sees only its own machine and shell series; operator series (creations, warm pool, hosts) are admin-only.
+- `kling ai serve`: `/metrics` requires the main token; tenant tokens get 403.
+- Credential proxy: rotating or removing a Postgres or MySQL credential cuts the sessions open with it.
+- `kling db branch -switch` gives up after `KLING_DB_SWITCH_TIMEOUT` (60 s by default, 0 = no limit) instead of hanging the checkout.
+- `kling db role -login -rm` (and undoing a failed `-login`) gives the role back its previous LOGIN and password and cuts the sessions of the new one.
+- `kling db fork` of a branch copy no longer inherits its repo and branch labels.
+- `run -from` claims from the warm pool only when every other request field is zero; with `defaults.cpu_pct` set and a template without its own CPU ceiling it now takes the cold path.
+- Releases >= 1.0 need the `e2e-mac/kling-hv` commit status (the job's check run no longer counts), checked again by `release.yml` before signing; the Linux release e2e boots the published kernel and `min`; the release-path Mac e2e is strict (any skip fails it), so the Mac needs psql, git and the Postgres golden.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

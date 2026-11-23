@@ -300,6 +300,8 @@ En node-postgres, `ssl: false`; en psycopg, `sslmode="disable"`; en JDBC,
 - La contraseña, ASCII imprimible. 32 conexiones a la vez por máquina, 10 s para que el
   invitado mande arranque y contraseña, 15 s para toda la autenticación. Sin
   conexiones de replicación.
+- Rotar o quitar la credencial corta las sesiones abiertas con ella: la clave vieja no
+  sigue viva en una conexión que ya estaba autenticada. El cliente tiene que reconectar.
 - En macOS, un `-upstream` con nombre se resuelve en el daemon al entregar la
   credencial, no en cada conexión, y se usa solo la primera IP (`localhost` es
   siempre el loopback, sin preguntar al DNS; ver la receta de la LAN).

@@ -155,7 +155,16 @@ OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmli
 #     VMM=hv en un Apple Silicon, sobre el commit que se va a etiquetar. Sin el
 #     runner de e2e-mac.yml, a mano, y release.sh lo exige: el commit status
 #     e2e-mac/kling-hv que publica el script (con gh autenticado y el commit
-#     empujado). La línea KLING_E2E_HV ya no vale.
+#     empujado). La línea KLING_E2E_HV ya no vale, y el check run del job de
+#     e2e-mac.yml tampoco: solo el status, que el job publica únicamente si
+#     corrieron y pasaron 92 y 95. El job release de release.yml lo vuelve a
+#     pedir antes de firmar una ≥ 1.0, así que una etiqueta empujada a mano o
+#     un workflow_dispatch tampoco se lo saltan.
+#     En este camino el e2e es estricto (KLING_E2E_STRICT=1): una parte
+#     saltada hace fallar la pasada, así que el Mac necesita psql, git y el
+#     dorado de Postgres (KLING_E2E_DB_GOLDEN y _PASSWORD). Un kernel que no
+#     sea el de kernel.pin se rechaza, y el status lleva el sha256 del vmlinux
+#     y del min con que se probó.
 #     Un solo comando en un Mac pelado (sin Linux ni Lima): compila todo de
 #     HEAD, clona vmlinux y min.ext4 del kindling instalado (o los baja de la
 #     última release), construye la imagen de 92 con el constructor debian
@@ -203,9 +212,10 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
    `min` de las dos (`scripts/70-build-minimal-image.sh` con el `kling-bridge`
    de esta release; sin paquetes no hay chroot, así que también sale de
    x86_64), comprimidos con `zstd -19`.
-5. **e2e** (tras test y lint): `e2e-linux.yml` entero como `workflow_call`
+5. **e2e** (tras test, lint e imagenes): `e2e-linux.yml` entero como `workflow_call`
    sobre el commit de la etiqueta, con `require_kvm` (un runner sin `/dev/kvm`
-   falla en vez de avisar): microVMs de verdad con Firecracker, `90-e2e.sh`
+   falla en vez de avisar) y arrancando el `vmlinux` y el `min` que construyó
+   el job imagenes, los mismos que se publican: microVMs de verdad con Firecracker, `90-e2e.sh`
    con `kling db` y carpetas vivas, `e2e-diff-freeze.sh` y `94-e2e-upgrade.sh`
    desde la release anterior. Unos 5 min con el kernel en la caché del
    nocturno, más lo que tarde la parte db en construir la imagen pg16 y su
@@ -214,7 +224,9 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
    los kernels Android del prototipo (arm64 y amd64) con su sha256, su
    `.config` y su `.buildinfo`, como artefactos de este run.
 7. **release** (tras build, vz, imagenes, e2e y android; `contents: write`):
-   junta los artefactos, empaqueta los tres `.tar.gz` (el del operador con la
+   desde 1.0 exige primero el commit status `e2e-mac/kling-hv` en success
+   sobre el commit (`scripts/e2e-hv-estado.sh`, la misma consulta que
+   `release.sh`); después junta los artefactos, empaqueta los tres `.tar.gz` (el del operador con la
    etiqueta de esta release en `deployment.yaml`), **compara la lista de
    assets con el contrato escrito en el propio job** (si falta o sobra uno, no
    se publica), genera **un** `SHA256SUMS`, rellena la fórmula de Homebrew
@@ -240,8 +252,8 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
    vieja que la del tap tampoco.
 
 El e2e del Mac (92 y 95 con kling-hv) no está en el workflow mientras
-`e2e-mac.yml` no tenga runner: lo exige `scripts/release.sh` antes de crear la
-etiqueta (paso 3c).
+`e2e-mac.yml` no tenga runner: lo exigen `scripts/release.sh` antes de crear la
+etiqueta (paso 3c) y el job release antes de firmar.
 
 El CI de cada push y PR (`.github/workflows/ci.yml`, solo lectura, todas las
 actions fijadas por SHA):

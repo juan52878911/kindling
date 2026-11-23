@@ -65,13 +65,13 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 |---|---|
 | `up [<plantilla>] [-name N] [-ttl D] [-owner T] [-from-oci REF] [-json] [-dsn]` | sin plantilla, `pg` (construida desde `postgres:16-alpine` la primera vez; con `-from-oci`, una plantilla nombrada que falte se construye desde esa imagen). `-json`: lo necesario para conectar, sin la clave; `-dsn`: la URL con la clave (pregunta si stdout es una terminal). Después, `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
 | `ls [-owner T] [-json]` (o `ps`) | las copias del dueño: motor, golden, estado y edad. Marca con `!` y explica debajo la que el daemon retuvo porque el almacén de copia al escribir se llenó (se reanuda sola tras `kling cow grow`) y la que vio errores de disco ([cow.md](cow.md#almacén-lleno)) |
-| `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
+| `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada. Las copias de una copia de rama no heredan su repo ni su rama (`kling.db.repo`, `kling.db.branch`): son copias sueltas, no otra copia ni otra reserva de esa rama |
 | `connect <copia> [-role R] [-dsn \| -psql \| -mysql \| -redis \| -sqlite]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role`. `-mysql`, `-redis`, `-sqlite`: el cliente de cada motor ([mysql.md](mysql.md), [db-engines.md](db-engines.md)) |
 | `sql <copia> "SQL" [-role R] [-json] [-timeout 30s] \| -f FICHERO\|-` | ejecuta SQL desde el host sin psql (cliente propio, `ext/db/internal/pgmini`), como el rol de la aplicación o `-role`, con la clave del host, que no sale del proceso. Una tabla por sentencia; `-json`: `{results: [{command, columns, rows}]}`, con `null` para NULL, y `error` si el servidor contesta uno (sale con 1). Solo Postgres |
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña (en macOS, por el broker de enlaces del daemon); ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
-| `role <copia> -login -name R [-rm]` | deja entrar desde el host a un rol que **ya existe** (los que crean las migraciones: `app_user`, uno por servicio): clave nueva solo de esa copia (al invitado, su verificador), `LOGIN` y su línea de `pg_hba.conf`; no le cambia ningún privilegio. Un superusuario no. Después, `connect <copia> -role R`. `-rm` quita la línea y la clave (el rol se queda) |
+| `role <copia> -login -name R [-rm]` | deja entrar desde el host a un rol que **ya existe** (los que crean las migraciones: `app_user`, uno por servicio): clave nueva solo de esa copia (al invitado, su verificador), `LOGIN` y su línea de `pg_hba.conf`; no le cambia ningún privilegio. Un superusuario no. Después, `connect <copia> -role R`. `-rm` (y el deshacer de un `-login` que falla) devuelve el rol a como estaba: quita la línea y recarga, le devuelve la clave que tenía antes del primer `-login` (o lo deja sin ninguna) y el `LOGIN` si no lo tenía, corta las sesiones abiertas con la clave nueva y la borra del host; el rol se queda. Un rol cuya clave guardada no se sabría devolver tal cual (ni SCRAM-SHA-256 ni md5) se rechaza |
 | `branch [<rama>] [-from P] [-golden G] \| -switch [-wait] [-golden G] \| -settle \| -ls \| -rm R \| -prune \| [-owner T] [-golden G] hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
 | `class -n N [-prefix P] <golden> \| class ls \| class reset [<copia>...] \| class rm [<copia>...]` | una copia por alumno (`<prefijo>-01`...), en paralelo; las claves solo a un fichero 0600 con `-passwords`. Sin `-prefix`, `ls`, `reset` y `rm` usan la clase que haya (la de las copias nombradas, o la única; `ls` las lista todas). Ver [Una copia por alumno](#una-copia-por-alumno-class) |
 | `report add <nombre> -golden G -every 1w -question "..." \| report run <nombre> [-due] \| report ls \| report rm <nombre>` | una pregunta de `ask` guardada, que cada ejecución hace sobre una copia fresca del golden y borra al acabar; se programa con cron o systemd. Ver [db-ask.md](db-ask.md#kling-db-report-la-misma-pregunta-cada-cierto-tiempo) |
@@ -687,7 +687,10 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   cada una con el cerrojo del repo y releyendo `git worktree list`: un checkout que
   llega a la vez espera como mucho a un congelado, y lo que él active ya no se
   congela. Con `-switch -wait` todo se hace antes de volver (lo que hacía siempre); si
-  el proceso de fondo no se puede lanzar, también.
+  el proceso de fondo no se puede lanzar, también. La parte que espera el checkout
+  tiene plazo, `KLING_DB_SWITCH_TIMEOUT` (una duración de Go; 60 s por defecto, que
+  cubre crear la copia desde el golden; `0` = sin plazo): con un daemon que no contesta
+  o un cerrojo que no se suelta, `-switch` se rinde, el hook avisa y el checkout sigue.
 - **Copias de reserva.** Al salir de la rama por defecto (cuando ya no la tiene activa
   ningún worktree), el proceso de fondo saca un fork de su copia, lo prepara (clave
   propia, como cualquier copia) y lo congela: es la **reserva** de la siguiente rama
@@ -742,7 +745,11 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   checkouts a la vez —dos worktrees, o el hook y un comando— se ponen en fila: el
   segundo espera (hasta 3 minutos, avisando por stderr) y encuentra la copia hecha en
   vez de crear otra. El cerrojo lo suelta el sistema si el proceso muere. Es por host:
-  dos máquinas contra el mismo daemon no se ven.
+  dos máquinas contra el mismo daemon no se ven. `reset`, `undo` y `rm` de una copia de
+  rama o de una reserva toman el mismo cerrojo; por eso una copia de rama que se quedó
+  en `preparing` (su creador murió entre el fork y marcarla lista) es huérfana seguro y
+  se tira y se rehace. Ctrl-C, SIGTERM y SIGHUP (cerrar la terminal) deshacen lo que iba
+  a medias.
 - **Identidad y nombres.** La copia se reconoce por sus etiquetas, no por su nombre
   (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del directorio git común
   del repo (ver Worktrees) y

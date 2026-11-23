@@ -918,6 +918,15 @@ por defecto de la configuración del CLI, que ya no viaja como si fuera un flag)
 el del daemon (50). En vz el regulador pausa la VM entera: un Android de 2 vCPU
 con el 50 % iba a ¼.
 
+**Fondo precalentado y `run -from`.** Una copia del fondo (`PUT /snapshots/{name}/pool`)
+ya tiene fijados al restaurar la red, los volúmenes, los puentes al host, el caudal y
+el techo de CPU; después solo se le ajustan el nombre, las etiquetas, el TTL y qué
+hacer al vencer. Por eso `run -from` solo reclama del fondo si el resto de campos de la
+petición está en su valor cero (es una lista blanca: un campo nuevo tampoco se pierde
+en silencio); si no, va por el camino en frío. En particular, con `defaults.cpu_pct`
+configurado en el CLI (`cpu_pct_default`) y una plantilla sin techo de CPU propio, la
+creación va en frío en vez de reclamar una copia con otro techo.
+
 **Impulso de arranque (Linux).** Mientras arranca (en frío, `run -from` o
 `thaw`), la máquina corre con todas sus vCPU enteras (sin pasar de los núcleos
 del host) y vuelve a su `cpu_pct` cuando pasa la sonda de listo de su imagen,
