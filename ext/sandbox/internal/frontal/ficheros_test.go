@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -187,4 +188,64 @@ func TestMoverYBuscarFicheros(t *testing.T) {
 	// Un nombre que parece opción no se interpreta como tal.
 	esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", map[string]string{"from": "-rf", "to": "/x"}), 400)
 	esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", `{"from":"/a"}`), 400)
+}
+
+// R4-9: un destino que aparece entre la comprobación y el mv (mv -n sale con 0
+// sin mover) no es un 200; y overwrite sobre un directorio no mete el origen
+// dentro.
+func TestMoverCarreraYDirectorios(t *testing.T) {
+	b := montarCodigo(t)
+	dir := t.TempDir()
+	escribe := func(n string) string {
+		p := filepath.Join(dir, n)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mueve := func(m map[string]any) *http.Response {
+		return pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", m)
+	}
+
+	// Carrera: el destino aparece justo antes del mv.
+	origen, destino := escribe("a.txt"), filepath.Join(dir, "b.txt")
+	b.d.mu.Lock()
+	b.d.antesMv = func(api.ExecRequest) { _ = os.WriteFile(destino, []byte("otro"), 0o644) }
+	b.d.mu.Unlock()
+	resp := mueve(map[string]any{"from": origen, "to": destino})
+	esperaCodigo(t, resp, 409)
+	resp.Body.Close()
+	b.d.mu.Lock()
+	b.d.antesMv = nil
+	b.d.mu.Unlock()
+	if got, _ := os.ReadFile(destino); string(got) != "otro" {
+		t.Errorf("el destino que apareció se pisó: %q", got)
+	}
+
+	if runtime.GOOS == "darwin" {
+		t.Skip("el mv de BSD no tiene -T: la parte de directorios es del invitado Linux")
+	}
+	// overwrite con un fichero sobre un directorio: 409, y nada dentro.
+	f := escribe("f.txt")
+	d := filepath.Join(dir, "d")
+	_ = os.MkdirAll(d, 0o755)
+	resp = mueve(map[string]any{"from": f, "to": d, "overwrite": true})
+	esperaCodigo(t, resp, 409)
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(d, "f.txt")); err == nil {
+		t.Errorf("overwrite metió el origen dentro del directorio destino")
+	}
+	// overwrite con un directorio sobre un directorio vacío: lo sustituye.
+	orig := filepath.Join(dir, "o")
+	escribe("o/x.txt")
+	resp = mueve(map[string]any{"from": orig, "to": d, "overwrite": true})
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(d, "x.txt")); err != nil {
+		t.Errorf("el directorio no sustituyó al destino: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d, "o")); err == nil {
+		t.Errorf("el origen quedó anidado dentro del destino")
+	}
 }
