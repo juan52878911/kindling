@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -160,6 +161,7 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 	// Se niega a bajar nada sin --proto y --proto-redir '=https': install.sh
 	// no puede caer a http ni seguir una redirección a otro protocolo.
 	sistema := "/usr/bin:/bin"
+	var fuera []string
 	if r.conWget {
 		// wget falso con la misma regla: sin --https-only no baja nada.
 		escribir(t, filepath.Join(falsos, "wget"), `#!/bin/sh
@@ -178,7 +180,7 @@ f="`+datos+`/${url##*/releases/download/}"
 [ -f "$f" ] || exit 8
 cp "$f" "$dest"
 `, 0o755)
-		sistema = sinDescargadores(t, filepath.Join(raiz, "sistema"))
+		fuera = append(fuera, "curl", "wget")
 	} else {
 		escribir(t, filepath.Join(falsos, "curl"), `#!/bin/sh
 dest=""; url=""; proto=""; redir=""
@@ -200,6 +202,14 @@ f="`+datos+`/${url##*/releases/download/}"
 [ -f "$f" ] || exit 22
 cp "$f" "$dest"
 `, 0o755)
+	}
+	if r.sinMinisign && hayEnSistema("minisign") {
+		// Los runners de Ubuntu traen minisign en /usr/bin: sin quitarlo, el
+		// caso «sin minisign» verificaría con el de verdad.
+		fuera = append(fuera, "minisign")
+	}
+	if len(fuera) > 0 {
+		sistema = sistemaSin(t, filepath.Join(raiz, "sistema"), fuera...)
 	}
 	if !r.sinMinisign {
 		escribir(t, filepath.Join(falsos, "minisign"), `#!/bin/sh
@@ -254,9 +264,18 @@ esac
 	return res
 }
 
-// sinDescargadores llena dir de enlaces a lo de /usr/bin y /bin salvo curl y
-// wget, para un PATH donde install.sh no encuentre el curl del sistema.
-func sinDescargadores(t *testing.T, dir string) string {
+// sistemaSin llena dir de enlaces a lo de /usr/bin y /bin salvo los nombres de
+// fuera, para un PATH donde install.sh no encuentre esas herramientas.
+func hayEnSistema(n string) bool {
+	for _, d := range []string{"/usr/bin", "/bin"} {
+		if _, err := os.Lstat(filepath.Join(d, n)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func sistemaSin(t *testing.T, dir string, fuera ...string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -271,7 +290,7 @@ func sinDescargadores(t *testing.T, dir string) string {
 			// Lstat y no existe(): en Ubuntu /bin es /usr/bin, y un enlace ya
 			// puesto a un ejecutable que es a su vez un enlace roto
 			// (grub-ntldr-img) no «existe» por Stat pero ocupa el nombre.
-			if _, err := os.Lstat(filepath.Join(dir, n)); n == "curl" || n == "wget" || err == nil {
+			if _, err := os.Lstat(filepath.Join(dir, n)); slices.Contains(fuera, n) || err == nil {
 				continue
 			}
 			if err := os.Symlink(filepath.Join(d, n), filepath.Join(dir, n)); err != nil {

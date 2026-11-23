@@ -35,7 +35,8 @@ fi
 LABEL="dev.kindling.e2e$$"
 PLIST="$HOME_T/Library/LaunchAgents/$LABEL.plist"
 export KLING_LAUNCH_AGENT_LABEL="$LABEL" KLING_LAUNCH_AGENT_PLIST="$PLIST"
-export KLING_ROOT="$HOME_T/kindling-root" KLING_SOCKET="$KLING_ROOT/kling.sock"
+export KLING_ROOT="$HOME_T/kindling-root"
+export KLING_SOCKET="$KLING_ROOT/kling.sock"
 
 limpiar() {
     if [ "$(uname -s)" = Darwin ] && [ -f "$PLIST" ]; then

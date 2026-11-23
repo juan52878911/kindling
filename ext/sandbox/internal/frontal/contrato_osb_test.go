@@ -267,10 +267,18 @@ func TestContratoOSB(t *testing.T) {
 	gw := httptest.NewServer(s)
 	t.Cleanup(gw.Close)
 	const clave = "clave-osb-de-prueba-0123"
-	var logs strings.Builder
+	// El shim registra desde cada petición en paralelo.
+	var (
+		mu   sync.Mutex
+		logs strings.Builder
+	)
 	shim := httptest.NewServer(&osb.Servidor{API: apiFrontal{gw.URL, tokenAlice}, Clave: clave,
 		Imagenes: map[string]string{"python:3.12": "py"},
-		Log:      func(l string) { logs.WriteString(l + "\n") }})
+		Log: func(l string) {
+			mu.Lock()
+			defer mu.Unlock()
+			logs.WriteString(l + "\n")
+		}})
 	t.Cleanup(shim.Close)
 
 	base := t.TempDir()
@@ -280,6 +288,8 @@ func TestContratoOSB(t *testing.T) {
 	cmd.Env = append(os.Environ(), "OPEN_SANDBOX_API_KEY=", "OPEN_SANDBOX_DOMAIN=")
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "OSB OK") {
+		mu.Lock()
+		defer mu.Unlock()
 		t.Fatalf("SDK de OSB: %v\n%s\nshim:\n%s", err, out, logs.String())
 	}
 	t.Logf("%s", strings.TrimSpace(string(out)))

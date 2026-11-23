@@ -91,14 +91,20 @@ func TestCodigoResultsPorMIME(t *testing.T) {
 	}
 }
 
-func TestCodigoBash(t *testing.T) {
+// conBash4 salta el test sin bash 4 o posterior: el conductor de bash lo usa
+// (es el de las imágenes Linux) y el /bin/bash 3.2 de macOS no guarda el
+// estado entre celdas ni atiende la interrupción igual.
+func conBash4(t *testing.T) {
+	t.Helper()
 	sinHerramienta(t, "bash")
-	// El conductor de bash usa bash 4 o posterior (el de las imágenes Linux);
-	// el /bin/bash 3.2 de macOS no guarda el estado entre celdas.
 	v, err := exec.Command("bash", "-c", "echo ${BASH_VERSINFO[0]}").Output()
 	if mayor, errN := strconv.Atoi(strings.TrimSpace(string(v))); err != nil || errN != nil || mayor < 4 {
 		t.Skipf("hace falta bash >= 4 (hay %q)", strings.TrimSpace(string(v)))
 	}
+}
+
+func TestCodigoBash(t *testing.T) {
+	conBash4(t)
 	b := montarCodigo(t)
 	id := b.contextoDe(t, "bash")
 
@@ -218,6 +224,9 @@ func TestCodigoInterrumpir(t *testing.T) {
 	}
 	for _, c := range casos {
 		t.Run(c.lengua, func(t *testing.T) {
+			if c.lengua == "bash" {
+				conBash4(t)
+			}
 			sinHerramienta(t, c.herramienta)
 			b := montarCodigo(t)
 			id := b.contextoDe(t, c.lengua)

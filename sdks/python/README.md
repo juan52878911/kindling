@@ -1,7 +1,7 @@
 # kindling-sandbox (Python SDK)
 
 Client for the `/v1` API of the kindling sandbox gateway. Standard library only
-(Python >= 3.9), no dependencies. A synchronous API plus a thin asynchronous
+(Python >= 3.10), no dependencies. A synchronous API plus a thin asynchronous
 layer: `AsyncSandbox` runs each call of the sync client in a worker thread
 (`asyncio.to_thread`); it is not a native asyncio client.
 
