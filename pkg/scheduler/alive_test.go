@@ -75,7 +75,7 @@ func TestAliveUsaGetNoList(t *testing.T) {
 	}}
 	g := gwConDaemonAlive(t, d)
 
-	if !g.alive(context.Background(), "m1") {
+	if viva, _ := g.alive(context.Background(), "m1"); !viva {
 		t.Fatal("alive(m1) = false; la máquina está running")
 	}
 	if d.listLlamado.Load() {
@@ -90,11 +90,11 @@ func TestAliveFalseSiNoEstaRunning(t *testing.T) {
 	}}
 	g := gwConDaemonAlive(t, d)
 
-	if g.alive(context.Background(), "m1") {
+	if viva, _ := g.alive(context.Background(), "m1"); viva {
 		t.Error("alive(m1) = true; la máquina está congelada, no corriendo")
 	}
-	if g.alive(context.Background(), "no-existe") {
-		t.Error("alive(no-existe) = true; Get debía fallar con 404")
+	if viva, sabido := g.alive(context.Background(), "no-existe"); viva || !sabido {
+		t.Error("alive(no-existe) no la dio por muerta con certeza; Get debía fallar con 404")
 	}
 	if d.listLlamado.Load() {
 		t.Error("alive llamó a List() en algún caso; debe usar Get(id) siempre")

@@ -392,6 +392,22 @@ type entry struct {
 	// wake es el desglose del despertar que dejó lista esta instancia, hasta
 	// que la primera petición lo recoge (TakeWake).
 	wake atomic.Pointer[WakeTrace]
+
+	// sucesora es la entrada que sustituyó a esta cuando ensure readoptó la
+	// MISMA máquina (el daemon la había congelado por debajo). Las peticiones
+	// que seguían en vuelo conservan el puntero viejo: su End debe descontar
+	// en la entrada que está en el mapa, que heredó su inflight. Se toca con
+	// g.mu.
+	sucesora *entry
+}
+
+// vigenteLocked sigue la cadena de sucesoras hasta la entrada que representa
+// hoy a la máquina. Se llama con g.mu tomado.
+func (e *entry) vigenteLocked() *entry {
+	for e.sucesora != nil {
+		e = e.sucesora
+	}
+	return e
 }
 
 // begin y end marcan el trabajo en vuelo de una instancia.
@@ -401,6 +417,7 @@ type entry struct {
 // cuente desde que la respuesta salió y no desde que la petición entró.
 func (g *Scheduler) begin(e *entry) {
 	g.mu.Lock()
+	e = e.vigenteLocked()
 	e.inflight++
 	e.lastUse = time.Now()
 	g.mu.Unlock()
@@ -408,6 +425,7 @@ func (g *Scheduler) begin(e *entry) {
 
 func (g *Scheduler) end(e *entry) {
 	g.mu.Lock()
+	e = e.vigenteLocked()
 	if e.inflight > 0 {
 		e.inflight--
 	}
@@ -436,6 +454,7 @@ var streamSeq atomic.Uint64
 func (g *Scheduler) beginStream(e *entry, sesion string, cortar context.CancelFunc) (end func()) {
 	id := streamSeq.Add(1)
 	g.mu.Lock()
+	e = e.vigenteLocked()
 	if !g.enMapaLocked(e) {
 		g.mu.Unlock()
 		cortar()
@@ -897,6 +916,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (_ *entry, err e
 	tnt := tenantFrom(ctx)
 
 	var muerta string // la primaria que se descartó por muerta, si la hubo
+	var vieja *entry  // su entrada, por si vuelve la misma máquina
 	g.mu.Lock()
 	if e, ok := g.services[service]; ok {
 		e.lastUse = time.Now()
@@ -921,17 +941,26 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (_ *entry, err e
 		if recent {
 			return e, nil
 		}
-		if g.alive(ctx, e.machineID) {
+		viva, sabido := g.alive(ctx, e.machineID)
+		if viva {
 			g.mu.Lock()
 			e.checkedAt = time.Now()
 			g.mu.Unlock()
+			return e, nil
+		}
+		// No se pudo saber (el daemon reiniciándose, el cliente que canceló):
+		// eso no es una muerte. Descartarla aquí la readoptaba con una entrada
+		// nueva a inflight 0 y el segador congelaba debajo de las llamadas en
+		// curso (B-01). Se devuelve tal cual, sin refrescar checkedAt, para
+		// volver a mirar en la siguiente; si de verdad murió, el proxy lo nota.
+		if !sabido {
 			return e, nil
 		}
 		// Murió por debajo (o el daemon la congeló): se descarta como
 		// cualquier otra retirada y se reconstruye.
 		g.mu.Lock()
 		g.removeEntryLocked(service, e.machineID)
-		muerta = e.machineID
+		muerta, vieja = e.machineID, e
 	}
 	g.mu.Unlock()
 
@@ -950,6 +979,14 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (_ *entry, err e
 	// el cliente rehace el initialize con un 404 en vez de un 502.
 	if muerta != "" && muerta != e.machineID {
 		g.olvidarRutasLocked(service, muerta)
+	}
+	// La misma máquina: las peticiones en vuelo sobre la entrada vieja siguen
+	// vivas en el invitado tras el thaw. Su trabajo cuenta en la nueva (si no,
+	// el segador la vería ociosa) y su End descuenta aquí, vía sucesora.
+	if vieja != nil && muerta == e.machineID && vieja != e {
+		e.inflight += vieja.inflight
+		vieja.inflight = 0
+		vieja.sucesora = e
 	}
 	g.mu.Unlock()
 	return e, nil
@@ -1862,14 +1899,18 @@ var errNoSnapshot = errors.New("no snapshot")
 // calcular su ocupación, y ensure() lo llamaba aquí en cada thaw de una
 // instancia con caché caducada, bajo el candado del servicio — con 200+
 // máquinas y docenas de servicios era el tráfico dominante del socket del
-// daemon (G-02). Un error (incluido 404: la máquina ya no existe) cuenta
-// como no viva.
-func (g *Scheduler) alive(ctx context.Context, id string) bool {
+// daemon (G-02).
+//
+// sabido dice si la respuesta es fiable: un 404 (ya no existe) o un estado
+// distinto de running son una muerte; cualquier otro error (transporte, el
+// daemon reiniciándose, el ctx cancelado) no dice nada de la máquina y da
+// sabido=false (B-01).
+func (g *Scheduler) alive(ctx context.Context, id string) (viva, sabido bool) {
 	m, err := g.client.Get(ctx, id)
 	if err != nil {
-		return false
+		return false, api.IsNotFound(err)
 	}
-	return m.State == api.StateRunning
+	return m.State == api.StateRunning, true
 }
 
 // Reap congela las instancias que llevan demasiado tiempo sin recibir peticiones.
