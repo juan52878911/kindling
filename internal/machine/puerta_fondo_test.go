@@ -77,3 +77,32 @@ func BenchmarkPuertaFondo(b *testing.B) {
 	}
 	b.ReportMetric(float64(total)/float64(b.N), "fondo_antes/op")
 }
+
+// G-15: con peticiones reales esperando, el fondo no se lleva ningún hueco.
+func TestPuertaFondoCedeALasPeticiones(t *testing.T) {
+	if n := medirPuertaFondo(t, 2, 8); n != 0 {
+		t.Fatalf("el fondo entró %d veces delante de peticiones que esperaban", n)
+	}
+}
+
+// Sin peticiones esperando, el fondo entra sin más; y si su contexto se
+// cancela mientras cede, sale con el error del contexto y sin hueco.
+func TestPuertaFondoEntraSolaYRespetaElContexto(t *testing.T) {
+	m := &Manager{launchGate: make(chan struct{}, 1)}
+	fondo := context.WithValue(context.Background(), ctxFondo{}, true)
+	soltar, err := m.enterLaunch(fondo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	soltar()
+
+	m.esperandoPuerta.Add(1) // una petición real esperando, para siempre
+	ctx, cancel := context.WithTimeout(fondo, 30*time.Millisecond)
+	defer cancel()
+	if _, err := m.enterLaunch(ctx); err == nil {
+		t.Fatal("el fondo entró con una petición esperando")
+	}
+	if len(m.launchGate) != 0 {
+		t.Fatalf("quedaron %d huecos ocupados", len(m.launchGate))
+	}
+}

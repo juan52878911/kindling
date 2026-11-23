@@ -400,6 +400,10 @@ type Manager struct {
 	// KVM en el mismo instante— cuelga el kernel bajo virtualización anidada.
 	// Capacidad = KLING_MAX_PARALLEL_BOOT. nil en un Manager de test = sin límite.
 	launchGate chan struct{}
+	// esperandoPuerta cuenta las peticiones (no las altas del fondo) que
+	// esperan hueco en launchGate: mientras haya alguna, el fondo cede
+	// (entrarPuertaCediendo).
+	esperandoPuerta atomic.Int32
 	// retroceso es el estado del retroceso de launchGate (launch_retroceso.go);
 	// se crea al primer uso con la capacidad de la puerta.
 	retroceso atomic.Pointer[retrocesoPuerta]
