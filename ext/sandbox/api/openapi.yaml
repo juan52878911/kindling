@@ -454,16 +454,22 @@ paths:
       - $ref: "#/components/parameters/id"
     post:
       tags: [sandboxes]
-      summary: Ejecuta código Python (EXPERIMENTAL)
+      summary: Ejecuta código (python, bash o javascript)
       description: |
-        **Experimental**: versión mínima de `/code` del execd de OpenSandbox.
-        Ejecuta `code` en el contexto `context_id` (el estado persiste entre
-        ejecuciones) o, sin él, en uno efímero que se borra al acabar. La
-        respuesta es un flujo NDJSON de `CodeEvent` que siempre termina en
-        `done`. Un error del código llega como evento `error` con el traceback
-        (la respuesta sigue siendo 200). Sin salidas ricas de Jupyter. Sin
-        `python3` en la imagen, 422. Código de hasta 1 MiB (413), plazo por
-        ejecución `timeout_seconds` (60 por defecto, 600 máximo).
+        `/code` del execd de OpenSandbox. Ejecuta `code` en el contexto
+        `context_id` (el estado persiste entre ejecuciones) o, sin él, en uno
+        efímero que se borra al acabar. `language` (python por defecto; bash;
+        javascript, que necesita `node` en la imagen) no puede contradecir el
+        del contexto. La respuesta es un flujo NDJSON de `CodeEvent` que
+        SIEMPRE termina en `done`, también si el gateway falla a mitad de
+        flujo (entonces, un `error` sin datos del host y `done` con
+        `ok:false`). Un error del código llega como evento `error`
+        (la respuesta sigue siendo 200). `result` lleva `results` por tipo MIME
+        (`text/plain` siempre; `text/html` e `image/png` en base64 si el valor
+        tiene `_repr_html_` / `_repr_png_` o es una figura de matplotlib) y
+        `execution_count`. Sin el intérprete en la imagen, 422. Código de hasta
+        1 MiB (413), plazo por ejecución `timeout_seconds` (60 por defecto,
+        600 máximo).
       requestBody:
         required: true
         content:
@@ -498,11 +504,11 @@ paths:
       - $ref: "#/components/parameters/id"
     post:
       tags: [sandboxes]
-      summary: Crea un contexto de código (EXPERIMENTAL)
+      summary: Crea un contexto de código
       description: |
-        **Experimental**. Un contexto es un proceso de fondo del sandbox que
+        Un contexto es un proceso de fondo del sandbox que
         guarda las variables entre ejecuciones. Tope de 8 por sandbox (429).
-        Sin `python3` en la imagen, 422.
+        Sin el intérprete del lenguaje en la imagen, 422.
       requestBody:
         content:
           application/json:
@@ -531,7 +537,7 @@ paths:
           $ref: "#/components/responses/Error"
     get:
       tags: [sandboxes]
-      summary: Lista los contextos de código del sandbox (EXPERIMENTAL)
+      summary: Lista los contextos de código del sandbox
       responses:
         "200":
           description: Contextos vivos
@@ -559,7 +565,7 @@ paths:
           type: string
     get:
       tags: [sandboxes]
-      summary: Ve un contexto de código (EXPERIMENTAL)
+      summary: Ve un contexto de código
       responses:
         "200":
           description: El contexto
@@ -577,10 +583,36 @@ paths:
           $ref: "#/components/responses/Error"
     delete:
       tags: [sandboxes]
-      summary: Borra un contexto de código y mata su proceso (EXPERIMENTAL)
+      summary: Borra un contexto de código y mata su proceso
       responses:
         "204":
           description: Borrado
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/code/contexts/{cid}/execution:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: cid
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [sandboxes]
+      summary: Interrumpe la ejecución en curso de un contexto
+      description: |
+        Manda SIGINT al conductor del contexto: la ejecución acaba con un
+        evento `error` (`KeyboardInterrupt`) y `done` con `ok:false`. El
+        contexto y su estado siguen. Sin ejecución en curso, no hace nada.
+      responses:
+        "204":
+          description: Señal enviada
         "401":
           $ref: "#/components/responses/Error"
         "404":
@@ -1878,7 +1910,7 @@ components:
       properties:
         language:
           type: string
-          enum: [python]
+          enum: [python, bash, javascript]
         cwd:
           type: string
           description: Directorio de trabajo (vacío = el del agente)
@@ -1908,7 +1940,7 @@ components:
           description: Vacío = contexto efímero
         language:
           type: string
-          enum: [python]
+          enum: [python, bash, javascript]
         timeout_seconds:
           type: integer
           description: Plazo por ejecución (60 por defecto, 600 máximo)
@@ -1916,8 +1948,9 @@ components:
       type: object
       description: |
         `stdout` y `stderr` traen `text`; `result` el `repr` del valor de la
-        última expresión; `error`, `ename`, `evalue` y `traceback`; `done`
-        (`ok`, `duration_ms`) cierra el flujo.
+        última expresión (`text`) y sus `results` por tipo MIME; `error`,
+        `ename`, `evalue` y `traceback`; `done` (`ok`, `duration_ms`) cierra el
+        flujo, siempre. `execution_count` cuenta las ejecuciones del contexto.
       required: [type]
       properties:
         type:
@@ -1936,6 +1969,13 @@ components:
         ok:
           type: boolean
         duration_ms:
+          type: integer
+        results:
+          type: object
+          additionalProperties:
+            type: string
+          description: Por tipo MIME; `image/png` va en base64
+        execution_count:
           type: integer
     ProcessInfo:
       type: object

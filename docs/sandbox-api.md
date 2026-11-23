@@ -73,6 +73,12 @@ Los volúmenes son del tenant: otro tenant no los ve ni los monta (404, igual qu
 existieran). Cada uno vive en **un host**, y un sandbox solo monta volúmenes del host donde
 corre.
 
+- `GET /v1/sandboxes` acepta `state`, `label=clave=valor` (repetible), `limit` (1-1000) y `cursor`.
+  Sin ellos devuelve la lista entera. Con `limit` la respuesta es una página por id y, si hay más,
+  `X-Kindling-Next-Cursor` trae el `cursor` de la siguiente (el último id devuelto).
+- `POST /v1/sandboxes` acepta `env: {"CLAVE": "valor"}` (hasta 64 variables, 32 KiB): se guarda
+  como la sesión `default` del sandbox (24 h de inactividad), así que un `exec` con
+  `"session":"default"` las ve. No va junto con `count`.
 - `POST /v1/volumes` `{name, size_mib?, clone_from?, host?}` crea uno vacío o clon de otro
   propio (en su host); `GET /v1/volumes`, `GET /v1/volumes/{name}` y
   `DELETE /v1/volumes/{name}` (409 si está montado). Nombres `[a-z0-9_-]`, hasta 41.
@@ -109,23 +115,39 @@ Topes por tenant (todos con `429`): procesos vivos por sandbox (`max_processes`,
 defecto) y lecturas con `follow` abiertas a la vez (`max_follow`, 32). Se fijan en
 `KLING_SANDBOX_TENANTS` (campos 8.º a 10.º). Como en exec, el sandbox ajeno da `404`.
 
-## Intérprete de código (experimental)
+## Intérprete de código
 
-Versión mínima de `/code` y `/code/contexts` del execd de OpenSandbox, solo Python.
-`POST /v1/sandboxes/{id}/code/contexts` crea un contexto (un proceso de fondo del sandbox con
-un conductor embebido que guarda las variables); `GET` los lista, `GET|DELETE …/contexts/{cid}`
-lo ve o lo borra (mata el proceso). `POST …/code` con `{"code","context_id","timeout_seconds"}`
-devuelve NDJSON de eventos `stdout`, `stderr`, `result` (el valor de la última expresión),
-`error` (`ename`, `evalue`, `traceback`) y `done`; sin `context_id` usa un contexto efímero.
-Un error del código es un evento, no un código HTTP. Topes: 8 contextos por sandbox (`429`),
-1 MiB de código (`413`), plazo por ejecución 60 s por defecto y 600 s como máximo. Sin
-`python3` en la imagen, `422`. Los contextos de otro inquilino dan `404`. No hay salidas
-ricas de Jupyter, y una ejecución a la vez por contexto (las demás esperan).
-El plazo se impone con `SIGALRM`: un código que atrape `BaseException` o que esté dentro de
-una llamada larga en C no se corta, y el contexto queda ocupado hasta su `DELETE` (la respuesta
-HTTP vuelve igual pasado el plazo; un contexto efímero se mata siempre). El tope de 8 se
-comprueba antes de crear, sin cerrojo: peticiones simultáneas pueden pasarlo por poco, siempre
-dentro del sandbox del propio inquilino.
+`/code` y `/code/contexts` del execd de OpenSandbox, con **Python, bash y JavaScript**
+(`language`: `python` por defecto, `bash`, `javascript`; este último necesita `node` en la
+imagen). `POST /v1/sandboxes/{id}/code/contexts` crea un contexto (un proceso de fondo del
+sandbox con un conductor embebido por lenguaje que guarda el estado: variables en Python y
+JavaScript; variables, funciones y directorio actual en bash); `GET` los lista,
+`GET|DELETE …/contexts/{cid}` lo ve o lo borra (mata el proceso). `POST …/code` con
+`{"code","context_id","language","timeout_seconds"}` devuelve NDJSON de eventos `stdout`,
+`stderr`, `result` (el valor de la última expresión, en Python y JavaScript), `error`
+(`ename`, `evalue`, `traceback`) y `done`; sin `context_id` usa un contexto efímero. Un
+`language` que contradice el del contexto es `400`.
+
+- **El flujo siempre acaba en `done`**, también si el gateway pierde el host a mitad: sale
+  un `error` (`GatewayError`, sin la dirección del host) y `done` con `ok:false`.
+- **Resultados ricos.** `result` trae `text` (el `repr`) y `results`, un mapa por tipo MIME:
+  `text/plain` siempre; `text/html` e `image/png` (base64) si el valor tiene `_repr_html_` /
+  `_repr_png_` o es una figura de matplotlib. `result` y `done` llevan `execution_count`
+  (las ejecuciones del contexto, con esta).
+- **Interrumpir.** `DELETE …/code/contexts/{cid}/execution` manda SIGINT al conductor: la
+  ejecución en curso acaba con `error` `KeyboardInterrupt` y `done` `ok:false`, y el contexto
+  sigue. En bash un `exit` o un estado distinto de 0 es un `error` `ExitStatus`; no mata el
+  contexto.
+- Un error del código es un evento, no un código HTTP. Topes: 8 contextos por sandbox
+  (`429`), 1 MiB de código (`413`), plazo por ejecución 60 s por defecto y 600 s como máximo.
+  Sin el intérprete en la imagen, `422`. Los contextos de otro inquilino dan `404`. Una
+  ejecución a la vez por contexto (las demás esperan).
+- El plazo en Python se impone con `SIGALRM`: un código que atrape `BaseException` o que esté
+  dentro de una llamada larga en C no se corta, y el contexto queda ocupado hasta su `DELETE`
+  (la respuesta HTTP vuelve igual pasado el plazo; un contexto efímero se mata siempre). El
+  de JavaScript corta código síncrono con `vm`; el de bash mata el grupo de procesos de la
+  ejecución. El tope de 8 contextos se comprueba antes de crear, sin cerrojo: peticiones
+  simultáneas pueden pasarlo por poco, siempre dentro del sandbox del propio inquilino.
 
 ## Sesiones
 
@@ -143,8 +165,26 @@ tipos de trama.
 
 ## Ficheros
 
-`/v1/sandboxes/{id}/files?path=...`: GET descarga (o `stat=1` da metadatos), PUT sube
-(`mode` octal, `mkdir=1`, máximo 64 MiB) y DELETE borra.
+`/v1/sandboxes/{id}/files?path=...`: GET descarga (o `stat=1` da metadatos, `list=1` lista, `tar=1`
+baja el directorio como tar), PUT sube (`mode` octal, `mkdir=1`, máximo 64 MiB; con `tar=1` el
+cuerpo es un tar que se extrae dentro de `path`) y DELETE borra.
+
+- **`Range`** en la descarga: `Range: bytes=a-b` (también `a-` y `-n`, un solo rango) da `206` con
+  `Content-Range`; fuera del fichero, `416`. El invitado no sabe saltar: el gateway lee y descarta
+  lo anterior, así que el coste es el del desplazamiento.
+- `POST …/files/move` `{"from","to"}` mueve o renombra (`mv`), `POST …/files/mkdir` `{"path"}`
+  crea el directorio y los que falten (`201`, con su `FileStat`), y
+  `GET …/files/search?path=/dir&glob=*.log` busca por nombre (un `find` dentro del sandbox con
+  plazo de 20 s, 1 MiB de salida y 1000 resultados; `truncated` avisa de un corte).
+
+## Errores
+
+Toda respuesta de error es JSON `{"message","code"}`. El `code` es el del daemon si lo trae
+(`no_claimable`, `machine_limit`, `name_taken`…) y, si no, el del estado HTTP (`bad_request`,
+`not_found`, `method_not_allowed`, `too_many_requests`, `bad_gateway`…). También las rutas
+desconocidas (`404`) y los métodos no admitidos (`405`). Un fallo tras el `200` de un flujo
+sale como evento `error` con el mismo saneado que un 5xx: sin rutas de socket ni direcciones
+de host. El cuerpo de `exec` rechaza campos desconocidos (`400`), como el resto de rutas.
 
 ## Entrada HTTP a puertos del sandbox
 
@@ -164,8 +204,11 @@ que devuelve la API usan `https` si el gateway tiene certificado y `http` si no.
 "ttl_seconds": 3600, "public": false}` (TTL por defecto 1 h, máximo 7 días) devuelve la `url`
 y un `token`. El token no tiene estado (HMAC con `-ingress-secret-file`; sin él es uno al
 azar por proceso y no sobrevive a un reinicio ni vale en otro gateway): no se puede revocar
-antes de que caduque, solo acortar su vida al pedirlo. Con `"public": true` no hay token:
-cualquiera con la URL entra hasta que caduque.
+antes de que caduque salvo con `DELETE …/endpoints/{port}`, que revoca los tokens de ese puerto
+emitidos hasta ese momento (una lista de revocaciones por sandbox en una etiqueta interna, que
+`autorizar` comprueba; los tokens nuevos valen) y quita el puerto de los públicos. Con
+`"public": true` no hay token: cualquiera con la URL entra hasta que caduque o se revoque.
+`GET …/endpoints` lista los públicos vigentes; los de token no se listan (no hay estado).
 
 **Autorización.** En el subdominio vale el Bearer del tenant dueño, o el token del endpoint
 (solo para ese sandbox y ese puerto) por `Authorization: Bearer`, `X-Kling-Endpoint-Token`

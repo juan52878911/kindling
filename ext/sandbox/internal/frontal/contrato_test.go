@@ -202,6 +202,7 @@ func TestContratoEsquemas(t *testing.T) {
 		"CrearClavePeticion": pedirClave{}, "RotarClavePeticion": pedirRotar{}, "ClaveCreada": claveCreada{},
 		"ExecResult": api.ExecResult{}, "ProcessStartRequest": api.ProcessStartRequest{}, "ProcessInfo": api.ProcessInfo{},
 		"ProcessEvent": api.ProcessEvent{}, "ProcessSignalRequest": api.ProcessSignalRequest{}, "SessionRequest": api.SessionRequest{}, "Session": api.Session{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{}, "FileList": api.FileList{}, "FileEntry": api.FileEntry{},
+		"CodeEvent": CodigoEvento{}, "CodeRequest": CodigoPeticion{}, "CodeContext": Contexto{},
 		"MoverPeticion": MoverPeticion{}, "MkdirPeticion": MkdirPeticion{}, "BusquedaFicheros": BusquedaFicheros{},
 	}
 	for nombre, v := range structs {

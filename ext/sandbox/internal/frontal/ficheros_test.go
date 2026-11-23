@@ -13,21 +13,6 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-func (b *bancoCodigo) ficheroGET(t *testing.T, ruta string, cab map[string]string) (*http.Response, string) {
-	t.Helper()
-	req := peticion(t, b.srv, tokenAlice, "GET", b.base+ruta, nil)
-	for k, v := range cab {
-		req.Header.Set(k, v)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return resp, string(body)
-}
-
 // Range en la descarga: 206 con Content-Range, 416 fuera de rango.
 func TestDescargaConRange(t *testing.T) {
 	f := nuevoFalso(t)
