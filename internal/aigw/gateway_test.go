@@ -740,3 +740,43 @@ func TestCierreSaltaReplicasEnVuelo(t *testing.T) {
 		t.Fatalf("Close once idle: freezes=%d running=%d, want 1 and 0", freezes, running)
 	}
 }
+
+// Un gateway arrancado en el socket sin token sigue atendiendo sin token a su
+// dueño después de que un reload traiga inquilinos: el registro nuevo no le
+// cierra el socket. Un inquilino sigue entrando solo con su token, y un token
+// que no es de nadie es un 401. En TCP (-no-auth) no hay excepción.
+func TestSocketSinTokenSobreviveAInquilinos(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ai.json")
+	escribirRegistro(t, p, nil, nil)
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := g.ServeHandler("", false)
+	if rec := do(t, h, "GET", "/v1/models", "", nil); rec.Code != 200 {
+		t.Fatalf("owner before reload: %d", rec.Code)
+	}
+	escribirRegistro(t, p, nil, []TenantConfig{{Name: "acme", Token: "tenant-acme-0123456789"}})
+	if _, err := g.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "", nil); rec.Code != 200 {
+		t.Fatalf("socket owner without a token after tenants arrived: %d, want 200", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/metrics", "", nil); rec.Code != 200 {
+		t.Fatalf("socket owner on an admin route: %d, want 200", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/metrics", "tenant-acme-0123456789", nil); rec.Code != 403 {
+		t.Fatalf("tenant on an admin route: %d, want 403", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "tenant-acme-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("tenant with its token: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "nadie-0123456789abcdef", nil); rec.Code != 401 {
+		t.Fatalf("unknown token on the socket: %d, want 401", rec.Code)
+	}
+	tcp := g.ServeHandler("", true)
+	if rec := do(t, tcp, "GET", "/v1/models", "", nil); rec.Code != 401 {
+		t.Fatalf("TCP without a token once tenants exist: %d, want 401", rec.Code)
+	}
+}
