@@ -78,6 +78,7 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	// entorno finales por el descriptor 3 (sesiones.go).
 	argv, dir, baseEnv := req.Cmd, req.Dir, env
 	var cp *capturaSesion
+	var errSesion string
 	if req.Session != "" {
 		ses, ok := usarSesion(req.Session)
 		if !ok {
@@ -157,7 +158,11 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 		// Solo si el trap llegó a escribir: un comando matado por el plazo no
 		// toca la sesión.
 		if st, ok := cp.resultado(); ok {
-			guardarEstado(req.Session, st.dir, envComoMapa(append(append([]string(nil), baseEnv...), req.Env...)), st.env)
+			if err := guardarEstado(req.Session, st.dir, envComoMapa(append(append([]string(nil), baseEnv...), req.Env...)), st.env); err != nil {
+				errSesion = err.Error()
+			}
+		} else if cp.excedido.Load() {
+			errSesion = fmt.Sprintf("session state not saved: the environment after the command exceeds %d bytes", api.SessionMaxEnv)
 		}
 	}
 	stdout.flush()
@@ -190,6 +195,7 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 		code = c
 	}
 	ev.Exit = &code
+	ev.Error = errSesion
 	return ev
 }
 
