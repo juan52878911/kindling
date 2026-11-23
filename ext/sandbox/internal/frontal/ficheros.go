@@ -106,7 +106,9 @@ func (s *Servidor) handleMover(w http.ResponseWriter, r *http.Request, id string
 		fail(w, codigoBuscar(err), err)
 		return
 	}
-	cmd := []string{"mv", "--", req.From, req.To}
+	// -T: el destino es el nombre final, nunca un directorio donde meter el
+	// origen (con overwrite sobre un directorio, mv lo sustituye o falla).
+	cmd := []string{"mv", "-T", "--", req.From, req.To}
 	if !req.Overwrite {
 		// Un destino que existe no se pisa sin pedirlo; "-n" cubre la carrera
 		// entre la comprobación y el mv.
@@ -117,7 +119,7 @@ func (s *Servidor) handleMover(w http.ResponseWriter, r *http.Request, id string
 			fail(w, codigoExec(err), deHost(h, err))
 			return
 		}
-		cmd = []string{"mv", "-n", "--", req.From, req.To}
+		cmd = []string{"mv", "-T", "-n", "--", req.From, req.To}
 	}
 	// Las rutas son absolutas, así que ninguna parece una opción; "--" lo
 	// asegura igualmente.
@@ -135,6 +137,16 @@ func (s *Servidor) handleMover(w http.ResponseWriter, r *http.Request, id string
 			code = http.StatusNotFound
 		}
 		fail(w, code, fmt.Errorf("move failed: %s", msg))
+		return
+	}
+	// mv -n sale con 0 sin mover cuando el destino apareció entre la
+	// comprobación y el mv (busybox, coreutils < 9.2): si el origen sigue, no
+	// se movió nada.
+	if _, err := h.Cliente.StatFile(r.Context(), mc.ID, req.From); err == nil {
+		fail(w, http.StatusConflict, fmt.Errorf("nothing was moved: %s already exists (it appeared meanwhile)", req.To))
+		return
+	} else if !esNoEncontrado(err) {
+		fail(w, codigoExec(err), deHost(h, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, req)
