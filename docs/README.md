@@ -63,6 +63,7 @@ Los que no entran en una sección de arriba:
 |---|---|
 | [`sandbox-api.md`](sandbox-api.md) | La API `/v1` del gateway de sandboxes: autenticación, inquilinos y claves, intérprete de código, entrada HTTP a puertos |
 | [`e2b.md`](e2b.md) | El shim compatible con E2B (`kling sbx e2b`): cómo apuntar el SDK y qué operaciones soporta |
+| [`opensandbox.md`](opensandbox.md) | El shim compatible con OpenSandbox 1.2.1 (`kling sbx osb`): mapa de imágenes, qué operaciones soporta y cuáles dan 501 |
 | [`observabilidad.md`](observabilidad.md) | Trazas y métricas OTLP del gateway de sandboxes y su registro de auditoría |
 | [`db.md`](db.md) · [`mysql.md`](mysql.md) | `kling db`: una base Postgres desechable por microVM, y MySQL/MariaDB con su proxy de credenciales |
 | [`s3-sigv4.md`](s3-sigv4.md) | S3 y compatibles con el proxy de credenciales (re-firma SigV4) |
