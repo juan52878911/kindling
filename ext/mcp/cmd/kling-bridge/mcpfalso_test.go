@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // Servidor MCP de stdio falso, hecho con el propio binario de los tests: con
@@ -26,6 +28,9 @@ const envMCPFalso = "KLING_BRIDGE_MCP_FALSO"
 // del modo proxy y de Chromium compartido, para ver si se relanzan y con qué
 // entorno.
 const envHTTPFalso = "KLING_BRIDGE_HTTP_FALSO"
+
+// envArranqueFalso: milisegundos que el servidor MCP falso tarda en arrancar.
+const envArranqueFalso = "KLING_BRIDGE_MCP_FALSO_ARRANQUE_MS"
 
 func TestMain(m *testing.M) {
 	if addr := os.Getenv(envHTTPFalso); addr != "" {
@@ -61,6 +66,11 @@ type mensajeFalso struct {
 }
 
 func servidorMCPFalso() {
+	// Con envArranqueFalso, tarda esos milisegundos en «arrancar el runtime»
+	// antes de leer nada, como node importando sus módulos.
+	if ms, err := strconv.Atoi(os.Getenv(envArranqueFalso)); err == nil && ms > 0 {
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	out := bufio.NewWriter(os.Stdout)
