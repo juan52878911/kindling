@@ -396,6 +396,14 @@ func (a *app) undo(ctx context.Context, ref, name, owner string) (*api.Machine, 
 	if err := owned(mc, owner); err != nil {
 		return nil, err
 	}
+	un, mc, err := a.lockCopy(ctx, mc)
+	if err != nil {
+		return nil, err
+	}
+	defer un()
+	if err := owned(mc, owner); err != nil {
+		return nil, err
+	}
 	if st := mc.Labels[labelState]; st != stateReady {
 		return nil, fmt.Errorf("%s is not ready (%s=%q)", mc.Name, labelState, st)
 	}

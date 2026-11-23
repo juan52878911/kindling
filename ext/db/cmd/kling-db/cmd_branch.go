@@ -214,6 +214,37 @@ func (a *app) lockRepo(ctx context.Context, ri *repoInfo) (func(), error) {
 	return un, err
 }
 
+// lockCopy toma, si mc es la copia de una rama o una reserva (lleva el repo),
+// el cerrojo de kling db branch de su repo, y la devuelve releída ya con él.
+// reset, undo y rm borran y recrean copias: sin el cerrojo, un checkout en ese
+// hueco crearía otra copia de la misma rama, y ensureBranch no podría dar por
+// huérfana una copia en preparing. Una copia suelta no espera a nadie. La
+// clave del cerrojo es la del repo de ahora si se está dentro de él (la
+// etiqueta puede llevar aún la clave de antes) y, si no, la de la etiqueta.
+func (a *app) lockCopy(ctx context.Context, mc *api.Machine) (func(), *api.Machine, error) {
+	label := mc.Labels[labelRepo]
+	if label == "" {
+		return func() {}, mc, nil
+	}
+	if !api.KeyPattern.MatchString(label) {
+		return nil, nil, fmt.Errorf("%s has an invalid %s label", mc.Name, labelRepo)
+	}
+	key := label
+	if ri, err := a.repo(ctx); err == nil && ri.is(label) {
+		key = ri.repo
+	}
+	un, err := a.lockRepo(ctx, &repoInfo{repo: key})
+	if err != nil {
+		return nil, nil, err
+	}
+	cur, err := a.inspect(ctx, mc.ID)
+	if err != nil {
+		un()
+		return nil, nil, err
+	}
+	return un, cur, nil
+}
+
 // worktreeBranches son las claves de las ramas que tiene activas algún
 // worktree del repo (git worktree list): esas copias están en uso.
 func (a *app) worktreeBranches(ctx context.Context) (map[string]bool, error) {
