@@ -41,16 +41,18 @@ func TestThawDeUnaFailedReservaSusVolumenes(t *testing.T) {
 	req := api.RunRequest{Volume: "datos"}
 	var probado bool
 	var errOtro error
-	previo := montarRedHost
-	montarRedHost = func(n *knet.Net, e knet.Egress, d []string, uid int) error {
-		if !probado {
-			probado = true
-			otro := newID()
-			_, errOtro = m.reservarVolumenes(req, otro, "otra")
-			m.soltarReservas(otro)
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		previo := g.montar
+		g.montar = func(n *knet.Net, e knet.Egress, d []string, uid int) error {
+			if !probado {
+				probado = true
+				otro := newID()
+				_, errOtro = m.reservarVolumenes(req, otro, "otra")
+				m.soltarReservas(otro)
+			}
+			return previo(n, e, d, uid)
 		}
-		return previo(n, e, d, uid)
-	}
+	})
 
 	if _, err := m.Thaw(context.Background(), mc.ID); err == nil || !strings.Contains(err.Error(), "launching") {
 		t.Fatalf("Thaw = %v; quería que llegara a lanzar el VMM (y fallara sin él)", err)

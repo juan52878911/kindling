@@ -338,6 +338,11 @@ func managerVZ(t testing.TB, largo ...bool) (*Manager, string) {
 		byID:   map[string]*api.Machine{},
 		socket: map[string]string{},
 	}
+	// Lo último del test (los defer matarVMM ya corrieron): se espera a lo
+	// que dejó en segundo plano. Antes el esperarVMM de un VMM muerto seguía
+	// en el test siguiente y desmontaba la red con los ganchos que ese test
+	// acababa de cambiar.
+	t.Cleanup(func() { esperarSueltas(t, m) })
 	return m, logPath
 }
 

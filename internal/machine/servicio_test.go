@@ -87,9 +87,7 @@ func TestPeticionesAlAgenteSinConexionesGuardadas(t *testing.T) {
 // ahí las conexiones que guarda hacia los invitados, que con la misma IP
 // llegarían al VMM siguiente.
 func TestDesmontarRedAvisaDeQueElInvitadoSeFue(t *testing.T) {
-	old := desmontarRedHost
-	t.Cleanup(func() { desmontarRedHost = old })
-	desmontarRedHost = func(*knet.Net) {}
+	cambiarGanchosRed(t, func(g *ganchosRed) { g.desmontar = func(*knet.Net) {} })
 	m := &Manager{}
 	m.desmontarRed(knet.Plan(3, "abcd000000000001"), "abcd000000000001") // sin aviso registrado
 	var avisos []string

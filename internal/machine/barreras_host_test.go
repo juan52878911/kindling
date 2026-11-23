@@ -50,13 +50,15 @@ func TestElVigilanteReponeLasBarrerasDelHost(t *testing.T) {
 // despierta.
 func TestThawConLaRedConservadaCompruebaLasBarreras(t *testing.T) {
 	m := newTestManager(t)
-	oldR, oldM := redConservada, montarRedHost
-	t.Cleanup(func() { redConservada, montarRedHost = oldR, oldM })
+	oldR := redConservada
+	t.Cleanup(func() { redConservada = oldR })
 	redConservada = func(*Manager, *knet.Net, string) bool { return true }
-	montarRedHost = func(*knet.Net, knet.Egress, []string, int) error {
-		t.Fatal("con la red conservada no se monta otra")
-		return nil
-	}
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = func(*knet.Net, knet.Egress, []string, int) error {
+			t.Fatal("con la red conservada no se monta otra")
+			return nil
+		}
+	})
 	mc := &api.Machine{ID: "aa11bb22cc33dd44", NetIndex: 3, Egress: "none"}
 
 	llamadas := 0

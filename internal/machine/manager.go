@@ -579,7 +579,12 @@ type Manager struct {
 	vigMu     sync.Mutex
 	vigCancel []context.CancelFunc
 	vigWG     sync.WaitGroup
-	cerrando  atomic.Bool
+	// sueltas cuenta lo que corre en segundo plano sin que Close lo espere:
+	// los esperarVMM (el VMM puede seguir vivo tras el daemon) y los
+	// reintentos del resync de thaw. Es para los tests: que uno no deje
+	// trabajo vivo leyendo o escribiendo lo que cambia el siguiente.
+	sueltas  sync.WaitGroup
+	cerrando atomic.Bool
 	// ttlEnCurso: hay una ronda de expireTTL en segundo plano.
 	ttlEnCurso atomic.Bool
 	// pruebasPasoVigilante, en los tests, se llama antes de cada paso de la
@@ -2750,7 +2755,11 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 	}
 	// Sin Wait() el proceso quedaría zombi al terminar; y si muere solo, la
 	// máquina deja de figurar running en el acto (esperarVMM).
-	go m.esperarVMM(id, cmd, logf)
+	m.sueltas.Add(1)
+	go func() {
+		defer m.sueltas.Done()
+		m.esperarVMM(id, cmd, logf)
+	}()
 	return cmd.Process.Pid, enCg, nil
 }
 
@@ -4450,7 +4459,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if avisoResync != "" {
 		// Se sigue intentando hasta que entre.
 		if ej, ok := m.ejecucionDe(mc.ID); ok {
+			m.sueltas.Add(1)
 			go func() {
+				defer m.sueltas.Done()
 				defer finReloj()
 				m.resyncThawReintentos(mc.ID, ej, mc.AllowExec || mc.Agent != nil)
 			}()

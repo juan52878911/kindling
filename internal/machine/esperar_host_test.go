@@ -25,14 +25,14 @@ import (
 // los desmontajes de la red.
 func barreraCaida(t *testing.T) *atomic.Int32 {
 	t.Helper()
-	oldA, oldD, oldM := montarRedHostAparte, desmontarRedHost, montarRedHost
-	t.Cleanup(func() { montarRedHostAparte, desmontarRedHost, montarRedHost = oldA, oldD, oldM })
-	montarRedHost = nil
-	montarRedHostAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
-		return func() error { return errors.New("barrera caída") }, nil
-	}
 	var desmontadas atomic.Int32
-	desmontarRedHost = func(*knet.Net) { desmontadas.Add(1) }
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = nil
+		g.montarAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
+			return func() error { return errors.New("barrera caída") }, nil
+		}
+		g.desmontar = func(*knet.Net) { desmontadas.Add(1) }
+	})
 	return &desmontadas
 }
 

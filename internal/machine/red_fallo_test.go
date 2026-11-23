@@ -16,16 +16,16 @@ import (
 func TestMontarRedQueFallaNoDejaLaRedAMedias(t *testing.T) {
 	m := newTestManager(t)
 	var desmontadas []string
-	oldM, oldD := montarRedHost, desmontarRedHost
-	t.Cleanup(func() { montarRedHost, desmontarRedHost = oldM, oldD })
-	montarRedHost = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
-		// Lo que haría un Setup que se queda a medias: la marca ya está puesta.
-		if !m.redEsPropia(n.NS) {
-			t.Errorf("la marca de %s no estaba antes de montar", n.NS)
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
+			// Lo que haría un Setup que se queda a medias: la marca ya está puesta.
+			if !m.redEsPropia(n.NS) {
+				t.Errorf("la marca de %s no estaba antes de montar", n.NS)
+			}
+			return errors.New("iptables: no chain")
 		}
-		return errors.New("iptables: no chain")
-	}
-	desmontarRedHost = func(n *knet.Net) { desmontadas = append(desmontadas, n.NS) }
+		g.desmontar = func(n *knet.Net) { desmontadas = append(desmontadas, n.NS) }
+	})
 
 	id := "c0ffee0000000001"
 	n := knet.Plan(7, id)
@@ -48,12 +48,12 @@ func TestMontarRedQueFallaNoDejaLaRedAMedias(t *testing.T) {
 func TestMontarRedNoDesmontaLaRedAjena(t *testing.T) {
 	m := newTestManager(t)
 	var desmontadas []string
-	oldM, oldD := montarRedHost, desmontarRedHost
-	t.Cleanup(func() { montarRedHost, desmontarRedHost = oldM, oldD })
-	montarRedHost = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
-		return knet.ErrRedAjena
-	}
-	desmontarRedHost = func(n *knet.Net) { desmontadas = append(desmontadas, n.NS) }
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
+			return knet.ErrRedAjena
+		}
+		g.desmontar = func(n *knet.Net) { desmontadas = append(desmontadas, n.NS) }
+	})
 
 	id := "c0ffee0000000002"
 	n := knet.Plan(8, id)

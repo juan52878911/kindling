@@ -12,10 +12,10 @@ import (
 // allowlist, o con dominios corrientes, no dice nada.
 func TestMontarRedAvisaDeAllowMultiinquilino(t *testing.T) {
 	m := newTestManager(t)
-	oldM, oldD := montarRedHost, desmontarRedHost
-	t.Cleanup(func() { montarRedHost, desmontarRedHost = oldM, oldD })
-	montarRedHost = func(*knet.Net, knet.Egress, []string, int) error { return nil }
-	desmontarRedHost = func(*knet.Net) {}
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = func(*knet.Net, knet.Egress, []string, int) error { return nil }
+		g.desmontar = func(*knet.Net) {}
+	})
 
 	casos := []struct {
 		egress  knet.Egress
