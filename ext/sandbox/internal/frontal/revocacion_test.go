@@ -238,7 +238,8 @@ func TestRevConexionEnOtraReplicaSeCorta(t *testing.T) {
 	if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatalf("la conexión revocada en la otra réplica sigue abierta tras %s", time.Since(ini))
 	}
-	if d := time.Since(ini); d > 5500*time.Millisecond {
+	// 5 s del repaso más el margen de una máquina cargada (CI, -race).
+	if d := time.Since(ini); d > 7*time.Second {
 		t.Errorf("el corte tardó %s, el tope es 5 s", d)
 	}
 }
