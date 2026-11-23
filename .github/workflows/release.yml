@@ -42,6 +42,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27.4'
@@ -70,6 +72,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
           # apidiff compara con la etiqueta anterior: hacen falta las etiquetas.
           fetch-depth: 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -131,6 +135,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
 
       - name: set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -138,10 +144,9 @@ jobs:
           # La toolchain con la que se compila lo publicado, no el mínimo de los
           # go.mod (go 1.24): la stdlib va dentro del binario y sus CVE con ella.
           go-version: '1.27.4'
-          cache: true
-          cache-dependency-path: |
-            go.mod
-            ext/*/go.mod
+          # Sin caché: lo que se compila aquí se firma, y la caché de Go la
+          # puede escribir cualquier otro workflow del repo.
+          cache: false
 
       - name: compute version
         id: ver
@@ -212,11 +217,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # Como en build: la toolchain parcheada, no el mínimo de vz/go.mod.
           go-version: '1.27.4'
-          cache-dependency-path: vz/go.sum
+          # Sin caché, como en build: lo que sale de aquí se firma.
+          cache: false
       # vz/ es un módulo aparte con cgo que la matriz de test (ubuntu) no ve:
       # sus tests, como el job vz de ci.yml, antes de compilar lo publicado.
       # No arrancan ninguna VM (el VMM es un doble).
@@ -277,6 +285,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: bin-linux-*
@@ -360,6 +370,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
 
       - name: compute version
         id: ver
@@ -666,6 +678,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -722,6 +736,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - name: set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
