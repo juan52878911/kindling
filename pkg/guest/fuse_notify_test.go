@@ -191,3 +191,31 @@ func TestSynthReplySoloSuHilo(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Al volver una sesión (thaw, reinicio del daemon, corte), el vigilante del
+// host empieza vacío: lo que cambió mientras no había sesión no llegó como
+// aviso. Lo que el kernel tenga en caché larga se tiene que invalidar.
+func TestReconectarInvalidaLaCache(t *testing.T) {
+	dir := carpeta(t)
+	m := montar(t, dir, false)
+	m.stop()
+	m.stop = m.conectarConWatch(t)
+	m.fs.touchHost = func(synthOp, string) {}
+
+	e, hello, _ := m.lookup(t, rootID, "hello.txt")
+	if e != 0 {
+		t.Fatalf("lookup: %d", e)
+	}
+	// Vaciar lo que dejó la conexión anterior.
+	for len(m.dev.notas) > 0 {
+		<-m.dev.notas
+	}
+
+	// Corte y sesión nueva; entre medias el host cambia el fichero.
+	m.stop()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("changed while detached\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.stop = m.conectarConWatch(t)
+	esperarNota(t, m.dev, "reattach", func(n nota) bool { return n.code == notifyInvalInode && n.a == hello })
+}
