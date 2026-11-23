@@ -37,6 +37,63 @@ func bloquesJSONDeDocs(t *testing.T, ruta string) []string {
 	return out
 }
 
+// esBloqueHTTP dice si un registro de los docs tiene algún modelo kind http.
+func esBloqueHTTP(src string) bool {
+	var c Config
+	if json.Unmarshal([]byte(src), &c) != nil {
+		return false
+	}
+	for _, m := range c.Models {
+		if m != nil && m.Kind == KindHTTP {
+			return true
+		}
+	}
+	return false
+}
+
+// TestConfigHTTPDeDocs: los ejemplos de kind http de los docs cargan con
+// LoadConfig (las credenciales de auth, como ficheros 0600 junto al ai.json)
+// y cada modelo kind http tiene su backend.
+func TestConfigHTTPDeDocs(t *testing.T) {
+	n := 0
+	for _, md := range []string{"ai-gateway.md", "chispa-serverless.md"} {
+		for _, src := range bloquesJSONDeDocs(t, filepath.Join("..", "..", "docs", md)) {
+			if !esBloqueHTTP(src) {
+				continue
+			}
+			n++
+			var crudo Config
+			if err := json.Unmarshal([]byte(src), &crudo); err != nil {
+				t.Fatalf("%s: %v", md, err)
+			}
+			dir := t.TempDir()
+			for _, m := range crudo.Models {
+				if m.Auth != nil && m.Auth.File != "" {
+					if err := os.WriteFile(filepath.Join(dir, m.Auth.File), []byte("clave\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			p := filepath.Join(dir, "ai.json")
+			if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := LoadConfig(p)
+			if err != nil {
+				t.Fatalf("%s: a kind http example does not load: %v\n%s", md, err, src)
+			}
+			for name, m := range crudo.Models {
+				if m.Kind == KindHTTP && c.Backend(name) == nil {
+					t.Errorf("%s: model %q has no backend", md, name)
+				}
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no kind http example in the docs")
+	}
+}
+
 // TestConfigViejoIntacto: todo registro de hoy (los de docs/ y los de los
 // tests) carga igual que antes de la ronda 8 —ParseConfig no toca los
 // ModelConfig— y cada modelo de réplica tiene su backend expandido con el
@@ -48,7 +105,13 @@ func TestConfigViejoIntacto(t *testing.T) {
 		if len(bs) == 0 {
 			t.Fatalf("%s: no registry block found", md)
 		}
-		regs = append(regs, bs...)
+		for _, b := range bs {
+			// Los ejemplos de kind http son de la ronda 8: no son registros
+			// de antes (los cubre TestConfigHTTPDeDocs).
+			if !esBloqueHTTP(b) {
+				regs = append(regs, b)
+			}
+		}
 	}
 	// Los de los tests: los que usan gateway_test.go, intent_test.go y
 	// chispaguest_test.go, con todos los kinds de hoy.

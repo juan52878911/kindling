@@ -120,9 +120,12 @@ http` con los campos ya puestos (`von` = contrato `openai` en el puerto 8000,
                   "auth": {"header": "Authorization", "scheme": "Bearer", "file": "vllm.key"},
                   "limits": {"max_tokens": 1024, "n": 1},
                   "health": {"path": "/health", "every": "10s"}}
-  }
+  },
+  "tenants": [{"name": "acme", "token": "cambia-este-token-de-acme"}]
 }
 ```
+
+(Con tokens de inquilino, `ai.json` tiene que ser 0600.)
 
 | Campo | Qué es |
 |---|---|
