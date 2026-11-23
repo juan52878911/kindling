@@ -244,7 +244,7 @@ func (g *Gateway) handleEval(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"record": rec, "cascade": g.cascade(req.Task)})
 }
 
-// handleModels lista los modelos VON del registro sin despertar nada: una
+// handleModels lista los modelos VON y los codificadores del registro sin despertar nada: una
 // consulta de catálogo no debe costar un thaw.
 func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 	cfg := g.config()
@@ -257,7 +257,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 	}
 	data := []model{}
 	for _, n := range sortedKeys(cfg.Models) {
-		if m := cfg.Models[n]; m.Kind == KindVON {
+		if m := cfg.Models[n]; m.Kind == KindVON || m.Kind == KindEmbed {
 			data = append(data, model{ID: n, Object: "model", OwnedBy: "kindling", Snapshot: m.Snapshot})
 		}
 	}
@@ -375,7 +375,7 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 	cfg := g.config()
 	out := map[string]replicaCount{}
 	for _, n := range sortedKeys(cfg.Models) {
-		if cfg.Models[n].Kind == KindVON {
+		if cfg.Models[n].isReplica() {
 			out[n] = replicaCount{}
 		}
 	}
@@ -383,7 +383,7 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 		if m.Labels[LabelGateway] != g.opts.ID {
 			continue
 		}
-		name, _ := cfg.vonModel(m.Service())
+		name, _ := cfg.replicaModel(m.Service())
 		if name == "" {
 			continue
 		}
@@ -406,6 +406,26 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 // "model", con streaming. El cuerpo ya viene acotado; lo que vuelve del
 // invitado se acota en bytes y en tiempo, y solo se copian las cabeceras que
 // un cliente necesita (el invitado no decide cookies ni cabeceras propias).
+// errorProxy contesta un fallo de reenvío sin el texto del error interno, que
+// lleva direcciones de invitados y mensajes del daemon (R8-11): eso va al log.
+func (g *Gateway) errorProxy(w http.ResponseWriter, name string, err error) {
+	log.Printf("proxy %s: %v", name, err)
+	var mbe *http.MaxBytesError
+	var we *wakeError
+	switch {
+	case errors.As(err, &mbe):
+		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "body too large")
+	case errors.As(err, &we):
+		g.met.vonErr(name, "wake")
+		g.met.inc(g.met.proxy, name, "5xx")
+		writeError(w, http.StatusServiceUnavailable, "server_error", fmt.Sprintf("no replica of model %q is available; retry later", name))
+	default:
+		g.met.vonErr(name, "request")
+		g.met.inc(g.met.proxy, name, "5xx")
+		writeError(w, http.StatusBadGateway, "server_error", fmt.Sprintf("model %q did not answer", name))
+	}
+}
+
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -413,8 +433,9 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req map[string]json.RawMessage
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
+	if err := json.Unmarshal(body, &req); err != nil || req == nil {
+		// null decodifica sin error a un mapa nil (R8-05): también es 400.
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "the body must be a JSON object")
 		return
 	}
 	var model string
@@ -453,69 +474,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	resp, rep, err := g.postGuest(ctx, mc.Snapshot, r.URL.Path, out)
 	if err != nil {
-		var we *wakeError
-		if errors.As(err, &we) {
-			g.met.vonErr(name, "wake")
-			g.met.inc(g.met.proxy, name, "503")
-			writeError(w, http.StatusServiceUnavailable, "server_error", err.Error())
-			return
-		}
-		g.met.vonErr(name, "request")
-		g.met.inc(g.met.proxy, name, "502")
-		writeError(w, http.StatusBadGateway, "server_error", "replica did not answer: "+err.Error())
+		g.errorProxy(w, name, err)
 		return
 	}
 	defer rep.Release()
 	defer resp.Body.Close()
-
-	code := resp.StatusCode
-	if code < 200 || code > 599 {
-		code = http.StatusBadGateway
-	}
-	g.met.inc(g.met.proxy, name, strconv.Itoa(code))
-	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "application/json"
-	}
-	w.Header().Set("Content-Type", ct)
-	if stream {
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Accel-Buffering", "no")
-	}
-	w.WriteHeader(code)
-
-	// Copia acotada. Con streaming se vacía el búfer tras cada lectura para
-	// que cada token llegue cuando sale; sin él, al final.
-	rc := http.NewResponseController(w)
-	// Sin WriteTimeout en el servidor, el plazo se queda en la conexión:
-	// quitarlo al acabar para la siguiente petición de la misma conexión.
-	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
-	buf := make([]byte, 32<<10)
-	var n int64
-	for {
-		k, rerr := resp.Body.Read(buf)
-		if k > 0 {
-			if n+int64(k) > g.opts.MaxProxyBytes {
-				log.Printf("proxy %s: replica answer over %d bytes, cut", name, g.opts.MaxProxyBytes)
-				g.met.vonErr(name, "too_large")
-				return
-			}
-			n += int64(k)
-			_ = rc.SetWriteDeadline(time.Now().Add(plazoEscritura))
-			if _, werr := w.Write(buf[:k]); werr != nil {
-				return // el cliente se fue; el contexto cancela la réplica
-			}
-			if stream {
-				if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-					return
-				}
-			}
-		}
-		if rerr != nil {
-			if rerr != io.EOF {
-				g.met.vonErr(name, "stream")
-			}
-			return
-		}
-	}
+	g.devolver(w, resp, name, stream)
 }

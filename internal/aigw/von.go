@@ -109,13 +109,13 @@ func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte)
 		rep.Release()
 		if staleConn(ctx, reused, err) && !staleRetried {
 			staleRetried = true
-			g.met.vonErr(snap, "stale")
+			g.met.vonErr(g.nombreModelo(snap), "stale")
 			g.guests.closeIdle(rep.Addr)
 			continue
 		}
 		if isDialError(err) && !dialRetried {
 			dialRetried = true
-			g.met.vonErr(snap, "dial")
+			g.met.vonErr(g.nombreModelo(snap), "dial")
 			g.guests.forget(rep.Addr)
 			rep.Drop()
 			continue
@@ -188,14 +188,21 @@ func (g *Gateway) chatVON(ctx context.Context, snap string, req chatReq) (*von.C
 	return &out, nil
 }
 
+// nombreModelo es el modelo del registro que sirve el dorado snap, que es con
+// lo que se etiquetan las métricas (R8-11: el dorado abría otra serie para lo
+// mismo); el dorado si ningún modelo lo nombra.
+func (g *Gateway) nombreModelo(snap string) string {
+	if name, _ := g.config().replicaModel(snap); name != "" {
+		return name
+	}
+	return snap
+}
+
 // primeraPeticion cierra el desglose de un despertar con la petición que lo
 // pagó: la registra en las métricas y deja una línea de log con todas las
 // fases, que es de donde sale la tabla de docs/despertar.md.
 func (g *Gateway) primeraPeticion(snap string, t *scheduler.WakeTrace, first time.Duration) {
-	name, _ := g.config().replicaModel(snap)
-	if name == "" {
-		name = snap
-	}
+	name := g.nombreModelo(snap)
 	g.met.wakePhases(name, t, first)
 	log.Printf("%s: replica ready (%s), first request %.1f ms, total %.1f ms", name, t,
 		float64(first.Microseconds())/1000, float64((t.Total+first).Microseconds())/1000)
