@@ -228,9 +228,10 @@ func TestCambiarEgresoAllowlistANoneCierraConexiones(t *testing.T) {
 	if !res.Estrecha || !res.ConexionesCortadas || !f.vio("conntrack -D --orig-src "+GuestIP) {
 		t.Fatalf("res=%+v cmds=%v", res, f.cmds)
 	}
-	// B1: también las entradas del host con el NSIP de origen o destino.
-	if !f.vio("conntrack -D --orig-dst "+n.NSIP) || !f.vio("conntrack -D --orig-src "+n.NSIP) {
-		t.Errorf("faltan los borrados del host: %v", f.cmds)
+	// B1/R10: del host solo lo que originó el invitado (orig-src NSIP); lo
+	// host→invitado (orig-dst) no se corta al estrechar.
+	if !f.vio("conntrack -D --orig-src "+n.NSIP) || f.vio("--orig-dst "+n.NSIP) {
+		t.Errorf("borrados del host incorrectos: %v", f.cmds)
 	}
 	if !f.vio("ipset destroy") {
 		t.Errorf("el ipset debía borrarse: %v", f.cmds)
@@ -407,7 +408,7 @@ func TestCortarConexionesFalloEnElHostNoPrometeCorte(t *testing.T) {
 	base := ejecutar
 	ejecutar = func(args ...string) error {
 		_ = base(args...)
-		if strings.Contains(strings.Join(args, " "), "--orig-dst "+n.NSIP) {
+		if strings.Contains(strings.Join(args, " "), "--orig-src "+n.NSIP) {
 			return errors.New("boom")
 		}
 		return nil
@@ -422,7 +423,11 @@ func TestCortarConexionesFalloEnElHostNoPrometeCorte(t *testing.T) {
 func TestTeardownBorraConntrackDelHost(t *testing.T) {
 	n := redDePrueba()
 	f := nuevoFakeRed(t, n, EgressNone)
+	oldR := existeRuta
+	existeRuta = func(string) bool { return true }
+	t.Cleanup(func() { existeRuta = oldR })
 	n.Teardown()
+	vaciarConntrackHost()
 	if !f.vio("conntrack -D --orig-dst "+n.NSIP) || !f.vio("conntrack -D --orig-src "+n.NSIP) {
 		t.Fatalf("cmds=%v", f.cmds)
 	}
@@ -440,5 +445,105 @@ func TestReglasBaseRanuraLlevanLasReglasDelVeth(t *testing.T) {
 	estab := slices.IndexFunc(ls, func(s string) bool { return strings.Contains(s, "ESTABLISHED,RELATED") })
 	if nueva < 0 || inval < 0 || estab < 0 || nueva > estab || inval > estab {
 		t.Fatalf("nueva=%d invalida=%d established=%d", nueva, inval, estab)
+	}
+}
+
+// R7: sin red que borrar (alta nueva) Teardown no lanza conntrack.
+func TestTeardownSinRedNoLlamaAConntrack(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressNone)
+	oldR := existeRuta
+	existeRuta = func(string) bool { return false }
+	t.Cleanup(func() { existeRuta = oldR })
+	n.Teardown()
+	vaciarConntrackHost()
+	if f.vio("conntrack") {
+		t.Fatalf("Teardown sin red lanzó conntrack: %v", f.cmds)
+	}
+}
+
+// R7: el borrado del host no bloquea a quien llama y se agrupa por NSIP.
+func TestTeardownConntrackDelHostSeAgrupaPorNSIP(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressNone)
+	oldR := existeRuta
+	existeRuta = func(string) bool { return true }
+	t.Cleanup(func() { existeRuta = oldR })
+	soltar := make(chan struct{})
+	base := ejecutar
+	ejecutar = func(args ...string) error { <-soltar; return base(args...) }
+	n.Teardown() // vuelve aunque el trabajador esté parado en `ejecutar`
+	n.Teardown()
+	close(soltar)
+	vaciarConntrackHost()
+	cuenta := 0
+	for _, c := range f.cmds {
+		if c == "conntrack -D --orig-dst "+n.NSIP {
+			cuenta++
+		}
+	}
+	if cuenta != 1 {
+		t.Fatalf("orig-dst NSIP borrado %d veces, quería 1: %v", cuenta, f.cmds)
+	}
+}
+
+// R8: un netns anterior a las DROP de entrada las recibe en el mismo restore,
+// delante de todo; si ya las tiene, no se añade nada.
+func TestEgresoVivoReponeLaBaseQueFalta(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressInternet)
+	res, err := n.CambiarEgreso(EgressInternet, nil, EgressNone, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ConexionesCortadas {
+		t.Fatalf("res=%+v", res)
+	}
+	if len(f.restores) != 1 {
+		t.Fatalf("restores=%d, quería 1: %v", len(f.restores), f.restores)
+	}
+	r := f.restores[0]
+	for _, quiere := range []string{
+		"-I FORWARD 1 -i " + n.NSIf + " -m conntrack --ctstate NEW ! -s " + n.HostIP + " -j DROP",
+		"-I FORWARD 1 -i " + n.NSIf + " -m conntrack --ctstate INVALID -j DROP",
+	} {
+		if !strings.Contains(r, quiere) {
+			t.Errorf("falta %q en el restore:\n%s", quiere, r)
+		}
+	}
+}
+
+func TestEgresoVivoNoRepiteLaBaseQueYaEsta(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressInternet)
+	for _, r := range n.forwardBase() {
+		f.presente[claveRegla(comoBorrado(r))] = true
+		f.forward = append(f.forward, strings.Join(comoBorrado(r)[1:], " "))
+	}
+	if _, err := n.CambiarEgreso(EgressInternet, nil, EgressNone, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range f.restores {
+		if strings.Contains(r, "-I FORWARD 1 -i "+n.NSIf) {
+			t.Fatalf("repuso lo que ya estaba:\n%s", r)
+		}
+	}
+}
+
+// R8: si no se pueden reponer, el cambio sin restore (misma allowlist) no
+// promete el corte.
+func TestEgresoVivoSinBaseNoPrometeCorteEnMismaAllowlist(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressAllowlist)
+	if err := startDNSResolver(n, []string{"a.example.com", "b.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	ejecutarRestore = func(_, _ string) ([]byte, error) { return nil, errors.New("boom") }
+	res, err := n.CambiarEgreso(EgressAllowlist, []string{"a.example.com", "b.example.com"}, EgressAllowlist, []string{"a.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Estrecha || res.ConexionesCortadas {
+		t.Fatalf("res=%+v cmds=%v", res, f.cmds)
 	}
 }

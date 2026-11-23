@@ -11,10 +11,13 @@ import (
 // devuelve, en orden, una línea por proceso que Setup habría lanzado.
 func grabarSetup(t *testing.T, egress Egress) []string {
 	t.Helper()
-	oldO, oldE, oldB, oldR, oldH, oldX, oldI, oldA := ordenEnNetns, ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost
+	oldO, oldE, oldB, oldR, oldH, oldX, oldI, oldA, oldC, oldP := ordenEnNetns, ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost, hayConntrack, existeRuta
 	t.Cleanup(func() {
-		ordenEnNetns, ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost = oldO, oldE, oldB, oldR, oldH, oldX, oldI, oldA
+		ordenEnNetns, ejecutar, ipBatch, ejecutarRestore, hayRestore, existeRed, hayIp6tables, asegurarHost, hayConntrack, existeRuta = oldO, oldE, oldB, oldR, oldH, oldX, oldI, oldA, oldC, oldP
 	})
+	// Con conntrack instalado y sin red previa: una alta nueva no lo lanza.
+	hayConntrack = func() bool { return true }
+	existeRuta = func(string) bool { return false }
 	var procs []string
 	ordenEnNetns = func(ns string, args ...string) error {
 		procs = append(procs, "en-netns "+ns+" "+strings.Join(args, " "))
@@ -31,6 +34,7 @@ func grabarSetup(t *testing.T, egress Egress) []string {
 	if err := n.Setup(egress, nil, 1000); err != nil {
 		t.Fatal(err)
 	}
+	vaciarConntrackHost()
 	return procs
 }
 
@@ -43,6 +47,15 @@ func TestSetupNoUsaIPNetnsExec(t *testing.T) {
 	for _, p := range procs {
 		if strings.HasPrefix(p, "ip netns exec") {
 			t.Errorf("Setup lanza %.60q...: debe entrar en el netns con setns, sin `ip netns exec`", p)
+		}
+	}
+}
+
+// R7: una alta nueva no lanza conntrack (no hay nada que borrar).
+func TestSetupDeMaquinaNuevaNoLanzaConntrack(t *testing.T) {
+	for _, p := range grabarSetup(t, EgressInternet) {
+		if strings.HasPrefix(p, "conntrack ") {
+			t.Errorf("Setup lanzó %q", p)
 		}
 	}
 }
