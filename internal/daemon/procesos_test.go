@@ -231,3 +231,52 @@ func TestProcesosAgenteAntiguoEs501(t *testing.T) {
 		t.Fatalf("%d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// Una respuesta JSON del agente que pasa del tope es un 502; el flujo NDJSON
+// no tiene ese tope.
+func TestProcesosRespuestaDelAgenteConTope(t *testing.T) {
+	s, _ := testServer(t)
+	mux := http.NewServeMux()
+	grande := strings.Repeat("{},", (maxRespuestaProc/3)+10)
+	mux.HandleFunc("/json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[" + grande + "{}]"))
+	})
+	mux.HandleFunc("/nd", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(grande))
+	})
+	g := httptest.NewServer(mux)
+	defer g.Close()
+	rr := httptest.NewRecorder()
+	s.reenviar(rr, httptest.NewRequest("GET", "/json", nil), g.URL, "m", &api.Machine{})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("json: %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	s.reenviar(rr, httptest.NewRequest("GET", "/nd", nil), g.URL, "m", &api.Machine{})
+	if rr.Code != http.StatusOK || rr.Body.Len() <= maxRespuestaProc {
+		t.Fatalf("ndjson: %d %d", rr.Code, rr.Body.Len())
+	}
+}
+
+// R6-I2 (R2): el estado máximo que el agente admite (64 sesiones con el
+// entorno al tope) se reenvía sin 502.
+func TestProcesosReenviaListaAlMaximo(t *testing.T) {
+	s, _ := testServer(t)
+	var lista []api.Session
+	env := []string{"V=" + strings.Repeat("x", api.SessionMaxEnv-4)}
+	for i := 0; i < api.SessionMax; i++ {
+		lista = append(lista, api.Session{ID: "s", Env: env})
+	}
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(lista)
+	}))
+	defer g.Close()
+	rr := httptest.NewRecorder()
+	s.reenviar(rr, httptest.NewRequest("GET", "/sessions", nil), g.URL, "m", &api.Machine{})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("lista al máximo: %d %.200s", rr.Code, rr.Body.String())
+	}
+}

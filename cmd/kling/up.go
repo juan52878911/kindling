@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -34,8 +35,10 @@ import (
 
 	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
+	"github.com/juan52878911/kindling/internal/buildver"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/internal/transport"
+	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -55,12 +58,38 @@ func cmdUp(args []string) error {
 	host := hostFlag(fs)
 	root := fs.String("root", os.Getenv("KLING_ROOT"), "daemon data directory (default: the platform's, /var/lib/kindling on Linux)")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
-	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it")
+	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it. Linux (as root): write the systemd unit")
+	dryRun := fs.Bool("dry-run", false, "with -install on Linux: print what it would download, create and write, and do nothing")
+	uninstall := fs.Bool("uninstall", false, "macOS: stop the launchd agent and remove its plist (the daemon no longer starts at login)")
+	// Para install.sh: comprueba la firma de SHA256SUMS con este kling, sin minisign.
+	verifySums := fs.String("verify-sums", "", "check SHA256SUMS against its minisign signature (-sig) and release (-tag), then exit; for install.sh")
+	sig := fs.String("sig", "", "with -verify-sums: the SHA256SUMS.minisig file")
+	tag := fs.String("tag", "", "with -verify-sums: the release the signature must be for (vX.Y.Z)")
+	keys := fs.String("key", "", "with -verify-sums: the public keys to trust, separated by spaces (default: the ones built into this kling)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
-	if *install && (runtime.GOOS != "darwin" || *checkOnly) {
-		return errors.New("-install is for macOS (on Linux, kling up installs the systemd units) and doesn't go with -check")
+	if *verifySums != "" {
+		if *sig == "" || *tag == "" {
+			return errUso("-verify-sums needs -sig FILE and -tag vX.Y.Z")
+		}
+		return verificarSumas(*verifySums, *sig, *tag, *keys)
+	}
+	if *install && *checkOnly || *uninstall && (runtime.GOOS != "darwin" || *install || *checkOnly) {
+		return errUso("-uninstall is for macOS and doesn't go with -install or -check; -install doesn't go with -check")
+	}
+	if *dryRun && (!*install || runtime.GOOS != "linux") {
+		return errUso("-dry-run goes with -install on Linux")
+	}
+	if *install && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return errUso("-install is for macOS (launchd agent) and Linux (systemd unit)")
+	}
+	if *uninstall {
+		a, err := agenteDaemonMac()
+		if err != nil {
+			return err
+		}
+		return desinstalarAgente(a)
 	}
 
 	endpoint := loadConfig().Host(*host)
@@ -77,6 +106,14 @@ func cmdUp(args []string) error {
 		// En macOS el runtime es kling-vz, sin KVM.
 		return upMac(config.Or(*root, transport.DefaultRoot()), endpoint, *checkOnly, *install)
 	case hasKVM():
+		if *install {
+			if err := instalarEnLinux(*dryRun); err != nil {
+				return err
+			}
+			if *dryRun {
+				return nil
+			}
+		}
 		return upHere(config.Or(*root, transport.DefaultRoot()), *checkOnly)
 	default:
 		return explainNoRuntime()
@@ -257,6 +294,13 @@ type probe struct {
 	system      string // "Linux/x86_64"
 	kvm         bool
 	firecracker string // ruta del binario, vacío si no está
+	// jailer es la ruta de jailer, vacía si no está; jailerExigido, que el
+	// daemon se negará a crear máquinas sin él (todo menos KLING_JAILER=0).
+	jailer        string
+	jailerExigido bool
+	// kvmError es por qué /dev/kvm existe y no se puede abrir; vacío si se
+	// abre (o si no se miró: un host remoto).
+	kvmError    string
 	ip          bool   // iproute2: crea taps y namespaces
 	iptables    bool   // NAT y filtrado de salida
 	nft         bool   // el backend real de iptables en las distros modernas
@@ -307,6 +351,11 @@ func localProbe(root string) probe {
 		pageSize: os.Getpagesize(),
 	}
 	p.firecracker = lookFirecracker()
+	p.jailer = lookJailer()
+	p.jailerExigido = jailerExigidoPorElEnv()
+	if p.kvm {
+		p.kvmError = errorAbrirKVM(os.Geteuid() == 0)
+	}
 	p.ip = inPathOrSbin("ip")
 	p.iptables = inPathOrSbin("iptables")
 	p.nft = inPathOrSbin("nft")
@@ -348,6 +397,7 @@ si() { [ "$1" ] && echo si || echo no; }
 echo "system=$(uname -s)/$(uname -m)"
 echo "kvm=$(si "$([ -e /dev/kvm ] && echo 1)")"
 echo "firecracker=$(command -v firecracker 2>/dev/null || true)"
+echo "jailer=$(command -v jailer 2>/dev/null || { [ -x /usr/local/bin/jailer ] && echo /usr/local/bin/jailer; } || true)"
 echo "ip=$(si "$(command -v ip 2>/dev/null)")"
 echo "iptables=$(si "$(command -v iptables 2>/dev/null)")"
 echo "nft=$(si "$(command -v nft 2>/dev/null)")"
@@ -404,6 +454,8 @@ func remoteProbe(target, root string) (probe, error) {
 	p.system = vals["system"]
 	p.kvm = yes("kvm")
 	p.firecracker = vals["firecracker"]
+	p.jailer = vals["jailer"]
+	p.jailerExigido = jailerExigidoPorElEnv()
 	p.ip, p.iptables, p.nft = yes("ip"), yes("iptables"), yes("nft")
 	p.runAsExists = yes("runas")
 	p.buildAsExists = yes("buildas")
@@ -492,8 +544,8 @@ func checksOf(p probe) []check {
 
 	cs := []check{
 		{
-			label: "/dev/kvm", ok: p.kvm, fatal: true,
-			found: presence(p.kvm, "present", "doesn't exist"),
+			label: "/dev/kvm", ok: p.kvm && p.kvmError == "", fatal: true,
+			found: kvmFound(p),
 			why:   "Firecracker talks to KVM and only KVM; there's no software mode",
 			fix:   kvmFix(isArm64(p.system)),
 		},
@@ -501,7 +553,15 @@ func checksOf(p probe) []check {
 			label: "firecracker", ok: p.firecracker != "", fatal: true,
 			found: firecrackerFound,
 			why:   "it's the VMM: without the binary there's nothing to start",
-			fix:   []string{"sudo ./scripts/20-install-firecracker.sh"},
+			fix:   fcFix(p),
+		},
+		{
+			// El daemon se niega a crear máquinas sin jailer (KLING_JAILER=0 lo
+			// apaga a propósito): mejor enterarse aquí que en el primer try.
+			label: "jailer", ok: !p.jailerExigido || p.jailer != "", fatal: true,
+			found: presence(p.jailer != "", p.jailer, "not in PATH or in /usr/local/bin"),
+			why:   "the daemon refuses to create machines without it (KLING_JAILER=0 opts out, and runs Firecracker unconfined)",
+			fix:   fcFix(p),
 		},
 		{
 			label: "ip (iproute2)", ok: p.ip, fatal: true,
@@ -665,11 +725,24 @@ func materialize(root string) error {
 			fmt.Printf("artifacts:   already in %s\n", dir)
 			return nil
 		}
-		fmt.Printf("artifacts:   this binary doesn't include them, and they're missing from %s\n", dir)
-		fmt.Printf("  Build the full daemon (`make daemon-full`) or get them by hand:\n")
-		fmt.Printf("    sudo ./scripts/30-fetch-artifacts.sh      # guest kernel\n")
-		fmt.Printf("    sudo ./scripts/70-build-minimal-image.sh  # 'min' base image\n")
-		fmt.Printf("    sudo install -m644 /opt/fc/vmlinux %s/vmlinux\n", dir)
+		// Un binario de release no lleva el kernel ni min dentro: se bajan de la
+		// release de esta versión, verificados contra su SHA256SUMS (lo mismo
+		// que en Mac).
+		ctx, cancel := ctxWithSignals()
+		err := bajarImagenesMac(ctx, &upgrade.Fuente{VersionPropia: Version}, "v"+strings.TrimPrefix(Version, "v"), root, runtime.GOARCH, os.Stdout)
+		cancel()
+		if err == nil && fileExists(filepath.Join(dir, "vmlinux")) && fileExists(filepath.Join(dir, "min.ext4")) {
+			return nil
+		}
+		if err != nil {
+			if os.IsPermission(err) {
+				return fmt.Errorf("can't write to %s: %w\nrun it again as root:  %s", dir, err, privilegedSelf("up", "-root", root))
+			}
+			fmt.Printf("artifacts:   not downloaded (%v)\n", err)
+		}
+		fmt.Printf("artifacts:   missing from %s\n", dir)
+		fmt.Printf("  Get them from the release of this version: https://github.com/juan52878911/kindling/releases\n")
+		fmt.Printf("    vmlinux-<arch>.zst and min-<arch>.ext4.zst  ->  %s/vmlinux and %s/min.ext4 (zstd -d)\n", dir, dir)
 		return nil
 	}
 
@@ -697,9 +770,9 @@ func materialize(root string) error {
 // startServices levanta daemon y gateway con systemd, si la unit está puesta.
 func startServices(p probe) error {
 	if !p.systemd || !p.unit {
-		fmt.Println("services:    no systemd units installed.")
-		fmt.Println("  Deploy them from this repo (installs binary, units, and token):")
-		fmt.Println("    make deploy HOST=ssh://user@this-host")
+		fmt.Println("services:    no systemd unit installed.")
+		fmt.Println("  Install and start it with this binary:")
+		fmt.Printf("    %s\n", ordenUpInstall())
 		fmt.Println()
 		fmt.Println("  Or start it by hand:")
 		fmt.Printf("    %s\n", privilegedSelf("daemon", "-root", p.root))
@@ -864,7 +937,7 @@ func cmdStatus(args []string) error {
 			fmt.Printf("KVM:          %s\n", markYes(info.KVM, "available", "NOT available — no microVM can be started"))
 			fc := strings.TrimSpace(info.Firecrack)
 			if fc == "" {
-				fc = uiMarks().fail + " not found — install it with scripts/20-install-firecracker.sh"
+				fc = uiMarks().fail + " not found — " + fcFix(probe{})[0]
 			} else {
 				fc = uiMarks().ok + " " + fc
 			}
@@ -1003,6 +1076,65 @@ func lookFirecracker() string {
 		return p
 	}
 	return ""
+}
+
+// lookJailer busca jailer como el daemon (KLING_JAILER_BIN, o «jailer» en el
+// PATH) y, además, en /usr/local/bin, donde lo deja `kling up -install`.
+func lookJailer() string {
+	name := envOr("KLING_JAILER_BIN", "jailer")
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	if filepath.IsAbs(name) {
+		return ""
+	}
+	if p := filepath.Join("/usr/local/bin", name); fileExists(p) {
+		return p
+	}
+	return ""
+}
+
+// jailerExigidoPorElEnv: el daemon exige jailer salvo con KLING_JAILER=0. Lo
+// que vale es el entorno del daemon, no el de quien teclea: es la mejor
+// aproximación desde el CLI.
+func jailerExigidoPorElEnv() bool { return os.Getenv("KLING_JAILER") != "0" }
+
+// errorAbrirKVM abre /dev/kvm de verdad: que exista no dice que Firecracker
+// pueda usarlo. Vacío si se abre. Un usuario que no es root y no está en el
+// grupo kvm no puede abrirlo y el daemon (root, que luego cede al usuario del
+// VMM) sí: para él un permiso denegado no es un fallo y no se cuenta.
+func errorAbrirKVM(root bool) string {
+	f, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	if err == nil {
+		f.Close()
+		return ""
+	}
+	if errors.Is(err, fs.ErrPermission) && !root {
+		return ""
+	}
+	return err.Error()
+}
+
+func kvmFound(p probe) string {
+	if p.kvm && p.kvmError != "" {
+		return "present, but it can't be opened: " + p.kvmError
+	}
+	return presence(p.kvm, "present", "doesn't exist")
+}
+
+// fcFix es cómo conseguir firecracker y jailer: `up -install` los baja de la
+// release fijada. Desde un checkout (una compilación de desarrollo) también
+// sirve el script.
+func fcFix(p probe) []string {
+	orden := "sudo kling up -install"
+	if !p.remote {
+		orden = ordenUpInstall()
+	}
+	fix := []string{orden + "   # downloads firecracker and jailer (sha256 pinned) and creates the users"}
+	if !p.remote && buildver.IsDev(strings.TrimPrefix(Version, "v")) {
+		fix = append(fix, "or, from a checkout: sudo ./scripts/20-install-firecracker.sh")
+	}
+	return fix
 }
 
 // sshTarget extrae el destino de un endpoint ssh://usuario@host[/ruta/al/kling],

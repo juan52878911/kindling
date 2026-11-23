@@ -34,27 +34,101 @@ import (
 type Reaper struct {
 	mu      sync.Mutex
 	tracked map[int]chan syscall.WaitStatus
+	// arrancando cuenta los cmd.Start en curso (fuera del cerrojo) y
+	// adelantados guarda los estados de pids recogidos mientras tanto que
+	// aún no estaban registrados: StartTracked los reclama al registrar. Solo
+	// se guardan con arrancando > 0.
+	//
+	// Cada arranque toma un número de secuencia (secuencia) y cada estado
+	// guardado lleva el de ese momento: un arranque solo reclama estados de su
+	// secuencia o posteriores (un hijo suyo no pudo morir antes de existir), y
+	// al acabar un arranque se descartan los estados anteriores al arranque
+	// vivo más viejo. Así, con arranques solapados de continuo, la tabla no
+	// crece sin límite ni un pid reutilizado hereda un estado viejo.
+	arrancando  int
+	secuencia   uint64
+	vivos       map[uint64]struct{}
+	adelantados map[int]adelantado
+	// iniciar es cmd.Start; variable para los tests.
+	iniciar func(*exec.Cmd) error
+}
+
+// adelantado es el estado de un hijo recogido antes de quedar registrado.
+type adelantado struct {
+	ws  syscall.WaitStatus
+	seq uint64
 }
 
 var DefaultReaper = &Reaper{tracked: map[int]chan syscall.WaitStatus{}}
 
-// startTracked arranca el proceso y lo registra, ambas cosas bajo el mismo
-// candado que usa el cosechador.
+// StartTracked arranca el proceso y lo registra.
 //
-// Tiene que ser bajo el candado: un hijo que muere en el acto podría ser
-// recogido ANTES de quedar registrado, y su estado se descartaría como el de un
-// huérfano cualquiera.
+// El fork (cmd.Start) va FUERA del cerrojo: con él tomado, los exec
+// concurrentes se serializaban en el fork. Un hijo que muere en el acto podría
+// ser recogido ANTES de quedar registrado: reapAll guarda entonces su estado
+// (adelantados) mientras haya algún arranque en curso, y el registro lo
+// reclama.
 func (r *Reaper) StartTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
+	OwnGroup(cmd)
+	return r.arrancar(cmd)
+}
+
+func (r *Reaper) arrancar(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
+	r.mu.Lock()
+	r.arrancando++
+	r.secuencia++
+	mi := r.secuencia
+	if r.vivos == nil {
+		r.vivos = map[uint64]struct{}{}
+	}
+	r.vivos[mi] = struct{}{}
+	r.mu.Unlock()
+	err := r.start(cmd)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	OwnGroup(cmd)
-	if err := cmd.Start(); err != nil {
-		return nil, err
+	r.arrancando--
+	delete(r.vivos, mi)
+	var ch chan syscall.WaitStatus
+	if err == nil {
+		// Con buffer: el cosechador entrega y sigue, sin esperar a que nadie lea.
+		ch = make(chan syscall.WaitStatus, 1)
+		pid := cmd.Process.Pid
+		if ad, ok := r.adelantados[pid]; ok && ad.seq >= mi {
+			ch <- ad.ws
+			delete(r.adelantados, pid)
+		} else {
+			r.tracked[pid] = ch
+		}
 	}
-	// Con buffer: el cosechador entrega y sigue, sin esperar a que nadie lea.
-	ch := make(chan syscall.WaitStatus, 1)
-	r.tracked[cmd.Process.Pid] = ch
-	return ch, nil
+	r.podarAdelantados()
+	return ch, err
+}
+
+// podarAdelantados descarta los estados guardados antes del arranque vivo más
+// viejo (nadie puede reclamarlos). Con el cerrojo tomado.
+func (r *Reaper) podarAdelantados() {
+	if r.arrancando == 0 {
+		r.adelantados = nil
+		return
+	}
+	viejo := r.secuencia
+	for s := range r.vivos {
+		if s < viejo {
+			viejo = s
+		}
+	}
+	for pid, ad := range r.adelantados {
+		if ad.seq < viejo {
+			delete(r.adelantados, pid)
+		}
+	}
+}
+
+func (r *Reaper) start(cmd *exec.Cmd) error {
+	if r.iniciar != nil {
+		return r.iniciar(cmd)
+	}
+	return cmd.Start()
 }
 
 // OwnGroup hace del hijo el lider de su grupo de procesos.
@@ -70,14 +144,7 @@ func (r *Reaper) StartTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 // con EPERM y el fork entero se va al traste. Tras setsid el pgid ya es el pid,
 // así que KillGroup sigue valiendo igual.
 func (r *Reaper) StartTrackedSession(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	ch := make(chan syscall.WaitStatus, 1)
-	r.tracked[cmd.Process.Pid] = ch
-	return ch, nil
+	return r.arrancar(cmd)
 }
 
 func OwnGroup(cmd *exec.Cmd) {
@@ -157,6 +224,13 @@ func (r *Reaper) reapAll() {
 			owner <- ws
 			delete(r.tracked, pid)
 		} else {
+			if r.arrancando > 0 {
+				// Puede ser un hijo que aún se está registrando.
+				if r.adelantados == nil {
+					r.adelantados = map[int]adelantado{}
+				}
+				r.adelantados[pid] = adelantado{ws: ws, seq: r.secuencia}
+			}
 			log.Printf("init: orphan %d reaped (%v)", pid, ws)
 		}
 		r.mu.Unlock()

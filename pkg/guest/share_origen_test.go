@@ -49,7 +49,8 @@ func conRutas(t *testing.T, tabla []byte, err error) {
 		}
 		return parseRutas(tabla), nil
 	}
-	t.Cleanup(func() { rutasInvitado = viejas })
+	invalidarRutas()
+	t.Cleanup(func() { rutasInvitado = viejas; invalidarRutas() })
 }
 
 // Quién cuenta como el host: por TCP, solo la pasarela o quien llega por la

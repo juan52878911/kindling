@@ -106,6 +106,11 @@ jobs:
             exit 1
           fi
 
+      # Los ejemplos de sandbox: cada --dry-run imprime sus órdenes y no ejecuta
+      # nada (ni daemon, ni gateway, ni LLM).
+      - name: ejemplos de sandbox (--dry-run)
+        run: bash examples/sandbox/test-dry-run.sh
+
       # El builder del kernel contra un árbol falso (sin fuentes ni red): la
       # comprobación de config, los parches de patches/ y las salidas.
       - name: builder del kernel (scripts/builders/kernel/test.sh)

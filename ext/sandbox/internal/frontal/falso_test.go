@@ -5,7 +5,9 @@ package frontal
 // mapa y respuestas guionizadas.
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,6 +61,10 @@ type falso struct {
 	// frontal no acumula el flujo.
 	execLibera chan struct{}
 	ultimoExec api.ExecRequest
+	// ultimoShell es el cuerpo del último POST shell; sesionesEstrictas hace
+	// que un exec con una sesión que el daemon no tiene conteste 404, como el real.
+	ultimoShell       api.ShellRequest
+	sesionesEstrictas bool
 	// procs es el estado del daemon falso para procesos y sesiones.
 	procs procsFalsos
 	// shellIlegal: la shell falsa manda al cliente una trama que no le toca.
@@ -103,6 +110,13 @@ type falso struct {
 	sandboxesUnaVez   sync.Once
 	sandboxesColgarN  int
 	sandboxesLlamadas int
+	// sandboxesFoto hace que el GET /sandboxes retenido conteste con lo que
+	// había al RECIBIRLO y no al soltarlo: un listado lento cuyo contenido ya
+	// es viejo cuando llega.
+	sandboxesFoto bool
+	// etiquetasDemora retrasa cada PUT labels antes de aplicarlo: ensancha la
+	// ventana entre leer y escribir de dos réplicas del frontal.
+	etiquetasDemora time.Duration
 	// snapLista y snapUno cuentan GET /snapshots y GET /snapshots/{name};
 	// snapUnoViejo hace que la segunda ruta no exista (un daemon anterior).
 	snapLista, snapUno int
@@ -131,6 +145,30 @@ type falso struct {
 	// código (un daemon que ya no tiene la ruta); borrados cuenta los DELETE.
 	reclamoCorta, reclamoPlano404 bool
 	borrados                      []string
+
+	// execCorta hace que exec mande un evento y corte la conexión.
+	execCorta bool
+	// ultimoTar son los parámetros del último PUT files?format=tar.
+	ultimoTar url.Values
+	// tamanoStat, si no es 0, es el tamaño que anuncia el stat de un fichero
+	// (para probar topes sin guardar cientos de MiB).
+	tamanoStat int64
+	// dirs son los directorios que el falso conoce (clave ref:ruta).
+	dirs map[string]bool
+
+	// forks guarda lo pedido a POST /sandboxes/{ref}/fork; forkEspera, si no es
+	// nil, retiene el fork hasta que se cierre (antes cierra forkEmpezado);
+	// forkCodigo hace que el fork falle con ese estado; forkHereda hace que las
+	// copias hereden también las etiquetas del original (como un snapshot).
+	forks        []api.ForkRequest
+	forkEspera   chan struct{}
+	forkEmpezado chan struct{}
+	forkCodigo   int
+	forkHereda   bool
+	// procMaquinas es lo que GET /procstats dice de cada máquina.
+	procMaquinas []api.ProcStat
+	procKind     string
+	procLlamadas int
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -181,8 +219,13 @@ func (f *falso) rutas() http.Handler {
 	})
 	m.HandleFunc("POST /sandboxes/claim", f.reclamar)
 	m.HandleFunc("GET /procstats", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, api.ProcStats{AvailableMiB: f.libreMiB})
+		f.mu.Lock()
+		f.procLlamadas++
+		out := api.ProcStats{AvailableMiB: f.libreMiB, Machines: append([]api.ProcStat(nil), f.procMaquinas...), MemoryKind: f.procKind}
+		f.mu.Unlock()
+		writeJSON(w, 200, out)
 	})
+	m.HandleFunc("POST /sandboxes/{ref}/fork", f.fork)
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.snapLista++
@@ -354,6 +397,19 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 500, fmt.Errorf("listing timed out"))
 			return
 		}
+		var foto []*api.Machine
+		if colgar && f.sandboxesFoto {
+			f.mu.Lock()
+			foto = []*api.Machine{}
+			for _, mc := range f.maquinas {
+				if mc.Labels[api.LabelKind] == api.KindSandbox {
+					c := *mc
+					c.Labels = api.MergeLabels(nil, mc.Labels)
+					foto = append(foto, &c)
+				}
+			}
+			f.mu.Unlock()
+		}
 		if colgar {
 			f.sandboxesUnaVez.Do(func() { close(f.sandboxesEmpezado) })
 			select {
@@ -361,6 +417,10 @@ func (f *falso) rutas() http.Handler {
 			case <-r.Context().Done():
 				return
 			}
+		}
+		if foto != nil {
+			writeJSON(w, 200, foto)
+			return
 		}
 		f.mu.Lock()
 		out := []*api.Machine{}
@@ -439,6 +499,9 @@ func (f *falso) rutas() http.Handler {
 			if primera {
 				<-f.etiquetasEspera
 			}
+		}
+		if f.etiquetasDemora > 0 {
+			time.Sleep(f.etiquetasDemora)
 		}
 		if _, conTenant := labels[LabelTenant]; conTenant && f.etiquetasLentas > 0 {
 			time.Sleep(f.etiquetasLentas)
@@ -651,9 +714,26 @@ func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.ultimoExec = req
 	libera := f.execLibera
+	estricto := f.sesionesEstrictas
 	f.mu.Unlock()
+	if estricto && req.Session != "" {
+		f.procs.mu.Lock()
+		_, hay := f.procs.sesiones[req.Session]
+		f.procs.mu.Unlock()
+		if !hay {
+			failDaemon(w, 404, fmt.Errorf("no session %q (expired or never created)", req.Session))
+			return
+		}
+	}
 
 	salida := []byte("hola\n")
+	if f.execCorta {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(api.ExecEvent{Stream: "stdout", Data: salida})
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
 	if r.URL.Query().Get("wait") == "1" {
 		if libera != nil {
 			<-libera
@@ -702,13 +782,31 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, lista)
 			return
 		}
+		if q.Get("format") == "tar" {
+			b, ok := f.empaquetarLocked(r.PathValue("ref"), q.Get("path"))
+			if !ok {
+				failDaemon(w, 404, fmt.Errorf("no such directory"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-tar")
+			_, _ = w.Write(b)
+			return
+		}
 		b, ok := f.ficheros[clave]
+		if !ok && f.dirs[clave] && q.Get("stat") == "1" {
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Mode: "0755", IsDir: true})
+			return
+		}
 		if !ok {
 			failDaemon(w, 404, fmt.Errorf("no such file"))
 			return
 		}
 		if q.Get("stat") == "1" {
-			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: int64(len(b)), Mode: "0644"})
+			size := int64(len(b))
+			if f.tamanoStat > 0 {
+				size = f.tamanoStat
+			}
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: size, Mode: "0644"})
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -721,6 +819,16 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 		}
 		if int64(len(b)) > api.FileMaxUpload {
 			failDaemon(w, 413, fmt.Errorf("too big"))
+			return
+		}
+		if q.Get("format") == "tar" {
+			f.ultimoTar = q
+			res, err := f.extraerTarLocked(r.PathValue("ref"), q.Get("path"), q.Get("mkdir") == "1", b)
+			if err != nil {
+				failDaemon(w, 400, err)
+				return
+			}
+			writeJSON(w, 200, res)
 			return
 		}
 		f.ficheros[clave] = b
@@ -746,6 +854,9 @@ func (f *falso) shell(w http.ResponseWriter, r *http.Request) {
 	// bytes se leerían como tramas.
 	var req api.ShellRequest
 	_ = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req)
+	f.mu.Lock()
+	f.ultimoShell = req
+	f.mu.Unlock()
 	conn, brw, err := w.(http.Hijacker).Hijack()
 	if err != nil {
 		return
@@ -1059,4 +1170,130 @@ func (f *falso) tieneVolumen(n string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.volumenes[n] != nil
+}
+
+// extraerTarLocked extrae el tar dentro de path como lo haría el invitado:
+// los ficheros pasan a f.ficheros y los directorios a f.dirs. Con mkdir crea
+// también path. Rechaza entradas con ".." o absolutas.
+func (f *falso) extraerTarLocked(ref, path string, mkdir bool, b []byte) (*api.TarResult, error) {
+	if f.dirs == nil {
+		f.dirs = map[string]bool{}
+	}
+	if mkdir {
+		f.dirs[ref+":"+filepath.Clean(path)] = true
+	} else if !f.dirs[ref+":"+filepath.Clean(path)] {
+		return nil, fmt.Errorf("%s is not a directory", path)
+	}
+	res := &api.TarResult{}
+	tr := tar.NewReader(bytes.NewReader(b))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return res, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		nombre := filepath.Clean(h.Name)
+		if filepath.IsAbs(nombre) || nombre == ".." || strings.HasPrefix(nombre, "../") {
+			return nil, fmt.Errorf("unsafe entry %q", h.Name)
+		}
+		dest := ref + ":" + filepath.Join(path, nombre)
+		res.Entries++
+		switch h.Typeflag {
+		case tar.TypeDir:
+			f.dirs[dest] = true
+		default:
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, err
+			}
+			f.dirs[ref+":"+filepath.Dir(filepath.Join(path, nombre))] = true
+			f.ficheros[dest] = data
+			res.Files++
+			res.Bytes += int64(len(data))
+		}
+	}
+}
+
+// empaquetarLocked devuelve un tar con los ficheros bajo path (nombres
+// relativos a path).
+func (f *falso) empaquetarLocked(ref, path string) ([]byte, bool) {
+	raiz := ref + ":" + filepath.Clean(path)
+	if !f.dirs[raiz] {
+		return nil, false
+	}
+	var nombres []string
+	for k := range f.ficheros {
+		if rel, ok := strings.CutPrefix(k, raiz+"/"); ok {
+			nombres = append(nombres, rel)
+		}
+	}
+	sort.Strings(nombres)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, n := range nombres {
+		data := f.ficheros[raiz+"/"+n]
+		_ = tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(data))})
+		_, _ = tw.Write(data)
+	}
+	_ = tw.Close()
+	return buf.Bytes(), true
+}
+
+// fork hace de daemon: crea Count copias del original con las etiquetas
+// pedidas más kind=sandbox y kling.fork-of.
+func (f *falso) fork(w http.ResponseWriter, r *http.Request) {
+	var req api.ForkRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	f.mu.Lock()
+	f.forks = append(f.forks, req)
+	espera, empezado, codigo, hereda := f.forkEspera, f.forkEmpezado, f.forkCodigo, f.forkHereda
+	f.mu.Unlock()
+	if empezado != nil {
+		select {
+		case <-empezado:
+		default:
+			close(empezado)
+		}
+	}
+	if espera != nil {
+		select {
+		case <-espera:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if codigo != 0 {
+		failDaemon(w, codigo, fmt.Errorf("fork refused"))
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	src, ok := f.maquinas[r.PathValue("ref")]
+	if !ok {
+		failDaemon(w, 404, fmt.Errorf("no sandbox"))
+		return
+	}
+	n := max(req.Count, 1)
+	res := api.ForkResult{Snapshot: "fork-tmp"}
+	for i := 0; i < n; i++ {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		c := &api.Machine{ID: hex.EncodeToString(b), State: api.StateRunning, Image: src.Image, MemMiB: src.MemMiB,
+			TTLSeconds: src.TTLSeconds, CreatedAt: time.Now(),
+			Labels: api.MergeLabels(nil, req.Labels)}
+		if req.TTLSeconds > 0 {
+			c.TTLSeconds = req.TTLSeconds
+		}
+		if hereda {
+			c.Labels = api.MergeLabels(src.Labels, c.Labels)
+			c.Labels[LabelPublico] = src.Labels[LabelPublico]
+		}
+		c.Labels = api.MergeLabels(c.Labels, map[string]string{api.LabelForkOf: src.ID, api.LabelKind: api.KindSandbox})
+		f.maquinas[c.ID] = c
+		cc := *c
+		res.Sandboxes = append(res.Sandboxes, &cc)
+	}
+	writeJSON(w, 201, res)
 }

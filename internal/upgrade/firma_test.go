@@ -303,7 +303,7 @@ func TestClavesInstallSHIgualesQueLasDeKling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^KLING_RELEASE_PUBKEYS="([^"]*)"`).FindSubmatch(b)
+	m := regexp.MustCompile(`(?m)^KLING_RELEASE_PUBKEYS="(?:\$\{KLING_RELEASE_PUBKEYS:-)?([^"}]*)\}?"`).FindSubmatch(b)
 	if m == nil {
 		t.Fatal(`install.sh no define KLING_RELEASE_PUBKEYS="…"`)
 	}

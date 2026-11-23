@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,6 +135,28 @@ func servirVZFalso(sock, logPath string) {
 				linea += " disposable=" + strconv.FormatBool(*d.Disposable)
 			}
 		}
+		if r.URL.Path == "/snapshot/load" {
+			// kling_repoint, si viaja (reapuntar.go): kernel y cada disco.
+			var l struct {
+				R *struct {
+					Kernel string `json:"kernel"`
+					Drives map[string]struct {
+						Path string `json:"path"`
+					} `json:"drives"`
+				} `json:"kling_repoint"`
+			}
+			if json.Unmarshal(body, &l) == nil && l.R != nil {
+				linea += " repoint kernel=" + l.R.Kernel
+				ids := make([]string, 0, len(l.R.Drives))
+				for id := range l.R.Drives {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				for _, id := range ids {
+					linea += " " + id + "=" + l.R.Drives[id].Path
+				}
+			}
+		}
 		if r.URL.Path == "/snapshot/load" && os.Getenv(envFakeVZRechazaCarga) != "" {
 			apuntar(linea)
 			w.WriteHeader(http.StatusBadRequest)
@@ -143,7 +166,7 @@ func servirVZFalso(sock, logPath string) {
 		switch r.URL.Path {
 		case "/kling/info":
 			apuntar(linea)
-			info := map[string]any{"backend": "vz", "version": "fake"}
+			info := map[string]any{"backend": "vz", "version": "fake", "snapshot_repoint": true}
 			if k := os.Getenv(envFakeVZKinds); k != "" {
 				info["credential_kinds"] = strings.Split(k, ",")
 			}

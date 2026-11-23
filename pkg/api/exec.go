@@ -343,14 +343,14 @@ func (c *Client) WriteFile(ctx context.Context, ref, path string, mode uint32, m
 		return nil, statusErrorFrom(resp)
 	}
 	var st FileStat
-	return &st, json.NewDecoder(resp.Body).Decode(&st)
+	return &st, decodeAcotado(resp.Body, MaxResponseBytes, &st)
 }
 
 // ListFiles lista un directorio de dentro de la máquina (capacidad "files").
 func (c *Client) ListFiles(ctx context.Context, ref, path string) (*FileList, error) {
 	var out FileList
 	u := machineFileURL(ref, path, url.Values{"list": {"1"}})
-	return &out, c.do(ctx, http.MethodGet, u[len("http://kling"):], nil, &out)
+	return &out, c.doMax(ctx, MaxFileListBytes, http.MethodGet, u[len("http://kling"):], nil, &out)
 }
 
 // ReadTar abre un directorio de dentro de la máquina como tar. Quien llama
@@ -391,7 +391,7 @@ func (c *Client) WriteTar(ctx context.Context, ref, path string, mkdir bool, r i
 		return nil, statusErrorFrom(resp)
 	}
 	var st TarResult
-	return &st, json.NewDecoder(resp.Body).Decode(&st)
+	return &st, decodeAcotado(resp.Body, MaxResponseBytes, &st)
 }
 
 // RemoveFile borra un fichero (o un directorio vacío) de dentro de la máquina.

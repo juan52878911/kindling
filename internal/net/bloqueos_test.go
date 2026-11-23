@@ -2,6 +2,7 @@ package net
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,29 @@ func TestFormatoDestino(t *testing.T) {
 	}
 	if s := formatoDestino("1.2.3.4", "udp", 123); s != "1.2.3.4:123/udp" {
 		t.Fatal(s)
+	}
+}
+
+func consultaCruda(labels ...string) []byte {
+	q := []byte{0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0}
+	for _, l := range labels {
+		q = append(q, byte(len(l)))
+		q = append(q, l...)
+	}
+	return append(q, 0, 0, 1, 0, 1)
+}
+
+// B12: un nombre con bytes fuera de [a-z0-9._-] no se guarda: llegaría a la
+// terminal del operador y a la orden -allow sugerida.
+func TestAnotarDescartaNombresConBytesRaros(t *testing.T) {
+	r := &dnsResolver{modo: modoSoloGrafo}
+	r.process(consultaCruda("\x1b[2J\x1b[Hok", "a.com -egress internet", "x"), false)
+	r.process(consultaCruda("ok", "example", "com"), false)
+	ds := r.bloq.destinos()
+	if len(ds) != 1 || ds[0].Dest != "ok.example.com" {
+		t.Fatalf("destinos: %v", ds)
+	}
+	if strings.ContainsAny(ds[0].Dest, "\x1b ") {
+		t.Fatalf("sin sanear: %q", ds[0].Dest)
 	}
 }

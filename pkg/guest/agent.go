@@ -105,7 +105,7 @@ type Agent struct {
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
 		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
-		api.GuestCapVolumeWait, CapResyncClock, api.GuestCapDropCaches}
+		api.GuestCapVolumeWait, CapResyncClock, api.GuestCapDropCaches, api.GuestCapNet}
 	if a.tardio {
 		caps = append(caps, api.GuestCapLateStart)
 	}
@@ -182,6 +182,15 @@ func newAgent(diferido bool) (*Agent, error) {
 	a := &Agent{Reaper: DefaultReaper, Volumes: volumeState, diferido: diferido}
 	go a.Reaper.Run()
 	ajustarLimiteMemoria()
+
+	// La red (kling.net=) antes que la ruta de MMDS, que cuelga de eth0, y sin
+	// diferir: el daemon habla con el agente por ella. Sin parámetro, la puso el
+	// kernel con ip=.
+	if puesta, err := SetupNet(); err != nil {
+		log.Printf("net: kling.net: %v", err)
+	} else if puesta {
+		log.Printf("net: lo and eth0 up, address and default route set")
+	}
 
 	// Best-effort: si nadie usa secretos por MMDS es inocuo, y si se usan es
 	// esta ruta la que los hace legibles. Diferido, la pone FinishBoot.
@@ -318,6 +327,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	ruta(api.GuestMemInfoPath, MemInfoHandler())
 	// /drop-caches: el host la pide antes de apretar, congelar o guardar un
 	// dorado (dropcaches.go).
+	// Fuera de la puerta del resync (decidido): ninguna toca lo que el segundo
+	// tiempo cambia (machine-id, execs, procesos, generación), y retenerlas
+	// retrasaría al host en el camino de apretar/congelar.
 	ruta(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.

@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/juan52878911/kindling/ext/mcp/internal/gateway"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/scheduler"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -60,6 +63,19 @@ func parseHosts(spec string) ([]hostSpec, error) {
 // 16 réplicas de un servicio de 2 GiB ya son 512 sesiones (32 por instancia).
 const defaultMaxReplicas = 16
 
+// gatewayStateDir es el directorio de estado del gateway MCP (el id de su
+// fondo): $XDG_STATE_HOME/kling/mcp-gateway, o ~/.local/state/kling/mcp-gateway.
+func gatewayStateDir() (string, error) {
+	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
+		return filepath.Join(d, "kling", "mcp-gateway"), nil
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(h, ".local", "state", "kling", "mcp-gateway"), nil
+}
+
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -79,6 +95,7 @@ func cmdGateway(args []string) error {
 	tlsCert := fs.String("tls-cert", "", "TLS certificate (PEM) to serve HTTPS; required to listen outside loopback")
 	tlsKey := fs.String("tls-key", "", "private key (PEM) of -tls-cert")
 	insecure := fs.Bool("insecure-listen", false, "allow plain HTTP on a non-loopback address (tokens travel in the clear)")
+	poolOwner := fs.String("pool-owner", "", "id that marks the machines of this gateway's pool (kling.pool.owner); default: generated once and kept in the gateway's state directory. Two gateways on one daemon need different ones")
 	hostsFlag := fs.String("hosts", "", "several daemons instead of one: name=endpoint,name2=endpoint2 (default: mcp.hosts, or one host, the active context)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -125,6 +142,24 @@ func cmdGateway(args []string) error {
 	token, err := resolveGatewayToken(cfg, *noAuth, addr)
 	if err != nil {
 		return err
+	}
+
+	// El dueño del fondo: el de -pool-owner, o el guardado en el directorio de
+	// estado (se genera la primera vez). Sin poder escribirlo, el de antes,
+	// derivado de -listen y del daemon, con un aviso: cambiar -listen dejaría
+	// entonces huérfanas las máquinas del fondo.
+	owner := *poolOwner
+	if owner != "" {
+		if err := gateway.ValidarPoolOwner(owner); err != nil {
+			return err
+		}
+	} else if dir, derr := gatewayStateDir(); derr != nil {
+		log.Printf("pool owner: no state directory (%v); deriving it from -listen", derr)
+	} else if owner, err = gateway.PoolOwnerGuardado(dir); errors.Is(err, gateway.ErrPoolOwnerInvalido) {
+		return err
+	} else if err != nil {
+		log.Printf("pool owner: can't keep it in %s (%v); deriving it from -listen", dir, err)
+		owner = ""
 	}
 
 	// -hosts gana a mcp.hosts, que gana a "sin hosts": un solo host, el del
@@ -180,6 +215,10 @@ func cmdGateway(args []string) error {
 			return fmt.Errorf("can't reach host %q (%s): %w", h.Name, h.Endpoint, err)
 		}
 		gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
+		gw.PoolOwner = owner
+		if gw.PoolOwner == "" {
+			gw.PoolOwner = gateway.PoolOwnerDe(addr, c)
+		}
 		gw.KeepWarm = *keepwarm
 		// El nivel pausada (pkg/scheduler/pausa.go). Apagado por defecto: una
 		// pausada retiene su RAM, y en un host justo eso es decisión del

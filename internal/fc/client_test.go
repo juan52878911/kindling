@@ -3,6 +3,7 @@ package fc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -226,5 +227,56 @@ func TestBalloonStatsCuerpoConTope(t *testing.T) {
 	})
 	if _, err := c.BalloonStats(context.Background()); err == nil {
 		t.Fatal("un cuerpo de 16 MiB se leyó entero")
+	}
+}
+
+func TestLoadSnapshotRepoint(t *testing.T) {
+	c, _, cuerpo := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ctx := context.Background()
+	// Con nil, el cuerpo es el de LoadSnapshotTracking, byte a byte.
+	if err := c.LoadSnapshotTracking(ctx, "/s/snap.file", "/s/mem.file", true, true); err != nil {
+		t.Fatal(err)
+	}
+	hoy := string(*cuerpo)
+	if err := c.LoadSnapshotRepoint(ctx, "/s/snap.file", "/s/mem.file", true, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(*cuerpo) != hoy || strings.Contains(hoy, "kling_repoint") {
+		t.Fatalf("con nil el cuerpo cambió: %s vs %s", *cuerpo, hoy)
+	}
+	rp := &Repoint{Kernel: "/k", Drives: map[string]RepointDrive{"rootfs": {Path: "/r", ReadOnly: true}}}
+	if err := c.LoadSnapshotRepoint(ctx, "/s/snap.file", "/s/mem.file", true, false, rp); err != nil {
+		t.Fatal(err)
+	}
+	var d struct {
+		R *Repoint `json:"kling_repoint"`
+	}
+	if err := json.Unmarshal(*cuerpo, &d); err != nil || d.R == nil || d.R.Kernel != "/k" || d.R.Drives["rootfs"] != (RepointDrive{"/r", true}) {
+		t.Fatalf("cuerpo = %s (%v)", *cuerpo, err)
+	}
+}
+
+// Un 507 del VMM (kling-hv sin cupo en Hypervisor.framework: HV_NO_RESOURCES)
+// tiene que llegar al núcleo con su código, no solo como texto: es lo que deja
+// al daemon traducirlo a la falta de capacidad que el planificador trata
+// congelando ociosas. El texto, el de siempre.
+func TestUn507DelVMMLlegaConSuCodigo(t *testing.T) {
+	c, _, _ := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInsufficientStorage)
+		_, _ = w.Write([]byte(`{"fault_message":"creating the VM: this Mac has no room for another VM (HV_NO_RESOURCES)"}`))
+	})
+	err := c.Start(context.Background())
+	var fe *Error
+	if !errors.As(err, &fe) {
+		t.Fatalf("el error de un 507 no es un *fc.Error: %T %v", err, err)
+	}
+	if fe.Status != http.StatusInsufficientStorage {
+		t.Errorf("Status = %d, quiero 507", fe.Status)
+	}
+	quiero := "firecracker PUT /actions: 507 Insufficient Storage: creating the VM: this Mac has no room for another VM (HV_NO_RESOURCES)"
+	if err.Error() != quiero {
+		t.Errorf("el texto cambió:\n got %q\nwant %q", err.Error(), quiero)
 	}
 }

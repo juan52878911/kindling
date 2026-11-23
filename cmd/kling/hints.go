@@ -45,6 +45,8 @@ type hint struct {
 var hints = []hint{
 	{[]string{"cannot talk to the daemon", "permission denied"},
 		"add your user to KLING_SOCKET_USER in /etc/default/kling and restart the daemon (or use sudo)", ""},
+	{[]string{"cannot talk to the daemon", "no such file"}, "kling up   (starts the daemon, or says what is missing)", ""},
+	{[]string{"cannot talk to the daemon", "connection refused"}, "kling up   (starts the daemon, or says what is missing)", ""},
 	{[]string{"cannot talk to the daemon"}, "kling doctor", ""},
 	{[]string{"launching ssh to"}, "kling doctor", ""},
 	{[]string{"machine ", " does not exist"}, "kling ps -a", ""},
@@ -146,4 +148,6 @@ var movedToExtension = map[string]string{
 	"mcp":     "mcp",
 	"connect": "mcp",
 	"db":      "db",
+	"sbx":     "sandbox",
+	"phone":   "phone",
 }

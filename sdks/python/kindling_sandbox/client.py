@@ -5,17 +5,18 @@ import json
 import os
 import socket
 import ssl
+import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
-from .errors import ConfigError, TransportError, error_para
-from .models import (ExecEvent, ExecResult, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, SandboxInfo,
-                     Session, Volume)
+from .errors import ApiError, ConfigError, TransportError, error_para
+from .models import (CodeContext, CodeEvent, EgressPolicy, Endpoint, SearchResult, TarResult, ExecEvent, ExecResult, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, ReplaceResult,
+                     SandboxInfo, SandboxMetrics, Session, Volume)
 
 ENV_URL = "KLING_SANDBOX_URL"
 ENV_TOKEN = "KLING_SANDBOX_TOKEN"
-URL_POR_DEFECTO = "http://localhost:8088"
+URL_POR_DEFECTO = "http://127.0.0.1:8090"
 
 
 def _retry_after(valor: Optional[str]) -> Optional[float]:
@@ -39,7 +40,10 @@ class Client:
     """Conexión al gateway. Una conexión TCP por petición (simple y sin estado)."""
 
     def __init__(self, url: Optional[str] = None, token: Optional[str] = None,
-                 timeout: Optional[float] = 60.0):
+                 timeout: Optional[float] = 60.0, retries: int = 0, max_retry_wait: float = 30.0):
+        """`retries` > 0 reintenta (hasta ese número de veces) un 429 o 503,
+        esperando el `Retry-After` del servidor (1 s si no lo trae; nunca más
+        de `max_retry_wait`). Por defecto no reintenta nada."""
         url = url or os.environ.get(ENV_URL) or URL_POR_DEFECTO
         partes = urlsplit(url)
         if partes.scheme not in ("http", "https") or not partes.hostname:
@@ -51,6 +55,9 @@ class Client:
         self.url = "%s://%s%s" % (partes.scheme, partes.netloc.rpartition("@")[2], self._prefijo)
         self._token = token if token is not None else os.environ.get(ENV_TOKEN)
         self.timeout = timeout
+        self.retries = max(0, int(retries))
+        self.max_retry_wait = max_retry_wait
+        self._dormir = time.sleep
 
     def __repr__(self) -> str:
         return "Client(url=%r, token=%s)" % (self.url, "<oculto>" if self._token else "None")
@@ -70,20 +77,36 @@ class Client:
             texto = texto.replace(self._token, "<oculto>")
         return texto
 
-    def _abrir(self, metodo: str, ruta: str, query: Optional[Dict[str, str]] = None,
-               cuerpo: Optional[bytes] = None, content_type: Optional[str] = None,
-               timeout: Any = "defecto", auth: bool = True):
-        """Devuelve (conn, resp) con el estado ya validado: si no es 2xx, lanza."""
+    def _abrir(self, metodo: str, ruta: str, query=None, cuerpo=None, content_type: Optional[str] = None,
+               timeout: Any = "defecto", auth: bool = True, cabeceras: Optional[Dict[str, str]] = None):
+        """Devuelve (conn, resp) con el estado ya validado: si no es 2xx, lanza.
+        Con `retries`, un 429/503 se reintenta tras su `Retry-After`."""
+        intento = 0
+        while True:
+            try:
+                return self._abrir_una(metodo, ruta, query, cuerpo, content_type, timeout, auth, cabeceras)
+            except ApiError as e:
+                if e.status not in (429, 503) or intento >= self.retries:
+                    raise
+                if hasattr(cuerpo, "seek"):  # un cuerpo en flujo hay que rebobinarlo
+                    cuerpo.seek(0)
+                intento += 1
+                espera = e.retry_after if e.retry_after is not None else 1.0
+                self._dormir(min(max(espera, 0.0), self.max_retry_wait))
+
+    def _abrir_una(self, metodo, ruta, query, cuerpo, content_type, timeout, auth, cabeceras):
         if timeout == "defecto":
             timeout = self.timeout
         destino = self._prefijo + quote(ruta, safe="/")
         if query:
-            destino += "?" + urlencode(query)
+            destino += "?" + urlencode(query, doseq=True)
         cab = {"Accept": "application/json, application/x-ndjson, application/octet-stream"}
         if auth and self._token:
             cab["Authorization"] = "Bearer " + self._token
         if content_type:
             cab["Content-Type"] = content_type
+        if cabeceras:
+            cab.update(cabeceras)
         conn = self._conectar(timeout)
         try:
             conn.request(metodo, destino, body=cuerpo, headers=cab)
@@ -166,15 +189,29 @@ class Client:
     def get_sandbox(self, id: str) -> SandboxInfo:
         return SandboxInfo.from_json(self._json("GET", "/v1/sandboxes/" + id))
 
-    def list_sandboxes(self):
-        conn, resp = self._abrir("GET", "/v1/sandboxes")
+    def list_sandboxes(self, state: Optional[str] = None, label: Optional[Any] = None,
+                       limit: Optional[int] = None, cursor: Optional[str] = None):
+        """Devuelve (lista, parcial, siguiente): `parcial` es X-Kindling-Partial y
+        `siguiente`, el X-Kindling-Next-Cursor (None en la última página).
+        `label` es un dict {clave: valor} o una lista de "clave=valor"."""
+        q: Dict[str, Any] = {}
+        if state:
+            q["state"] = state
+        if label:
+            q["label"] = ["%s=%s" % kv for kv in label.items()] if isinstance(label, dict) else list(label)
+        if limit:
+            q["limit"] = str(int(limit))
+        if cursor:
+            q["cursor"] = cursor
+        conn, resp = self._abrir("GET", "/v1/sandboxes", q or None)
         parcial = resp.getheader("X-Kindling-Partial")
+        siguiente = resp.getheader("X-Kindling-Next-Cursor")
         crudo = self._leer(conn, resp, "/v1/sandboxes")
         try:
             lista = [SandboxInfo.from_json(x) for x in json.loads(crudo or b"[]") or []]
         except ValueError:
             raise TransportError("respuesta no JSON de /v1/sandboxes") from None
-        return lista, parcial
+        return lista, parcial, siguiente
 
     def delete_sandbox(self, id: str) -> None:
         self._json("DELETE", "/v1/sandboxes/" + id)
@@ -182,6 +219,97 @@ class Client:
     def renew_sandbox(self, id: str, ttl_seconds: Optional[int] = None) -> SandboxInfo:
         cuerpo = {"ttl_seconds": ttl_seconds} if ttl_seconds is not None else None
         return SandboxInfo.from_json(self._json("POST", "/v1/sandboxes/%s/renew" % id, cuerpo=cuerpo))
+
+    def pause_sandbox(self, id: str) -> SandboxInfo:
+        return SandboxInfo.from_json(self._json("POST", "/v1/sandboxes/%s/pause" % id))
+
+    def resume_sandbox(self, id: str) -> SandboxInfo:
+        return SandboxInfo.from_json(self._json("POST", "/v1/sandboxes/%s/resume" % id))
+
+    def set_egress(self, id: str, egress: Optional[str] = None,
+                   allow_domains: Optional[List[str]] = None) -> EgressPolicy:
+        cuerpo: Dict[str, Any] = {}
+        if egress is not None:
+            cuerpo["egress"] = egress
+        if allow_domains is not None:
+            cuerpo["allow_domains"] = list(allow_domains)
+        return EgressPolicy.from_json(self._json("PATCH", "/v1/sandboxes/%s/egress" % id, cuerpo=cuerpo))
+
+    def patch_metadata(self, id: str, labels: Optional[Dict[str, str]] = None,
+                       remove: Optional[List[str]] = None) -> SandboxInfo:
+        cuerpo: Dict[str, Any] = {}
+        if labels:
+            cuerpo["labels"] = dict(labels)
+        if remove:
+            cuerpo["remove"] = list(remove)
+        return SandboxInfo.from_json(self._json("PATCH", "/v1/sandboxes/%s/metadata" % id, cuerpo=cuerpo))
+
+    def fork_sandbox(self, id: str, count: Optional[int] = None,
+                     ttl_seconds: Optional[int] = None) -> List[SandboxInfo]:
+        cuerpo: Dict[str, Any] = {}
+        if count is not None:
+            cuerpo["count"] = int(count)
+        if ttl_seconds is not None:
+            cuerpo["ttl_seconds"] = int(ttl_seconds)
+        r = self._json("POST", "/v1/sandboxes/%s/fork" % id, cuerpo=cuerpo) or {}
+        return [SandboxInfo.from_json(x) for x in r.get("sandboxes") or []]
+
+    def sandbox_metrics(self, id: str) -> SandboxMetrics:
+        return SandboxMetrics.from_json(self._json("GET", "/v1/sandboxes/%s/metrics" % id))
+
+    # ---- endpoints
+
+    def create_endpoint(self, id: str, port: int, ttl_seconds: Optional[int] = None,
+                        public: bool = False) -> Endpoint:
+        cuerpo: Dict[str, Any] = {"port": int(port)}
+        if ttl_seconds is not None:
+            cuerpo["ttl_seconds"] = int(ttl_seconds)
+        if public:
+            cuerpo["public"] = True
+        return Endpoint.from_json(self._json("POST", "/v1/sandboxes/%s/endpoints" % id, cuerpo=cuerpo))
+
+    def list_endpoints(self, id: str) -> List[Endpoint]:
+        return [Endpoint.from_json(x) for x in self._json("GET", "/v1/sandboxes/%s/endpoints" % id) or []]
+
+    def revoke_endpoint(self, id: str, port: int) -> None:
+        self._json("DELETE", "/v1/sandboxes/%s/endpoints/%d" % (id, int(port)))
+
+    # ---- código
+
+    def run_code(self, id: str, code: str, language: Optional[str] = None,
+                 context_id: Optional[str] = None,
+                 timeout_seconds: Optional[int] = None) -> Iterator[CodeEvent]:
+        """Iterador de CodeEvent (NDJSON); el último es siempre `done`."""
+        cuerpo: Dict[str, Any] = {"code": code}
+        if language:
+            cuerpo["language"] = language
+        if context_id:
+            cuerpo["context_id"] = context_id
+        if timeout_seconds:
+            cuerpo["timeout_seconds"] = int(timeout_seconds)
+        ruta = "/v1/sandboxes/%s/code" % id
+        # La lectura espera al plazo de la ejecución (60 s por defecto) más un margen.
+        conn, resp = self._abrir("POST", ruta, None, json.dumps(cuerpo).encode(), "application/json",
+                                 (timeout_seconds or 60) + 30)
+        return self._eventos(conn, resp, ruta, CodeEvent)
+
+    def create_code_context(self, id: str, language: Optional[str] = None,
+                            cwd: Optional[str] = None) -> CodeContext:
+        cuerpo = {k: v for k, v in dict(language=language, cwd=cwd).items() if v}
+        return CodeContext.from_json(self._json("POST", "/v1/sandboxes/%s/code/contexts" % id, cuerpo=cuerpo))
+
+    def list_code_contexts(self, id: str) -> List[CodeContext]:
+        return [CodeContext.from_json(x) for x in
+                self._json("GET", "/v1/sandboxes/%s/code/contexts" % id) or []]
+
+    def get_code_context(self, id: str, cid: str) -> CodeContext:
+        return CodeContext.from_json(self._json("GET", "/v1/sandboxes/%s/code/contexts/%s" % (id, cid)))
+
+    def delete_code_context(self, id: str, cid: str) -> None:
+        self._json("DELETE", "/v1/sandboxes/%s/code/contexts/%s" % (id, cid))
+
+    def interrupt_code(self, id: str, cid: str) -> None:
+        self._json("DELETE", "/v1/sandboxes/%s/code/contexts/%s/execution" % (id, cid))
 
     # ---- exec
 
@@ -271,9 +399,56 @@ class Client:
 
     # ---- ficheros
 
-    def read_file(self, id: str, path: str) -> bytes:
+    def read_file(self, id: str, path: str, range: Optional[Any] = None) -> bytes:
+        """`range`: (inicio, fin) inclusivos, (inicio, None) hasta el final, o una
+        cadena `bytes=a-b` tal cual (también `bytes=-n` para los últimos n)."""
         ruta = "/v1/sandboxes/%s/files" % id
-        conn, resp = self._abrir("GET", ruta, {"path": path}, timeout=None)
+        cab = None
+        if range is not None:
+            if isinstance(range, str):
+                cab = {"Range": range}
+            else:
+                a, b = range
+                cab = {"Range": "bytes=%d-%s" % (a, "" if b is None else int(b))}
+        conn, resp = self._abrir("GET", ruta, {"path": path}, timeout=None, cabeceras=cab)
+        return self._leer(conn, resp, ruta)
+
+    def move_file(self, id: str, origen: str, destino: str, overwrite: bool = False) -> None:
+        cuerpo: Dict[str, Any] = {"from": origen, "to": destino}
+        if overwrite:
+            cuerpo["overwrite"] = True
+        self._json("POST", "/v1/sandboxes/%s/files/move" % id, cuerpo=cuerpo)
+
+    def mkdir_file(self, id: str, path: str) -> FileStat:
+        return FileStat.from_json(self._json("POST", "/v1/sandboxes/%s/files/mkdir" % id, cuerpo={"path": path}))
+
+    def chmod_file(self, id: str, path: str, mode: str, recursive: bool = False) -> FileStat:
+        cuerpo: Dict[str, Any] = {"path": path, "mode": mode}
+        if recursive:
+            cuerpo["recursive"] = True
+        return FileStat.from_json(self._json("POST", "/v1/sandboxes/%s/files/chmod" % id, cuerpo=cuerpo))
+
+    def replace_in_file(self, id: str, path: str, old: str, new: str, all: bool = False) -> ReplaceResult:
+        cuerpo: Dict[str, Any] = {"path": path, "old": old, "new": new}
+        if all:
+            cuerpo["all"] = True
+        return ReplaceResult.from_json(self._json("POST", "/v1/sandboxes/%s/files/replace" % id, cuerpo=cuerpo))
+
+    def search_files(self, id: str, path: str, glob: str) -> SearchResult:
+        return SearchResult.from_json(self._json(
+            "GET", "/v1/sandboxes/%s/files/search" % id, {"path": path, "glob": glob}))
+
+    def upload_tar(self, id: str, path: str, datos: bytes, mkdir: bool = False) -> TarResult:
+        q = {"path": path, "tar": "1"}
+        if mkdir:
+            q["mkdir"] = "1"
+        ruta = "/v1/sandboxes/%s/files" % id
+        conn, resp = self._abrir("PUT", ruta, q, bytes(datos), "application/x-tar", timeout=None)
+        return TarResult.from_json(json.loads(self._leer(conn, resp, ruta) or b"{}"))
+
+    def download_tar(self, id: str, path: str) -> bytes:
+        ruta = "/v1/sandboxes/%s/files" % id
+        conn, resp = self._abrir("GET", ruta, {"path": path, "tar": "1"}, timeout=None)
         return self._leer(conn, resp, ruta)
 
     def stat_file(self, id: str, path: str) -> FileStat:

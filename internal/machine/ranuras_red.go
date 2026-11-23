@@ -51,9 +51,10 @@ func (m *Manager) fondoDeRed() *knet.Fondo {
 		f := knet.NuevoFondo(tam, m.montarRanura, m.destruirRanura)
 		e.f.Store(f)
 		f.Bloquear = m.tryLock
+		f.Adaptar(knet.TamPoolMax())
 		f.IniciarRecogida(intervaloRecogida)
 		f.Reponer()
-		log.Printf("network: slot pool of %d prepared networks started", tam)
+		log.Printf("network: slot pool of %d prepared networks started (adaptive up to %d)", tam, max(tam, knet.TamPoolMax()))
 	})
 	return e.f.Load()
 }
@@ -139,6 +140,15 @@ func (m *Manager) ranuraEntregar(id string) *knet.Net {
 		return nil
 	}
 	return f.Entregar(id)
+}
+
+// ranuraDescartar destruye la ranura tomada para id si nadie la entregó
+// (asignarRed): una alta que falla antes de la red no la deja esperando al
+// plazo de Recoger. Tras la entrega, o si id no es de una ranura, no hace nada.
+func (m *Manager) ranuraDescartar(id string) {
+	if f := m.fondoActivo(); f != nil {
+		f.Descartar(id)
+	}
 }
 
 // ranuraPropia: el namespace es de una ranura del fondo (en espera, tomada o

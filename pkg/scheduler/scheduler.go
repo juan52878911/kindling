@@ -158,6 +158,11 @@ type Scheduler struct {
 	// que comparten daemon (el gateway MCP y el de IA, o un humano con `kling
 	// run -from`) no deben congelarse las máquinas el uno al otro.
 	MachineLabels map[string]string
+	// PoolOwner identifica a este planificador en las máquinas del fondo
+	// (etiqueta LabelPoolOwner) y tiene que ser estable entre reinicios. El
+	// barrido de huérfanas solo borra las pool=true con SU id; vacío = no barre
+	// (y las del fondo no llevan etiqueta de dueño).
+	PoolOwner string
 	// NamePrefix, si no está vacío, da nombre a las máquinas nuevas:
 	// <prefijo><servicio>-<aleatorio>. Vacío = el daemon elige.
 	NamePrefix string
@@ -2370,6 +2375,9 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	if barrer {
 		g.barrerAisladas(ctx)
+		if g.pool != nil {
+			g.pool.barrerHuerfanas(ctx)
+		}
 	}
 }
 

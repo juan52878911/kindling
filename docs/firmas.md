@@ -60,6 +60,32 @@ vieja (con sus fallos ya conocidos) valdría para servirla como si fuera otra.
 Un fallo al bajar la firma que no sea un 404 (red, 5xx) es un error, no «release
 sin firma».
 
+## Los tres verificadores de `install.sh`
+
+`install.sh` comprueba la firma de `SHA256SUMS` con el primero que tenga a mano,
+en este orden:
+
+1. **`minisign`**, con `SHA256SUMS.minisig` y las claves de `KLING_RELEASE_PUBKEYS`
+   (las mismas que `clavesRelease`). Independiente del binario que se instala.
+2. **`ssh-keygen -Y verify`**, con `SHA256SUMS.sshsig`, namespace `kling-release`
+   y los firmantes de `KLING_RELEASE_SSH_SIGNERS`. También independiente, y
+   `ssh-keygen` viene con casi todos los sistemas (un Mac sin Homebrew lo
+   tiene). Mientras no haya clave ssh publicada, `KLING_RELEASE_SSH_SIGNERS`
+   va vacío y este verificador no se usa: hoy, sin `minisign`, se pasa al
+   tercero. La release tampoco trae todavía `SHA256SUMS.sshsig`.
+3. **El self-check**: el `kling` recién bajado (ya comprobado contra
+   `SHA256SUMS`) corre `kling up -verify-sums`, con las claves que `install.sh`
+   le pasa. **No es independiente**: un binario malicioso se daría por bueno. Es
+   lo que permite instalar en un Mac sin `minisign`, y `install.sh` lo dice al
+   terminar («sha256 + self-check»). Lo traen las releases desde
+   `PRIMER_USO_DESDE` (constante de `install.sh`); con una anterior y sin
+   `minisign` el script se niega y dice qué versión fijar.
+
+`KLING_RELEASE_PUBKEYS` y `KLING_RELEASE_SSH_SIGNERS` se pueden sustituir por el
+entorno, y quien lo hace cambia la raíz de confianza: `install.sh` avisa («comes
+from the environment») cuando ve alguna. Una variable heredada sin querer no
+pasa en silencio.
+
 ## Generar la clave (una vez, Juan)
 
 ```sh

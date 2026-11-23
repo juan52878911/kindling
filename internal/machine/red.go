@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -36,6 +37,24 @@ const redDormidaMax = 30 * time.Minute
 
 // montarRed monta la red de la máquina id y apunta que está en pie.
 func (m *Manager) montarRed(n *knet.Net, id string, egress knet.Egress, domains []string) error {
+	_, err := m.montarRedModo(n, id, egress, domains, false)
+	return err
+}
+
+// montarRedAparte es montarRed con la comprobación de las barreras del host en
+// paralelo con el montaje: devuelve la función que espera su resultado. QUIEN
+// LLAMA DEBE ESPERARLA antes de que el invitado pueda emitir (justo antes de
+// Resume / de cargar el snapshot). Si la comprobación falla, la espera
+// desmonta la red y devuelve el error: quien llama aborta como con cualquier
+// fallo de red (sin desmontar otra vez, que es idempotente).
+func (m *Manager) montarRedAparte(n *knet.Net, id string, egress knet.Egress, domains []string) (func() error, error) {
+	return m.montarRedModo(n, id, egress, domains, true)
+}
+
+// montarRedModo monta la red; con aparte, la comprobación de las barreras
+// corre en paralelo y la espera la hace quien llama. Sin aparte, el Setup de
+// siempre: la comprobación va antes y, si falla, no se monta nada.
+func (m *Manager) montarRedModo(n *knet.Net, id string, egress knet.Egress, domains []string, aparte bool) (func() error, error) {
 	m.redMontada.Delete(id)
 	// La marca va ANTES de montar: si el daemon muere a medias, lo que quede
 	// montado también es suyo y su barrido lo puede recoger.
@@ -55,28 +74,54 @@ func (m *Manager) montarRed(n *knet.Net, id string, egress knet.Egress, domains 
 	if m.priv != nil {
 		uid = m.priv.UID
 	}
-	if err := montarRedHost(n, egress, domains, uid); err != nil {
+	var esperar func() error
+	var err error
+	switch {
+	case montarRedHost != nil: // los tests
+		err = montarRedHost(n, egress, domains, uid)
+		esperar = func() error { return nil }
+	case !aparte:
+		err = n.Setup(egress, domains, uid)
+		esperar = func() error { return nil }
+	default:
+		esperar, err = montarRedHostAparte(n, egress, domains, uid)
+	}
+	if err != nil {
 		if errors.Is(err, knet.ErrRedAjena) {
 			// No es nuestra: ni se desmonta ni se queda marcada como propia
 			// (el barrido de huérfanos se la llevaría).
 			m.olvidarRedPropia(n.NS)
-			return err
+			return nil, err
 		}
 		// Un Setup que falla a medias deja el namespace, el veth y sus
 		// reglas; quien llama no los desmontaba, y barrerNamespaces solo
 		// corre al arrancar el daemon: cada fallo era una red huérfana (y su
 		// subred ocupada en el host) hasta el siguiente reinicio.
 		m.desmontarRed(n, id)
-		return err
+		return nil, err
 	}
 	m.redMontada.Store(id, true)
-	return nil
+	var once sync.Once
+	var herr error
+	return func() error {
+		once.Do(func() {
+			if herr = esperar(); herr != nil {
+				m.desmontarRed(n, id)
+				m.redMontada.Delete(id)
+			}
+		})
+		return herr
+	}, nil
 }
 
 // Sustituibles en tests: montar y desmontar la red de verdad pide root e `ip`.
 var (
-	montarRedHost = func(n *knet.Net, egress knet.Egress, domains []string, uid int) error {
-		return n.Setup(egress, domains, uid)
+	// montarRedHost es nil salvo en los tests, que lo sustituyen por un
+	// montaje sin comprobación aparte.
+	montarRedHost func(n *knet.Net, egress knet.Egress, domains []string, uid int) error
+
+	montarRedHostAparte = func(n *knet.Net, egress knet.Egress, domains []string, uid int) (func() error, error) {
+		return n.SetupAparte(egress, domains, uid)
 	}
 	desmontarRedHost = func(n *knet.Net) { n.Teardown() }
 )

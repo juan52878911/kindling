@@ -40,18 +40,67 @@ func (n *Net) reglasRegistroIP() string {
 // emite tráfico hasta bastante después de que Setup devuelva; esperarlo
 // añadiría esos ms a cada arranque. Si el netns se desmonta antes de que
 // acabe, nft falla y no pasa nada.
-func (n *Net) instalarRegistroIP() {
-	if _, err := exec.LookPath("nft"); err != nil {
-		return
+func (n *Net) instalarRegistroIP() <-chan struct{} {
+	if instalarRegistroHook != nil {
+		instalarRegistroHook(n)
+	}
+	if !hayNft() {
+		return nil
 	}
 	script := n.reglasRegistroIP()
+	ns := n.NS
+	hecho := make(chan struct{})
+	registrosEnVuelo.Add(1)
+	go func() {
+		defer registrosEnVuelo.Done()
+		defer close(hecho)
+		_ = ejecutarNft(ns, script, "-f", "-") // setns, sin `ip netns exec`
+	}()
+	return hecho
+}
+
+// hayNft y ejecutarNft: el nft del netns; sustituibles en tests. stdin es lo
+// que se le pasa por la entrada estándar (vacío: nada).
+var (
+	hayNft = func() bool { _, err := exec.LookPath("nft"); return err == nil }
+
+	ejecutarNft = func(ns, stdin string, args ...string) error {
+		cmd := exec.Command("nft", args...)
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
+		return ejecutarEnNetns(ns, cmd)
+	}
+)
+
+// instalarRegistroHook avisa de cada instalación del registro (tests).
+var instalarRegistroHook func(*Net)
+
+// registroEnRanura (valor: canal que se cierra al acabar la instalación): netns de ranuras que ya traen el registro de none
+// instalado por MontarRanura (la tabla solo depende de HostIP y del tap). Lo
+// consume arrancarRegistroNone (none: no lo repite) o aplicarSobreRanura (otro
+// modo: lo retira, porque un registro solo tiene sentido donde se corta).
+var registroEnRanura sync.Map // ns -> <-chan struct{}
+
+// retirarRegistroDeRanura quita el registro de una ranura que se entrega con
+// un modo que no es none. En segundo plano, como la instalación.
+func (n *Net) retirarRegistroDeRanura() {
+	v, ok := registroEnRanura.LoadAndDelete(n.NS)
+	if !ok {
+		return
+	}
+	// Espera a la instalación de esa ranura: si el delete corriera antes que
+	// el nft -f, fallaría en silencio y la tabla se quedaría en una máquina
+	// con salida (R3-6).
+	instalado, _ := v.(<-chan struct{})
 	ns := n.NS
 	registrosEnVuelo.Add(1)
 	go func() {
 		defer registrosEnVuelo.Done()
-		cmd := exec.Command("nft", "-f", "-")
-		cmd.Stdin = strings.NewReader(script)
-		_ = ejecutarEnNetns(ns, cmd) // setns, sin `ip netns exec`
+		if instalado != nil {
+			<-instalado
+		}
+		_ = ejecutarNft(ns, "", "delete", "table", "ip", nftTabla)
 	}()
 }
 

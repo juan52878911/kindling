@@ -68,8 +68,8 @@ func archBootArg() string {
 // monolíticas, que siguen arrancando con la línea de siempre.
 //
 // ipv6Stack: la receta de la imagen pide el módulo IPv6 cargado (knet.BootArg).
-func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6Stack bool) string {
-	return bootArgsBase + archBootArg() + " " + knet.BootArg(ipv6Stack) + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
+func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6Stack bool, redAgente ...bool) string {
+	return bootArgsBase + archBootArg() + " " + knet.BootArg(ipv6Stack, len(redAgente) > 0 && redAgente[0]) + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -254,6 +254,10 @@ type Manager struct {
 	// stat-earlo bajo m.mu en cada Run/runFrom/Resize (hotMemFilesMiBLocked) no
 	// aporta nada sobre calcularlo una vez. Se invalida junto con snapCache.
 	memAllocCache map[string]int64
+	// memSinPropio: id -> PID con el que se vio que la máquina no tiene
+	// volcado propio (mem.file en su directorio); m.mu. Ver
+	// hotMemFilesMiBLocked.
+	memSinPropio map[string]int
 
 	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
 	// pasada completa no libera nada, lo que significa que el disco lo llena algo
@@ -492,6 +496,10 @@ type Manager struct {
 	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
 	pendGen    uint64
 	escritoGen uint64
+	// sinFsync: la última foto se escribió con write+rename sin fsync
+	// (persistirYa) y falta el fsync, que hace la siguiente escritura con
+	// debounce. escrituraMu.
+	sinFsync bool
 	// fallosEstado cuenta las escrituras seguidas de state.json que fallaron
 	// (para la espera del reintento). Con escrituraMu.
 	fallosEstado uint
@@ -771,8 +779,17 @@ func (m *Manager) load() {
 		list, err = decodificarEstado(b, version)
 	}
 	if err != nil {
-		m.ponerEnCuarentena(err)
-		return
+		var ok bool
+		if list, version, ok = m.recuperarEstadoPrevio(err); !ok {
+			m.ponerEnCuarentena(err)
+			return
+		}
+	} else if ferr := fsyncEstado(m.statePath()); ferr != nil {
+		// La pudo publicar sin fsync un daemon que murió (persistirYa): hasta
+		// asentarla no sirve de foto anterior (escribirFoto).
+		m.escrituraMu.Lock()
+		m.sinFsync = true
+		m.escrituraMu.Unlock()
 	}
 	m.versionPrevia, m.hayPrevia = version, true
 	if version < versionEstado {
@@ -928,6 +945,56 @@ func comprobarEstadoV013(ruta string, b []byte) error {
 
 // sufijoCuarentena es lo que lleva el nombre de un state.json apartado.
 const sufijoCuarentena = ".corrupt-"
+
+// sufijoPrevio es la última foto asentada (con fsync) de state.json, que
+// escribirFoto enlaza antes de publicar una sin fsync (R3-1).
+const sufijoPrevio = ".prev"
+
+// sufijoRoto es lo que lleva un state.json ilegible cuando se pudo recuperar
+// la foto anterior: se guarda para el diagnóstico y, a diferencia de
+// sufijoCuarentena, no deja al daemon en modo protegido.
+const sufijoRoto = ".torn-"
+
+// recuperarEstadoPrevio carga state.json.prev cuando state.json no se pudo
+// leer (causa): lo que deja un corte de luz entre el rename sin fsync de
+// persistirYa y el fsync con debounce, en un sistema de ficheros que no
+// asienta los datos al renombrar (XFS, ext4 con noauto_da_alloc). Devuelve
+// false si tampoco hay foto anterior legible: entonces va a cuarentena.
+//
+// La foto anterior se vuelve a poner como state.json (con fsync) y el roto se
+// aparta a state.json.torn-<ns>. Se pierden, como mucho, las altas y bajas de
+// los últimos ~250 ms antes del corte, no el inventario entero.
+func (m *Manager) recuperarEstadoPrevio(causa error) ([]*api.Machine, int, bool) {
+	previo := m.statePath() + sufijoPrevio
+	b, err := os.ReadFile(previo)
+	if err != nil {
+		return nil, 0, false
+	}
+	version, err := esquema.Comprobar(previo, b, versionEstadoMax)
+	if err != nil {
+		return nil, 0, false
+	}
+	list, err := decodificarEstado(b, version)
+	if err != nil {
+		return nil, 0, false
+	}
+	roto := m.statePath() + sufijoRoto + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if rerr := os.Rename(m.statePath(), roto); rerr != nil {
+		roto = "(could not set it aside: " + rerr.Error() + ")"
+	}
+	if werr := escribirEstado(m.statePath(), b, 0o600); werr != nil {
+		// Sin poder reponerla, state.json no es una foto asentada: la
+		// siguiente escritura rápida no debe enlazarlo como anterior.
+		m.escrituraMu.Lock()
+		m.sinFsync = true
+		m.escrituraMu.Unlock()
+		log.Printf("warning: state: couldn't put the previous state back as %s: %v", m.statePath(), werr)
+	}
+	log.Printf("state: %s is unreadable (%v), probably torn by a host crash; loaded the last settled "+
+		"state from %s (%d machine(s)); changes from the last moments before the crash may be missing. "+
+		"The unreadable file is at %s", m.statePath(), causa, previo, len(list), roto)
+	return list, version, true
+}
 
 // ponerEnCuarentena aparta el state.json que no se pudo leer. Si ni siquiera
 // se puede renombrar, se bloquea además su escritura: persist lo pisaría con
@@ -1097,6 +1164,79 @@ func (m *Manager) ultimaEscritura(plazo time.Duration) {
 // disco que falla no se puede fabricar de otra forma.
 var escribirEstado = durable.Escribir
 
+// escribirEstadoRapido es escribirEstado sin fsync: temporal, write y rename.
+// La publicación es atómica para un lector (ve la foto vieja o la nueva
+// entera), pero no ante una caída del HOST antes del fsync que hace la
+// escritura con debounce (≤ ~250 ms): un sistema de ficheros que no asienta
+// los datos al renombrar (XFS, ext4 con noauto_da_alloc) puede dejar
+// state.json vacío o a medias. Por eso escribirFoto enlaza antes la última
+// foto asentada como state.json.prev, y load la recupera de ahí (R3-1). Una
+// caída del daemon no lo rompe: el rename ya está en el page cache del kernel.
+// Variable para los tests.
+var escribirEstadoRapido = func(ruta string, datos []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(ruta), filepath.Base(ruta)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	fallo := func(err error) error { f.Close(); os.Remove(tmp); return err }
+	if err := f.Chmod(perm); err != nil {
+		return fallo(fmt.Errorf("chmod %s: %w", tmp, err))
+	}
+	if _, err := f.Write(datos); err != nil {
+		return fallo(fmt.Errorf("writing %s: %w", tmp, err))
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, ruta); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// enlazarEstadoPrevio deja la foto que hay en ruta (asentada) como
+// ruta+sufijoPrevio: un enlace duro a un temporal y un rename, dos llamadas al
+// sistema sin fsync. El inodo enlazado no se vuelve a escribir (toda
+// escritura de state.json es temporal+rename), así que sus datos siguen
+// asentados; y el journal ordena el enlace antes del rename de la foto nueva.
+// Falla si no hay foto (la primera) o si el sistema de ficheros no tiene
+// enlaces duros: escribirFoto escribe entonces con fsync. Variable para los
+// tests.
+var enlazarEstadoPrevio = func(ruta string) error {
+	tmp := ruta + sufijoPrevio + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.Link(ruta, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, ruta+sufijoPrevio); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// fsyncEstado asienta en disco state.json y su directorio (el fsync que
+// escribirEstadoRapido dejó para después). Variable para los tests.
+var fsyncEstado = func(ruta string) error {
+	f, err := os.Open(ruta)
+	if err != nil {
+		return err
+	}
+	err = durable.Ordenar(f)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(ruta)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
 // reintentoEstadoMax acota la espera entre reintentos de una escritura de
 // state.json que falló.
 const reintentoEstadoMax = 10 * time.Second
@@ -1106,12 +1246,24 @@ const reintentoEstadoMax = 10 * time.Second
 // escrituraMu se toma ANTES de sacar la foto: quien la saca la escribe o la
 // repone sin soltarlo, así que persistirYa, al tomarlo detrás, ve ya en
 // escritoGen el resultado de cualquier escritura en curso.
-func (m *Manager) writePending() error {
+func (m *Manager) writePending() error { return m.escribirPendiente(false) }
+
+// escribirPendiente es writePending; rapido escribe la foto con write+rename
+// sin fsync (solo persistirYa) y deja el fsync para la escritura con debounce.
+func (m *Manager) escribirPendiente(rapido bool) error {
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
 	m.stateMu.Lock()
 	if !m.hasPend {
 		m.stateMu.Unlock()
+		if m.sinFsync && !rapido {
+			// Nada nuevo, pero la última foto aún no se asentó: este es el
+			// fsync que persistirYa dejó para después.
+			if err := fsyncEstado(m.statePath()); err != nil {
+				return fmt.Errorf("could not fsync state: %w", err)
+			}
+			m.sinFsync = false
+		}
 		return nil
 	}
 	list, gen := m.pending, m.pendGen
@@ -1124,9 +1276,10 @@ func (m *Manager) writePending() error {
 	if gen <= m.escritoGen {
 		return nil // ya se escribió una foto más nueva
 	}
-	err := m.escribirFoto(list, gen)
+	sinFsync, err := m.escribirFoto(list, gen, rapido)
 	if err == nil {
 		m.fallosEstado = 0
+		m.sinFsync = sinFsync
 		return nil
 	}
 	// La foto no llegó a disco: se repone, salvo que ya haya otra más nueva
@@ -1154,11 +1307,11 @@ func (m *Manager) writePending() error {
 }
 
 // escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
-func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
+func (m *Manager) escribirFoto(list []api.Machine, gen uint64, rapido bool) (sinFsync bool, err error) {
 	schema := esquemaParaEscribir(list)
 	b, err := serializarFoto(list, schema)
 	if err != nil {
-		return fmt.Errorf("could not serialize it: %w", err)
+		return false, fmt.Errorf("could not serialize it: %w", err)
 	}
 	// Un esquema mayor que el que dejó el binario anterior (1→2 con la
 	// primera copia en diferencial, →3 con el primer campo de necesitaV3):
@@ -1168,7 +1321,7 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	// Respaldar no pisa una que ya exista: la buena es la primera.
 	if m.hayPrevia && schema > m.versionPrevia {
 		if err := esquema.Respaldar(m.statePath(), m.versionPrevia); err != nil {
-			return fmt.Errorf("not writing schema %d, because the schema %d copy could not be made: %w", schema, m.versionPrevia, err)
+			return false, fmt.Errorf("not writing schema %d, because the schema %d copy could not be made: %w", schema, m.versionPrevia, err)
 		}
 	}
 
@@ -1177,11 +1330,22 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	// mal en el otro, que es lo que pasaba con links.json.
 	// 0600: es el inventario entero (IPs, reenvíos, dueños, nombres de
 	// variables), y solo lo lee el daemon (M8).
-	if err := escribirEstado(m.statePath(), b, 0o600); err != nil {
-		return fmt.Errorf("could not persist it: %w", err)
+	//
+	// Sin fsync solo si queda de dónde recuperar (R3-1): la foto en disco ya
+	// asentada se enlaza antes como state.json.prev. Si la de disco es a su
+	// vez una sin fsync (sinFsync), el .prev de entonces sigue siendo la
+	// última asentada y no se toca. Sin foto anterior o sin enlaces duros, con
+	// fsync: más lento, no menos seguro.
+	escribir := escribirEstado
+	sinFsync = rapido && (m.sinFsync || enlazarEstadoPrevio(m.statePath()) == nil)
+	if sinFsync {
+		escribir = escribirEstadoRapido
+	}
+	if err := escribir(m.statePath(), b, 0o600); err != nil {
+		return false, fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
-	return nil
+	return sinFsync, nil
 }
 
 // serializarFoto es el state.json de la foto list con esquema schema: los
@@ -1276,7 +1440,7 @@ func (m *Manager) persistirYa() error {
 	m.mu.RLock()
 	gen := m.persist()
 	m.mu.RUnlock()
-	err := m.writePending()
+	err := m.escribirPendiente(true)
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
 	if m.estadoIntocable || m.escritoGen >= gen {
@@ -1286,6 +1450,18 @@ func (m *Manager) persistirYa() error {
 		err = errors.New("its write failed")
 	}
 	return fmt.Errorf("state not saved to disk: %w", err)
+}
+
+// cederArranqueFrio cede al VMM de un arranque en frío su overlay y su
+// directorio (R3-4). El overlay va primero y por descriptor con O_NOFOLLOW:
+// cedido el directorio, otro VMM con el mismo uid y sin jailer podría cambiar
+// overlay.ext4 por un enlace, y un chown por ruta (Own) le daría el fichero al
+// que apunta.
+func (m *Manager) cederArranqueFrio(dir, overlay string) error {
+	if err := m.priv.OwnNoFollow(overlay); err != nil {
+		return err
+	}
+	return m.priv.Own(dir)
 }
 
 // cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
@@ -1902,6 +2078,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
 	// reserva tiene que existir antes de que empiece nada lento.
 	id := m.nuevoIDMaquina()
+	// Si la alta se abandona antes de asignarRed, la ranura se descarta en el
+	// acto; entregada, es no-op.
+	defer m.ranuraDescartar(id)
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]
 	}
@@ -2116,7 +2295,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.mu.Unlock()
 
 	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.
-	if err := m.priv.Own(dir, overlay); err != nil {
+	if err := m.cederArranqueFrio(dir, overlay); err != nil {
 		m.desmontarRed(netcfg, id)
 		return abandonar(err)
 	}
@@ -2383,7 +2562,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if comando != nil && n == nil {
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
 	}
-	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack, n != nil && m.redDelAgente(id)) + envBootArg(len(env) > 0) +
 		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait) +
 		imgSnapBootArg(m.esPrepImagen(id))
 	anidada := m.anidadaDe(id)
@@ -2511,7 +2690,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// Y las carpetas vivas por virtio-fs, si el VMM lo tiene (kling-hv).
 	m.carpetasAntesDeArrancar(ctx, c, id)
 	if err := c.Start(ctx); err != nil {
-		return pid, err
+		return pid, sinCapacidadVMM(err)
 	}
 	// Y los reenvíos de puertos, sin los que en macOS el host no llega al
 	// invitado. No hacen falta en Linux.
@@ -2612,6 +2791,11 @@ func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid i
 	// 30 s por defecto del cliente en el primero, muy por encima de los 5 s.
 	ping := c.ConPlazo(plazoPing)
 	for time.Now().Before(deadline) {
+		// Con el contexto cancelado no se sigue: quien llama tiene un hueco de
+		// la puerta de arranques y su abortar mata el VMM.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if ping.Ping(ctx) == nil {
 			return nil
 		}
@@ -2626,7 +2810,11 @@ func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid i
 		if time.Since(start) > 200*time.Millisecond {
 			paso = 10 * time.Millisecond
 		}
-		time.Sleep(paso)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(paso):
+		}
 	}
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
@@ -3899,7 +4087,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// La red suele seguir montada desde el Freeze (ver red.go); si no —un
 	// reinicio del daemon o del host, o el vigilante la soltó—, se rehace con
 	// el mismo índice para que la máquina conserve su IP.
-	netcfg, errRed := m.redDelThaw(mc)
+	netcfg, esperarHost, errRed := m.redDelThaw(mc)
 	if errRed != nil {
 		soltarFull()
 		return nil, errRed
@@ -4053,14 +4241,28 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// si el daemon moría el volcado viejo pasaba por anterior a los sellos y el
 	// siguiente thaw cargaba aquella RAM sobre el disco ya escrito. Ahora es un
 	// rename durable (volcadoEnCurso) y, si no se puede, no se carga nada.
+	// Las barreras del host se comprobaron en paralelo: aquí se espera su
+	// resultado, antes de cargar y reanudar al invitado.
+	if err := esperarHost(); err != nil {
+		return abortar(err)
+	}
 	if err := esperarSello(); err != nil {
 		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
+	}
+	// macOS: las rutas del daemon, para que el VMM no abra las del snap.file
+	// (reapuntar.go). En Linux, nil. Antes de intentoCarga: un fallo aquí no
+	// ha cargado nada.
+	rp, err := m.reapuntarDe(ctx, c, pid, func() (*fc.Repoint, error) { return m.rutasDelThaw(mc) })
+	if err != nil {
+		return abortar(err)
 	}
 	intentoCarga = true
 	start := time.Now()
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
-	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotTracking(ctx, snapPath, memPath, true, base != ""); err != nil {
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotRepoint(ctx, snapPath, memPath, true, base != "", rp); err != nil {
+		// Un 507 de kling-hv (sin cupo de VMs) es falta de capacidad.
+		err = sinCapacidadVMM(err)
 		// Si el VMM contestó con un error, no cargó: el invitado no corrió y el
 		// volcado sigue describiendo su disco, así que recupera su sello. Sin
 		// respuesta (un plazo, el socket cortado) no se sabe si reanudó y se
@@ -4550,23 +4752,37 @@ func (m *Manager) vmmCongeladoEnDisco(id string, pid int) bool {
 // host antes de dar red (knet.AsegurarHost): tras un reload del cortafuegos,
 // la máquina despertaba con el host abierto. Ahora se comprueban también, y
 // si no se pueden reponer no despierta, como en Setup.
-func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, error) {
+//
+// Devuelve la espera de la comprobación de las barreras, que corre en paralelo
+// con el resto del thaw: quien llama la ejecuta antes de cargar el volcado (el
+// invitado no corre hasta entonces) y aborta si falla.
+func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, func() error, error) {
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
 	if redConservada(m, netcfg, mc.ID) {
-		if err := asegurarBarrerasHost(); err != nil {
-			return nil, fmt.Errorf("host firewall rules: %w", err)
-		}
-		return netcfg, nil
+		comprobar := asegurarBarrerasHost
+		hecho := make(chan error, 1)
+		go func() { hecho <- comprobar() }()
+		var once sync.Once
+		var herr error
+		return netcfg, func() error {
+			once.Do(func() {
+				if herr = <-hecho; herr != nil {
+					herr = fmt.Errorf("host firewall rules: %w", herr)
+				}
+			})
+			return herr
+		}, nil
 	}
 	n, err := m.redParaRehacer(mc)
 	if err != nil {
-		return nil, fmt.Errorf("rebuilding the network: %w", err)
+		return nil, nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
 	egress, _ := knet.ParseEgress(mc.Egress)
-	if err := m.montarRed(n, mc.ID, egress, mc.AllowDomains); err != nil {
-		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	esperar, err := m.montarRedAparte(n, mc.ID, egress, mc.AllowDomains)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
-	return n, nil
+	return n, esperar, nil
 }
 
 // redConservada es redLista detrás de una variable, para los tests (en macOS

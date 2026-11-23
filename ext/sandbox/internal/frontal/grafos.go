@@ -223,7 +223,7 @@ func (s *Servidor) handleGrafo(w http.ResponseWriter, r *http.Request) {
 	resto := strings.TrimPrefix(r.URL.Path, "/v1/graphs/")
 	partes := strings.Split(resto, "/")
 	if len(partes) != 2 || partes[0] == "" || partes[1] == "" {
-		http.NotFound(w, r)
+		fail(w, http.StatusNotFound, errors.New("not found"))
 		return
 	}
 	id := partes[0] + "/" + partes[1]

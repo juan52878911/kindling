@@ -2,6 +2,7 @@ package aigw
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -258,17 +259,20 @@ type TeacherVote struct {
 // una persona (Source "human": la verdad) o un maestro externo (Source
 // "teacher": un voto más, que tiene que validarse como cualquier maestro).
 type FeedbackRecord struct {
-	ID      string         `json:"id,omitempty"`
-	Task    string         `json:"task"`
-	TS      time.Time      `json:"ts"`
-	Source  string         `json:"source"`           // human | teacher
-	Action  string         `json:"action,omitempty"` // human: confirm | correct | discard
-	Label   string         `json:"label,omitempty"`
-	Teacher string         `json:"teacher,omitempty"`
-	Conf    float64        `json:"conf,omitempty"`
-	By      string         `json:"by,omitempty"`
-	Text    string         `json:"text,omitempty"`
-	Fields  map[string]any `json:"fields,omitempty"`
+	ID      string    `json:"id,omitempty"`
+	Task    string    `json:"task"`
+	TS      time.Time `json:"ts"`
+	Source  string    `json:"source"`           // human | teacher
+	Action  string    `json:"action,omitempty"` // human: confirm | correct | discard
+	Label   string    `json:"label,omitempty"`
+	Teacher string    `json:"teacher,omitempty"`
+	Conf    float64   `json:"conf,omitempty"`
+	By      string    `json:"by,omitempty"`
+	Text    string    `json:"text,omitempty"`
+	// TextSHA256 es el sha256 del texto tal como llegó (Text va filtrado): con
+	// él se coteja con el de la captura antes de dar el texto a un caso.
+	TextSHA256 string         `json:"text_sha256,omitempty"`
+	Fields     map[string]any `json:"fields,omitempty"`
 }
 
 // ---- el almacén y su escritor
@@ -411,8 +415,11 @@ func (l *learner) write(ws map[string]*taskWriter, j learnJob) {
 	rec.TextSHA256 = hex.EncodeToString(sum[:])
 	if j.mode == CaptureText {
 		rec.Text = redact(j.text)
+		rec.Fields = redactFields(rec.Fields)
+	} else {
+		// hash: nada legible en disco, tampoco los campos.
+		rec.Fields = nil
 	}
-	rec.Fields = redactFields(rec.Fields)
 	day := rec.TS.UTC().Format("2006-01-02")
 	w := ws[rec.Task]
 	if w == nil || w.day != day {
@@ -651,17 +658,24 @@ func redact(s string) string {
 }
 
 // redactFields filtra los campos de texto y recorta lo largo: un campo es una
-// característica, no un documento.
+// característica, no un documento. Solo pasan los escalares (cadena, número,
+// booleano, null): lo anidado no pasa por el filtro de secretos, así que no se
+// escribe.
 func redactFields(f map[string]any) map[string]any {
 	if len(f) == 0 {
 		return nil
 	}
 	out := make(map[string]any, len(f))
 	for k, v := range f {
-		if s, ok := v.(string); ok {
-			v = truncUTF8(redact(s), maxLearnFieldLen)
+		switch x := v.(type) {
+		case string:
+			out[k] = truncUTF8(redact(x), maxLearnFieldLen)
+		case nil, bool, float64, json.Number, int, int64:
+			out[k] = x
 		}
-		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -670,28 +684,44 @@ func redactFields(f map[string]any) map[string]any {
 
 // readJSONL lee un JSONL acotado (líneas de 1 MiB, maxB bytes) y llama a fn
 // por cada línea; las rotas se cuentan y se saltan: un fichero a medias (el
-// gateway murió escribiendo) no puede tumbar un reentreno.
+// gateway murió escribiendo) no puede tumbar un reentreno. Una línea de más de
+// chispa.MaxLineBytes también se salta y se cuenta, y se sigue con la
+// siguiente: con un bufio.Scanner la lectura paraba ahí en silencio, y todo lo
+// escrito después se perdía para review y retrain. fn no puede quedarse con b.
 func readJSONL(path string, maxB int64, fn func([]byte) error) (bad int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(io.LimitReader(f, maxB))
-	sc.Buffer(make([]byte, 64<<10), chispa.MaxLineBytes)
-	for sc.Scan() {
-		b := sc.Bytes()
-		if len(strings.TrimSpace(string(b))) == 0 {
-			continue
+	r := bufio.NewReaderSize(io.LimitReader(f, maxB), 64<<10)
+	var linea []byte
+	larga := false
+	for {
+		trozo, err := r.ReadSlice('\n')
+		if !larga {
+			if len(linea)+len(trozo) > chispa.MaxLineBytes+1 { // +1: el salto de línea
+				larga, linea = true, linea[:0]
+			} else {
+				linea = append(linea, trozo...)
+			}
 		}
-		if fn(b) != nil {
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue // la línea sigue
+		}
+		if larga {
+			bad++
+		} else if b := bytes.TrimRight(linea, "\r\n"); len(bytes.TrimSpace(b)) > 0 && fn(b) != nil {
 			bad++
 		}
+		linea, larga = linea[:0], false
+		if errors.Is(err, io.EOF) {
+			return bad, nil
+		}
+		if err != nil {
+			return bad, err
+		}
 	}
-	if err := sc.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
-		return bad, err
-	}
-	return bad, nil
 }
 
 // readCaptures lee las capturas de una tarea, de la más vieja a la más nueva.
@@ -713,7 +743,7 @@ func (l *learner) readCaptures(task string, maxB int64) ([]CaptureRecord, error)
 	sort.Strings(names)
 	var out []CaptureRecord
 	for _, n := range names {
-		_, err := readJSONL(filepath.Join(dir, n), maxB, func(b []byte) error {
+		bad, err := readJSONL(filepath.Join(dir, n), maxB, func(b []byte) error {
 			var r CaptureRecord
 			if err := json.Unmarshal(b, &r); err != nil || r.ID == "" {
 				return errors.New("bad record")
@@ -723,6 +753,9 @@ func (l *learner) readCaptures(task string, maxB int64) ([]CaptureRecord, error)
 		})
 		if err != nil {
 			return nil, err
+		}
+		if bad > 0 {
+			log.Printf("learn: task %q: %d unreadable line(s) skipped in captures/%s", task, bad, n)
 		}
 	}
 	return out, nil
@@ -734,7 +767,7 @@ func (l *learner) feedbackPath(task string) string {
 
 func (l *learner) readFeedback(task string) ([]FeedbackRecord, error) {
 	var out []FeedbackRecord
-	_, err := readJSONL(l.feedbackPath(task), maxFeedbackBytes+chispa.MaxLineBytes, func(b []byte) error {
+	bad, err := readJSONL(l.feedbackPath(task), maxFeedbackBytes+chispa.MaxLineBytes, func(b []byte) error {
 		var r FeedbackRecord
 		if err := json.Unmarshal(b, &r); err != nil {
 			return err
@@ -744,6 +777,9 @@ func (l *learner) readFeedback(task string) ([]FeedbackRecord, error) {
 	})
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
+	}
+	if bad > 0 {
+		log.Printf("learn: task %q: %d unreadable line(s) skipped in feedback.jsonl", task, bad)
 	}
 	return out, err
 }
@@ -815,7 +851,7 @@ func (g *Gateway) Feedback(req FeedbackRequest, human bool, tenant string) (*Fee
 		}
 		rec := FeedbackRecord{ID: it.ID, Task: req.Task, TS: now, Label: it.Label, By: it.By, Fields: redactFields(it.Fields)}
 		if it.Text != "" {
-			rec.Text = redact(it.Text)
+			rec.Text, rec.TextSHA256 = redact(it.Text), textKey(it.Text)
 		}
 		if it.Teacher != "" {
 			// Un maestro externo siempre lleva "ext:" (y el tenant, si no es el
@@ -839,6 +875,10 @@ func (g *Gateway) Feedback(req FeedbackRequest, human bool, tenant string) (*Fee
 		if err != nil {
 			return nil, err
 		}
+		// Tope por registro: una línea que readJSONL no lee no se escribe.
+		if len(b) > chispa.MaxLineBytes {
+			return nil, statusf(http.StatusBadRequest, "item %d: larger than %d bytes once stored", i+1, chispa.MaxLineBytes)
+		}
 		lines = append(lines, append(b, '\n'))
 	}
 	if err := g.learn.appendFeedback(req.Task, lines); err != nil {
@@ -859,6 +899,13 @@ func checkFeedback(it FeedbackItem) error {
 	}
 	if len(it.Fields) > 64 {
 		return errors.New("at most 64 fields")
+	}
+	for k, v := range it.Fields {
+		switch v.(type) {
+		case nil, bool, float64, string, json.Number:
+		default:
+			return fmt.Errorf("field %q: only strings, numbers, booleans or null", k)
+		}
 	}
 	if len(it.By) > maxByLen || strings.ContainsAny(it.By, "\n\r") {
 		return fmt.Errorf("by: at most %d characters, one line", maxByLen)

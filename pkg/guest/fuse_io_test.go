@@ -79,8 +79,9 @@ func TestFUSEIOGrandeTroceado(t *testing.T) {
 	}
 }
 
-// En un montaje ro se conserva la caché de páginas al abrir SOLO si el fichero
-// no cambió desde el open anterior; en rw, nunca.
+// Se conserva la caché de páginas al abrir SOLO si el fichero no cambió desde
+// el open anterior (y, en rw, no hay escrituras pendientes ni handles de
+// escritura abiertos).
 func TestFUSEKeepCache(t *testing.T) {
 	for _, ro := range []bool{true, false} {
 		dir := carpeta(t)
@@ -99,7 +100,7 @@ func TestFUSEKeepCache(t *testing.T) {
 		if abrir() {
 			t.Errorf("ro=%v: the first open kept the cache", ro)
 		}
-		if got := abrir(); got != ro {
+		if got := abrir(); !got {
 			t.Errorf("ro=%v: unchanged reopen keep_cache=%v", ro, got)
 		}
 		// El host cambia el fichero (mismo tamaño): el open siguiente tira la
@@ -115,7 +116,18 @@ func TestFUSEKeepCache(t *testing.T) {
 		if abrir() {
 			t.Errorf("ro=%v: kept the cache of a file the host changed", ro)
 		}
-		if got := abrir(); got != ro {
+		if !ro {
+			// Con un handle de escritura abierto, no se conserva.
+			e, out := m.dev.pedir(t, opOpen, node, u32s(linuxOWronly, 0))
+			if e != 0 {
+				t.Fatalf("open w: %d", e)
+			}
+			if abrir() {
+				t.Error("kept the cache while a write handle is open")
+			}
+			m.dev.pedir(t, opRelease, node, u64s(le.Uint64(out), 0, 0))
+		}
+		if got := abrir(); !got {
 			t.Errorf("ro=%v: reopen after the change keep_cache=%v", ro, got)
 		}
 	}

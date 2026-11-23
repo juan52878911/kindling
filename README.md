@@ -26,33 +26,45 @@ in the repo: [`docs/`](docs/README.md), starting with the [full guide](docs/guid
 **Linux with KVM** (amd64 or arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-kling up            # checks KVM, nftables, the kindling user and the images; prints what needs sudo
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sudo sh -s -- --tag v1.0.0-rc.3
+sudo kling up -install   # firecracker, jailer, the kindling users, the systemd unit; starts it
+kling try -- uname -a
 ```
 
 On arm64 (Graviton .metal, Ampere, Raspberry Pi 5 with the 4K kernel) see
 [`docs/linux-arm64.md`](docs/linux-arm64.md) for which hosts work and how to tune them.
 
-The daemon can also run as a systemd service on a remote host, deployed from a checkout:
+The release's `install.sh` is enough, run as root so `kling` lands in `/usr/local/bin` (where
+`sudo` and systemd find it; as a normal user it ends by printing the `sudo install …` line that
+does the same). `sudo kling up -install` downloads `firecracker` and `jailer` (a pinned release,
+sha256 checked) if they are missing, creates the `kindling` and `kindling-build` system users,
+writes the unit and starts it; `kling up -install -dry-run` prints those steps and does nothing.
+The first `kling try` downloads the guest kernel and `min` from the release (no checkout needed). The daemon can also
+run as a systemd service on a remote host, deployed from a checkout:
 `make deploy HOST=ssh://user@host`. The CLI then reaches it over SSH
 (`kling context add lab ssh://user@host`) — the daemon never listens on a network port.
 
 **Mac with Apple Silicon** (macOS 14+, native `vz` backend, no root):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-brew install e2fsprogs
-kling up            # downloads the guest kernel and the `min` image from the release, verified
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v1.0.0-rc.3 sh
+kling try -- uname -a
 ```
 
+Nothing else to install (no Homebrew, no `minisign`, no checkout): the first `kling try` starts
+the daemon (it offers to install its launchd agent) and downloads the guest kernel and the
+`min` image from the release, verified against its `SHA256SUMS` (about 10 MB). `kling up` does
+the same step by step and prints what is missing; `kling up -uninstall` removes the agent.
+
 Or with Homebrew, from the [tap](https://github.com/juan52878911/homebrew-kindling) (latest
-stable release; it pulls in e2fsprogs and `brew services start kling` runs the daemon):
+stable release; `brew services start kling` runs the daemon):
 
 ```sh
 brew install juan52878911/kindling/kling
 ```
 
-The script verifies every binary against the release's `SHA256SUMS`, installs to
+The script verifies the signature of `SHA256SUMS` (with `minisign` if you have it, otherwise with the
+`kling` it just downloaded) and every binary against it, installs to
 `~/.local/bin` without sudo, and takes `--with mcp,sandbox`, `--tag vX.Y.Z` and
 `--prefix DIR`. To upgrade later: `kling upgrade` (`sudo` on Linux; `brew upgrade kling` if
 Homebrew installed it) swaps the binaries,
@@ -82,8 +94,9 @@ failure; `kling help <command>` shows one command's help.
 
 - **`kling mcp`** — any MCP server (npm or PyPI) as a service that wakes on demand from
   a golden snapshot, behind one gateway for your AI agent. [`ext/mcp`](ext/mcp/README.md)
-- **`kling sandbox`** — multi-tenant sandboxes for code agents: tokens, quotas,
-  templates and a prewarmed pool. [`ext/sandbox`](ext/sandbox/README.md)
+- **`kling sbx`** — multi-tenant sandboxes for code agents: tokens, quotas,
+  templates and a prewarmed pool. Start with the [quickstart](docs/quickstart-sandbox.md) and
+  the [examples](examples/sandbox/README.md). [`ext/sandbox`](ext/sandbox/README.md)
 - **`kling db`** — a disposable Postgres (also MySQL, Redis, SQLite) per test or agent,
   copied from a warm template in milliseconds. [`docs/db.md`](docs/db.md)
 - **`kling phone`** — Android phones (Redroid) in microVMs, each with its own identity,

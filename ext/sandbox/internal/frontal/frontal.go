@@ -343,6 +343,9 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	if s.log == nil {
 		s.log = log.Default()
 	}
+	for _, t := range s.tenantsTodos() {
+		s.avisarCuotasAbiertas(t)
+	}
 	s.rutas()
 	ing, err := nuevoIngreso(s, o.Ingreso)
 	if err != nil {
@@ -350,6 +353,15 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	}
 	s.ingreso = ing
 	return s, nil
+}
+
+// avisarCuotasAbiertas deja en el log un inquilino sin tope de sandboxes ni de
+// memoria total: solo lo acota cada petición, así que puede llenar los hosts.
+// Sale al arrancar y cada vez que se crea o edita uno.
+func (s *Servidor) avisarCuotasAbiertas(t Tenant) {
+	if t.MaxSandboxes == 0 && t.MaxMemTotalMiB == 0 {
+		s.log.Printf("frontal: warning: tenant %q has neither MaxSandboxes nor MaxMemTotalMiB: its sandboxes are limited only per request, so it can fill the hosts", t.Nombre)
+	}
 }
 
 func (s *Servidor) rutas() {
@@ -363,6 +375,9 @@ func (s *Servidor) rutas() {
 	// obligaría a repartir un segundo secreto sin ganar nada a cambio.
 	m.Handle("GET /v1/metrics", s.auth(http.HandlerFunc(s.handleMetrics)))
 	m.Handle("GET /v1/templates", s.auth(http.HandlerFunc(s.handleTemplates)))
+	// Solo admin (lo comprueba handlePool): el operador de Kubernetes fija con
+	// ella el fondo de una plantilla (SandboxPool).
+	m.Handle("PUT /v1/templates/{name}/pool", s.auth(http.HandlerFunc(s.handlePool)))
 	m.Handle("POST /v1/sandboxes", s.auth(http.HandlerFunc(s.handleCrear)))
 	m.Handle("GET /v1/sandboxes", s.auth(http.HandlerFunc(s.handleListar)))
 	// Las rutas por sandbox se despachan a mano: el id lleva una barra dentro
@@ -389,6 +404,11 @@ func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.ingreso != nil && s.ingreso.esDeIngreso(r) {
 		s.ingreso.servir(w, r)
 		return
+	}
+	// Lo que el mux no casa (404) o casa con otro método (405) contesta texto
+	// plano; solo en ese caso se envuelve para darlo como JSON.
+	if _, patron := s.mux.Handler(r); patron == "" {
+		w = &escritorJSON{ResponseWriter: w, r: r}
 	}
 	s.mux.ServeHTTP(w, r)
 }

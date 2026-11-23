@@ -5,6 +5,9 @@
 # solo que el proceso declare com.apple.security.virtualization. Sin la firma,
 # crear la VM falla con un error de permisos poco claro.
 #
+# --options runtime: hardened runtime (sin JIT, sin cargar bibliotecas sin firmar,
+# sin DYLD_*). Lo que necesite va en el .entitlements.
+#
 #   ./build.sh                 -> ./bin/kling-vz
 #   OUT=/ruta/kling-vz VERSION=0.1.0 ./build.sh
 set -eu
@@ -14,5 +17,5 @@ VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo 0.
 mkdir -p "$(dirname "$OUT")"
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath \
 	-ldflags "-s -w -X main.version=${VERSION#v}" -o "$OUT" ./cmd/kling-vz
-codesign --force --entitlements kling-vz.entitlements -s - "$OUT"
+codesign --force --options runtime --entitlements kling-vz.entitlements -s - "$OUT"
 echo "$OUT ($VERSION)"

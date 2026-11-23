@@ -1,5 +1,5 @@
 [Unit]
-Description=kling - daemon de microVMs Firecracker
+Description=kling - Firecracker microVM daemon
 Documentation=https://github.com/juan52878911/kindling
 After=network.target
 ConditionPathExists=/dev/kvm

@@ -129,7 +129,11 @@ func servicioInvitado(t *testing.T) *httptest.Server {
 				c.Write([]byte("eco:" + string(buf[:n])))
 			}
 		}
-		w.Header().Set("Set-Cookie", "app=1; Path=/")
+		if r.URL.Path == "/dominio" {
+			w.Header().Add("Set-Cookie", "a=1; Domain=.sandbox.test; Path=/")
+			w.Header().Add("Set-Cookie", "b=2; Path=/; domain=sandbox.test; Expires=Wed, 21 Oct 2037 07:28:00 GMT; HttpOnly")
+		}
+		w.Header().Add("Set-Cookie", "app=1; Path=/")
 		fmt.Fprintf(w, "path=%s auth=%q cookie=%q fwd=%q", r.URL.RequestURI(), r.Header.Get("Authorization"), r.Header.Get("Cookie"), r.Header.Get("X-Forwarded-Host"))
 	}))
 	t.Cleanup(srv.Close)
@@ -505,5 +509,74 @@ func TestIngresoApagadoYHostRaro(t *testing.T) {
 	// El dominio de la API no se confunde con el de ingress.
 	if resp := pide(t, b.srv, "", "GET", "/v1/health", nil); resp.StatusCode != 200 {
 		t.Fatalf("health = %d", resp.StatusCode)
+	}
+}
+
+// C14: listar y revocar endpoints.
+func TestIngresoListarYRevocarEndpoints(t *testing.T) {
+	b := montarIngreso(t, nil)
+	base := "/v1/sandboxes/" + b.id + "/endpoints"
+	_, pub := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 3000, Public: true, TTLSeconds: 600})
+	_, tok := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 3000, TTLSeconds: 600})
+	_, otro := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 4000, TTLSeconds: 600})
+	if resp, _ := b.get(t, 3000, "/", map[string]string{cabeceraEndpoint: tok.Token}); resp.StatusCode != 200 {
+		t.Fatalf("token antes de revocar = %d", resp.StatusCode)
+	}
+
+	resp := pide(t, b.srv, tokenAlice, "GET", base, nil)
+	esperaCodigo(t, resp, 200)
+	lista := decodifica[[]Endpoint](t, resp)
+	if len(lista) != 1 || lista[0].Port != 3000 || !lista[0].Public || lista[0].URL != pub.URL || lista[0].Token != "" {
+		t.Fatalf("lista: %+v", lista)
+	}
+	esperaCodigo(t, pide(t, b.srv, tokenBob, "GET", base, nil), 404)
+	esperaCodigo(t, pide(t, b.srv, tokenBob, "DELETE", base+"/3000", nil), 404)
+	esperaCodigo(t, pide(t, b.srv, tokenAlice, "DELETE", base+"/abc", nil), 400)
+
+	esperaCodigo(t, pide(t, b.srv, tokenAlice, "DELETE", base+"/3000", nil), 204)
+	if resp, _ := b.get(t, 3000, "/", nil); resp.StatusCode != 401 {
+		t.Fatalf("público tras revocar = %d, quería 401", resp.StatusCode)
+	}
+	if resp, _ := b.get(t, 3000, "/", map[string]string{cabeceraEndpoint: tok.Token}); resp.StatusCode != 401 {
+		t.Fatalf("token tras revocar = %d, quería 401", resp.StatusCode)
+	}
+	// Otro puerto, intacto; y un token NUEVO del puerto revocado vale.
+	if resp, _ := b.get(t, 4000, "/", map[string]string{cabeceraEndpoint: otro.Token}); resp.StatusCode == 401 {
+		t.Fatalf("el token de otro puerto también se revocó")
+	}
+	_, nuevo := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 3000, TTLSeconds: 600})
+	if resp, _ := b.get(t, 3000, "/", map[string]string{cabeceraEndpoint: nuevo.Token}); resp.StatusCode != 200 {
+		t.Fatalf("token nuevo = %d, quería 200", resp.StatusCode)
+	}
+	resp = pide(t, b.srv, tokenAlice, "GET", base, nil)
+	if l := decodifica[[]Endpoint](t, resp); len(l) != 0 {
+		t.Fatalf("lista tras revocar: %+v", l)
+	}
+}
+
+// Un Set-Cookie del invitado con Domain= llega sin él: la cookie queda ligada
+// al subdominio del sandbox y no puede fijarse para el dominio de todos.
+func TestIngresoQuitaDomainDeLasCookies(t *testing.T) {
+	b := montarIngreso(t, nil)
+	resp, _ := b.get(t, 3000, "/dominio", map[string]string{"Authorization": "Bearer " + tokenAlice})
+	cs := resp.Header.Values("Set-Cookie")
+	if len(cs) != 3 {
+		t.Fatalf("Set-Cookie: %q", cs)
+	}
+	for _, c := range cs {
+		if strings.Contains(strings.ToLower(c), "domain") {
+			t.Errorf("la cookie conserva Domain: %q", c)
+		}
+	}
+	if !strings.Contains(cs[1], "Expires=Wed, 21 Oct 2037") || !strings.Contains(cs[1], "HttpOnly") {
+		t.Errorf("se perdió el resto de atributos: %q", cs[1])
+	}
+}
+
+func TestQuitarDominioPorGuest(t *testing.T) {
+	// Camino de hosts remotos: varios Set-Cookie unidos con ", ".
+	got := quitarDominio("a=1; Domain=x.test; Path=/, b=2; DOMAIN = y.test; Expires=Wed, 21 Oct 2037 07:28:00 GMT")
+	if strings.Contains(strings.ToLower(got), "domain") || !strings.Contains(got, "Expires=Wed, 21 Oct 2037") {
+		t.Fatalf("quitarDominio = %q", got)
 	}
 }

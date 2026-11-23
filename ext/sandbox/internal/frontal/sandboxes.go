@@ -22,7 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +88,9 @@ type CrearPeticion struct {
 	MemMiB       int               `json:"mem_mib,omitempty"`
 	VCPUs        int               `json:"vcpus,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
+	// Env son variables de entorno que se guardan como la sesión "default" del
+	// sandbox: los exec con session=default las ven.
+	Env map[string]string `json:"env,omitempty"`
 
 	// Count crea un lote de Count sandboxes iguales (ver lote.go). Ausente es
 	// uno solo y la respuesta es el sandbox; presente, aunque sea 1, la
@@ -138,7 +144,7 @@ func vista(h *hosts.Host, mc *api.Machine) Sandbox {
 		}
 	}
 	for k, v := range mc.Labels {
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, prefijoReservado) {
+		if !etiquetaDeUsuario(k) || v == "" {
 			continue
 		}
 		if sb.Labels == nil {
@@ -254,7 +260,13 @@ func (s *Servidor) buscar(ctx context.Context, t *Tenant, id string) (*hosts.Hos
 
 func (s *Servidor) handleListar(w http.ResponseWriter, r *http.Request) {
 	t := tenantDe(r)
+	f, err := filtroDe(r.URL.Query())
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 	out, errs := s.sandboxesDe(r.Context(), t)
+	out, siguiente := f.aplicar(out)
 	if out == nil {
 		out = []Sandbox{}
 	}
@@ -263,12 +275,94 @@ func (s *Servidor) handleListar(w http.ResponseWriter, r *http.Request) {
 	if len(errs) > 0 {
 		w.Header().Set("X-Kindling-Partial", strings.Join(mensajes(errs), "; "))
 	}
+	if siguiente != "" {
+		w.Header().Set("X-Kindling-Next-Cursor", siguiente)
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// maxLimiteLista acota ?limit= de GET /v1/sandboxes.
+const maxLimiteLista = 1000
+
+// filtroLista son los parámetros de GET /v1/sandboxes: sin ninguno, la lista
+// entera como siempre.
+type filtroLista struct {
+	estado   api.State
+	etiqueta map[string]string
+	limite   int // 0 = sin tope
+	cursor   string
+}
+
+func filtroDe(q url.Values) (filtroLista, error) {
+	var f filtroLista
+	if e := q.Get("state"); e != "" {
+		switch st := api.State(e); st {
+		case api.StateCreated, api.StateRunning, api.StateWarm, api.StatePaused, api.StateStopped, api.StateFailed:
+			f.estado = st
+		default:
+			return f, fmt.Errorf("invalid state %q", e)
+		}
+	}
+	for _, kv := range q["label"] {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return f, fmt.Errorf("invalid label %q: use label=key=value", kv)
+		}
+		if f.etiqueta == nil {
+			f.etiqueta = map[string]string{}
+		}
+		f.etiqueta[k] = v
+	}
+	if l := q.Get("limit"); l != "" {
+		n, err := strconv.Atoi(l)
+		if err != nil || n < 1 || n > maxLimiteLista {
+			return f, fmt.Errorf("limit must be between 1 and %d", maxLimiteLista)
+		}
+		f.limite = n
+	}
+	f.cursor = q.Get("cursor")
+	return f, nil
+}
+
+// aplicar filtra la lista (ya ordenada por id) y devuelve la página y el
+// cursor de la siguiente ("" si no hay más). El cursor es el último id
+// devuelto: la página siguiente empieza en el primer id mayor, así que un
+// sandbox creado o borrado entre dos páginas no repite ni salta a los demás.
+func (f filtroLista) aplicar(in []Sandbox) ([]Sandbox, string) {
+	var out []Sandbox
+	for _, sb := range in {
+		if f.cursor != "" && sb.ID <= f.cursor {
+			continue
+		}
+		if f.estado != "" && sb.State != f.estado {
+			continue
+		}
+		casa := true
+		for k, v := range f.etiqueta {
+			if got, ok := sb.Labels[k]; !ok || got != v {
+				casa = false
+				break
+			}
+		}
+		if !casa {
+			continue
+		}
+		if f.limite > 0 && len(out) == f.limite {
+			return out, out[len(out)-1].ID
+		}
+		out = append(out, sb)
+	}
+	return out, ""
 }
 
 // handleSandbox despacha /v1/sandboxes/{host}/{ref}[/acción].
 func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	resto := strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/")
+	if resto == "" || r.URL.Path == "/v1/sandboxes" {
+		// La colección solo admite GET y POST, que el mux ya despachó.
+		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
+		return
+	}
 	partes := strings.Split(resto, "/")
 	if len(partes) < 2 || partes[0] == "" || partes[1] == "" {
 		fail(w, http.StatusNotFound, noSandbox(resto))
@@ -279,8 +373,8 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	if len(partes) >= 3 {
 		accion = partes[2]
 	}
-	if len(partes) > 3 && accion != "processes" && accion != "sessions" && accion != "code" {
-		http.NotFound(w, r)
+	if len(partes) > 3 && accion != "processes" && accion != "sessions" && accion != "code" && accion != "endpoints" && accion != "files" {
+		noRuta(w, r)
 		return
 	}
 	switch {
@@ -296,24 +390,31 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.handleReanudar(w, r, id)
 	case accion == "egress" && r.Method == http.MethodPatch:
 		s.handleEgress(w, r, id)
+	case accion == "metadata" && r.Method == http.MethodPatch:
+		s.handleMetadatos(w, r, id)
+	case accion == "fork" && r.Method == http.MethodPost:
+		s.handleFork(w, r, id)
+	case accion == "metrics" && r.Method == http.MethodGet:
+		s.handleMetricas(w, r, id)
 	case accion == "exec" && r.Method == http.MethodPost:
 		s.handleExec(w, r, id)
 	case accion == "shell" && r.Method == http.MethodPost:
 		s.handleShell(w, r, id)
-	case accion == "endpoints" && r.Method == http.MethodPost:
-		s.handleEndpoint(w, r, id)
-	case accion == "files" && (r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodDelete):
-		s.handleFiles(w, r, id)
+	case accion == "endpoints":
+		s.despachaEndpoints(w, r, id, partes[3:])
+	case accion == "files":
+		s.despachaFicheros(w, r, id, partes[3:])
 	case accion == "processes":
 		s.despachaProcesos(w, r, id, partes[3:])
 	case accion == "sessions":
 		s.despachaSesiones(w, r, id, partes[3:])
 	case accion == "code":
 		s.despachaCodigo(w, r, id, partes[3:])
-	case accion == "" || accion == "renew" || accion == "pause" || accion == "resume" || accion == "egress" || accion == "exec" || accion == "shell" || accion == "files" || accion == "endpoints":
+	case accion == "" || accion == "renew" || accion == "pause" || accion == "resume" || accion == "egress" || accion == "exec" || accion == "shell" ||
+		accion == "metadata" || accion == "fork" || accion == "metrics":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
-		http.NotFound(w, r)
+		noRuta(w, r)
 	}
 }
 
@@ -335,6 +436,10 @@ func (s *Servidor) handleBorrar(w http.ResponseWriter, r *http.Request, id strin
 	if err := h.Cliente.RemoveSandbox(r.Context(), mc.ID); err != nil {
 		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
+	}
+	if s.ingreso != nil {
+		s.ingreso.olvidar(id)
+		s.ingreso.cortar(id, 0) // las conexiones abiertas por el ingress no sobreviven al sandbox
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -414,6 +519,12 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if len(pet.Env) > 0 {
+		if pet.Labels == nil {
+			pet.Labels = map[string]string{}
+		}
+		pet.Labels[LabelEnv] = "1"
+	}
 	n := 1
 	if pet.Count != nil {
 		n = *pet.Count
@@ -444,6 +555,19 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	// Con clones, contar y clonar van bajo el cerrojo de volúmenes del tenant
+	// (el mismo de POST /v1/volumes): dos peticiones no pasan juntas el tope.
+	desbloquear := func() {}
+	for _, v := range pet.Volumes {
+		if v.CloneFrom != "" {
+			ct := s.cerrojoDe(t.Nombre + "\x00vol")
+			ct.Lock()
+			var una sync.Once
+			desbloquear = func() { una.Do(ct.Unlock) }
+			defer desbloquear()
+			break
+		}
+	}
 	plan, err := s.resolverVolumenes(r.Context(), t, pet.Volumes)
 	if err != nil {
 		fail(w, codigoVolumen(err), err)
@@ -471,6 +595,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// Los clones se hacen con la cuota ya reservada: un lote rechazado no deja
 	// volúmenes detrás.
 	hVol, clonados, err := s.clonar(r.Context(), plan)
+	desbloquear()
 	if err != nil {
 		s.metricas.registrar(resultadoDe(err), 0)
 		fail(w, codigoVolumen(err), err)
@@ -497,6 +622,26 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		}
 		s.falloCrear(w, pet, err)
 		return
+	}
+	if len(pet.Env) > 0 {
+		// El env es la sesión "default": si no se puede guardar, el sandbox no
+		// sale a medias (sin las variables que el cliente cree que tiene).
+		env, _ := entornoDe(pet.Env)
+		_, err := h.Cliente.CreateSession(r.Context(), mc.ID, api.SessionRequest{
+			ID: idSesionPorDefecto, Env: env, TTLSeconds: api.SessionMaxTTL})
+		if err != nil {
+			bg, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
+			defer cancel()
+			if e := h.Cliente.RemoveSandbox(bg, mc.ID); e != nil {
+				s.log.Printf("frontal: removing %s/%s after its env session failed: %v", h.Nombre, mc.ID, e)
+			}
+			if hVol != nil {
+				s.borrarVolumenes(hVol, clonados)
+			}
+			s.metricas.registrar(resultadoDe(err), time.Since(inicio))
+			fail(w, codigoExec(err), deHost(h, err))
+			return
+		}
 	}
 	s.metricas.registrar(resultadoOK, time.Since(inicio))
 	sb := vista(h, mc)
@@ -599,7 +744,71 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 			return fmt.Errorf("label %q is not valid (lowercase letters, digits, '.', '_', '-')", k)
 		}
 	}
+	if len(p.Env) > 0 {
+		if p.Count != nil {
+			return errors.New("env is not supported together with count")
+		}
+		if _, err := entornoDe(p.Env); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// Topes del entorno inicial de un sandbox.
+const (
+	maxEnv      = 64
+	maxEnvBytes = 32 << 10
+)
+
+var reNombreEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// entornoDe valida env y lo da como KEY=value ordenado por nombre.
+func entornoDe(env map[string]string) ([]string, error) {
+	if len(env) > maxEnv {
+		return nil, fmt.Errorf("too many env variables (%d); the limit is %d", len(env), maxEnv)
+	}
+	out := make([]string, 0, len(env))
+	total := 0
+	for k, v := range env {
+		if !reNombreEnv.MatchString(k) {
+			return nil, fmt.Errorf("env name %q is not valid (letters, digits and '_', not starting with a digit)", k)
+		}
+		if strings.ContainsRune(v, 0) {
+			return nil, fmt.Errorf("env %q has a NUL byte", k)
+		}
+		total += len(k) + len(v) + 1
+		out = append(out, k+"="+v)
+	}
+	if total > maxEnvBytes {
+		return nil, fmt.Errorf("env is %d bytes; the limit is %d", total, maxEnvBytes)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// idSesionPorDefecto es la sesión que guarda el env de la creación.
+const idSesionPorDefecto = "default"
+
+// LabelEnv marca los sandboxes creados con env: su sesión "default" guarda ese
+// entorno y todo lo que se ejecute sin sesión propia la usa. Va en el espacio
+// reservado: el cliente no la ve ni la pone.
+const LabelEnv = "kling.sandbox.env"
+
+// sesionPorDefecto es la sesión que se aplica a lo que no pide ninguna: la del
+// env de la creación, si el sandbox la tiene; si no, ninguna.
+func sesionPorDefecto(mc *api.Machine) string {
+	if mc.Labels[LabelEnv] != "" {
+		return idSesionPorDefecto
+	}
+	return ""
+}
+
+// esSesionPerdida dice si el daemon contestó que la sesión no existe (caducó
+// tras SessionMaxTTL sin uso, o el sandbox se restauró sin ella).
+func esSesionPerdida(err error) bool {
+	var se *api.StatusError
+	return errors.As(err, &se) && se.Code == http.StatusNotFound && strings.Contains(se.Message, "no session")
 }
 
 // tamanoEfectivo es p con mem_mib y vcpus a lo que de verdad tendrá el

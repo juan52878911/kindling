@@ -25,6 +25,7 @@ import (
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/internal/zstd"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // launchAgentLabel es la etiqueta del agente de launchd que docs/mac.md
@@ -45,6 +46,7 @@ type probeMac struct {
 	debugfs     bool
 	kernel      bool
 	baseImage   bool
+	guest       bool // lib/kling-guest
 	root        string
 }
 
@@ -77,6 +79,7 @@ func localProbeMac(root string) probeMac {
 	p.debugfs = machine.E2fsDisponible("debugfs")
 	p.kernel = fileExists(filepath.Join(root, "images", "vmlinux"))
 	p.baseImage = fileExists(filepath.Join(root, "images", "min.ext4"))
+	p.guest = fileExists(filepath.Join(root, "lib", "kling-guest"))
 	return p
 }
 
@@ -212,9 +215,11 @@ func checksMac(p probeMac) []check {
 			fix:   []string{"make vz            # signs it (ad-hoc is enough)"},
 		},
 		{
-			label: "mkfs.ext4", ok: p.mkfs, fatal: true,
+			// kling up escribe la plantilla del overlay de 512 MiB con su propio
+			// escritor de ext4: mkfs solo hace falta para un -disk distinto.
+			label: "mkfs.ext4", ok: p.mkfs,
 			found: presence(p.mkfs, "found", "missing"),
-			why:   "every microVM gets an ext4 overlay",
+			why:   "only needed for a -disk other than 512M (the default overlay template is written by kling itself)",
 			fix:   []string{"brew install e2fsprogs      # kling finds it in Homebrew's prefix, no PATH change needed"},
 		},
 		{
@@ -246,12 +251,15 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 	p := localProbeMac(root)
 	// Sin kernel o sin min, y con una release que los publica: se bajan,
 	// verificados con su SHA256SUMS, en vez de pedir un host Linux.
-	if !checkOnly && (!p.kernel || !p.baseImage) && p.arch == "arm64" {
+	bajadas := false
+	if !checkOnly && (!p.kernel || !p.baseImage || !p.guest) && p.arch == "arm64" {
 		ctx, cancel := ctxWithSignals()
 		err := bajarImagenesMac(ctx, &upgrade.Fuente{VersionPropia: Version}, "v"+strings.TrimPrefix(Version, "v"), root, p.arch, os.Stdout)
 		cancel()
 		if err != nil {
 			fmt.Printf("images:      not downloaded (%v)\n\n", err)
+		} else {
+			bajadas = !p.baseImage
 		}
 		p = localProbeMac(root)
 	}
@@ -266,6 +274,13 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 		}
 	}
 	fmt.Println()
+	if !checkOnly && !p.mkfs {
+		// Sin e2fsprogs el daemon formatearía la plantilla con mkfs.ext4: se
+		// la deja hecha, con internal/ext4 (existe = completa, ver el daemon).
+		if err := escribirPlantillaOverlay(root, 512); err != nil {
+			fmt.Printf("overlay:     could not write the overlay template (%v); brew install e2fsprogs\n\n", err)
+		}
+	}
 	cs := checksMac(p)
 	fatal, warn := printChecks(cs, "")
 	if fatal > 0 {
@@ -282,7 +297,7 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 		return err
 	}
 	if install {
-		if err := instalarAgente(a, root); err != nil {
+		if err := instalarAgente(os.Stdout, a, root); err != nil {
 			return err
 		}
 	}
@@ -295,8 +310,11 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 			fmt.Println("             not from the launchd agent: it starts the daemon at the next login, or stop")
 			fmt.Println("             this one and run `kling up` to start it from the agent now")
 		}
-	} else if err := startMacDaemon(a, endpoint); err != nil {
+	} else if err := startMacDaemon(os.Stdout, a, endpoint, root); err != nil {
 		return err
+	}
+	if bajadas {
+		calentarImagen(endpoint, "min")
 	}
 	if warn > 0 {
 		fmt.Println()
@@ -305,8 +323,8 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 	}
 	fmt.Println()
 	fmt.Println("Next step:")
+	fmt.Println("  kling try -- uname -a            runs a command in a throwaway microVM")
 	fmt.Println("  kling status                     checks that everything responds")
-	fmt.Println("  kling run -image min             a first microVM")
 	return nil
 }
 
@@ -315,36 +333,77 @@ func agenteCargado(a agenteDaemon) bool {
 	return exec.Command("launchctl", "print", a.dominio()+"/"+a.label).Run() == nil
 }
 
-// startMacDaemon arranca el agente de launchd si está instalado; si no, dice
-// cómo instalarlo. Es lo único que up ejecuta por su cuenta, igual que en
-// Linux arranca los servicios de systemd, y también se imprime antes.
-func startMacDaemon(a agenteDaemon, endpoint string) error {
-	plist := a.plist
-	if !fileExists(plist) {
-		fmt.Println("daemon:      not running, and there's no launchd agent to start it.")
-		fmt.Println("  Run it in a terminal:        kling daemon")
-		fmt.Println("  Or at every login:           kling up -install")
-		return nil
-	}
-	argv := []string{"launchctl", "bootstrap", a.dominio(), plist}
-	fmt.Printf("daemon:      $ %s\n", strings.Join(argv, " "))
-	if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-		// Ya cargado: bootstrap falla, pero kickstart lo arranca.
-		argv = []string{"launchctl", "kickstart", a.dominio() + "/" + a.label}
-		fmt.Printf("             (%s) $ %s\n", strings.TrimSpace(string(out)), strings.Join(argv, " "))
-		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-			return fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
+// esperaDaemonMac es lo que se espera a que el daemon conteste tras arrancar
+// el agente.
+var esperaDaemonMac = 10 * time.Second
+
+// startMacDaemon arranca el daemon por su agente de launchd: el dueño del
+// proceso es launchd (reinicio, registro y parada ordenada), nunca un hijo
+// suelto de este kling. Sin agente lo instala si quien está delante lo confirma
+// (confirmarAgente); si no, error con la orden. Y si tras arrancarlo no
+// contesta, también error: `kling up` no dice «Next step» sobre un daemon
+// parado. La orden de launchctl se imprime antes de lanzarla.
+func startMacDaemon(w io.Writer, a agenteDaemon, endpoint, root string) error {
+	if !fileExists(a.plist) {
+		if !confirmarAgente(a) {
+			return &errWithHint{
+				err:  errors.New("the daemon is not running and there is no launchd agent to start it"),
+				hint: "kling up -install   (starts it now and at every login; or, in another terminal: kling daemon)",
+			}
+		}
+		if err := instalarAgente(w, a, root); err != nil {
+			return err
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// El registro solo se aparta con el agente descargado: launchd abre la
+	// salida al lanzar el daemon, y uno que sigue vivo seguiría escribiendo en
+	// el fichero ya renombrado.
+	if fi, err := os.Stat(a.log); err == nil && fi.Size() > maxLogAgente {
+		if out, err := lanzarctl("launchctl", "bootout", a.dominio()+"/"+a.label); err != nil {
+			fmt.Fprintf(w, "agent:       not rotating %s: launchctl bootout: %s\n", a.log, strings.TrimSpace(string(out)))
+		} else if err := rotarLog(a.log, maxLogAgente); err != nil {
+			fmt.Fprintf(w, "agent:       could not rotate %s: %v\n", a.log, err)
+		}
+	}
+	espera := esperaDaemonMac
+	argv := []string{"launchctl", "bootstrap", a.dominio(), a.plist}
+	fmt.Fprintf(w, "daemon:      $ %s\n", strings.Join(argv, " "))
+	if out, err := lanzarctl(argv...); err != nil {
+		// Ya cargado: bootstrap falla, pero kickstart lo arranca.
+		argv = []string{"launchctl", "kickstart", a.dominio() + "/" + a.label}
+		fmt.Fprintf(w, "             (%s) $ %s\n", strings.TrimSpace(string(out)), strings.Join(argv, " "))
+		if out, err := lanzarctl(argv...); err != nil {
+			return fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		// Cargado y sin contestar: puede estar frenado por ThrottleInterval
+		// tras una caída; la espera cubre el freno.
+		espera += frenoAgente
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), espera)
 	defer cancel()
 	if info := waitDaemonEn(ctx, endpoint); info != nil {
-		fmt.Printf("daemon:      "+uiMarks().ok+" responding (%s, backend %s)\n", info.Version, info.Backend)
+		fmt.Fprintf(w, "daemon:      "+uiMarks().ok+" responding (%s, backend %s)\n", info.Version, info.Backend)
 		return nil
 	}
-	fmt.Println("daemon:      started, but not yet responding on the socket.")
-	fmt.Printf("  See why:  tail -n 50 %q\n", a.log)
-	return nil
+	return &errWithHint{
+		err:  errors.New("the daemon was started but does not answer on its socket"),
+		hint: fmt.Sprintf("tail -n 50 %q", a.log),
+	}
+}
+
+// calentarImagen pide al daemon una máquina de la imagen y la borra: el
+// primer arranque de una imagen deja su snapshot por imagen preparado en
+// segundo plano, y el primer `kling try` real restaura (~45 ms) en vez de
+// arrancar en frío (~150 ms). Es una optimización: lo que falle, se calla.
+func calentarImagen(endpoint, imagen string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c := api.NewClient(endpoint)
+	mc, err := c.CreateSandbox(ctx, api.SandboxRequest{Image: imagen, TTLSeconds: 60})
+	if err != nil {
+		return
+	}
+	_ = c.RemoveSandbox(ctx, mc.ID)
 }
 
 // Imágenes de la release para un Mac sin host Linux ---------------------------
@@ -354,12 +413,19 @@ type imagenMac struct {
 	asset   string // min-arm64.ext4.zst
 	destino string // min.ext4
 	max     int64  // tope de lo descomprimido: un .zst hostil no llena el disco
+	// sub es el directorio de la raíz donde va ("images" si vacío); plano, que
+	// el asset no va comprimido (el agente de invitado, un ejecutable).
+	sub   string
+	plano bool
 }
 
 func imagenesMac(arch string) []imagenMac {
 	return []imagenMac{
 		{asset: "vmlinux-" + arch + ".zst", destino: "vmlinux", max: 256 << 20},
 		{asset: "min-" + arch + ".ext4.zst", destino: "min.ext4", max: 2 << 30},
+		// El agente de invitado: el daemon lo mete en las imágenes que construye
+		// o importa (toolchain, alpine). install.sh lo deja ahí también.
+		{asset: "kling-guest-linux-" + arch, destino: "kling-guest", sub: "lib", plano: true},
 	}
 }
 
@@ -379,7 +445,7 @@ func bajarImagenesMac(ctx context.Context, f *upgrade.Fuente, etiqueta, root, ar
 	var faltan []imagenMac
 	var assets []upgrade.Asset
 	for _, im := range imagenesMac(arch) {
-		if !fileExists(filepath.Join(dir, im.destino)) {
+		if !fileExists(filepath.Join(im.dirEn(root), im.destino)) {
 			faltan = append(faltan, im)
 			// Opcional: una release anterior no los trae y Bajar los omite.
 			assets = append(assets, upgrade.Asset{Nombre: im.asset, Opcional: true})
@@ -402,18 +468,69 @@ func bajarImagenesMac(ctx context.Context, f *upgrade.Fuente, etiqueta, root, ar
 		return err
 	}
 	for _, im := range faltan {
-		if bajados[im.asset] == "" {
+		// El agente de invitado es un extra: una release que no lo trae sigue
+		// sirviendo para min.
+		if bajados[im.asset] == "" && im.sub == "" {
 			return errSinImagenes
 		}
 	}
 	for _, im := range faltan {
-		if err := descomprimirImagen(bajados[im.asset], filepath.Join(dir, im.destino), im.max); err != nil {
+		if bajados[im.asset] == "" {
+			continue
+		}
+		d := im.dirEn(root)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+		var err error
+		if im.plano {
+			err = copiarEjecutable(bajados[im.asset], filepath.Join(d, im.destino))
+		} else {
+			err = descomprimirImagen(bajados[im.asset], filepath.Join(d, im.destino), im.max)
+		}
+		if err != nil {
 			return fmt.Errorf("%s: %w", im.asset, err)
 		}
-		marcarRelease(dir, im.destino, etiqueta) // para el aviso de doctor
-		fmt.Fprintf(out, "             "+uiMarks().ok+" %s\n", filepath.Join(dir, im.destino))
+		if !im.plano {
+			marcarRelease(d, im.destino, etiqueta) // para el aviso de doctor
+		}
+		fmt.Fprintf(out, "             "+uiMarks().ok+" %s\n", filepath.Join(d, im.destino))
 	}
 	return nil
+}
+
+// dirEn es el directorio de root donde va la imagen.
+func (im imagenMac) dirEn(root string) string {
+	if im.sub != "" {
+		return filepath.Join(root, im.sub)
+	}
+	return filepath.Join(root, "images")
+}
+
+// copiarEjecutable deja src (ya verificado) en dst, 0755, a través de un
+// temporal: dst existe entero o no existe.
+func copiarEjecutable(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".part-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return durable.Renombrar(tmp.Name(), dst)
 }
 
 // descomprimirImagen escribe el zstd src en dst (disperso: los bloques de

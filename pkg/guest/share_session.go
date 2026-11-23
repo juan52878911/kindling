@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	share "github.com/juan52878911/kindling/internal/shareproto"
@@ -46,12 +47,23 @@ type shareSession struct {
 	// caps son las capacidades que anunció el daemon en OpHello
 	// (share.Cap*); 0 con uno anterior. Como maxIO.
 	caps uint32
+	// watching dice que el daemon acepta OpWatch: avisa de los cambios del
+	// host, y las cachés del kernel pueden ser largas (fuseFS.ttls).
+	watching atomic.Bool
 
 	// events son los avisos de cambios del host (OpWatch). El lector nunca
-	// espera por ellos: si el consumidor se atasca, se pierden (son pistas; las
-	// cachés de 1 s siguen ahí).
-	events chan pushEvent
+	// espera por ellos (detrás van las respuestas que el propio notificador
+	// espera): si el consumidor se atasca, se pierden. Con la caché larga un
+	// aviso perdido no es inocuo, así que se apunta en perdido y fuseFS lo
+	// trata como un desborde (fuse_notify.go, perder).
+	events  chan pushEvent
+	perdido atomic.Bool
 }
+
+// eventForget es hostshare.EventForget: el daemon dejó de vigilar la ruta y
+// el kernel no debe seguir fiándose de lo que tenga de ella. Va fuera de
+// shareproto (ver allí por qué); fuse_desborde_test comprueba que coinciden.
+const eventForget byte = 4
 
 // pushEvent es un aviso del daemon: algo cambió en path, en el host.
 type pushEvent struct {
@@ -102,6 +114,7 @@ func (s *shareSession) watch() bool {
 	t := time.AfterFunc(helloTimeout, s.close)
 	defer t.Stop()
 	errno, _ := s.call(share.OpWatch, nil)
+	s.watching.Store(errno == 0)
 	return errno == 0
 }
 
@@ -126,7 +139,7 @@ func (s *shareSession) readLoop() {
 			return
 		}
 		if id == share.PushID {
-			ev, p, err := share.ParsePush(d)
+			ev, p, err := parsePush(d)
 			if errno == 0 && errors.Is(err, share.ErrUnknownEvent) {
 				// Un aviso de un daemon más nuevo: se salta. Cerrar aquí
 				// dejaría al agente reconectando sin fin contra él.
@@ -138,6 +151,7 @@ func (s *shareSession) readLoop() {
 			select {
 			case s.events <- pushEvent{ev, p}:
 			default:
+				s.perdido.Store(true)
 			}
 			continue
 		}
@@ -149,6 +163,24 @@ func (s *shareSession) readLoop() {
 			ch <- callResult{errno: errno, body: d.B}
 		}
 	}
+}
+
+// parsePush es share.ParsePush, más eventForget.
+func parsePush(d *share.Dec) (byte, string, error) {
+	copia := *d
+	ev, p, err := share.ParsePush(d)
+	if ev != eventForget || !errors.Is(err, share.ErrUnknownEvent) {
+		return ev, p, err
+	}
+	_ = copia.U8()
+	p = copia.Str()
+	if err := copia.Done(); err != nil {
+		return 0, "", err
+	}
+	if err := share.ValidPath(p); err != nil {
+		return 0, "", err
+	}
+	return ev, p, nil
 }
 
 // close corta la sesión y despierta con EIO a quien estuviera esperando (con

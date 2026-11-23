@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -200,12 +201,34 @@ var envIgnorado = map[string]bool{"PWD": true, "OLDPWD": true, "SHLVL": true, "_
 
 // guardarEstado aplica a la sesión lo que cambió un exec: dir es donde acabó
 // y final el entorno con que acabó, frente a inicio con el que empezó.
-func guardarEstado(id, dir string, inicio, final map[string]string) {
+//
+// Devuelve un error si el entorno resultante pasaría de SessionMaxEnv: en ese
+// caso no se guarda nada de este exec (la sesión sigue como estaba).
+func guardarEstado(id, dir string, inicio, final map[string]string) error {
 	sesiones.mu.Lock()
 	defer sesiones.mu.Unlock()
 	s, ok := sesiones.m[id]
 	if !ok {
-		return // borrada mientras corría el comando
+		return nil // borrada mientras corría el comando
+	}
+	nuevo := make(map[string]string, len(s.set))
+	for k, v := range s.set {
+		nuevo[k] = v
+	}
+	for k, v := range final {
+		if envIgnorado[k] {
+			continue
+		}
+		if old, ok := inicio[k]; !ok || old != v {
+			nuevo[k] = v
+		}
+	}
+	tam := 0
+	for k, v := range nuevo {
+		tam += len(k) + 1 + len(v)
+	}
+	if tam > api.SessionMaxEnv {
+		return fmt.Errorf("session env would be %d bytes; the limit is %d: session state not saved", tam, api.SessionMaxEnv)
 	}
 	s.execs++
 	if dir != "" {
@@ -229,6 +252,7 @@ func guardarEstado(id, dir string, inicio, final map[string]string) {
 			s.unset[k] = true
 		}
 	}
+	return nil
 }
 
 // citar escapa s para una shell POSIX entre comillas simples.
@@ -256,14 +280,12 @@ func guionDe(argv []string) string {
 // (también con `exit N`), vuelca pwd y el entorno por el descriptor 3 sin
 // cambiar el código de salida.
 //
-// El entorno no se vuelca con `env -0`: es de GNU coreutils y el `env` de
-// BSD/macOS (o de un busybox viejo) lo rechaza, con lo que el entorno de la
-// sesión se perdía en silencio. $2 es el propio binario del agente, que
-// siempre está en el invitado: con KLING_ENVDUMP=1 se limita a escribir su
-// entorno con separador NUL (volcarEntornoSiPide, init de este paquete). Si
-// no se puede ejecutar (otro usuario sin permiso), repliegue a awk y, al
-// final, a env -0.
-const envolturaSesion = `trap '__kling_rc=$?; { pwd; echo; KLING_ENVDUMP=1 "$2" || awk '\''BEGIN{for(k in ENVIRON) printf "%s=%s%c",k,ENVIRON[k],0}'\'' || env -0; } >&3 2>/dev/null; exit $__kling_rc' EXIT
+// El entorno se vuelca con `env -0` (un solo proceso, sin otro fork+exec del
+// agente). Si el `env` no lo admite (BSD/macOS, un busybox viejo), repliegue
+// al propio binario del agente ($2, que siempre está en el invitado): con
+// KLING_ENVDUMP=1 se limita a escribir su entorno con separador NUL
+// (volcarEntornoSiPide, init de este paquete); y al final a awk.
+const envolturaSesion = `trap '__kling_rc=$?; { pwd; echo; env -0 || KLING_ENVDUMP=1 "$2" || awk '\''BEGIN{for(k in ENVIRON) printf "%s=%s%c",k,ENVIRON[k],0}'\''; } >&3 2>/dev/null; exit $__kling_rc' EXIT
 eval "$1"`
 
 // El init hace de volcador de entorno: lo invoca la envoltura de
@@ -317,6 +339,9 @@ type capturaSesion struct {
 	pr   *os.File
 	done chan struct{}
 	buf  bytes.Buffer
+	// excedido: el estado pasó del tope y se descartó (el resto se drena para
+	// no bloquear a la shell al escribir).
+	excedido atomic.Bool
 }
 
 func nuevaCaptura() (*capturaSesion, error) {
@@ -334,7 +359,14 @@ func (c *capturaSesion) arrancada() {
 	_ = c.pw.Close()
 	go func() {
 		defer close(c.done)
-		_, _ = io.Copy(&c.buf, io.LimitReader(c.pr, api.SessionMaxEnv+4096))
+		n, _ := io.Copy(&c.buf, io.LimitReader(c.pr, api.SessionMaxEnv+4096))
+		if n == api.SessionMaxEnv+4096 {
+			// Sigue drenando: si no, la shell se bloquearía en el descriptor 3
+			// y el exec acabaría en TimedOut aunque el comando terminó.
+			if m, _ := io.Copy(io.Discard, c.pr); m > 0 {
+				c.excedido.Store(true)
+			}
+		}
 	}()
 }
 
@@ -348,6 +380,9 @@ func (c *capturaSesion) resultado() (estadoCapturado, bool) {
 		<-c.done
 	}
 	_ = c.pr.Close()
+	if c.excedido.Load() {
+		return estadoCapturado{}, false
+	}
 	return leerEstado(c.buf.Bytes())
 }
 

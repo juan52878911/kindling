@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -161,6 +162,9 @@ func (s *Servidor) iniciar() {
 	m.HandleFunc("POST /sandboxes/{id}/refreshes", s.control(s.refrescar))
 	m.HandleFunc("POST /sandboxes/{id}/connect", s.control(s.conectar))
 	m.HandleFunc("POST /v2/sandboxes/{id}/connect", s.control(s.conectar))
+	m.HandleFunc("POST /sandboxes/{id}/pause", s.control(s.pausar))
+	m.HandleFunc("POST /sandboxes/{id}/resume", s.control(s.reanudar))
+	m.HandleFunc("PUT /sandboxes/{id}/network", s.control(s.red))
 	// envd: Connect RPC y ficheros.
 	m.HandleFunc("POST /process.Process/Start", s.envd(s.procStart))
 	m.HandleFunc("POST /process.Process/List", s.envd(s.procList))
@@ -185,7 +189,7 @@ var noImplementadas = []struct{ prefijo, motivo string }{
 	{"/process.Process/", "this process RPC is not supported by the kindling gateway (no interactive stdin or PTY)"},
 	{"/filesystem.Filesystem/", "filesystem watchers are not supported by the kindling gateway"},
 	{"/files/compose", "file composition is not supported by the kindling gateway"},
-	{"/sandboxes/", "this E2B operation has no equivalent in the kindling gateway (pause, resume, fork, snapshots, metrics, logs, network updates)"},
+	{"/sandboxes/", "this E2B operation has no equivalent in the kindling gateway (fork, snapshots, metrics, logs)"},
 	{"/v2/sandboxes/", "this E2B operation has no equivalent in the kindling gateway (logs)"},
 	{"/sandboxes", "this E2B operation has no equivalent in the kindling gateway"},
 	{"/templates", "E2B template builds are not supported: use `kling sbx template`"},
@@ -577,7 +581,7 @@ func (s *Servidor) refrescar(w http.ResponseWriter, r *http.Request) {
 }
 
 // conectar devuelve un sandbox existente (Sandbox.connect del SDK) y, si trae
-// timeout, lo renueva. No hay pausa: un sandbox vivo se "conecta" tal cual.
+// timeout, lo renueva. Uno pausado se reanuda antes y contesta 201, como E2B.
 func (s *Servidor) conectar(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var p struct {
@@ -589,11 +593,113 @@ func (s *Servidor) conectar(w http.ResponseWriter, r *http.Request) {
 		s.falloE2B(w, err)
 		return
 	}
+	st := http.StatusOK
+	if estadoE2B(g.State) == "paused" {
+		if err := s.llamarGW(r.Context(), "POST", rutaSB(id)+"/resume", nil, &g); err != nil {
+			s.falloE2B(w, err)
+			return
+		}
+		st = http.StatusCreated
+	}
 	if p.Timeout > 0 {
 		if err := s.renovar(r.Context(), id, p.Timeout); err != nil {
 			s.falloE2B(w, err)
 			return
 		}
 	}
-	escribirJSON(w, http.StatusOK, s.sandboxCreado(g))
+	escribirJSON(w, st, s.sandboxCreado(g))
+}
+
+// pausar usa POST …/pause del gateway (la memoria se queda en el host).
+func (s *Servidor) pausar(w http.ResponseWriter, r *http.Request) {
+	if err := s.llamarGW(r.Context(), "POST", rutaSB(r.PathValue("id"))+"/pause", nil, nil); err != nil {
+		s.falloE2B(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// reanudar es el resume de E2B (obsoleto en su spec, pero el SDK viejo lo usa):
+// POST …/resume del gateway, con timeout opcional.
+func (s *Servidor) reanudar(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var p struct {
+		Timeout int `json:"timeout"`
+	}
+	json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p)
+	var g gwSandbox
+	if err := s.llamarGW(r.Context(), "POST", rutaSB(id)+"/resume", nil, &g); err != nil {
+		s.falloE2B(w, err)
+		return
+	}
+	if p.Timeout > 0 {
+		if err := s.renovar(r.Context(), id, p.Timeout); err != nil {
+			s.falloE2B(w, err)
+			return
+		}
+	}
+	escribirJSON(w, http.StatusCreated, s.sandboxCreado(g))
+}
+
+// red traduce PUT /sandboxes/{id}/network a PATCH …/egress del gateway. Lo que
+// el gateway expresa: dominios en allowOut (allowlist), sin internet
+// (allow_internet_access false o denyOut 0.0.0.0/0) o abierto. IPs, CIDRs,
+// denyOut parciales, reglas de transformación y proxy de salida son 501.
+func (s *Servidor) red(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		AllowOut    []string        `json:"allowOut"`
+		DenyOut     []string        `json:"denyOut"`
+		DNSServers  json.RawMessage `json:"dnsServers"`
+		EgressProxy json.RawMessage `json:"egressProxy"`
+		Rules       json.RawMessage `json:"rules"`
+		Internet    *bool           `json:"allow_internet_access"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
+		errE2B(w, http.StatusBadRequest, "invalid network config")
+		return
+	}
+	vacio := func(m json.RawMessage) bool {
+		t := strings.TrimSpace(string(m))
+		return t == "" || t == "null" || t == "{}" || t == "[]"
+	}
+	if !vacio(p.EgressProxy) || !vacio(p.Rules) {
+		errE2B(w, http.StatusNotImplemented, "egress proxies and transform rules are not supported by the kindling gateway")
+		return
+	}
+	cerrado := p.Internet != nil && !*p.Internet
+	for _, d := range p.DenyOut {
+		if d != "0.0.0.0/0" {
+			errE2B(w, http.StatusNotImplemented, "denyOut only supports 0.0.0.0/0 (no internet): the kindling gateway has no deny lists")
+			return
+		}
+		cerrado = true
+	}
+	for _, a := range p.AllowOut {
+		if !esDominio(a) {
+			errE2B(w, http.StatusNotImplemented, fmt.Sprintf("allowOut %q: only domain names are supported by the kindling gateway, not IPs or CIDRs", a))
+			return
+		}
+	}
+	pet := map[string]any{"egress": "internet"}
+	switch {
+	case len(p.AllowOut) > 0:
+		pet = map[string]any{"egress": "allowlist", "allow_domains": p.AllowOut}
+	case cerrado:
+		pet["egress"] = "none"
+	}
+	if err := s.llamarGW(r.Context(), "PATCH", rutaSB(r.PathValue("id"))+"/egress", pet, nil); err != nil {
+		s.falloE2B(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func esDominio(t string) bool {
+	if t == "" || net.ParseIP(t) != nil {
+		return false
+	}
+	if _, _, err := net.ParseCIDR(t); err == nil {
+		return false
+	}
+	return strings.ContainsAny(t, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 }

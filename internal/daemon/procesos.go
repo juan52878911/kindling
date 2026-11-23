@@ -22,6 +22,12 @@ import (
 // (comando, entorno, señal).
 const maxCuerpoProc = 1 << 20
 
+// maxRespuestaProc acota una respuesta JSON del agente que se reenvía (el flujo
+// NDJSON de salida tiene su propio régimen).
+// Se deriva de lo máximo que el agente deja guardar (api.MaxListResponseBytes:
+// 64 sesiones con el entorno al tope), no de un número suelto.
+const maxRespuestaProc = api.MaxListResponseBytes
+
 // maxEsperaProc es el mayor ?wait= que se acepta de una vez (el cliente puede
 // repetir).
 const maxEsperaProc = 10 * time.Minute
@@ -139,9 +145,29 @@ func (s *Server) reenviar(w http.ResponseWriter, r *http.Request, base, id strin
 		fail(w, code, e)
 		return
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/x-ndjson") {
+		// Una respuesta JSON del agente (lista de procesos, sesiones, estado) es
+		// pequeña: se lee con tope y, si se pasa, es un 502 en vez de copiar lo que
+		// mande un invitado.
+		b, err := io.ReadAll(io.LimitReader(resp.Body, maxRespuestaProc+1))
+		if err != nil {
+			s.olvidarAgente(id)
+			fail(w, http.StatusBadGateway, fmt.Errorf("talking to the guest agent: %w", err))
+			return
+		}
+		if len(b) > maxRespuestaProc {
+			fail(w, http.StatusBadGateway, fmt.Errorf("the guest agent's response exceeds %d bytes", maxRespuestaProc))
+			return
+		}
+		if ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(b)
+		return
 	}
+	w.Header().Set("Content-Type", ct)
 	w.WriteHeader(resp.StatusCode)
 	copiarFlujo(ctx, w, wrapGuestBody(resp.Body))
 }

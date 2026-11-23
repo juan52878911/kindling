@@ -21,6 +21,11 @@ func nsIP(third, fourth int) string { return GuestIP }
 // Setup no monta nada: la red la crea kling-vz al arrancar la máquina.
 func (n *Net) Setup(egress Egress, domains []string, owner int) error { return nil }
 
+// SetupAparte: sin red de host en macOS, no hay nada que esperar.
+func (n *Net) SetupAparte(egress Egress, domains []string, owner int) (func() error, error) {
+	return func() error { return nil }, nil
+}
+
 // Teardown no desmonta nada: la red muere con el proceso del ayudante.
 func (n *Net) Teardown() {}
 

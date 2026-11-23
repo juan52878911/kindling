@@ -53,11 +53,10 @@ spec:
             spec:
               type: object
               description: >-
-                Lo que se quiere. Todo, salvo ttlSeconds, se fija al crear: el
-                frontal no permite cambiar red, memoria ni política de TTL de
-                un sandbox ya vivo (ver internal/frontal/sandboxes.go,
-                puedeReclamar). Cambiar esos campos no falla, pero tampoco
-                hace nada hasta que el sandbox se recree a mano.
+                Lo que se quiere. Todo, salvo ttlSeconds y paused, se fija al
+                crear: cambiar red, memoria, vcpus, labels, env o volúmenes de
+                un sandbox ya vivo no falla, pero tampoco hace nada hasta que
+                el sandbox se recree a mano.
               properties:
                 template:
                   type: string
@@ -82,16 +81,57 @@ spec:
                   description: 'freeze (por defecto): se congela y reanuda en ms. remove: se destruye.'
                 egress:
                   type: string
-                  enum: [none, internet]
+                  enum: [none, internet, allowlist]
                   description: >-
-                    Salida de red del sandbox. "allowlist" no está expuesto
-                    aquí porque pide una lista de dominios que este CRD no
-                    modela todavía; pedirlo sin dominios lo rechazará el
-                    frontal y quedará en status.message.
+                    Salida de red del sandbox. allowlist exige allowDomains; sin
+                    ellos el frontal lo rechaza y queda en status.message.
+                allowDomains:
+                  type: array
+                  maxItems: 256
+                  items:
+                    type: string
+                  description: Dominios permitidos con egress allowlist.
                 memMiB:
                   type: integer
                   minimum: 0
                   description: 0 usa el valor por defecto del frontal.
+                vcpus:
+                  type: integer
+                  minimum: 0
+                  description: 0 usa el valor por defecto del frontal.
+                labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: >-
+                    Etiquetas del sandbox en el frontal. k8s-uid es del operador
+                    y no se puede pisar.
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Variables de entorno de la sesión "default" del sandbox.
+                volumes:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, mountPath]
+                    properties:
+                      name:
+                        type: string
+                        description: Volumen del tenant en el frontal.
+                      mountPath:
+                        type: string
+                        pattern: '^/'
+                      readOnly:
+                        type: boolean
+                  description: Volúmenes del tenant a montar.
+                paused:
+                  type: boolean
+                  description: >-
+                    true pausa el sandbox (pause); pasar a false lo reanuda
+                    (resume). Se aplica en caliente. No despierta un sandbox
+                    congelado por su propio TTL.
               oneOf:
                 - required: [template]
                 - required: [image]
@@ -113,9 +153,83 @@ spec:
                 expiresAt:
                   type: string
                   format: date-time
+                endpoint:
+                  type: string
+                  description: >-
+                    URL del sandbox en el frontal (plano de datos). Se llega con
+                    el token del tenant.
                 message:
                   type: string
                   description: Último error, si lo hay. Vacío cuando todo va bien.
+                observedGeneration:
+                  type: integer
+                  format: int64
+---
+# CustomResourceDefinition de SandboxPool: el fondo precalentado de una
+# plantilla. El operador lo concilia con PUT /v1/templates/{name}/pool del
+# frontal (hace falta un token de admin) y escribe en status cuántas copias
+# despiertas hay. Borrar el objeto no vacía el fondo: poner size: 0 antes.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxpools.sandbox.kindling.dev
+spec:
+  group: sandbox.kindling.dev
+  scope: Namespaced
+  names:
+    plural: sandboxpools
+    singular: sandboxpool
+    kind: SandboxPool
+    shortNames:
+      - sbxpool
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Template
+          type: string
+          jsonPath: .spec.template
+        - name: Size
+          type: integer
+          jsonPath: .spec.size
+        - name: Available
+          type: integer
+          jsonPath: .status.available
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [template, size]
+              properties:
+                template:
+                  type: string
+                  pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+                  description: Plantilla construida en el frontal.
+                size:
+                  type: integer
+                  minimum: 0
+                  maximum: 16
+                  description: >-
+                    Copias despiertas que se quieren por host que tenga la
+                    plantilla. 0 apaga el fondo y lo vacía.
+            status:
+              type: object
+              properties:
+                available:
+                  type: integer
+                  description: Copias despiertas y reclamables, sumadas en todos los hosts.
+                message:
+                  type: string
+                  description: Último error, si lo hay.
                 observedGeneration:
                   type: integer
                   format: int64

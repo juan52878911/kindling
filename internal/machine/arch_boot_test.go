@@ -29,3 +29,16 @@ func TestBootArgsQuietYArch(t *testing.T) {
 		}
 	}
 }
+
+// La red del invitado la pone el agente (kling.net=) solo si la imagen anuncia
+// "net"; si no, el kernel con ip= como siempre.
+func TestBootArgsRedDelAgente(t *testing.T) {
+	con := bootArgs(nil, false, "", false, true)
+	if !strings.Contains(con, " kling.net=172.16.0.2/30,172.16.0.1") || strings.Contains(con, "ip=") {
+		t.Errorf("con agente net: %q", con)
+	}
+	sin := bootArgs(nil, false, "", false)
+	if !strings.Contains(sin, " ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off") || strings.Contains(sin, "kling.net") {
+		t.Errorf("sin agente net: %q", sin)
+	}
+}

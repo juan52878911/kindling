@@ -76,7 +76,16 @@ type CrearVolumenPeticion struct {
 	Host string `json:"host,omitempty"`
 }
 
+// prefijoVolumen es el de los volúmenes nuevos: 8 bytes del hash del nombre.
 func prefijoVolumen(t *Tenant) string {
+	h := sha256.Sum256([]byte(t.Nombre))
+	return "v" + hex.EncodeToString(h[:8]) + "-"
+}
+
+// prefijoCorto es el de antes (4 bytes): se sigue reconociendo al leer, no se
+// escribe. 32 bits chocan con poco más de 65 000 tenants, y un clon no lleva
+// etiqueta que deshaga el empate.
+func prefijoCorto(t *Tenant) string {
 	h := sha256.Sum256([]byte(t.Nombre))
 	return "v" + hex.EncodeToString(h[:4]) + "-"
 }
@@ -85,15 +94,54 @@ func nombreReal(t *Tenant, n string) string { return prefijoVolumen(t) + n }
 
 func etiquetasVolumen(t *Tenant) map[string]string { return map[string]string{LabelTenant: t.Nombre} }
 
-// esVolumenDe dice si v es del tenant (ver arriba).
-func esVolumenDe(v *api.Volume, t *Tenant) bool {
+// esVolumenDe dice si v es del tenant (ver arriba). Con el prefijo largo basta
+// él (y la etiqueta, si la hay). Con el corto, de antes, un volumen sin
+// etiqueta (un clon) solo se atribuye si ningún otro tenant conocido comparte
+// ese prefijo: si lo comparte no se sabe de quién es y no es de nadie.
+func (s *Servidor) esVolumenDe(v *api.Volume, t *Tenant) bool {
 	dueno, etiquetado := v.Labels[LabelTenant]
-	return strings.HasPrefix(v.Name, prefijoVolumen(t)) && (!etiquetado || dueno == t.Nombre)
+	if etiquetado && dueno != t.Nombre {
+		return false
+	}
+	if strings.HasPrefix(v.Name, prefijoVolumen(t)) {
+		return true
+	}
+	if !strings.HasPrefix(v.Name, prefijoCorto(t)) {
+		return false
+	}
+	if etiquetado {
+		return true
+	}
+	for _, o := range s.tenantsTodos() {
+		if o.Nombre != t.Nombre && prefijoCorto(&o) == prefijoCorto(t) {
+			return false
+		}
+	}
+	return true
+}
+
+// buscaReal devuelve el nombre real con que existe el volumen nombre del
+// tenant (con el prefijo largo o con el de antes) y en qué hosts; si no
+// existe, el nombre que tendría uno nuevo.
+func buscaReal(en map[string]map[string]bool, t *Tenant, nombre string) (string, map[string]bool, bool) {
+	for _, real := range []string{nombreReal(t, nombre), prefijoCorto(t) + nombre} {
+		if hs, ok := en[real]; ok {
+			return real, hs, true
+		}
+	}
+	return nombreReal(t, nombre), nil, false
+}
+
+func quitarPrefijo(t *Tenant, real string) string {
+	if strings.HasPrefix(real, prefijoVolumen(t)) {
+		return strings.TrimPrefix(real, prefijoVolumen(t))
+	}
+	return strings.TrimPrefix(real, prefijoCorto(t))
 }
 
 func vistaVolumen(t *Tenant, h *hosts.Host, v *api.Volume) Volumen {
 	return Volumen{
-		Name: strings.TrimPrefix(v.Name, prefijoVolumen(t)), Host: h.Nombre,
+		Name: quitarPrefijo(t, v.Name), Host: h.Nombre,
 		SizeMiB: v.SizeBytes >> 20, UsedBytes: v.UsedBytes, InUse: len(v.UsedBy) > 0,
 	}
 }
@@ -133,7 +181,7 @@ func (s *Servidor) volumenesDe(ctx context.Context, t *Tenant) ([]volEnHost, []e
 		vs := out[i]
 		sort.Slice(vs, func(a, b int) bool { return vs[a].Name < vs[b].Name })
 		for _, v := range vs {
-			if esVolumenDe(v, t) {
+			if s.esVolumenDe(v, t) {
 				res = append(res, volEnHost{h, v})
 			}
 		}
@@ -185,6 +233,8 @@ type planVolumenes struct {
 	solo map[string]bool
 	// clones son los volúmenes que hay que crear antes, en solo[host].
 	clones []clonPlan
+	// propios son los volúmenes que el tenant tenía al resolver.
+	propios int
 }
 
 type clonPlan struct{ origen, destino string }
@@ -222,7 +272,7 @@ func (s *Servidor) resolverVolumenes(ctx context.Context, t *Tenant, vs []Volume
 		}
 		return noVolumen(n)
 	}
-	plan := &planVolumenes{}
+	plan := &planVolumenes{propios: len(propios)}
 	var comunes map[string]bool
 	var fijado string // el volumen que fijó los hosts, para el mensaje
 	cruzar := func(n string, hs map[string]bool) error {
@@ -245,8 +295,7 @@ func (s *Servidor) resolverVolumenes(ctx context.Context, t *Tenant, vs []Volume
 		return nil
 	}
 	for _, v := range vs {
-		real := nombreReal(t, v.Name)
-		hs, existe := en[real]
+		real, hs, existe := buscaReal(en, t, v.Name)
 		switch {
 		case existe && v.CloneFrom != "":
 			return nil, &errVolumen{http.StatusConflict, fmt.Sprintf("volume %q already exists: drop clone_from to mount it", v.Name)}
@@ -255,20 +304,32 @@ func (s *Servidor) resolverVolumenes(ctx context.Context, t *Tenant, vs []Volume
 				return nil, err
 			}
 		case v.CloneFrom != "":
-			orig, ok := en[nombreReal(t, v.CloneFrom)]
+			realOrig, orig, ok := buscaReal(en, t, v.CloneFrom)
 			if !ok {
 				return nil, ausente(v.CloneFrom)
 			}
 			if err := cruzar(v.CloneFrom, orig); err != nil {
 				return nil, err
 			}
-			plan.clones = append(plan.clones, clonPlan{nombreReal(t, v.CloneFrom), real})
+			plan.clones = append(plan.clones, clonPlan{realOrig, real})
 		default:
 			return nil, ausente(v.Name)
 		}
 		plan.atts = append(plan.atts, api.VolumeAttachment{Name: real, Mount: v.Mount, ReadOnly: v.ReadOnly})
 	}
 	plan.solo = comunes
+	// El tope de volúmenes cuenta también los clones de aquí (el cerrojo lo
+	// toma handleCrear). Con un host sin contestar no se sabe cuántos hay: se
+	// niega en vez de dejar pasar de más.
+	if t.MaxVolumenes > 0 && len(plan.clones) > 0 {
+		if len(errs) > 0 {
+			return nil, &errVolumen{http.StatusServiceUnavailable, fmt.Sprintf("can't count the volumes of tenant %s: %v", t.Nombre, errors.Join(errs...))}
+		}
+		if len(propios)+len(plan.clones) > t.MaxVolumenes {
+			return nil, &errVolumen{http.StatusTooManyRequests, fmt.Sprintf(
+				"tenant %s already has %d volumes and asks for %d more; the limit is %d", t.Nombre, len(propios), len(plan.clones), t.MaxVolumenes)}
+		}
+	}
 	return plan, nil
 }
 
@@ -355,7 +416,7 @@ func (s *Servidor) buscarVolumen(ctx context.Context, t *Tenant, nombre string) 
 	}
 	vs, errs := s.volumenesDe(ctx, t)
 	for _, p := range vs {
-		if p.v.Name == nombreReal(t, nombre) {
+		if p.v.Name == nombreReal(t, nombre) || p.v.Name == prefijoCorto(t)+nombre {
 			return p, nil
 		}
 	}
@@ -430,12 +491,14 @@ func (s *Servidor) handleCrearVolumen(w http.ResponseWriter, r *http.Request, t 
 	}
 	real := nombreReal(t, pet.Name)
 	var origen map[string]bool
+	realOrigen := nombreReal(t, pet.CloneFrom)
 	for _, p := range propios {
-		if p.v.Name == real {
+		if p.v.Name == real || p.v.Name == prefijoCorto(t)+pet.Name {
 			fail(w, http.StatusConflict, fmt.Errorf("volume %q already exists", pet.Name))
 			return
 		}
-		if pet.CloneFrom != "" && p.v.Name == nombreReal(t, pet.CloneFrom) {
+		if pet.CloneFrom != "" && (p.v.Name == realOrigen || p.v.Name == prefijoCorto(t)+pet.CloneFrom) {
+			realOrigen = p.v.Name
 			if origen == nil {
 				origen = map[string]bool{}
 			}
@@ -465,7 +528,7 @@ func (s *Servidor) handleCrearVolumen(w http.ResponseWriter, r *http.Request, t 
 	if pet.CloneFrom != "" {
 		var res *api.CloneVolumeResult
 		res, h, err = hosts.Intentar(r.Context(), s.reg, sirve, func(ctx context.Context, h *hosts.Host) (*api.CloneVolumeResult, error) {
-			return h.Cliente.CloneVolume(ctx, nombreReal(t, pet.CloneFrom), api.CloneVolumeRequest{To: real})
+			return h.Cliente.CloneVolume(ctx, realOrigen, api.CloneVolumeRequest{To: real})
 		})
 		if err == nil {
 			v = res.Volume

@@ -65,7 +65,7 @@ Cuatro causas, y lo que hace este bucle con cada una:
 
 | Campo | Por defecto | Qué es |
 |---|---|---|
-| `capture` | off | `text` (texto filtrado), `hash` (solo sha256: nada legible en disco; solo entrena lo que una persona mande con su texto) u `off` |
+| `capture` | off | `text` (texto filtrado), `hash` (solo sha256, sin texto ni `fields`: nada legible en disco; solo entrena lo que una persona mande con el mismo texto) u `off` |
 | `max_mb`, `max_days` | 64, 30 | tope del almacén de capturas por tarea; lo más viejo sale primero |
 | `gold` | — | el ancla: el JSONL de entrenamiento. Obligatorio para reentrenar |
 | `heldout` | — | etiquetas de verdad que nada entrena. Obligatorio para reentrenar |
@@ -119,6 +119,9 @@ directorio 0700, ficheros 0600):
   expired", "reset your password please"), los hashes (SHA de commit, sha256) y los
   UUID se quedan. Es un filtro, no una garantía: con datos sensibles,
   `capture: "hash"`.
+- De `fields` solo se guardan los escalares (cadena, número, booleano, null);
+  las cadenas pasan el mismo filtro y se recortan. Lo anidado no se escribe: no
+  pasaría por el filtro. En modo `hash` no se escribe `fields`.
 
 ## Feedback: personas y maestros externos
 
@@ -140,8 +143,16 @@ directorio 0700, ficheros 0600):
   texto. Así se enchufa otra herramienta: `kling ai feedback <tarea> -import
   etiquetas.jsonl` acepta una línea por etiqueta con los campos de arriba
   (`{"text", "fields"?, "label", "by"?}` o `{"id", "label"}`), en tandas.
+- Con `id` y texto, el texto solo se le da al caso si su sha256 es el de la
+  captura: los ids son secuenciales, y sin el cotejo cualquiera con un token
+  fijaba lo que se entrena de un caso ajeno. Un texto que no coincide se
+  ignora (la etiqueta o el voto sí cuentan).
+- `fields` solo admite escalares (cadena, número, booleano, null): lo demás,
+  400. Un registro que guardado pasaría de 1 MiB, también 400.
 - `feedback.jsonl` no caduca (las etiquetas humanas son lo escaso) y tiene
-  tope de 64 MiB: lleno, 507, no se tira nada.
+  tope de 64 MiB: lleno, 507, no se tira nada. Una línea ilegible o de más de
+  1 MiB (de una versión anterior) se salta, se cuenta en el log y se sigue
+  leyendo.
 
 ## Revisión: `kling ai review`
 

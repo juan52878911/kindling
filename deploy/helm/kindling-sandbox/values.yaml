@@ -64,6 +64,10 @@ operator:
 # ---------------------------------------------------------------------------
 gateway:
   enabled: false
+  # Con más de una: el cerrojo por sandbox, el registro de conexiones vivas y la
+  # caché de 3 s son de cada réplica. Revocar un endpoint corta lo abierto en
+  # las demás réplicas en 5 s como mucho (no al instante), y una petición nueva
+  # puede ver las etiquetas viejas hasta 3 s. Ver docs/sandbox-api.md.
   replicas: 1
   image:
     repository: ""     # obligatorio con enabled=true

@@ -3,6 +3,7 @@ package aigw
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -676,5 +677,142 @@ func TestLearnCaptureCaps(t *testing.T) {
 	f.stream(t, f.traffic[:5])
 	if n := f.g.learn.counts["kind|cap"]; n == 0 {
 		t.Errorf("cap drops = %d", n)
+	}
+}
+
+const b5Main = "main-token-0123456789abcdef"
+const b5Ten = "tenant-token-0123456789abcdef"
+
+func b5Tenants(c *Config) {
+	c.Tenants = []TenantConfig{{Name: "ci", Token: b5Ten}}
+}
+
+// B5: un token de inquilino mandaba un feedback con un "fields" anidado que,
+// escapado en JSON, pasaba de 1 MiB en una sola línea; readJSONL paraba ahí en
+// silencio y todo lo que viniera después se perdía para review y retrain.
+func TestB5FeedbackLineaLarga(t *testing.T) {
+	f := newLearnGateway(t, b5Tenants)
+	h := f.g.Handler(b5Main)
+	if rec := do(t, h, http.MethodPost, "/v1/feedback", b5Main, map[string]any{"task": "kind", "text": "antes", "label": "bug"}); rec.Code != 200 {
+		t.Fatalf("antes: %d %s", rec.Code, rec.Body)
+	}
+	body := `{"task":"kind","teacher":"x","label":"bug","text":"t","fields":{"k":["` + strings.Repeat("<", 200_000) + `"]}}`
+	if rec := do(t, h, http.MethodPost, "/v1/feedback", b5Ten, body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("fields anidado: %d %s, quiero 400", rec.Code, rec.Body)
+	}
+	for i := 0; i < 3; i++ {
+		if rec := do(t, h, http.MethodPost, "/v1/feedback", b5Main, map[string]any{"task": "kind", "text": "despues " + string(rune('a'+i)), "label": "bug"}); rec.Code != 200 {
+			t.Fatalf("despues: %d %s", rec.Code, rec.Body)
+		}
+	}
+	fb, err := f.g.learn.readFeedback("kind")
+	if err != nil || len(fb) != 4 {
+		t.Fatalf("registros leídos = %d (quiero 4), err=%v", len(fb), err)
+	}
+
+	// Una línea de más de MaxLineBytes ya escrita (por una versión anterior)
+	// se salta y se cuenta; lo que viene después se sigue leyendo.
+	p := f.g.learn.feedbackPath("kind")
+	largo := `{"task":"kind","source":"teacher","label":"bug","fields":{"k":"` + strings.Repeat("x", chispa.MaxLineBytes+10) + `"}}` + "\n"
+	fh, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh.WriteString(largo + `{"task":"kind","source":"human","action":"correct","label":"bug","text":"tras la larga"}` + "\n")
+	fh.Close()
+	var vistas []string
+	bad, err := readJSONL(p, 1<<30, func(b []byte) error {
+		var r FeedbackRecord
+		if err := json.Unmarshal(b, &r); err != nil {
+			return err
+		}
+		vistas = append(vistas, r.Text)
+		return nil
+	})
+	if err != nil || bad != 1 || len(vistas) != 5 || vistas[4] != "tras la larga" {
+		t.Fatalf("bad=%d err=%v leídas=%q", bad, err, vistas)
+	}
+}
+
+// B6: en modo hash no se escribía Text pero sí Fields, y lo anidado no pasaba
+// el filtro de secretos: «nada legible en disco» no era verdad.
+func TestB6HashNoGuardaCampos(t *testing.T) {
+	f := newLearnGateway(t, func(c *Config) { c.Tasks["kind"].Learn.Capture = CaptureHash })
+	for _, ex := range f.traffic[:40] {
+		if _, err := f.g.Classify(context.Background(), "classify", ClassifyRequest{Task: "kind", Text: ex.Text,
+			Fields: map[string]any{"cliente": "Maria Lopez, calle Mayor 3", "cfg": map[string]any{"password": "hunter2"}, "hdr": []any{"Authorization: Bearer abcDEF123456xyz"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.g.learn.flush()
+	files, _ := filepath.Glob(filepath.Join(f.g.learn.taskDir("kind"), "captures", "*.jsonl"))
+	var all string
+	for _, p := range files {
+		b, _ := os.ReadFile(p)
+		all += string(b)
+	}
+	if all == "" {
+		t.Fatal("nada capturado")
+	}
+	for _, s := range []string{"Maria Lopez", "hunter2", "abcDEF123456xyz", `"fields"`} {
+		if strings.Contains(all, s) {
+			t.Errorf("modo hash guardó %q en disco", s)
+		}
+	}
+
+	// En modo text los campos se guardan, pero solo los escalares (filtrados):
+	// lo anidado no pasa.
+	if got := redactFields(map[string]any{"a": "x", "n": 3.0, "b": true, "z": nil, "cfg": map[string]any{"password": "hunter2"}, "l": []any{"y"}}); len(got) != 4 || got["cfg"] != nil || got["l"] != nil {
+		t.Errorf("redactFields = %v", got)
+	}
+}
+
+// B6: en modo hash los ids son secuenciales y el texto de un feedback no se
+// cotejaba con el sha256 de la captura: un inquilino fijaba el texto (lo que
+// se entrena) de un caso ajeno con un voto de maestro.
+func TestB6TextoAjenoEnCasoHash(t *testing.T) {
+	f := newLearnGateway(t, func(c *Config) { b5Tenants(c); c.Tasks["kind"].Learn.Capture = CaptureHash })
+	var id, verdad, texto string
+	for _, ex := range f.traffic[:20] {
+		r, err := f.g.Classify(context.Background(), "classify", ClassifyRequest{Task: "kind", Text: ex.Text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Escalate {
+			id, verdad, texto = r.ID, ex.Label, ex.Text
+			break
+		}
+	}
+	f.g.learn.flush()
+	if id == "" {
+		t.Skip("nada escalado")
+	}
+	h := f.g.Handler(b5Main)
+	caso := func() *learnCase {
+		t.Helper()
+		caps, _ := f.g.learn.readCaptures("kind", 1<<20)
+		fb, _ := f.g.learn.readFeedback("kind")
+		for _, c := range buildCases(caps, fb, nil) {
+			if c.ID == id {
+				return c
+			}
+		}
+		t.Fatalf("caso %s no está", id)
+		return nil
+	}
+	if rec := do(t, h, http.MethodPost, "/v1/feedback", b5Ten, map[string]any{"task": "kind", "id": id, "teacher": "x", "label": verdad, "text": "TEXTO DEL ATACANTE"}); rec.Code != 200 {
+		t.Fatalf("tenant: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, http.MethodPost, "/v1/feedback", b5Main, map[string]any{"task": "kind", "id": id, "label": verdad, "text": "otro texto"}); rec.Code != 200 {
+		t.Fatalf("humano: %d %s", rec.Code, rec.Body)
+	}
+	if c := caso(); c.Text != "" {
+		t.Fatalf("un texto que no es el de la captura entró en el caso: %q", c.Text)
+	}
+	if rec := do(t, h, http.MethodPost, "/v1/feedback", b5Main, map[string]any{"task": "kind", "id": id, "label": verdad, "text": texto}); rec.Code != 200 {
+		t.Fatalf("humano con el texto: %d %s", rec.Code, rec.Body)
+	}
+	if c := caso(); c.Text != texto || c.Human != verdad {
+		t.Fatalf("el texto que sí coincide no entró: Text=%q Human=%q", c.Text, c.Human)
 	}
 }

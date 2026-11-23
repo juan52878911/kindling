@@ -61,12 +61,20 @@ func TestThawConLaRedConservadaCompruebaLasBarreras(t *testing.T) {
 
 	llamadas := 0
 	usarBarrerasFalsas(t, func() error { llamadas++; return nil })
-	if _, err := m.redDelThaw(mc); err != nil || llamadas != 1 {
+	_, esperar, err := m.redDelThaw(mc)
+	if err == nil {
+		err = esperar()
+	}
+	if err != nil || llamadas != 1 {
 		t.Fatalf("redDelThaw = %v, %d comprobaciones; quería nil y 1", err, llamadas)
 	}
 	sinBarreras := errors.New("sin barreras")
 	usarBarrerasFalsas(t, func() error { return sinBarreras })
-	if _, err := m.redDelThaw(mc); !errors.Is(err, sinBarreras) {
+	_, esperar, err = m.redDelThaw(mc)
+	if err == nil {
+		err = esperar() // la comprobación va aparte: el fallo sale al esperarla, antes de cargar el volcado
+	}
+	if !errors.Is(err, sinBarreras) {
 		t.Fatalf("redDelThaw sin barreras = %v, quería %v", err, sinBarreras)
 	}
 }

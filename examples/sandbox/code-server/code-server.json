@@ -1,0 +1,4 @@
+{"name":"code-server","image":"toolchain","build_egress":"internet","mem_mib":1536,
+ "steps":[{"cmd":["curl","-fsSLo","/tmp/code-server-install.sh","https://code-server.dev/install.sh"],"timeout_seconds":120},
+          {"cmd":["sh","/tmp/code-server-install.sh","--method","standalone","--prefix","/usr/local"],"timeout_seconds":600}],
+ "pool":0}

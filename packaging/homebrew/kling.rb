@@ -33,8 +33,10 @@ class Kling < Formula
   # Los Mac Intel no tienen backend (ni kling-vz ni kling-hv); en Linux valen
   # amd64 y arm64.
   depends_on arch: :arm64 if OS.mac?
-  # mkfs.ext4 y debugfs: el overlay de cada microVM y la inspección de imágenes.
-  depends_on "e2fsprogs"
+  # debugfs (inspección de imágenes) y el formateador de ext4 (solo para un -disk
+  # distinto de 512 MiB): kling up escribe la plantilla del overlay por defecto
+  # sin ellos.
+  depends_on "e2fsprogs" => :recommended
 
   on_macos do
     on_arm do
@@ -96,6 +98,8 @@ class Kling < Formula
 
   def caveats
     s = <<~EOS
+      Try it (the first run starts the daemon and downloads the guest kernel and image):
+        kling try -- uname -a
       Diagnose this host and start the daemon:
         kling up
       Upgrade with `brew upgrade kling` (not `kling upgrade`).

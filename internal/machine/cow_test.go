@@ -559,6 +559,7 @@ func TestClonarInstanciaCuotaAntesDelChownYLibreCacheado(t *testing.T) {
 	}
 	src := escribirDorado(t, root, "dorado", "disco v1")
 	var ruta string
+	ini := time.Now()
 	for i := range 10 {
 		r, err := a.clonarInstancia(context.Background(), "dorado", src, fmt.Sprintf("q%d", i), 0)
 		if err != nil {
@@ -572,7 +573,10 @@ func TestClonarInstanciaCuotaAntesDelChownYLibreCacheado(t *testing.T) {
 	if fi, err := os.Stat(ruta); err != nil || fi.Mode().Perm() != 0o660 {
 		t.Errorf("tras ceder: %v %v", fi, err)
 	}
-	if n := libres.Load(); n != 1 {
-		t.Errorf("lecturas del espacio libre en la ráfaga: %d, quería 1", n)
+	// Una lectura por cada 100 ms de ráfaga: en un runner lento los 10 clones
+	// pasan de la vigencia y la segunda lectura es correcta.
+	tope := 1 + int32(time.Since(ini)/vigenciaLibre)
+	if n := libres.Load(); n < 1 || n > tope {
+		t.Errorf("lecturas del espacio libre en la ráfaga: %d, quería entre 1 y %d", n, tope)
 	}
 }

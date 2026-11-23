@@ -45,7 +45,7 @@ type registroBloqueos struct {
 // con 0, que Blocked lee como 1.
 func (b *registroBloqueos) anotar(name string, qtype uint16) {
 	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
-	if name == "" || strings.HasSuffix(name, ".arpa") {
+	if name == "" || strings.HasSuffix(name, ".arpa") || !nombreValido(name) {
 		return
 	}
 	if qtype != 1 && qtype != 28 {
@@ -117,4 +117,20 @@ func formatoDestino(ip, proto string, puerto int) string {
 		return fmt.Sprintf("%s:%d", ip, puerto)
 	}
 	return fmt.Sprintf("%s:%d/%s", ip, puerto, proto)
+}
+
+// nombreValido dice si name solo lleva [a-z0-9._-] y mide 1-253 bytes. Los
+// nombres los pone el invitado: bytes de control o espacios llegarían a la
+// terminal del operador y a la orden -allow sugerida.
+func nombreValido(name string) bool {
+	if len(name) == 0 || len(name) > 253 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

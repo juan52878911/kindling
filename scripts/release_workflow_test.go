@@ -64,3 +64,40 @@ func TestReleaseWorkflowArtefactosYFirmaDelTap(t *testing.T) {
 		t.Error("job tap: no comprueba la firma de SHA256SUMS (firmar verify -tag)")
 	}
 }
+
+// B17: los jobs que compilan lo que se firma (build y vz) no restauran la
+// caché de Go, que puede haber escrito cualquier otro workflow del repo; y
+// ningún checkout deja el token del job en .git/config, donde lo lee
+// cualquier paso posterior (el de release tiene contents: write).
+func TestReleaseWorkflowSinCacheNiCredenciales(t *testing.T) {
+	jobs := jobsDeWorkflow(t, "../.github/workflows/release.yml")
+	for _, nombre := range []string{"build", "vz"} {
+		j, ok := jobs[nombre]
+		if !ok {
+			t.Fatalf("release.yml sin job %s", nombre)
+		}
+		for _, p := range strings.Split(j, "\n      - ") {
+			if !strings.Contains(p, "actions/setup-go@") {
+				continue
+			}
+			if !regexp.MustCompile(`(?m)^\s+cache:\s*false\s*$`).MatchString(p) {
+				t.Errorf("job %s: setup-go sin cache: false:\n%s", nombre, p)
+			}
+		}
+	}
+	checkouts := 0
+	for nombre, j := range jobs {
+		for _, p := range strings.Split(j, "\n      - ") {
+			if !strings.Contains(p, "actions/checkout@") {
+				continue
+			}
+			checkouts++
+			if !regexp.MustCompile(`(?m)^\s+persist-credentials:\s*false\s*$`).MatchString(p) {
+				t.Errorf("job %s: checkout sin persist-credentials: false:\n%s", nombre, p)
+			}
+		}
+	}
+	if checkouts == 0 {
+		t.Fatal("release.yml sin ningún checkout")
+	}
+}

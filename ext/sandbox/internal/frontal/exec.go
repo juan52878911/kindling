@@ -5,6 +5,7 @@ package frontal
 // daemon tal cual, con los mismos topes.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -32,8 +34,16 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := json.Unmarshal(b, &req); err != nil {
+	// Como el resto de rutas: un campo desconocido (un typo en timeout_seconds)
+	// es un 400, no se ignora en silencio.
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+		return
+	}
+	if dec.More() {
+		fail(w, http.StatusBadRequest, errors.New("invalid body: trailing data"))
 		return
 	}
 	// Se valida aquí para contestar 400 antes de molestar al daemon, y para
@@ -49,8 +59,18 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	// Sin sesión propia, un sandbox creado con env corre con la del env. Si ya
+	// caducó, el daemon lo dice antes de ejecutar nada y se repite sin ella.
+	porDefecto := req.Session == "" && sesionPorDefecto(mc) != ""
+	if porDefecto {
+		req.Session = idSesionPorDefecto
+	}
 	if r.URL.Query().Get("wait") == "1" {
 		res, err := h.Cliente.Exec(r.Context(), mc.ID, req, nil)
+		if err != nil && porDefecto && esSesionPerdida(err) {
+			req.Session = ""
+			res, err = h.Cliente.Exec(r.Context(), mc.ID, req, nil)
+		}
 		if err != nil {
 			fail(w, codigoExec(err), err)
 			return
@@ -79,15 +99,20 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		}
 		return nil
 	}
-	res, err := h.Cliente.Exec(r.Context(), mc.ID, req, func(stream string, data []byte) error {
+	salida := func(stream string, data []byte) error {
 		return emitir(api.ExecEvent{Stream: stream, Data: data})
-	})
+	}
+	res, err := h.Cliente.Exec(r.Context(), mc.ID, req, salida)
+	if err != nil && !empezado && porDefecto && esSesionPerdida(err) {
+		req.Session = ""
+		res, err = h.Cliente.Exec(r.Context(), mc.ID, req, salida)
+	}
 	switch {
 	case err != nil && !empezado:
 		fail(w, codigoExec(err), err)
 	case err != nil:
 		// Ya se contestó 200: solo queda decirlo en el flujo, como hace el daemon.
-		_ = emitir(api.ExecEvent{Error: err.Error()})
+		_ = emitir(api.ExecEvent{Error: errorDeFlujo(deHost(h, err))})
 	default:
 		code := res.ExitCode
 		_ = emitir(api.ExecEvent{Exit: &code, DurationMS: res.DurationMS, Truncated: res.Truncated, TimedOut: res.TimedOut})
@@ -161,6 +186,23 @@ func (s *Servidor) handleFiles(w http.ResponseWriter, r *http.Request, id string
 			writeJSON(w, http.StatusOK, ls)
 			return
 		}
+		if q.Get("tar") == "1" {
+			rc, err := cl.ReadTar(r.Context(), mc.ID, path)
+			if err != nil {
+				fail(w, http.StatusBadGateway, deHost(h, err))
+				return
+			}
+			defer rc.Close()
+			w.Header().Set("Content-Type", "application/x-tar")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.Copy(w, rc)
+			return
+		}
+		if rango := r.Header.Get("Range"); strings.HasPrefix(rango, "bytes=") {
+			if servido := s.descargaConRango(w, r, h, mc.ID, path, rango); servido {
+				return
+			}
+		}
 		rc, err := cl.ReadFile(r.Context(), mc.ID, path)
 		if err != nil {
 			fail(w, http.StatusBadGateway, err)
@@ -168,12 +210,29 @@ func (s *Servidor) handleFiles(w http.ResponseWriter, r *http.Request, id string
 		}
 		defer rc.Close()
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 		// Tope también aquí: el daemon ya lo aplica, pero el frontal no debe
 		// depender de que sea así.
 		_, _ = io.Copy(w, io.LimitReader(rc, api.FileMaxDownload))
 
 	case http.MethodPut:
+		if q.Get("tar") == "1" {
+			// Extrae el tar dentro del directorio path (lo valida el invitado).
+			res, err := cl.WriteTar(r.Context(), mc.ID, path, q.Get("mkdir") == "1",
+				&lectorAcotado{r: r.Body, quedan: api.FileMaxUpload})
+			if err != nil {
+				var ea *errAcotado
+				if errors.As(err, &ea) {
+					fail(w, http.StatusRequestEntityTooLarge, err)
+					return
+				}
+				fail(w, http.StatusBadGateway, deHost(h, err))
+				return
+			}
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
 		// No se trunca en silencio: si el cuerpo pasa del tope sin haber
 		// anunciado Content-Length, el lector falla y la subida falla con él.
 		st, err := cl.WriteFile(r.Context(), mc.ID, path, uint32(modo), q.Get("mkdir") == "1",

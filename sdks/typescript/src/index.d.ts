@@ -6,6 +6,11 @@ export interface SandboxInfo {
   [extra: string]: unknown;
 }
 export interface FileStat { path: string; size: number; mode: string; is_dir: boolean; mod_time: string; [extra: string]: unknown }
+export interface ReplaceResult { path: string; replacements: number; size: number; [extra: string]: unknown }
+export interface SandboxMetrics {
+  id: string; state: string; memory_mib?: number; memory_kind?: string; cpu_seconds?: number; mem_limit_mib?: number;
+  [extra: string]: unknown;
+}
 export interface FileEntry { name: string; type: string; size: number; mode: string; mod_time: string; target?: string; [extra: string]: unknown }
 export interface FileList { path: string; entries: FileEntry[]; truncated?: boolean; [extra: string]: unknown }
 export interface Graph { id: string; host: string; template: string; state: string; claimed_at: string; nodes: Record<string, unknown>; [extra: string]: unknown }
@@ -47,7 +52,29 @@ export interface CreateOptions extends ConnectionOptions {
   allow_domains?: string[]; mem_mib?: number; vcpus?: number; labels?: Record<string, string>;
   /** Volúmenes del inquilino a montar. */
   volumes?: VolumeMount[];
+  /** Variables de entorno que ve todo exec con `session: "default"`. */
+  env?: Record<string, string>;
 }
+export interface ListOptions extends ConnectionOptions {
+  state?: string; /** `{clave: valor}` o `["clave=valor"]` */ label?: Record<string, string> | string[];
+  /** tamaño de página (1-1000) */ limit?: number; /** el `nextCursor` de la página anterior */ cursor?: string;
+}
+export interface EndpointInfo { url: string; port: number; token?: string; public?: boolean; expires_at: string; [extra: string]: unknown }
+export interface EgressPolicy { egress: string; allow_domains?: string[]; applied: "live" | "next_start" | "unchanged"; narrowed?: boolean; connections_closed?: boolean; [extra: string]: unknown }
+export interface SearchResult { path: string; glob: string; matches: string[]; truncated: boolean; [extra: string]: unknown }
+export interface TarResult { entries: number; files: number; bytes: number; [extra: string]: unknown }
+export interface CodeContextInfo { id: string; language: string; pid: number; cwd?: string; started_at: string; [extra: string]: unknown }
+export interface CodeEvent {
+  type: "stdout" | "stderr" | "result" | "error" | "done"; text?: string; ename?: string; evalue?: string;
+  traceback?: string[]; ok?: boolean; duration_ms?: number; results?: Record<string, string>; execution_count?: number;
+}
+export interface CodeRunOptions { language?: "python" | "bash" | "javascript"; /** id de un contexto */ context?: string; /** segundos */ timeout?: number }
+export interface CodeResult {
+  ok: boolean; stdout: string; stderr: string; result: CodeEvent | null; error: CodeEvent | null;
+  results: Record<string, string>; events: CodeEvent[];
+}
+/** Rango de bytes: `[inicio, fin]` inclusivos (`fin` null = hasta el final) o `"bytes=-n"`. */
+export type ByteRange = [number, number | null] | string;
 export interface VolumeMount { name: string; mount: string; read_only?: boolean; /** crea `name` clonando este volumen propio */ clone_from?: string }
 export interface CreateManyOptions extends CreateOptions { /** todo o nada */ atomic?: boolean }
 export interface BatchError { index: number; status: number; error: string }
@@ -83,7 +110,7 @@ export class Admin {
 }
 
 export class Client {
-  constructor(opts?: { url?: string; token?: string; timeout?: number | null; fetch?: typeof fetch });
+  constructor(opts?: { url?: string; token?: string; timeout?: number | null; fetch?: typeof fetch; /** reintentos de 429/503 con su Retry-After */ retries?: number; maxRetryWait?: number });
   readonly url: string;
   health(): Promise<boolean>;
   hosts(): Promise<unknown[]>;
@@ -92,12 +119,34 @@ export class Client {
   createSandbox(peticion: Record<string, unknown>): Promise<SandboxInfo>;
   createSandboxes(count: number, peticion?: Record<string, unknown> & { atomic?: boolean }): Promise<{ sandboxes: SandboxInfo[]; errors: BatchError[] }>;
   getSandbox(id: string): Promise<SandboxInfo>;
-  listSandboxes(): Promise<{ sandboxes: SandboxInfo[]; partial: string | null }>;
+  listSandboxes(o?: { state?: string; label?: Record<string, string> | string[]; limit?: number; cursor?: string }): Promise<{ sandboxes: SandboxInfo[]; partial: string | null; nextCursor: string | null }>;
+  pauseSandbox(id: string): Promise<SandboxInfo>;
+  resumeSandbox(id: string): Promise<SandboxInfo>;
+  setEgress(id: string, o?: { egress?: string; allow_domains?: string[] }): Promise<EgressPolicy>;
+  createEndpoint(id: string, o: { port: number; ttl_seconds?: number; public?: boolean }): Promise<EndpointInfo>;
+  listEndpoints(id: string): Promise<EndpointInfo[]>;
+  revokeEndpoint(id: string, port: number): Promise<void>;
+  runCode(id: string, o: { code: string; language?: string; context_id?: string; timeout_seconds?: number }): Promise<AsyncGenerator<CodeEvent>>;
+  createCodeContext(id: string, o?: { language?: string; cwd?: string }): Promise<CodeContextInfo>;
+  listCodeContexts(id: string): Promise<CodeContextInfo[]>;
+  getCodeContext(id: string, cid: string): Promise<CodeContextInfo>;
+  deleteCodeContext(id: string, cid: string): Promise<void>;
+  interruptCode(id: string, cid: string): Promise<void>;
+  moveFile(id: string, from: string, to: string, overwrite?: boolean): Promise<void>;
+  chmodFile(id: string, path: string, mode: string, recursive?: boolean): Promise<FileStat>;
+  replaceInFile(id: string, path: string, old: string, nuevo: string, all?: boolean): Promise<ReplaceResult>;
+  patchMetadata(id: string, o?: { labels?: Record<string, string>; remove?: string[] }): Promise<SandboxInfo>;
+  forkSandbox(id: string, o?: { count?: number; ttl_seconds?: number }): Promise<SandboxInfo[]>;
+  sandboxMetrics(id: string): Promise<SandboxMetrics>;
+  mkdirFile(id: string, path: string): Promise<FileStat>;
+  searchFiles(id: string, path: string, glob: string): Promise<SearchResult>;
+  uploadTar(id: string, path: string, datos: Uint8Array, o?: { mkdir?: boolean }): Promise<TarResult>;
+  downloadTar(id: string, path: string): Promise<Uint8Array>;
   deleteSandbox(id: string): Promise<void>;
   renewSandbox(id: string, ttlSeconds?: number): Promise<SandboxInfo>;
   execWait(id: string, peticion: Record<string, unknown>): Promise<unknown>;
   execStream(id: string, peticion: Record<string, unknown>): Promise<AsyncGenerator<Record<string, unknown>>>;
-  readFile(id: string, path: string): Promise<Uint8Array>;
+  readFile(id: string, path: string, range?: ByteRange): Promise<Uint8Array>;
   statFile(id: string, path: string): Promise<FileStat>;
   listFiles(id: string, path: string): Promise<FileList>;
   writeFile(id: string, path: string, datos: Uint8Array | string, o?: { mode?: number; mkdir?: boolean }): Promise<FileStat>;
@@ -123,8 +172,15 @@ export class Client {
 }
 
 export class Files {
-  read(path: string): Promise<Uint8Array>;
-  readText(path: string): Promise<string>;
+  read(path: string, o?: { range?: ByteRange }): Promise<Uint8Array>;
+  readText(path: string, o?: { range?: ByteRange }): Promise<string>;
+  move(from: string, to: string, o?: { overwrite?: boolean }): Promise<void>;
+  mkdir(path: string): Promise<FileStat>;
+  chmod(path: string, mode: number | string, o?: { recursive?: boolean }): Promise<FileStat>;
+  replace(path: string, old: string, nuevo: string, o?: { all?: boolean }): Promise<ReplaceResult>;
+  search(path: string, glob: string): Promise<SearchResult>;
+  uploadTar(path: string, data: Uint8Array, o?: { mkdir?: boolean }): Promise<TarResult>;
+  downloadTar(path: string): Promise<Uint8Array>;
   write(path: string, data: string | Uint8Array, o?: { mode?: number; mkdir?: boolean }): Promise<FileStat>;
   delete(path: string): Promise<void>;
   stat(path: string): Promise<FileStat>;
@@ -149,7 +205,27 @@ export class Sessions {
   delete(sid: string): Promise<void>;
 }
 
-export type SandboxList = Sandbox[] & { partial: string | null };
+export class Endpoints {
+  create(port: number, o?: { /** segundos */ ttl?: number; public?: boolean }): Promise<EndpointInfo>;
+  list(): Promise<EndpointInfo[]>;
+  revoke(port: number): Promise<void>;
+}
+
+export class CodeContexts {
+  create(o?: { language?: string; cwd?: string }): Promise<CodeContextInfo>;
+  list(): Promise<CodeContextInfo[]>;
+  get(cid: string): Promise<CodeContextInfo>;
+  delete(cid: string): Promise<void>;
+}
+
+export class Code {
+  readonly contexts: CodeContexts;
+  run(code: string, opts?: CodeRunOptions): AsyncGenerator<CodeEvent>;
+  runWait(code: string, opts?: CodeRunOptions): Promise<CodeResult>;
+  interrupt(context: string): Promise<void>;
+}
+
+export type SandboxList = Sandbox[] & { partial: string | null; nextCursor: string | null };
 export type SandboxBatch = Sandbox[] & { errors: BatchError[] };
 
 export class Sandbox implements AsyncDisposable {
@@ -159,12 +235,21 @@ export class Sandbox implements AsyncDisposable {
   readonly files: Files;
   readonly processes: Processes;
   readonly sessions: Sessions;
+  readonly endpoints: Endpoints;
+  readonly code: Code;
   static create(opts?: CreateOptions): Promise<Sandbox>;
   static createMany(count: number, opts?: CreateManyOptions): Promise<SandboxBatch>;
   static connect(id: string, opts?: ConnectionOptions): Promise<Sandbox>;
-  static list(opts?: ConnectionOptions): Promise<SandboxList>;
+  static list(opts?: ListOptions): Promise<SandboxList>;
   refresh(): Promise<this>;
   renew(ttl?: number): Promise<SandboxInfo>;
+  pause(): Promise<SandboxInfo>;
+  resume(): Promise<SandboxInfo>;
+  setEgress(egress?: string, allowDomains?: string[]): Promise<EgressPolicy>;
+  set_egress(egress?: string, allowDomains?: string[]): Promise<EgressPolicy>;
+  setMetadata(o?: { labels?: Record<string, string>; remove?: string[] }): Promise<SandboxInfo>;
+  fork(o?: { count?: number; ttl?: number }): Promise<Sandbox[]>;
+  metrics(): Promise<SandboxMetrics>;
   delete(): Promise<void>;
   kill(): Promise<void>;
   exec(cmd: string | string[], opts?: ExecOptions): Promise<ExecResult>;

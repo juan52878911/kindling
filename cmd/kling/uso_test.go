@@ -118,7 +118,7 @@ func TestErroresJSON(t *testing.T) {
 		code, try  string
 		contieneEn string
 	}{
-		{[]string{"freeze", "-json", "m1"}, 1, "error", "kling doctor", "cannot talk to the daemon"},
+		{[]string{"freeze", "-json", "m1"}, 1, "error", "kling up   (starts the daemon, or says what is missing)", "cannot talk to the daemon"},
 		{[]string{"ps", "-json", "-x"}, 2, "usage", "kling help ps", "flag provided but not defined"},
 		{[]string{"ps", "-x", "-json"}, 2, "usage", "kling help ps", "flag provided but not defined"},
 		{[]string{"cp", "-json", "m1:/etc/hosts", "-"}, 2, "usage", "kling help cp", "-json needs a destination"},
@@ -135,7 +135,7 @@ func TestErroresJSON(t *testing.T) {
 	}
 	// Sin -json, el texto de siempre.
 	_, errOut, _ := correrKling(t, nil, "freeze", "m1")
-	if !strings.HasPrefix(errOut, "error: ") || !strings.Contains(errOut, "\ntry: kling doctor") {
+	if !strings.HasPrefix(errOut, "error: ") || !strings.Contains(errOut, "\ntry: kling up") {
 		t.Errorf("sin -json: %q", errOut)
 	}
 }

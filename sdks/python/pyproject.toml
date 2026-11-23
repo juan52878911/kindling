@@ -6,8 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "kindling-sandbox"
 version = "0.1.0"
 description = "SDK de Python (solo biblioteca estándar) para la API /v1 del gateway de sandboxes de kindling"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+readme = "README.md"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/juan52878911/kindling"
+Documentation = "https://github.com/juan52878911/kindling/blob/main/docs/quickstart-sandbox.md"
 
 [tool.setuptools]
 packages = ["kindling_sandbox"]

@@ -22,15 +22,15 @@ func modo(t *testing.T, ruta string) os.FileMode {
 // nombres de variables) y los escribía 0644: legibles por cualquier cuenta.
 func TestEstadoYFondosSoloLosLeeElDaemon(t *testing.T) {
 	var permisos []os.FileMode
-	prevE, prevF := escribirEstado, escribirFondosEn
+	prevE, prevF, prevR := escribirEstado, escribirFondosEn, escribirEstadoRapido
 	espia := func(prev func(string, []byte, os.FileMode) error) func(string, []byte, os.FileMode) error {
 		return func(ruta string, datos []byte, perm os.FileMode) error {
 			permisos = append(permisos, perm)
 			return prev(ruta, datos, perm)
 		}
 	}
-	escribirEstado, escribirFondosEn = espia(prevE), espia(prevF)
-	t.Cleanup(func() { escribirEstado, escribirFondosEn = prevE, prevF })
+	escribirEstado, escribirFondosEn, escribirEstadoRapido = espia(prevE), espia(prevF), espia(prevR)
+	t.Cleanup(func() { escribirEstado, escribirFondosEn, escribirEstadoRapido = prevE, prevF, prevR })
 
 	m := newTestManager(t)
 	m.addForTest("e8e8000000000001")

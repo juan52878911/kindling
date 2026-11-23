@@ -1,0 +1,13 @@
+Copia de las especificaciones públicas de OpenSandbox
+(https://github.com/alibaba/OpenSandbox), etiqueta release-1.2.1,
+commit db708c218771a8d311356f0e96552c15df6e097a:
+
+  sandbox-lifecycle.yml  <- specs/sandbox-lifecycle.yml
+  execd-api.yaml         <- specs/execd-api.yaml
+
+Copyright de los autores de OpenSandbox, sin cambios.
+Licencia: Apache License, Version 2.0 (la misma que este repositorio; texto
+completo en el LICENSE de la raíz y en https://www.apache.org/licenses/LICENSE-2.0).
+
+Son la referencia del test de contrato del shim (contrato_test.go): no se
+compilan ni se sirven.

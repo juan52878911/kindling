@@ -8,6 +8,10 @@
   "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
   "files": ["src", "README.md"],
   "engines": { "node": ">=18" },
-  "license": "UNLICENSED",
-  "scripts": { "test": "node --test test/sdk.test.ts" }
+  "devEngines": { "runtime": { "name": "node", "version": ">=22.18", "onFail": "error" } },
+  "license": "Apache-2.0",
+  "scripts": {
+    "pretest": "node -e \"const [a, b] = process.versions.node.split('.').map(Number); if (a < 22 || (a === 22 && b < 18)) { console.error('npm test needs Node >= 22.18 (the tests are .ts files); this is ' + process.versions.node + '. The package itself runs on Node >= 18.'); process.exit(1); }\"",
+    "test": "node --test test/sdk.test.ts test/cobertura.test.ts"
+  }
 }

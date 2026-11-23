@@ -3,6 +3,8 @@ package machine
 import (
 	"os"
 	"strconv"
+
+	knet "github.com/juan52878911/kindling/internal/net"
 )
 
 // Ajustes devuelve los valores EFECTIVOS de los ajustes del daemon que se
@@ -58,6 +60,7 @@ func (m *Manager) Ajustes() map[string]string {
 		"KLING_MAX_SWAP_PCT":        strconv.FormatInt(maxSwapPct(), 10),
 		"KLING_MIN_MEM_LEVEL":       strconv.Itoa(minMemLevel()),
 		"KLING_SHARE_RESERVE_DIV":   strconv.Itoa(shareReserveDiv()),
+		"KLING_NET_POOL_MAX":        strconv.Itoa(knet.TamPoolMax()),
 		"KLING_MAX_MACHINES":        strconv.Itoa(maxMachines()),
 		"KLING_MAX_PARALLEL_BOOT":   strconv.Itoa(maxParallelLaunch()),
 		"KLING_GC_DISK_HIGH":        strconv.Itoa(high),

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"os"
@@ -49,7 +50,7 @@ func minFreeMiB() int {
 
 // meminfoMiB lee un campo de /proc/meminfo en MiB. Devuelve 0 si no se puede.
 func meminfoMiB(key string) int {
-	b, err := os.ReadFile("/proc/meminfo")
+	b, err := meminfoCacheado()
 	if err != nil {
 		return 0
 	}
@@ -69,6 +70,35 @@ func meminfoMiB(key string) int {
 		return kb / 1024
 	}
 	return 0
+}
+
+// meminfoVida es lo que vale una lectura de /proc/meminfo: una reserva pide
+// MemAvailable y MemFree seguidas, y una ráfaga de altas haría decenas de
+// lecturas por segundo. La reserva en vuelo (pendingMiB) cubre el desfase.
+const meminfoVida = 50 * time.Millisecond
+
+var meminfoCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	data []byte
+}
+
+// leerMeminfo es la lectura real, en variable para los tests.
+var leerMeminfo = func() ([]byte, error) { return os.ReadFile("/proc/meminfo") }
+
+func meminfoCacheado() ([]byte, error) {
+	meminfoCache.mu.Lock()
+	defer meminfoCache.mu.Unlock()
+	if meminfoCache.data != nil && time.Since(meminfoCache.at) < meminfoVida {
+		return meminfoCache.data, nil
+	}
+	b, err := leerMeminfo()
+	if err != nil {
+		meminfoCache.data = nil
+		return nil, err
+	}
+	meminfoCache.data, meminfoCache.at = b, time.Now()
+	return b, nil
 }
 
 // availableMiB devuelve la memoria realmente disponible del anfitrión.
@@ -241,11 +271,31 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 		}
 		// Una máquina descongelada mapea su propio volcado, no el dorado: éste SÍ
 		// cambia con lo que el invitado va escribiendo, así que no se cachea.
-		total += allocatedBytes(filepath.Join(m.dir(mc.ID), "mem.file"))
+		// Pero solo existe en las que salieron de un freeze: se recuerda, por
+		// PID, que una máquina no lo tiene (el VMM nuevo de un thaw tiene otro
+		// PID), y no se hace un stat por máquina viva en cada reserva.
+		if pid, ok := m.memSinPropio[mc.ID]; ok && pid == mc.PID {
+			continue
+		}
+		if b, hay := allocatedBytesVia(filepath.Join(m.dir(mc.ID), "mem.file")); hay {
+			total += b
+		} else {
+			if m.memSinPropio == nil {
+				m.memSinPropio = map[string]int{}
+			}
+			m.memSinPropio[mc.ID] = mc.PID
+		}
 	}
 	// Los que están arrancando aún no figuran RUNNING pero ya mapean su dorado.
 	for snap := range m.snapPending {
 		count(snap)
+	}
+	if len(m.memSinPropio) > len(m.byID)+64 {
+		for id := range m.memSinPropio {
+			if _, vive := m.byID[id]; !vive {
+				delete(m.memSinPropio, id)
+			}
+		}
 	}
 	return int(total >> 20)
 }
@@ -253,6 +303,19 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 // statMemFile es os.Stat, en variable para que los tests comprueben que un
 // acierto de allocatedBytesCachedLocked no toca el disco.
 var statMemFile = os.Stat
+
+// allocatedBytesVia es allocatedBytes por statMemFile; hay=false si el
+// fichero no existe.
+func allocatedBytesVia(path string) (int64, bool) {
+	fi, err := statMemFile(path)
+	if err != nil {
+		return 0, false
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return st.Blocks * 512, true
+	}
+	return fi.Size(), true
+}
 
 // allocatedBytesCachedLocked es allocatedBytes con caché para el mem.file
 // INMUTABLE de un snapshot dorado (M-12). key es el nombre del snapshot.

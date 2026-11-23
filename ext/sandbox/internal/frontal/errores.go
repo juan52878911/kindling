@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -52,7 +53,25 @@ type conPublico interface{ publico() string }
 // para quien llama y aplastarlos con un 502 perdería justo eso.
 func fail(w http.ResponseWriter, code int, err error) {
 	code, msg := codigoYMensaje(code, err)
-	writeJSON(w, code, api.Error{Message: msg})
+	writeJSON(w, code, api.Error{Message: msg, Code: codigoDeError(code, err)})
+}
+
+// codigoDeError es el code estable de una respuesta de error: el que trae el
+// daemon si lo trae (no_claimable, machine_limit...) y, si no, el derivado del
+// estado HTTP final.
+func codigoDeError(status int, err error) api.ErrorCode {
+	if c := api.CodeOf(err); c != "" {
+		return c
+	}
+	if c := api.CodeForStatus(status); c != "" {
+		return c
+	}
+	// Estados sin código propio en pkg/api (405, 422...): su texto en
+	// snake_case ("method_not_allowed").
+	if t := http.StatusText(status); t != "" {
+		return api.ErrorCode(strings.ReplaceAll(strings.ToLower(t), " ", "_"))
+	}
+	return ""
 }
 
 // codigoYMensaje es lo que fail contesta: el código final y el mensaje que ve
@@ -148,3 +167,54 @@ func mensajes(errs []error) []string {
 	}
 	return out
 }
+
+// errorDeFlujo es el texto de un fallo que ocurre cuando el flujo ya empezó
+// (tras el 200): pasa por el mismo saneado que fail, para que no lleve la ruta
+// del socket ni la dirección del host.
+func errorDeFlujo(err error) string {
+	_, msg := codigoYMensaje(http.StatusBadGateway, err)
+	return msg
+}
+
+// noRuta contesta un 404 JSON a una ruta que no existe.
+func noRuta(w http.ResponseWriter, r *http.Request) {
+	fail(w, http.StatusNotFound, fmt.Errorf("no route %s %s", r.Method, r.URL.Path))
+}
+
+// escritorJSON deja pasar una respuesta salvo los 404 y 405 en texto plano
+// del ServeMux, que sustituye por el JSON {message, code} de todo el API.
+type escritorJSON struct {
+	http.ResponseWriter
+	r        *http.Request
+	sustituy bool
+}
+
+func (e *escritorJSON) WriteHeader(code int) {
+	if (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) && !e.sustituy {
+		e.sustituy = true
+		e.ResponseWriter.Header().Del("Content-Type")
+		e.ResponseWriter.Header().Del("X-Content-Type-Options")
+		if code == http.StatusMethodNotAllowed {
+			fail(e.ResponseWriter, code, fmt.Errorf("%s is not allowed on this route", e.r.Method))
+		} else {
+			noRuta(e.ResponseWriter, e.r)
+		}
+		return
+	}
+	e.ResponseWriter.WriteHeader(code)
+}
+
+func (e *escritorJSON) Write(b []byte) (int, error) {
+	if e.sustituy {
+		return len(b), nil // el texto plano del mux se descarta
+	}
+	return e.ResponseWriter.Write(b)
+}
+
+func (e *escritorJSON) Flush() {
+	if f, ok := e.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (e *escritorJSON) Unwrap() http.ResponseWriter { return e.ResponseWriter }

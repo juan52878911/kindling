@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,9 @@ type evCodigo struct {
 	Evalue    string   `json:"evalue"`
 	Traceback []string `json:"traceback"`
 	OK        *bool    `json:"ok"`
+
+	Results        map[string]string `json:"results"`
+	ExecutionCount int               `json:"execution_count"`
 }
 
 // daemonReal pone delante del daemon falso uno que SÍ ejecuta: exec, procesos
@@ -44,6 +48,18 @@ type daemonReal struct {
 	info      map[int]api.ProcessInfo
 	sinPython bool
 	execs     []api.ExecRequest
+	// corta hace que el exec "run" mande un evento y corte la conexión.
+	corta bool
+	// sinInterprete: el exec que busca ese intérprete contesta 127.
+	sinInterprete string
+	senales       []string
+	// antesMv, si no es nil, corre justo antes de ejecutar un mv: es la carrera
+	// entre la comprobación del destino y el mv.
+	antesMv func(req api.ExecRequest)
+	// arranques son los procesos de fondo que se pidieron.
+	arranques []api.ProcessStartRequest
+	// dirsCodigo son los directorios de contexto que el daemon vio escribir.
+	dirsCodigo []string
 }
 
 func (d *daemonReal) vivo(pid int) bool {
@@ -77,6 +93,22 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		t.Skipf("no unix sockets here: %v", err)
 	}
 	d := &daemonReal{procs: map[int]chan struct{}{}, info: map[int]api.ProcessInfo{}}
+	// Cada contexto deja un directorio /tmp/.kindling-code-* en esta máquina
+	// (el daemon corre de verdad). Este Cleanup se registra antes que los que
+	// matan los procesos (se registran al arrancarlos), así que corre después.
+	t.Cleanup(func() {
+		d.mu.Lock()
+		dirs := append([]string(nil), d.dirsCodigo...)
+		d.mu.Unlock()
+		for _, dir := range dirs {
+			for i := 0; i < 20; i++ {
+				if os.RemoveAll(dir) == nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	})
 	detras := f.endpoint
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) { r.URL.Scheme, r.URL.Host = "http", "daemon" },
@@ -94,16 +126,40 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		d.mu.Lock()
 		d.execs = append(d.execs, req)
+		antesMv := d.antesMv
 		sinPy := d.sinPython
+		sinInt := d.sinInterprete
+		corta := d.corta && len(req.Cmd) > 2 && req.Cmd[2] == "run"
 		d.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(200)
 		enc := json.NewEncoder(w)
 		fl := w.(http.Flusher)
-		if sinPy && len(req.Cmd) > 2 && strings.Contains(req.Cmd[2], "python3") {
+		if corta {
+			_ = enc.Encode(api.ExecEvent{Stream: "stdout", Data: []byte("{\"type\":\"stdout\",\"text\":\"x\"}\n")})
+			fl.Flush()
+			panic(http.ErrAbortHandler)
+		}
+		if len(req.Cmd) > 2 && ((sinPy && strings.Contains(req.Cmd[2], "python3")) ||
+			(sinInt != "" && strings.Contains(req.Cmd[2], "command -v "+sinInt+" "))) {
 			code := 127
 			_ = enc.Encode(api.ExecEvent{Exit: &code})
 			return
+		}
+		if req.Cmd[0] == "mv" {
+			if antesMv != nil {
+				antesMv(req)
+			}
+			if runtime.GOOS == "darwin" {
+				// El mv de BSD no tiene -T (el del invitado, Linux, sí).
+				var sin []string
+				for _, a := range req.Cmd {
+					if a != "-T" {
+						sin = append(sin, a)
+					}
+				}
+				req.Cmd = sin
+			}
 		}
 		c := exec.CommandContext(r.Context(), req.Cmd[0], req.Cmd[1:]...)
 		c.Stdin = bytes.NewReader(req.Stdin)
@@ -137,11 +193,46 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		code := c.ProcessState.ExitCode()
 		_ = enc.Encode(api.ExecEvent{Exit: &code})
 	})
+	// stat y lectura de verdad: los ficheros de estas pruebas viven en esta
+	// máquina (los escribe el PUT de abajo). Lo que no existe aquí (tar, listados,
+	// ficheros del falso) pasa al daemon falso de detrás.
+	m.HandleFunc("GET /machines/{ref}/files", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("list") != "" || q.Get("format") != "" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		fi, err := os.Stat(q.Get("path"))
+		if err != nil {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		if q.Get("stat") == "1" {
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: fi.Size(), Mode: "0755", IsDir: fi.IsDir()})
+			return
+		}
+		b, err := os.ReadFile(q.Get("path"))
+		if err != nil {
+			failDaemon(w, 500, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(b)
+	})
 	m.HandleFunc("PUT /machines/{ref}/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") == "tar" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
 		p := r.URL.Query().Get("path")
 		mode, _ := strconv.ParseUint(r.URL.Query().Get("mode"), 8, 32)
 		if mode == 0 {
 			mode = 0o644
+		}
+		if dir, ok := strings.CutPrefix(filepath.Dir(p), dirCodigo); ok && dir != "" {
+			d.mu.Lock()
+			d.dirsCodigo = append(d.dirsCodigo, filepath.Dir(p))
+			d.mu.Unlock()
 		}
 		b := new(bytes.Buffer)
 		_, _ = b.ReadFrom(r.Body)
@@ -154,6 +245,9 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 	m.HandleFunc("POST /machines/{ref}/processes", func(w http.ResponseWriter, r *http.Request) {
 		var req api.ProcessStartRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.mu.Lock()
+		d.arranques = append(d.arranques, req)
+		d.mu.Unlock()
 		c := exec.Command(req.Cmd[0], req.Cmd[1:]...)
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := c.Start(); err != nil {
@@ -196,6 +290,25 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		w.WriteHeader(204)
 	})
+	m.HandleFunc("POST /machines/{ref}/processes/{pid}/signal", func(w http.ResponseWriter, r *http.Request) {
+		pid, _ := strconv.Atoi(r.PathValue("pid"))
+		var req api.ProcessSignalRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		sig := syscall.SIGTERM
+		if strings.TrimPrefix(req.Signal, "SIG") == "INT" {
+			sig = syscall.SIGINT
+		}
+		d.mu.Lock()
+		_, ok := d.procs[pid]
+		d.senales = append(d.senales, req.Signal)
+		d.mu.Unlock()
+		if !ok {
+			failDaemon(w, 404, os.ErrNotExist)
+			return
+		}
+		_ = syscall.Kill(-pid, sig)
+		writeJSON(w, 200, api.ProcessInfo{PID: pid, State: api.ProcessRunning})
+	})
 	m.Handle("/", proxy)
 	srv := httptest.NewUnstartedServer(m)
 	srv.Listener = ln
@@ -217,7 +330,8 @@ func montarCodigo(t *testing.T) *bancoCodigo {
 	d := ponerReal(t, f)
 	srv, _ := montar(t, map[string]*falso{"a": f})
 	sb := crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
-	return &bancoCodigo{srv: srv, d: d, base: "/v1/sandboxes/" + sb.ID}
+	b := &bancoCodigo{srv: srv, d: d, base: "/v1/sandboxes/" + sb.ID}
+	return b
 }
 
 func (b *bancoCodigo) contexto(t *testing.T) string {

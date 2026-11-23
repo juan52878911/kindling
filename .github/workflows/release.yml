@@ -42,6 +42,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27.4'
@@ -70,6 +72,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
           # apidiff compara con la etiqueta anterior: hacen falta las etiquetas.
           fetch-depth: 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -131,6 +135,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
 
       - name: set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -138,10 +144,9 @@ jobs:
           # La toolchain con la que se compila lo publicado, no el mínimo de los
           # go.mod (go 1.24): la stdlib va dentro del binario y sus CVE con ella.
           go-version: '1.27.4'
-          cache: true
-          cache-dependency-path: |
-            go.mod
-            ext/*/go.mod
+          # Sin caché: lo que se compila aquí se firma, y la caché de Go la
+          # puede escribir cualquier otro workflow del repo.
+          cache: false
 
       - name: compute version
         id: ver
@@ -212,11 +217,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # Como en build: la toolchain parcheada, no el mínimo de vz/go.mod.
           go-version: '1.27.4'
-          cache-dependency-path: vz/go.sum
+          # Sin caché, como en build: lo que sale de aquí se firma.
+          cache: false
       # vz/ es un módulo aparte con cgo que la matriz de test (ubuntu) no ve:
       # sus tests, como el job vz de ci.yml, antes de compilar lo publicado.
       # No arrancan ninguna VM (el VMM es un doble).
@@ -277,6 +285,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: bin-linux-*
@@ -360,6 +370,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
 
       - name: compute version
         id: ver
@@ -525,6 +537,32 @@ jobs:
           go run ./internal/upgrade/firmar verify -tag "$VERSION" -in release/SHA256SUMS
           cat release/SHA256SUMS.minisig
 
+      # Segunda firma, con ssh-keygen: install.sh la comprueba sin minisign y,
+      # a diferencia de la comprobación con el kling bajado, no depende del
+      # binario que se instala. Lo firmado es «tag:<versión>» y el SHA256SUMS
+      # (namespace kling-release). Sin el secreto no se publica el .sshsig y
+      # se avisa; la clave pública va en KLING_RELEASE_SSH_SIGNERS de install.sh.
+      - name: firmar SHA256SUMS con ssh-keygen
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          KLING_RELEASE_SSH_KEY: ${{ secrets.KLING_RELEASE_SSH_KEY }}
+        run: |
+          set -eu
+          if [ -z "$KLING_RELEASE_SSH_KEY" ]; then
+            echo "::warning::KLING_RELEASE_SSH_KEY no está en el environment release: $VERSION sale sin SHA256SUMS.sshsig (install.sh sin minisign lo comprobará con el kling bajado)"
+            exit 0
+          fi
+          t="$(mktemp -d)"
+          trap 'rm -rf "$t"' EXIT
+          umask 077
+          printf '%s\n' "$KLING_RELEASE_SSH_KEY" > "$t/key"
+          { printf 'tag:%s\n' "$VERSION"; cat release/SHA256SUMS; } > "$t/msg"
+          ssh-keygen -Y sign -q -f "$t/key" -n kling-release "$t/msg"
+          mv "$t/msg.sig" release/SHA256SUMS.sshsig
+          printf 'kling-release %s\n' "$(ssh-keygen -y -f "$t/key" | cut -d' ' -f1-2)" > "$t/allowed"
+          ssh-keygen -Y verify -f "$t/allowed" -I kling-release -n kling-release \
+            -s release/SHA256SUMS.sshsig < "$t/msg"
+
       # Procedencia SLSA de cada asset (firma, fórmula y SHA256SUMS incluidos)
       # con el OIDC del job: se comprueba con `gh attestation verify`.
       - name: atestación de procedencia
@@ -590,7 +628,8 @@ jobs:
           # Lo que tiene que haber: el contrato (want.txt) y lo que este job
           # le añade (SHA256SUMS, la fórmula y, si se firmó, la firma).
           { cat want.txt; echo SHA256SUMS; echo kling.rb
-            if [ -f release/SHA256SUMS.minisig ]; then echo SHA256SUMS.minisig; fi; } | sort > final.txt
+            if [ -f release/SHA256SUMS.minisig ]; then echo SHA256SUMS.minisig; fi
+            if [ -f release/SHA256SUMS.sshsig ]; then echo SHA256SUMS.sshsig; fi; } | sort > final.txt
           (cd release && ls -1) | sort > local.txt
           diff -u final.txt local.txt || { echo "::error::release/ is not the expected list (- missing, + extra)"; exit 1; }
           # Y lo que GitHub dice tener, fichero a fichero: nombre, tamaño y
@@ -639,6 +678,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -695,6 +736,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
       - name: set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:

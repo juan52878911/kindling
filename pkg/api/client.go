@@ -170,7 +170,41 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return c.doWith(c.http, ctx, method, path, body, out)
 }
 
+const (
+	// MaxResponseBytes es lo máximo que Client decodifica de una respuesta JSON.
+	MaxResponseBytes = 16 << 20
+	// MaxListResponseBytes acota las listas que salen del agente del invitado
+	// (procesos, sesiones): el daemon corta en el mismo valor.
+	// Se deriva de lo máximo que el agente deja guardar: 64 sesiones con el
+	// entorno al tope (16 MiB) más margen para el resto del JSON.
+	MaxListResponseBytes = SessionMax*SessionMaxEnv + 1<<20
+	// MaxFileListBytes acota la respuesta de ListFiles.
+	MaxFileListBytes = 8 << 20
+)
+
+// ErrResponseTooLarge es el error cuando una respuesta JSON pasa del tope.
+var ErrResponseTooLarge = errors.New("api: response exceeds the size limit")
+
+// decodeAcotado decodifica un JSON de r con un tope de max bytes; si se pasa
+// falla con ErrResponseTooLarge en vez de truncar.
+func decodeAcotado(r io.Reader, max int64, out any) error {
+	lr := &io.LimitedReader{R: r, N: max + 1}
+	err := json.NewDecoder(lr).Decode(out)
+	if lr.N <= 0 {
+		return ErrResponseTooLarge
+	}
+	return err
+}
+
+func (c *Client) doMax(ctx context.Context, max int64, method, path string, body, out any) error {
+	return c.doWithMax(c.http, max, ctx, method, path, body, out)
+}
+
 func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path string, body, out any) error {
+	return c.doWithMax(cl, MaxResponseBytes, ctx, method, path, body, out)
+}
+
+func (c *Client) doWithMax(cl *http.Client, max int64, ctx context.Context, method, path string, body, out any) error {
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -202,7 +236,7 @@ func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path strin
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return decodeAcotado(resp.Body, max, out)
 }
 
 func (c *Client) Info(ctx context.Context) (*Info, error) {
@@ -635,7 +669,7 @@ func (c *Client) RunHooks(ctx context.Context, ref string, wait time.Duration) (
 
 func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
 	var l []*Snapshot
-	return l, c.do(ctx, http.MethodGet, "/snapshots", nil, &l)
+	return l, c.doMax(ctx, topeAnotaciones, http.MethodGet, "/snapshots", nil, &l)
 }
 
 // RemoveImage retira una imagen del disco.
@@ -688,7 +722,10 @@ func (c *Client) Guest(ctx context.Context, ref string, r GuestRequest) (*GuestR
 	// descongelándose, y la herramienta que se invoca puede tardar lo suyo.
 	// Acotar esto por cabeceras es acotar el trabajo del usuario, no la salud
 	// del daemon.
-	if err := c.doWith(c.long, ctx, "POST", "/machines/"+url.PathEscape(ref)+"/guest", r, &out); err != nil {
+	// El tope sigue al contrato: el cuerpo va como cadena JSON (puede doblar
+	// con los escapes) y MaxBodyBytes llega hasta GuestMaxBodyCap.
+	tope := 2*max(r.MaxBodyBytes, GuestMaxBody) + 1<<20
+	if err := c.doWithMax(c.long, tope, ctx, "POST", "/machines/"+url.PathEscape(ref)+"/guest", r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

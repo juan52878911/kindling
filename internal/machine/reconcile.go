@@ -30,14 +30,62 @@ import (
 // vivas. Sin esto, kling afirmaría cosas falsas: máquinas "running" cuyo proceso
 // murió, o namespaces de máquinas que ya no existen.
 func (m *Manager) reconcile() {
-	m.resyncTrasReconcile(m.reconciliarEstado())
+	resync, limpieza := m.reconciliarEstado()
+	// Los desmontajes de red, sin m.mu y de 8 en 8: cada uno son procesos
+	// (ip netns del, ip link del) y con cientos de máquinas en serie bajo el
+	// candado el daemon tardaba segundos en escuchar (A14).
+	limpieza.desmontarRedes(m)
+	m.resyncTrasReconcile(resync)
+	m.volumenesTrasReconcile(limpieza.volumenes)
 	// Fuera de m.mu: escanea los procesos (ver killOrphanVMMs).
 	m.killOrphanVMMs()
+	// Tras matar a los huérfanos: el cgroup de un VMM que sigue vivo no se
+	// borra, y releaseCPU reintentaba 20×25 ms por cada uno.
+	for _, id := range limpieza.cpu {
+		m.releaseCPU(id)
+	}
+}
+
+// limpiezaReconcile es lo que reconciliarEstado deja para hacer sin m.mu.
+type limpiezaReconcile struct {
+	redes []redADesmontar
+	cpu   []string
+	// volumenes son las plantillas readoptadas tras un commit cortado que
+	// hay que dejar con sus volúmenes montados (volumenesTrasReconcile).
+	volumenes []string
+}
+
+type redADesmontar struct {
+	n  *knet.Net
+	id string
+}
+
+// sinVMM anota la limpieza de una máquina cuyo VMM ya no está.
+func (l *limpiezaReconcile) sinVMM(mc *api.Machine) {
+	l.redes = append(l.redes, redADesmontar{knet.Plan(mc.NetIndex, mc.ID), mc.ID})
+	l.cpu = append(l.cpu, mc.ID)
+}
+
+// desmontarRedes desmonta las redes anotadas, de 8 en 8.
+func (l *limpiezaReconcile) desmontarRedes(m *Manager) {
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, r := range l.redes {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			m.desmontarRed(r.n, r.id)
+		}()
+	}
+	wg.Wait()
 }
 
 // reconciliarEstado es reconcile salvo la caza de VMMs huérfanos. Devuelve
 // las máquinas readoptadas que necesitan un resync (un thaw cortado).
-func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
+func (m *Manager) reconciliarEstado() (resyncPendientes []string, limpieza *limpiezaReconcile) {
+	limpieza = &limpiezaReconcile{}
 	// Lo primero es MIRAR, y hacerlo fuera del lock porque lee /proc.
 	//
 	// El estado en disco no es la verdad: se escribe con debounce y fuera del
@@ -102,6 +150,12 @@ func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
 			delete(live, mc.ID)
 		}
 		if pid, alive := live[mc.ID]; alive {
+			// Un commit cortado tras soltar los volúmenes (releaseVolumes): la
+			// plantilla sigue sin ellos. Una en pausa no los soltó (el commit no
+			// los suelta si ya estaba pausada) y VolumeWait no los tiene montados.
+			if previas[mc.ID].commitRevertido && len(mc.Volumes) > 0 && !mc.VolumeWait && mc.State != api.StatePaused {
+				limpieza.volumenes = append(limpieza.volumenes, mc.ID)
+			}
 			// Un thaw cortado tras cargar el volcado (el sello ya retirado, la
 			// máquina aún warm en disco): su invitado corre, o corre ahora que
 			// readoptable lo reanudó, con el reloj y la entropía del volcado.
@@ -120,6 +174,11 @@ func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
 				mc.State = api.StateRunning
 			}
 			mc.PID = pid
+			// La red sobrevivió con el VMM: que freeze+thaw no la rehaga entera
+			// y que soltarRedesDormidas la vea (A12).
+			if existe(filepath.Join("/var/run/netns", nsName(mc.ID))) {
+				m.redMontada.Store(mc.ID, true)
+			}
 			liveCg[cgName(mc.ID)] = true
 			// No es hijo nuestro: su salida se espera con el kernel, no con
 			// cmd.Wait (ver esperarVMM). Nunca llama a nada en el acto, así
@@ -183,8 +242,23 @@ func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
 				mc.State = api.StateStopped
 			}
 			mc.PID = 0
-			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
-			m.releaseCPU(mc.ID)
+			limpieza.sinVMM(mc)
+
+		case api.StateCreated:
+			// Sin VMM: el reinicio cortó el arranque entre persistirYa y el
+			// spawn (o el host se reinició). Ni TTL ni gcFailed la recogían
+			// (A10). Una copia sin entregar queda failed; el resto, stopped.
+			if copiaSinEntregar(mc) {
+				log.Printf("reconcile: %s (%s) was created from %s and its VMM is gone: failed",
+					mc.Name, shortID(mc.ID), origenCopia(mc))
+				ahora := time.Now()
+				mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errCopiaCortada, &ahora
+			} else {
+				log.Printf("reconcile: %s (%s) was created and its VMM is gone: stopped", mc.Name, shortID(mc.ID))
+				mc.State = api.StateStopped
+			}
+			mc.PID = 0
+			limpieza.sinVMM(mc)
 
 		case api.StateWarm, api.StateStopped, api.StateFailed:
 			// Una warm sin volcado que valga no se descongela nunca: el caso
@@ -220,8 +294,7 @@ func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
 			}
 			// Sin proceso: ni namespace ni cgroup hacen nada. Se recrean al
 			// arrancarla o descongelarla.
-			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
-			m.releaseCPU(mc.ID)
+			limpieza.sinVMM(mc)
 		}
 	}
 	m.persist()
@@ -234,7 +307,7 @@ func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
 
 	m.sweepMachineDirs()
 	fc.BarrerEnlaces(m.root)
-	return resyncPendientes
+	return resyncPendientes, limpieza
 }
 
 // killOrphanVMMs mata los procesos de firecracker cuya microVM ya no existe o
@@ -667,6 +740,11 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 		quitarMarcaCommit(dir)
 		hay = false
 	}
+	if hay && previa.commitRevertido {
+		log.Printf("reconcile: %s (%s): its VMM (pid %d) was in the middle of a commit; gave it its own disk back and readopted it",
+			mc.Name, shortID(mc.ID), pid)
+		return true
+	}
 	if hay {
 		log.Printf("reconcile: %s (%s): its VMM (pid %d) was in the middle of a commit; stopping it: failed",
 			mc.Name, shortID(mc.ID), pid)
@@ -742,6 +820,109 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 	return true
 }
 
+// reintentoCommitSinRespuesta es lo que reconcile reintenta, en total, con un
+// VMM de un commit cortado que no contesta (R3-5): reconcile corre antes de
+// que el daemon escuche, y uno colgado no puede retrasarlo un plazoVolcado.
+const reintentoCommitSinRespuesta = 10 * time.Second
+
+// revertirCommitCortado devuelve a un VMM vivo, cuyo commit cortó el reinicio,
+// su overlay propio (el invitado no llegó a escribir en el dorado: estaba en
+// pausa) y lo reanuda si no era una pausa pedida. Quita la marca solo si todo
+// salió bien; si no, devuelve false y readoptable lo da por failed.
+func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, pausada bool, memMiB int) bool {
+	c := m.clienteReconcile(id, pid)
+	overlay := filepath.Join(dir, "overlay.ext4")
+	inicio := time.Now()
+	intentar := func(plazo time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), plazo)
+		defer cancel()
+		return c.PatchDrive(ctx, "overlay", overlay)
+	}
+	err := intentar(plazoEstadoVMM)
+	switch {
+	case err != nil && vmmContestaOcupado(err):
+		// Un VMM que CONTESTA «ocupado» sigue volcando la memoria (una
+		// plantilla grande): se le espera lo que un volcado (R29), no los
+		// plazoEstadoVMM de una consulta.
+		log.Printf("reconcile: %s: its VMM is still busy with the dump of a cut commit; waiting up to %s", shortID(id), plazoVolcado(memMiB))
+		fin := inicio.Add(plazoVolcado(memMiB))
+		for err != nil && vmmContestaOcupado(err) && time.Until(fin) > 500*time.Millisecond {
+			time.Sleep(500 * time.Millisecond)
+			err = intentar(min(plazoEstadoVMM, time.Until(fin)))
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		// Sin respuesta no se sabe si vuelca o está colgado: se reintenta,
+		// pero como mucho reintentoCommitSinRespuesta en total. Después,
+		// failed: killOrphanVMMs para el VMM y un kling start la arranca.
+		fin := inicio.Add(reintentoCommitSinRespuesta)
+		for errors.Is(err, context.DeadlineExceeded) && time.Until(fin) > 0 {
+			err = intentar(min(plazoEstadoVMM, time.Until(fin)))
+		}
+		if err != nil {
+			log.Printf("reconcile: %s: the VMM of a cut commit hasn't answered in %s; giving up on it",
+				shortID(id), time.Since(inicio).Round(time.Millisecond))
+		}
+	}
+	if err != nil {
+		log.Printf("reconcile: %s: couldn't give the overlay back to the VMM of a cut commit: %v", shortID(id), err)
+		return false
+	}
+	if estado == "Paused" && !pausada {
+		ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
+		defer cancel()
+		if err := c.Resume(ctx); err != nil {
+			log.Printf("reconcile: %s: couldn't resume the VMM of a cut commit: %v", shortID(id), err)
+			return false
+		}
+	}
+	quitarMarcaCommit(dir)
+	return true
+}
+
+// vmmContestaOcupado dice si err es la RESPUESTA de un VMM que dice estar
+// ocupado (un volcado en marcha). Un plazo vencido no lo es: no se sabe si
+// vuelca o está colgado (ver revertirCommitCortado).
+func vmmContestaOcupado(err error) bool {
+	if !errorDelVMM(err) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	t := strings.ToLower(err.Error())
+	return strings.Contains(t, "busy") || strings.Contains(t, "in progress")
+}
+
+// devolverVolumenes devuelve los volúmenes a una plantilla readoptada tras un
+// commit cortado; variable para los tests.
+var devolverVolumenes = func(m *Manager, mc *api.Machine) error { return m.acquireVolumes(mc) }
+
+// volumenesTrasReconcile hace, fuera de m.mu y a la vez, acquireVolumes de las
+// máquinas ids (R6): un commit cortado tras releaseVolumes las dejó sin
+// volúmenes, y seguir así las haría escribir en su overlay. Si no se pueden
+// devolver, la máquina no sigue en marcha: failed, como en commit.
+func (m *Manager) volumenesTrasReconcile(ids []string) {
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		m.mu.RLock()
+		var copia api.Machine
+		viva := m.byID[id]
+		if viva != nil {
+			copia = *viva
+		}
+		m.mu.RUnlock()
+		if viva == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := devolverVolumenes(m, &copia); err != nil {
+				log.Printf("reconcile: %s: its commit was cut and the template couldn't mount its volumes again: %v", shortID(id), err)
+				m.fail(viva, fmt.Errorf("commit was cut and the template could not get its volumes back: %w", err))
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 // estadoNoArrancado es lo que contesta el VMM (Firecracker, kling-vz y
 // kling-hv) antes de cargar un volcado o arrancar un invitado.
 const estadoNoArrancado = "Not started"
@@ -757,6 +938,9 @@ type previaReadopcion struct {
 	// reanudado: se le pidió el Resume, con el resultado en errReanudar.
 	reanudado   bool
 	errReanudar error
+	// commitRevertido: el VMM de un commit cortado recuperó su overlay propio
+	// (y se reanudó, si no estaba en pausa): se readopta como cualquier otro.
+	commitRevertido bool
 }
 
 // prepararReadopcion hace, fuera de m.mu, la E/S de readoptable para cada VMM
@@ -772,12 +956,23 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 		id, dir   string
 		pid       int
 		congelada *time.Time
+		pausada   bool
+		memMiB    int
 	}
-	var cands []candidata
+	var cands, commits []candidata
 	var sinArrancar []string
 	m.mu.RLock()
 	for id, pid := range live {
 		mc := m.byID[id]
+		// Un commit cortado con su VMM vivo (A11): se le devuelve su disco.
+		if mc != nil && !copiaSinEntregar(mc) {
+			if hay, pidMarca := marcaCommitDe(m.dir(id)); hay && (pidMarca <= 0 || pidMarca == pid) &&
+				pidCongeladoApuntado(m.dir(id)) != pid {
+				commits = append(commits, candidata{id: id, dir: m.dir(id), pid: pid, pausada: mc.State == api.StatePaused,
+					memMiB: max(mc.MemMiB, mc.MemMaxMiB)})
+				continue
+			}
+		}
 		// Un thaw cortado antes de cargar: el VMM no ha cargado nada, así
 		// que el volcado sigue intacto y su sello (que el thaw convirtió en
 		// la marca en curso) puede volver.
@@ -812,6 +1007,16 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	for _, c := range commits {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok := m.revertirCommitCortado(c.id, c.dir, c.pid, estados[c.id], c.pausada, c.memMiB)
+			mu.Lock()
+			out[c.id] = previaReadopcion{commitRevertido: ok}
+			mu.Unlock()
+		}()
+	}
 	for _, c := range cands {
 		if pidCongeladoApuntado(c.dir) == c.pid {
 			continue

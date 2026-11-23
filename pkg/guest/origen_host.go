@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Cómo llega el host al agente por TCP, en cada backend:
@@ -87,6 +88,56 @@ func hexIPv4(s string, out *[4]byte) bool {
 	return true
 }
 
+var (
+	rutasMu    sync.Mutex
+	rutasCache []rutaIPv4
+	rutasHay   bool
+)
+
+// invalidarRutas olvida la tabla leída.
+func invalidarRutas() {
+	rutasMu.Lock()
+	rutasCache, rutasHay = nil, false
+	rutasMu.Unlock()
+}
+
+// rutasCacheadas lee /proc/net/route una vez y la repite hasta invalidarRutas
+// (en cada /resync con restauración): parsearla en cada petición costaba lo
+// que /resync no puede perder. Un error no se cachea.
+func rutasCacheadas() ([]rutaIPv4, error) {
+	rutasMu.Lock()
+	defer rutasMu.Unlock()
+	if rutasHay {
+		return rutasCache, nil
+	}
+	rs, err := rutasInvitado()
+	if err != nil {
+		return nil, err
+	}
+	rutasCache, rutasHay = rs, true
+	return rs, nil
+}
+
+// esLaPasarela dice si ip es la pasarela de una ruta por defecto activa.
+func esLaPasarela(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	rs, err := rutasCacheadas()
+	if err != nil {
+		return false
+	}
+	var a [4]byte
+	copy(a[:], ip4)
+	for _, r := range rs {
+		if r.flags&rtfUp != 0 && esPorDefecto(r) && r.gw == a {
+			return true
+		}
+	}
+	return false
+}
+
 // llegaPorLaPasarela dice si ip es la pasarela de la ruta por defecto o si
 // su mejor ruta es la de por defecto (ver arriba).
 func llegaPorLaPasarela(ip net.IP) bool {
@@ -94,7 +145,7 @@ func llegaPorLaPasarela(ip net.IP) bool {
 	if ip4 == nil {
 		return false // el host nunca habla IPv6 con el agente
 	}
-	rs, err := rutasInvitado()
+	rs, err := rutasCacheadas()
 	if err != nil {
 		return false
 	}

@@ -410,8 +410,10 @@ func (a *app) roleRemove(ctx context.Context, ref, owner, name string) error {
 // lo crea este comando: lo crearon las migraciones). Clave nueva generada aquí
 // (al invitado, solo su verificador), LOGIN, y su línea de pg_hba.conf. Un
 // superusuario no: por red solo entran roles sin poderes de administración.
-// No le cambia ni un privilegio. Las copias que nacen de esta no heredan la
-// línea (purgeInheritedRoles) ni la clave (es de este host y esta copia).
+// No le cambia ni un privilegio. Las copias que nacen de esta heredan el
+// verificador SCRAM y el LOGIN (están en pg_authid, dentro del disco), pero
+// no la línea de pg_hba.conf (purgeInheritedRoles la quita), así que no entran
+// por red; la clave en claro solo la guarda este host, para esta copia.
 func (a *app) roleLogin(ctx context.Context, ref, owner, name string) error {
 	mc, _, db, err := a.roleTarget(ctx, ref, owner, name)
 	if err != nil {

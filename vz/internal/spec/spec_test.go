@@ -333,3 +333,43 @@ func TestValidateVCPUs(t *testing.T) {
 		}
 	}
 }
+
+func TestReapuntar(t *testing.T) {
+	base := func() *Spec {
+		return &Spec{
+			BootSource: &BootSource{KernelImagePath: "/x/k", BootArgs: "a=b"},
+			Drives: []Drive{
+				{DriveID: "rootfs", PathOnHost: "/x/r", IsReadOnly: true},
+				{DriveID: "overlay", PathOnHost: "/x/o"},
+			},
+		}
+	}
+	ok := &Repoint{Kernel: "/k", Drives: map[string]RepointDrive{
+		"rootfs": {Path: "/r", ReadOnly: true}, "overlay": {Path: "/o"}, "sobra": {Path: "/z"},
+	}}
+	s := base()
+	if err := s.Reapuntar(ok); err != nil {
+		t.Fatal(err)
+	}
+	if s.BootSource.KernelImagePath != "/k" || s.BootSource.BootArgs != "a=b" || s.Drives[0].PathOnHost != "/r" || s.Drives[1].PathOnHost != "/o" {
+		t.Fatalf("spec = %+v %+v", s.BootSource, s.Drives)
+	}
+	if err := base().Reapuntar(nil); err != nil {
+		t.Fatal(err)
+	}
+	malos := map[string]*Repoint{
+		"sin kernel":  {Drives: ok.Drives},
+		"falta disco": {Kernel: "/k", Drives: map[string]RepointDrive{"rootfs": {Path: "/r", ReadOnly: true}}},
+		"ro distinto": {Kernel: "/k", Drives: map[string]RepointDrive{"rootfs": {Path: "/r"}, "overlay": {Path: "/o"}}},
+		"ruta vacía":  {Kernel: "/k", Drives: map[string]RepointDrive{"rootfs": {ReadOnly: true}, "overlay": {Path: "/o"}}},
+	}
+	for name, rp := range malos {
+		s := base()
+		if err := s.Reapuntar(rp); err == nil {
+			t.Errorf("%s: sin error", name)
+		}
+		if !reflect.DeepEqual(s, base()) {
+			t.Errorf("%s: dejó la spec a medias", name)
+		}
+	}
+}

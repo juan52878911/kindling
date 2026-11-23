@@ -37,6 +37,8 @@ esto es lo que el núcleo no debe llevar:
 No es aislamiento entre inquilinos: comparten daemon y host. Es reparto y
 contabilidad. Quien necesite aislamiento fuerte, hosts separados.
 
+Para crear el primer sandbox paso a paso (en inglés): [`docs/quickstart-sandbox.md`](../../docs/quickstart-sandbox.md); ejemplos que copiar: [`examples/sandbox`](../../examples/sandbox/README.md).
+
 ## Instalación
 
 Primero kindling, y esta extensión encima, de la misma release:
@@ -126,7 +128,9 @@ deja a un agente manejar sandboxes a través del gateway. Herramientas: `sandbox
 (`template`, `ttl_seconds`, `labels`), `sandbox_list`, `sandbox_exec` (`id`, `command`,
 `cwd`, `env`, `timeout_seconds`; usa `?wait=1`), `sandbox_exec_background` (lanza y devuelve el `pid`),
 `sandbox_process_output` (`id`, `pid`, `offset`, `wait_seconds`: salida desde un desplazamiento, estado y `next_offset`), `sandbox_read_file`, `sandbox_write_file`,
-`sandbox_delete` y `sandbox_renew`. Un error de la API (404, 401, 429...) vuelve como
+`sandbox_delete`, `sandbox_renew`, `sandbox_run_code` (`code`, `language`, `context_id`; el intérprete de `/code`),
+`sandbox_pause`, `sandbox_resume`, `sandbox_list_files` (`files?list=1`), `sandbox_open_port` (`/endpoints`),
+`sandbox_set_egress` (`PATCH /egress`) y `sandbox_fork`: 16 en total. Un error de la API (404, 401, 429...) vuelve como
 resultado con `isError: true` y su código HTTP, no como error JSON-RPC.
 
 La salida de `sandbox_exec` (stdout y stderr por separado) y los ficheros leídos se
@@ -218,6 +222,14 @@ dentro de ningún clúster; Kubernetes solo hace de plano de control. Ver
 [`docs/kubernetes.md`](../../docs/kubernetes.md). La imagen es
 `ghcr.io/juan52878911/kindling-operator:<versión de kindling>` y los manifiestos
 salen también como `kindling-operator-deploy.tar.gz` en cada release.
+
+`Sandbox.spec` admite `egress: allowlist` con `allowDomains`, `vcpus`, `labels`,
+`env`, `volumes` y `paused` (el operador llama a `pause`/`resume`); `status` da
+`state`, `expiresAt` y `endpoint`. Un segundo CRD, `SandboxPool` (`template`,
+`size`), declara el fondo precalentado de una plantilla: el operador lo fija con
+`PUT /v1/templates/{name}/pool` (solo admin: el token del operador tiene que serlo)
+y `status.available` dice cuántas copias despiertas hay. Los CRD cambiaron: aplica
+`deploy/crd.yaml` (Helm no actualiza `crds/`) **antes** de actualizar el operador.
 
 ## Documentación relacionada
 

@@ -26,9 +26,16 @@ en el repo: [`docs/`](docs/README.md), empezando por la [guía completa](docs/gu
 **Linux con KVM** (amd64 o arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-kling up            # comprueba KVM, nftables, el usuario kindling y las imágenes; imprime lo que pide sudo
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sudo sh -s -- --tag v1.0.0-rc.3
+sudo kling up -install   # firecracker, jailer, los usuarios kindling, la unidad de systemd; la arranca
+kling try -- uname -a
 ```
+
+Corrido como root, `install.sh` deja `kling` en `/usr/local/bin`, donde sudo y systemd lo
+encuentran (como usuario normal acaba imprimiendo la línea `sudo install …` que hace lo
+mismo). `sudo kling up -install` baja `firecracker` y `jailer` (una release fijada, con su
+sha256 comprobado) si faltan, crea los usuarios de sistema `kindling` y `kindling-build`,
+escribe la unidad y la arranca; con `-dry-run` solo imprime esos pasos.
 
 En arm64 (Graviton .metal, Ampere, Raspberry Pi 5 con el kernel de 4K), qué hosts sirven
 y cómo afinarlos: [`docs/linux-arm64.md`](docs/linux-arm64.md).
@@ -41,7 +48,7 @@ red.
 **Mac con Apple Silicon** (macOS 14+, backend nativo `vz`, sin root):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v1.0.0-rc.3 sh
 brew install e2fsprogs
 kling up -check
 kling image copy min -from ssh://usuario@host-linux-arm64   # las imágenes se construyen en Linux
@@ -79,8 +86,9 @@ cada fallo; `kling help <orden>` muestra la ayuda de una orden.
 - **`kling mcp`** — cualquier servidor MCP (npm o PyPI) como servicio que despierta bajo
   demanda desde un snapshot dorado, detrás de un gateway para tu agente de IA.
   [`ext/mcp`](ext/mcp/README.es.md)
-- **`kling sandbox`** — sandboxes multiinquilino para agentes de código: tokens, cuotas,
-  plantillas y un fondo precalentado. [`ext/sandbox`](ext/sandbox/README.md)
+- **`kling sbx`** — sandboxes multiinquilino para agentes de código: tokens, cuotas,
+  plantillas y un fondo precalentado. Empieza por el [quickstart](docs/quickstart-sandbox.md)
+  (en inglés) y los [ejemplos](examples/sandbox/README.md). [`ext/sandbox`](ext/sandbox/README.md)
 - **`kling db`** — un Postgres (también MySQL, Redis y SQLite) desechable por test o por
   agente, copiado de una plantilla caliente en milisegundos. [`docs/db.md`](docs/db.md)
 - **`kling phone`** — teléfonos Android (Redroid) en microVMs, cada uno con su identidad,

@@ -111,7 +111,7 @@ func concreta(ruta string) string {
 	if strings.HasPrefix(ruta, "/v1/tenants") { // aquí el id no lleva barra
 		return strings.NewReplacer("{id}", "t1", "{kid}", "k1").Replace(ruta)
 	}
-	return strings.NewReplacer("{id}", "h1/m1", "{pid}", "1", "{sid}", "s1").Replace(ruta)
+	return strings.NewReplacer("{id}", "h1/m1", "{pid}", "1", "{sid}", "s1", "{port}", "3000").Replace(ruta)
 }
 
 // TestContratoRutas compara la spec con lo que el frontal sirve de verdad.
@@ -131,6 +131,10 @@ func TestContratoRutas(t *testing.T) {
 	// Acciones por sandbox que el despacho conoce (sandboxes.go).
 	for _, m := range regexp.MustCompile(`accion == "(\w+)"`).FindAllStringSubmatch(leerFuente(t, "sandboxes.go"), -1) {
 		candidatas["/v1/sandboxes/{id}/"+m[1]] = true
+	}
+	// Subrutas de ficheros (ficheros.go).
+	for _, m := range regexp.MustCompile(`resto\[0\] == "(\w+)"`).FindAllStringSubmatch(leerFuente(t, "ficheros.go"), -1) {
+		candidatas["/v1/sandboxes/{id}/files/"+m[1]] = true
 	}
 	// Patrones registrados en el mux (frontal.go).
 	reMux := regexp.MustCompile(`m\.Handle(?:Func)?\("(?:([A-Z]+) )?(/v1/[^"]*)"`)
@@ -163,7 +167,7 @@ func TestContratoRutas(t *testing.T) {
 			if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode/100 == 3 {
 				continue // 405 (del mux o del despacho) o redirección: no hay ruta
 			}
-			if resp.StatusCode == http.StatusNotFound && strings.Contains(string(cuerpo), "page not found") {
+			if resp.StatusCode == http.StatusNotFound && (strings.Contains(string(cuerpo), "page not found") || strings.Contains(string(cuerpo), "no route ")) {
 				continue
 			}
 			servidas[metodo+" "+p] = true
@@ -198,6 +202,8 @@ func TestContratoEsquemas(t *testing.T) {
 		"CrearClavePeticion": pedirClave{}, "RotarClavePeticion": pedirRotar{}, "ClaveCreada": claveCreada{},
 		"ExecResult": api.ExecResult{}, "ProcessStartRequest": api.ProcessStartRequest{}, "ProcessInfo": api.ProcessInfo{},
 		"ProcessEvent": api.ProcessEvent{}, "ProcessSignalRequest": api.ProcessSignalRequest{}, "SessionRequest": api.SessionRequest{}, "Session": api.Session{}, "ShellRequest": api.ShellRequest{}, "FileStat": api.FileStat{}, "FileList": api.FileList{}, "FileEntry": api.FileEntry{},
+		"CodeEvent": CodigoEvento{}, "CodeRequest": CodigoPeticion{}, "CodeContext": Contexto{},
+		"MoverPeticion": MoverPeticion{}, "MkdirPeticion": MkdirPeticion{}, "BusquedaFicheros": BusquedaFicheros{},
 	}
 	for nombre, v := range structs {
 		declaradas, ok := sp.schemas[nombre]

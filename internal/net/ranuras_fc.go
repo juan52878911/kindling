@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,11 +49,41 @@ func TamPool() int {
 // sobre 8 vCPU y todas pelean por rtnl_lock.
 var montajesCompletos = make(chan struct{}, 4)
 
+// creacionesEsperando cuenta los montajes completos de creaciones que esperan
+// hueco en montajesCompletos. Los reponedores del fondo no lo toman mientras
+// haya alguno: una ráfaga de altas no hace cola detrás de reposiciones que
+// pueden esperar.
+var creacionesEsperando atomic.Int32
+
+// tomarMontaje toma un hueco de montajesCompletos. Una creación (creacion)
+// lo pide sin más, anotando que espera; un reponedor cede el hueco mientras
+// haya creaciones esperando. Se devuelve con soltarMontaje.
+func tomarMontaje(creacion bool) {
+	if creacion {
+		creacionesEsperando.Add(1)
+		montajesCompletos <- struct{}{}
+		creacionesEsperando.Add(-1)
+		return
+	}
+	for {
+		for creacionesEsperando.Load() > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		montajesCompletos <- struct{}{}
+		if creacionesEsperando.Load() == 0 {
+			return
+		}
+		<-montajesCompletos // llegó una creación mientras esperaba: se lo deja
+	}
+}
+
+func soltarMontaje() { <-montajesCompletos }
+
 // MontarRanura monta la base de n (con DNAT) y la deja como ranura: Setup solo
 // aplicará lo propio. Si falla, lo que quedó montado se derriba.
 func (n *Net) MontarRanura(owner int) error {
-	montajesCompletos <- struct{}{}
-	defer func() { <-montajesCompletos }()
+	tomarMontaje(false)
+	defer soltarMontaje()
 	if err := n.montarBase(nuevaTrazaSetup(n.NS), owner, true); err != nil {
 		n.Teardown()
 		return err
@@ -62,6 +93,9 @@ func (n *Net) MontarRanura(owner int) error {
 		n.Teardown()
 		return err
 	}
+	// El registro de none (nft) se instala aquí, en el reponedor, y no en la
+	// creación: su tabla solo depende de HostIP y del tap.
+	registroEnRanura.Store(n.NS, n.instalarRegistroIP())
 	n.baseLista = true
 	n.baseEgress = EgressNone
 	return nil
@@ -69,6 +103,7 @@ func (n *Net) MontarRanura(owner int) error {
 
 // DestruirRanura derriba una ranura que no llegó a máquina.
 func (n *Net) DestruirRanura() {
+	registroEnRanura.Delete(n.NS)
 	n.baseLista = false
 	n.baseEgress = ""
 	n.Teardown()
@@ -88,6 +123,7 @@ const PlazoRanuraTomada = 60 * time.Second
 // Fondo es el conjunto de ranuras listas de un daemon.
 type Fondo struct {
 	tam      int
+	adapt    *tamAdaptativo // nil: tamaño fijo
 	crear    func() (*Ranura, error)
 	destruir func(*Ranura)
 	ahora    func() time.Time
@@ -124,8 +160,29 @@ func NuevoFondo(tam int, crear func() (*Ranura, error), destruir func(*Ranura)) 
 // esperaTrasFallo es lo que el fondo deja pasar tras un montaje fallido.
 const esperaTrasFallo = 5 * time.Second
 
-// reponedoresMax: se reponen de 2 en 2 para no competir con las creaciones.
-const reponedoresMax = 2
+// reponedoresPermitidos: se reponen de 4 en 4 si no hay creaciones esperando
+// montaje, y de 2 en 2 si las hay, para no competir con ellas.
+func reponedoresPermitidos() int {
+	if creacionesEsperando.Load() == 0 {
+		return 4
+	}
+	return 2
+}
+
+// Adaptar activa el tamaño adaptativo: el objetivo (hoy tam, el mínimo) crece
+// con las tomas hasta max y baja en reposo. max <= tam: sin adaptación.
+func (f *Fondo) Adaptar(max int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.adapt = &tamAdaptativo{min: f.tam, max: max}
+}
+
+// Objetivo es el tamaño que el fondo intenta mantener.
+func (f *Fondo) Objetivo() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tam
+}
 
 // Reponer lanza, en segundo plano, lo que falta para llenar el fondo.
 func (f *Fondo) Reponer() {
@@ -138,7 +195,7 @@ func (f *Fondo) reponerLocked() {
 	if f.ahora().Sub(f.ultimoFallo) < esperaTrasFallo {
 		return
 	}
-	for !f.cerrado && f.enCurso < reponedoresMax && len(f.listas)+f.enCurso < f.tam {
+	for !f.cerrado && f.enCurso < reponedoresPermitidos() && len(f.listas)+f.enCurso < f.tam {
 		f.enCurso++
 		f.wg.Add(1)
 		go f.reponedor()
@@ -184,6 +241,11 @@ func (f *Fondo) Tomar() *Ranura {
 	defer f.mu.Unlock()
 	if f.cerrado {
 		return nil
+	}
+	if f.adapt != nil {
+		ahora := f.ahora()
+		f.adapt.anotar(ahora)
+		f.tam = f.adapt.objetivo(ahora)
 	}
 	var r *Ranura
 	if k := len(f.listas); k > 0 {
@@ -253,6 +315,16 @@ func (f *Fondo) IniciarRecogida(intervalo time.Duration) {
 // ocupado, queda para la vuelta siguiente.
 func (f *Fondo) Recoger() int {
 	f.mu.Lock()
+	var sobran []*Ranura
+	if f.adapt != nil {
+		f.tam = f.adapt.encoger(f.ahora())
+		// Las más antiguas (las primeras de listas), como mucho 2 por vuelta.
+		k := min(bajaPorVuelta, len(f.listas)-f.tam)
+		if k > 0 {
+			sobran = append(sobran, f.listas[:k]...)
+			f.listas = append([]*Ranura(nil), f.listas[k:]...)
+		}
+	}
 	var viejas []string
 	for id, t := range f.tomadas {
 		if f.ahora().Sub(t.en) > PlazoRanuraTomada {
@@ -260,6 +332,9 @@ func (f *Fondo) Recoger() int {
 		}
 	}
 	f.mu.Unlock()
+	for _, r := range sobran { // fuera de f.mu: destruir es lento
+		f.destruir(r)
+	}
 	n := 0
 	for _, id := range viejas {
 		soltar := func() {}

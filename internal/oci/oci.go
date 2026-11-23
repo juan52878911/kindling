@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"log"
@@ -151,6 +152,14 @@ type Layer struct {
 	// Tar, si no está vacío, es la capa ya descomprimida (Client.Unpack):
 	// OpenLayer la lee de ahí en vez de descomprimir otra vez.
 	Tar string
+	// DiffID es el sha256 de la capa sin comprimir que declara la config
+	// (cuando trae uno por capa; si no, vacío). Con Unpack se comprueba al
+	// descomprimirla en Pull; sin él, OpenLayer lo comprueba al llegar al
+	// final del flujo, y quien no lo lea entero no lo ha comprobado (AddTar
+	// de internal/ext4 lo drena hasta el final). Sin esto, una imagen podía
+	// declarar como suyos los diff_ids de otra y pasar por su base
+	// (imagen.BestBase).
+	DiffID string
 }
 
 // Client habla con los registros.
@@ -437,7 +446,7 @@ func (c *Client) pull(ctx context.Context, ref, digest, arch string, indices int
 			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar, tar+gzip and tar+zstd)", l.Digest, l.MediaType)
 		}
 	}
-	img.Layers, err = c.layers(ctx, registry, repo, m.Layers)
+	img.Layers, err = c.layers(ctx, registry, repo, m.Layers, diffIDsDeCapas(m.Layers, img.Config.RootFS.DiffIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -456,6 +465,11 @@ func checkDiffIDs(layers []Descriptor, ids []string, strict bool) error {
 		return nil
 	}
 	for i, l := range layers {
+		// Lo que no sea un sha256 no se puede comprobar al descomprimir
+		// (diffIDReader): no se acepta como diff_id de nadie.
+		if !reDigest.MatchString(ids[i]) {
+			return fmt.Errorf("layer %d: diff_id %q is not sha256:<64 hex>", i+1, ids[i])
+		}
 		if strings.HasSuffix(l.MediaType, ".tar") && l.Digest != ids[i] {
 			return fmt.Errorf("layer %d is %s but the config says its diff_id is %s", i+1, l.Digest, ids[i])
 		}
@@ -463,12 +477,22 @@ func checkDiffIDs(layers []Descriptor, ids []string, strict bool) error {
 	return nil
 }
 
+// diffIDsDeCapas es el diff_id de cada capa, si la config trae uno por capa
+// (checkDiffIDs ya los comprobó); si no, nil.
+func diffIDsDeCapas(layers []Descriptor, ids []string) []string {
+	if len(ids) != len(layers) {
+		return nil
+	}
+	return ids
+}
+
 // layers baja las capas en paralelo (parallel a la vez) y, con Unpack, las
 // descomprime según van llegando (tantas a la vez como núcleos, y de las zstd,
 // zstdParallel). Cada una se
-// descomprime solo después de verificar su sha256. El primer error para las
+// descomprime solo después de verificar su sha256, y lo descomprimido tiene
+// que dar su diff_id (diffIDs[i], si los hay). El primer error para las
 // demás.
-func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descriptor) ([]Layer, error) {
+func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descriptor, diffIDs []string) ([]Layer, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if c.Unpack != "" {
@@ -520,6 +544,9 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 				return
 			}
 			l := Layer{Descriptor: d, Path: f.path}
+			if diffIDs != nil {
+				l.DiffID = diffIDs[i]
+			}
 			if c.Unpack != "" && compressed(d.MediaType) {
 				// Las zstd cogen además uno de los pocos turnos de zstd, antes
 				// que el de CPU para no tenerlo parado mientras esperan.
@@ -619,7 +646,14 @@ func unpackCon(ctx context.Context, l Layer, dst string, budget *atomic.Int64, m
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(f, &unpackReader{ctx: ctx, r: rc, left: budget, max: max})
+	// El diff_id, por fuera de unpackReader: que no case no es que el blob
+	// esté dañado (su sha256 se comprobó), sino que la imagen miente; no se
+	// desaloja.
+	var src io.Reader = &unpackReader{ctx: ctx, r: rc, left: budget, max: max}
+	if l.DiffID != "" {
+		src = newDiffIDReader(src, l.DiffID)
+	}
+	n, err := io.Copy(f, src)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -703,6 +737,41 @@ func (u *unpackReader) Read(p []byte) (int, error) {
 		err = &errCapaDañada{err}
 	}
 	return n, err
+}
+
+// diffIDReader pasa lo que lee por sha256 y, al llegar al final, lo compara
+// con want (el diff_id de la config): si no casa, devuelve un error en vez de
+// io.EOF (y después, siempre ese error).
+type diffIDReader struct {
+	r    io.Reader
+	h    hash.Hash
+	want string
+	err  error
+}
+
+func newDiffIDReader(r io.Reader, want string) *diffIDReader {
+	return &diffIDReader{r: r, h: sha256.New(), want: want}
+}
+
+func (d *diffIDReader) Read(p []byte) (int, error) {
+	if d.err != nil {
+		return 0, d.err
+	}
+	n, err := d.r.Read(p)
+	d.h.Write(p[:n])
+	if err == io.EOF {
+		if got := "sha256:" + hex.EncodeToString(d.h.Sum(nil)); got != d.want {
+			err = fmt.Errorf("the layer unpacks to %s, but the config says its diff_id is %s", short(got), d.want)
+		}
+		d.err = err
+	}
+	return n, err
+}
+
+// capaVerificada es una capa descomprimida que comprueba su diff_id al leerla.
+type capaVerificada struct {
+	io.Reader
+	io.Closer
 }
 
 // pickPlatform elige la imagen linux/arch de un índice. En arm64 vale la
@@ -1253,7 +1322,9 @@ func splitChallenge(s string) []string {
 
 // OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip o
 // zstd, o la que dejó Unpack). Un tar sin comprimir se da como *os.File: archive/tar
-// salta con Seek los datos que no se leen.
+// salta con Seek los datos que no se leen. Una comprimida que se descomprime
+// aquí comprueba su diff_id al final del flujo: la última lectura da el
+// error si no casa.
 func OpenLayer(l Layer) (io.ReadCloser, error) {
 	if l.Tar != "" {
 		return os.Open(l.Tar)
@@ -1263,9 +1334,14 @@ func OpenLayer(l Layer) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if !compressed(l.MediaType) {
+		// Sin comprimir, su digest es el diff_id (checkDiffIDs).
 		return f, nil
 	}
-	return decompress(f)
+	rc, err := decompress(f)
+	if err != nil || l.DiffID == "" {
+		return rc, err
+	}
+	return capaVerificada{newDiffIDReader(rc, l.DiffID), rc}, nil
 }
 
 // errCertificado dice si err es de un certificado que no se pudo verificar

@@ -150,11 +150,15 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 	env := r.env
 	r.mu.Unlock()
 	if need {
-		r.probeMu.Lock()
-		// Otro /ready pudo terminarla mientras esperábamos.
-		r.mu.Lock()
-		need = !r.ok
-		r.mu.Unlock()
+		tomada := r.tomarSonda(ctx) // false: el cliente se fue esperando
+		if tomada {
+			// Otro /ready pudo terminarla mientras esperábamos.
+			r.mu.Lock()
+			need = !r.ok
+			r.mu.Unlock()
+		} else {
+			need = false
+		}
 		if need {
 			pctx, cancel := context.WithTimeout(ctx, probeTimeout())
 			run := r.probe
@@ -171,11 +175,27 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 			}
 			r.mu.Unlock()
 		}
-		r.probeMu.Unlock()
+		if tomada {
+			r.probeMu.Unlock()
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stateLocked(probe, hooks)
+}
+
+// tomarSonda toma probeMu respetando el contexto: si ctx acaba antes, no se
+// queda esperando (el cerrojo se suelta solo cuando llegue a tomarse).
+func (r *readiness) tomarSonda(ctx context.Context) bool {
+	tomado := make(chan struct{})
+	go func() { r.probeMu.Lock(); close(tomado) }()
+	select {
+	case <-tomado:
+		return true
+	case <-ctx.Done():
+		go func() { <-tomado; r.probeMu.Unlock() }()
+		return false
+	}
 }
 
 // serviceReadySpec son los plazos de la sonda que declara el servicio de la

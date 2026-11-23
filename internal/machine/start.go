@@ -362,14 +362,14 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 			log.Printf("start: %s started without its graph edges: %v", mc.Name, err)
 		}
 	}
-	// El VMM solo puede escribir en lo suyo. Un overlay en el almacén de
-	// copia al escribir es un enlace, y Own (chown, que sigue enlaces) se lo
-	// daría al VMM: ahí lo usa por grupo (ver runFrom).
-	ceder := []string{dir}
-	if fi, err := os.Lstat(overlay); err == nil && fi.Mode()&os.ModeSymlink == 0 {
-		ceder = append(ceder, overlay)
+	// El VMM solo puede escribir en lo suyo, y se cede por descriptor abierto
+	// con O_NOFOLLOW: un overlay en el almacén de copia al escribir es un
+	// enlace (ELOOP) y se lo daría al VMM un chown que sigue enlaces: ahí lo
+	// usa por grupo (ver runFrom). Lo mismo si el VMM planta uno en su sitio.
+	if err := m.priv.OwnNoFollow(dir); err != nil {
+		return devolver(err)
 	}
-	if err := m.priv.Own(ceder...); err != nil {
+	if err := m.priv.OwnNoFollow(overlay); err != nil && !errors.Is(err, syscall.ELOOP) && !errors.Is(err, os.ErrNotExist) {
 		return devolver(err)
 	}
 

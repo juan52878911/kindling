@@ -52,7 +52,7 @@ func (s *Servidor) despachaProcesos(w http.ResponseWriter, r *http.Request, id s
 		return
 	case 1, 2:
 	default:
-		http.NotFound(w, r)
+		noRuta(w, r)
 		return
 	}
 	pid, err := strconv.Atoi(resto[0])
@@ -76,7 +76,7 @@ func (s *Servidor) despachaProcesos(w http.ResponseWriter, r *http.Request, id s
 	case sub == "" || sub == "output" || sub == "signal":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
-		http.NotFound(w, r)
+		noRuta(w, r)
 	}
 }
 
@@ -95,6 +95,10 @@ func (s *Servidor) handleProcesoNuevo(w http.ResponseWriter, r *http.Request, id
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return
+	}
+	porDefecto := req.Session == "" && sesionPorDefecto(mc) != ""
+	if porDefecto {
+		req.Session = idSesionPorDefecto
 	}
 	// Tope de procesos vivos por sandbox. Se cuenta preguntando al daemon:
 	// los que ya terminaron no gastan cuota.
@@ -116,6 +120,10 @@ func (s *Servidor) handleProcesoNuevo(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	p, err := h.Cliente.StartProcess(r.Context(), mc.ID, req)
+	if err != nil && porDefecto && esSesionPerdida(err) {
+		req.Session = ""
+		p, err = h.Cliente.StartProcess(r.Context(), mc.ID, req)
+	}
 	if err != nil {
 		fail(w, codigoExec(err), deHost(h, err))
 		return
@@ -252,7 +260,7 @@ func (s *Servidor) handleProcesoSalida(w http.ResponseWriter, r *http.Request, i
 	case err != nil && !empezado:
 		fail(w, codigoExec(err), deHost(h, err))
 	case err != nil:
-		_ = emitir(api.ProcessEvent{Offset: next, Error: err.Error()})
+		_ = emitir(api.ProcessEvent{Offset: next, Error: errorDeFlujo(deHost(h, err))})
 	default:
 		// Cierre explícito: el offset desde el que continuar y, si terminó, su código.
 		_ = emitir(api.ProcessEvent{Offset: next, Exit: exit})
@@ -275,7 +283,7 @@ func (s *Servidor) despachaSesiones(w http.ResponseWriter, r *http.Request, id s
 	case len(resto) <= 1:
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
-		http.NotFound(w, r)
+		noRuta(w, r)
 	}
 }
 

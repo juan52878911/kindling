@@ -165,6 +165,26 @@ func dominiosEstrechan(viejos, nuevos []string) bool {
 	return false
 }
 
+// reglasBaseQueFaltan devuelve, como inserciones al principio de FORWARD, las
+// dos DROP de entrada del veth (NEW de otro origen que HostIP, e INVALID) si el
+// netns no las tiene: una máquina creada antes de que existieran no las
+// recibe, y el corte de conexiones prometería algo que un DNAT de entrada
+// podría deshacer. Van delante del ACCEPT de ESTABLISHED.
+func (n *Net) reglasBaseQueFaltan() [][]string {
+	var out [][]string
+	for _, r := range n.forwardBase() {
+		if len(r) < 4 || r[0] != "-A" || r[1] != "FORWARD" || r[2] != "-i" || r[3] != n.NSIf {
+			continue
+		}
+		if reglaPresente(n.NS, r) {
+			continue
+		}
+		ins := append([]string{"-I", "FORWARD", "1"}, r[2:]...)
+		out = append(out, ins)
+	}
+	return out
+}
+
 // CambiarEgreso pasa la máquina de n del modo viejo (con sus dominios) al
 // nuevo. Idempotente: se puede repetir tras un fallo a medias, partiendo de
 // cualquier estado intermedio, porque solo toca lo que falta.
@@ -204,7 +224,14 @@ func (n *Net) CambiarEgreso(viejo Egress, viejosDominios []string, nuevo Egress,
 				}
 			}
 			sembrarSemillas(n.NS, n.setName(), semillasDe(dominios))
-			res.ConexionesCortadas = res.Estrecha && n.cortarConexiones()
+			if res.Estrecha {
+				// Sin las DROP de base no se promete el corte.
+				base := true
+				if falta := n.reglasBaseQueFaltan(); len(falta) > 0 {
+					base = n.restoreRules(falta) == nil
+				}
+				res.ConexionesCortadas = base && n.cortarConexiones()
+			}
 			return res, nil
 		}
 		if err := hayIpset(); err != nil {
@@ -224,7 +251,7 @@ func (n *Net) CambiarEgreso(viejo Egress, viejosDominios []string, nuevo Egress,
 	viejas := n.reglasDeModo(viejo)
 	nuevas := n.reglasDeModo(nuevo)
 	borrar, anadir := diferenciaDeReglas(viejas, nuevas)
-	var tx [][]string
+	tx := n.reglasBaseQueFaltan()
 	for _, r := range borrar {
 		if reglaPresente(n.NS, r) {
 			tx = append(tx, comoBorrado(r))
@@ -295,7 +322,88 @@ func (n *Net) cortarConexiones() bool {
 	if !hayConntrack() {
 		return false
 	}
-	err := ejecutar("ip", "netns", "exec", n.NS, "conntrack", "-D", "--orig-src", GuestIP)
-	// conntrack sale con 1 si no había nada que borrar: tampoco es un fallo.
+	// Las del netns (lo que el invitado originó) y las del host con el NSIP
+	// de origen: sin ellas el siguiente paquete del remoto recogería el flujo
+	// de nuevo y seguiría vivo. Las del host con el NSIP de destino son flujos
+	// host→invitado (un exec en curso): no se tocan al estrechar, solo en
+	// Teardown. Las dos mitades deben ir bien para prometer el corte.
+	ok := conntrackBorrado(ejecutar("ip", "netns", "exec", n.NS, "conntrack", "-D", "--orig-src", GuestIP))
+	return conntrackBorrado(ejecutar("conntrack", "-D", "--orig-src", n.NSIP)) && ok
+}
+
+// Trabajador del conntrack del host (Teardown): una cola por NSIP, sin
+// duplicados, con un único goroutine que la vacía.
+var cntHost struct {
+	mu      sync.Mutex
+	pend    map[string]chan struct{} // NSIP -> se cierra al terminar su borrado
+	activo  bool
+	enCurso sync.WaitGroup
+}
+
+// encolarConntrackHost pide borrar del conntrack del HOST las entradas con el
+// NSIP de n de origen o destino: la máquina que reutilice el índice no hereda
+// flujos UDP vivos de la anterior. No bloquea.
+func encolarConntrackHost(n *Net) {
+	if !hayConntrack() {
+		return
+	}
+	cntHost.mu.Lock()
+	defer cntHost.mu.Unlock()
+	if cntHost.pend == nil {
+		cntHost.pend = map[string]chan struct{}{}
+	}
+	if _, ya := cntHost.pend[n.NSIP]; ya {
+		return
+	}
+	cntHost.pend[n.NSIP] = make(chan struct{})
+	if !cntHost.activo {
+		cntHost.activo = true
+		cntHost.enCurso.Add(1)
+		go trabajadorConntrackHost()
+	}
+}
+
+func trabajadorConntrackHost() {
+	defer cntHost.enCurso.Done()
+	for {
+		cntHost.mu.Lock()
+		var nsip string
+		var hecho chan struct{}
+		for k, c := range cntHost.pend {
+			nsip, hecho = k, c
+			break
+		}
+		if hecho == nil {
+			cntHost.activo = false
+			cntHost.mu.Unlock()
+			return
+		}
+		cntHost.mu.Unlock()
+		_ = ejecutar("conntrack", "-D", "--orig-dst", nsip)
+		_ = ejecutar("conntrack", "-D", "--orig-src", nsip)
+		cntHost.mu.Lock()
+		delete(cntHost.pend, nsip)
+		cntHost.mu.Unlock()
+		close(hecho)
+	}
+}
+
+// esperarConntrackHost espera al borrado pendiente de nsip, si lo hay. En el
+// caso corriente (nada pendiente) es un mapa vacío.
+func esperarConntrackHost(nsip string) {
+	cntHost.mu.Lock()
+	c := cntHost.pend[nsip]
+	cntHost.mu.Unlock()
+	if c != nil {
+		<-c
+	}
+}
+
+// vaciarConntrackHost espera a que el trabajador acabe (tests).
+func vaciarConntrackHost() { cntHost.enCurso.Wait() }
+
+// conntrackBorrado: conntrack sale con 1 si no había nada que borrar, y eso
+// tampoco es un fallo.
+func conntrackBorrado(err error) bool {
 	return err == nil || strings.Contains(err.Error(), "exit status 1")
 }

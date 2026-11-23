@@ -34,11 +34,20 @@ type section struct {
 // coreTree son los comandos del núcleo, en el orden en que salen.
 var coreTree = []section{
 	{title: "START HERE", cmds: []plugin.Command{
-		{Name: "up", Summary: "gets the runtime ready and starts the daemon", Usage: `  up [-check] [-root DIR] [-install]               gets the runtime ready: KVM,
+		{Name: "up", Summary: "gets the runtime ready and starts the daemon", Usage: `  up [-check] [-root DIR] [-install [-dry-run] | -uninstall]
+                                                   gets the runtime ready: KVM,
                                                    nftables, user, images, daemon
                                                    and extension units (-check: only
                                                    check; -install: macOS, start the
-                                                   daemon at login)
+                                                   daemon at login; Linux, as root:
+                                                   firecracker and jailer if missing,
+                                                   the kindling users and the systemd
+                                                   unit, -dry-run: only say what;
+                                                   -uninstall: macOS, remove the
+                                                   launchd agent)
+  up -verify-sums FILE -sig FILE -tag vX.Y.Z [-key K]
+                                                   checks a release's SHA256SUMS
+                                                   signature (what install.sh uses)
 `},
 		{Name: "upgrade", Summary: "replaces kling and the daemon with another release; rolls back if it fails", Usage: `  upgrade [-tag vX.Y.Z | -from-dir DIR]            downloads and verifies a release,
       [-dry-run|-check] [-force] [-unit NAME]      checks it reads the state, backs up,
@@ -817,6 +826,76 @@ func unknownHelp(name string) error {
 	return &errConCodigo{code: 2, err: &errWithHint{err: fmt.Errorf("unknown command %q", name), hint: "kling help all"}}
 }
 
+// comandosConOrden son los comandos cuyo resto de la línea es la orden de otro
+// programa: `kling try df -h` ejecuta df -h. posicionales es cuántos
+// argumentos son de kling antes de la orden (exec: la máquina y la orden;
+// try: la orden; run: la imagen), y bools los flags que no se llevan valor.
+var comandosConOrden = map[string]struct {
+	posicionales int
+	bools        map[string]bool
+}{
+	"try":  {1, map[string]bool{"keep": true, "json": true}},
+	"exec": {2, map[string]bool{"i": true, "d": true, "json": true}},
+	"run":  {1, map[string]bool{"fresh": true, "volume-ro": true, "allow-exec": true, "nested": true, "wait-ready": true, "json": true}},
+}
+
+// argsDeKling devuelve los argumentos de args que son de kling: todos, salvo
+// en los comandos de comandosConOrden, donde se corta en `--` o tras el
+// último posicional de kling (lo que sigue es del programa de dentro).
+func argsDeKling(cmd string, args []string) []string {
+	c, ok := comandosConOrden[cmd]
+	if !ok {
+		for i, a := range args {
+			if a == "--" {
+				return args[:i]
+			}
+		}
+		return args
+	}
+	vistos := 0
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return args[:i]
+		case a == "-h" || a == "-help" || a == "--help":
+		case len(a) > 1 && a[0] == '-':
+			nombre := strings.TrimLeft(a, "-")
+			if !strings.Contains(nombre, "=") && !c.bools[nombre] {
+				i++ // se lleva el valor siguiente
+			}
+		default:
+			if vistos++; vistos >= c.posicionales {
+				return args[:i+1]
+			}
+		}
+	}
+	return args
+}
+
+// tryArgsConGuion pone `--` antes de la orden de `kling try`, para que el -h
+// de `try df -h` llegue a df y reorderFor no lo suba a los flags de kling.
+func tryArgsConGuion(args []string) []string {
+	c := comandosConOrden["try"]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return args
+		case len(a) > 1 && a[0] == '-':
+			nombre := strings.TrimLeft(a, "-")
+			if !strings.Contains(nombre, "=") && !c.bools[nombre] && nombre != "h" && nombre != "help" {
+				i++
+			}
+		default:
+			out := append([]string{}, args[:i]...)
+			out = append(out, "--")
+			return append(out, args[i:]...)
+		}
+	}
+	return args
+}
+
 // helpRequest dice si args pide ayuda: un -h, -help o --help en cualquier
 // sitio antes de "--". Devuelve la ruta de ayuda: el comando (alias ya
 // resuelto) y las palabras que le siguen mientras se resuelvan en el árbol o
@@ -830,10 +909,8 @@ func helpRequest(cmd string, args []string) ([]string, bool) {
 		return nil, false
 	}
 	asks := false
-	for _, a := range args {
-		if a == "--" {
-			break
-		}
+	name, rest := resolveAlias(cmd, args)
+	for _, a := range argsDeKling(name, rest) {
 		if a == "-h" || a == "-help" || a == "--help" {
 			asks = true
 			break
@@ -842,7 +919,6 @@ func helpRequest(cmd string, args []string) ([]string, bool) {
 	if !asks {
 		return nil, false
 	}
-	name, rest := resolveAlias(cmd, args)
 	var subs []string
 	for _, a := range rest {
 		if strings.HasPrefix(a, "-") {

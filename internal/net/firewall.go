@@ -137,6 +137,12 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 // de estas: van todas a n.HostIP, el lado host del propio veth.
 func (n *Net) forwardBase() [][]string {
 	return append([][]string{
+		// Hacia el invitado solo entran flujos NEW del host (HostIP): lo de
+		// otro origen (un vecino L2 que enrute 172.30.0.0/16 por el host) y lo
+		// INVALID se descartan, y antes de cualquier ACCEPT de ESTABLISHED. Así
+		// una conexión recogida de nuevo tras cortar el conntrack no sobrevive.
+		{"-A", "FORWARD", "-i", n.NSIf, "-m", "conntrack", "--ctstate", "NEW", "!", "-s", n.HostIP, "-j", "DROP"},
+		{"-A", "FORWARD", "-i", n.NSIf, "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
 		{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
 		{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
 	}, n.reglasIPsHost()...)

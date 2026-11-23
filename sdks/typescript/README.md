@@ -1,91 +1,172 @@
-# @kindling/sandbox (SDK de JavaScript/TypeScript)
+# @kindling/sandbox (JavaScript/TypeScript SDK)
 
-Cliente de la API `/v1` del gateway de sandboxes de kindling. Node ≥ 18, `fetch` nativo,
-**sin dependencias**. El nombre del paquete es provisional.
+Client for the `/v1` API of the kindling sandbox gateway. Native `fetch`, **no dependencies**.
+The package name is provisional. License: Apache-2.0.
 
-No hay `tsc` en el entorno de construcción, así que el SDK está escrito en JavaScript ESM
-con JSDoc y los tipos van a mano en `src/index.d.ts`; no hay paso de compilación.
+The package runs on Node >= 18; `npm test` needs Node >= 22.18, because the tests are TypeScript
+files run with Node's built-in type stripping, with no build step. The SDK itself is plain ES-module JavaScript with JSDoc, and the
+types are hand-written in `src/index.d.ts`.
 
-## Instalación local
+## Install
 
 ```sh
-npm install ./sdks/typescript        # o: npm pack ./sdks/typescript && npm install kindling-sandbox-0.1.0.tgz
+npm install ./sdks/typescript        # or: npm pack ./sdks/typescript && npm install kindling-sandbox-0.1.0.tgz
 ```
 
-Configuración por argumentos (`url`, `token`) o por `KLING_SANDBOX_URL` / `KLING_SANDBOX_TOKEN`
-(URL por defecto `http://localhost:8088`).
+Configure with arguments (`url`, `token`) or `KLING_SANDBOX_URL` / `KLING_SANDBOX_TOKEN`
+(default URL `http://127.0.0.1:8090`).
 
-## Ejemplo
+## Example
 
 ```js
 import { Sandbox } from "@kindling/sandbox";
 
-const sb = await Sandbox.create({ template: "python", ttl: 300 });
+const sb = await Sandbox.create({ template: "python", ttl: 300, env: { MODE: "demo" } });
 try {
-  const r = await sb.exec("echo hola; exit 2", { cwd: "/tmp", env: { A: "1" }, timeout: 10 });
+  const r = await sb.exec("echo hi; exit 2", { cwd: "/tmp", env: { A: "1" }, timeout: 10 });
   console.log(r.exit_code, r.stdout, r.stderr);
-  for await (const ev of sb.execStream(["ls", "/"])) if (ev.stream) process.stdout.write(ev.data);
   await sb.files.write("/tmp/x.bin", new Uint8Array([0, 255]), { mode: 0o600, mkdir: true });
-  console.log(await sb.files.read("/tmp/x.bin"));
-} finally { await sb.delete(); }   // o `await using sb = …` (Node ≥ 24 / TS ≥ 5.2)
+  console.log(await sb.files.read("/tmp/x.bin", { range: [0, 0] }));        // first byte (206)
+
+  // Code contexts keep state between runs; run() yields events ending in "done".
+  const ctx = await sb.code.contexts.create({ language: "python" });
+  for await (const ev of sb.code.run("x = 21", { context: ctx.id })) { /* stdout, result, done */ }
+  console.log((await sb.code.runWait("x * 2", { context: ctx.id })).results["text/plain"]); // 42
+
+  await sb.files.move("/tmp/x.bin", "/tmp/y.bin", { overwrite: true });
+  console.log((await sb.files.search("/tmp", "*.bin")).matches);
+  const ep = await sb.endpoints.create(8000, { ttl: 600 });                // publish a port
+  await sb.pause(); await sb.resume();
+} finally { await sb.delete(); }   // or `await using sb = ...` (Node >= 24 / TS >= 5.2)
 ```
 
-`await using` llama a `[Symbol.asyncDispose]()`, que borra el sandbox e ignora un 404.
-Un `cmd` de tipo string se ejecuta con `sh -c`; un array, tal cual. `timeout` y `ttl` van en segundos.
-Los campos del resultado conservan los nombres del cable (`exit_code`, `retry_after`);
-los métodos son camelCase (`execStream`, con alias `exec_stream`).
+- `Sandbox.list({ state, label: { k: "v" }, limit, cursor })`: with `limit` it returns a page and
+  `.nextCursor` (`X-Kindling-Next-Cursor`); `.partial` is `X-Kindling-Partial`.
+- `Sandbox.create({ env })` stores the variables as the sandbox's `default` session, which
+  `exec`, background processes, `code` and `shell` use when they don't ask for another one
+  (each use renews it; it expires after 24 h without use, and the sandbox keeps working without it).
+- `sb.setMetadata({ labels: { k: "v" }, remove: ["old"] })` patches your labels (reserved ones are a
+  `BadRequest`); `sb.fork({ count: 2, ttl: 300 })` branches the live sandbox into copies that count
+  against your quota; `sb.metrics()` gives `memory_mib` and, if the daemon measures it, `cpu_seconds`.
+- `files.chmod(path, 0o755, { recursive })` and `files.replace(path, old, new, { all })`
+  (without `all`, `old` must appear exactly once, else `Conflict`).
+- `files.uploadTar(path, bytes, { mkdir })` / `downloadTar(path)` move whole directories.
+  `files.move(from, to)` refuses to replace an existing target (`Conflict`) unless `overwrite: true`.
+- `await using` calls `[Symbol.asyncDispose]()`, which deletes the sandbox and ignores a 404.
+- A string `cmd` runs with `sh -c`; an array runs as is. `timeout` and `ttl` are in seconds.
+  Result fields keep the wire names (`exit_code`, `retry_after`); methods are camelCase
+  (`execStream`, with an `exec_stream` alias).
 
-## Administrar inquilinos y claves
+## Retries
 
-Con un token de admin, `Admin` maneja `/v1/tenants` (hace falta que el gateway arranque con `-state-dir`):
+`new Client({ retries: 3 })` retries a 429 or 503 after the server's `Retry-After` (1 s if
+absent, never longer than `maxRetryWait`, 30 s). The default is no retries. `retries` also
+repeats `POST /v1/sandboxes` on a 503; if the 503 came after the host created the sandbox you
+can end up with two.
+
+## Tenants and keys
+
+With an admin token, `Admin` manages `/v1/tenants` (the gateway needs `-state-dir`):
 
 ```js
 import { Admin } from "@kindling/sandbox";
 
 const adm = new Admin({ url: "https://gateway:8090", token: ADMIN_TOKEN });
 await adm.createTenant("ana", { limits: { max_sandboxes: 10 } });
-const clave = await adm.createKey("ana");   // clave.key solo se ve ahora
-const nueva = await adm.rotateKey("ana", clave.id, { graceMinutes: 10 });
-await adm.revokeKey("ana", nueva.id);
+const key = await adm.createKey("ana");   // key.key is shown only now
+const next = await adm.rotateKey("ana", key.id, { graceMinutes: 10 });
+await adm.revokeKey("ana", next.id);
 ```
 
-## Errores
+## Errors
 
-`SandboxError` → `ConfigError`, `TransportError` (red, plazo, flujo cortado) y `ApiError`
-(`status`, `apiMessage`, `code`, `retry_after`) con `BadRequest` 400, `Unauthorized` 401, `Forbidden` 403,
-`NotFound` 404, `Conflict` 409, `PayloadTooLarge` 413, `RateLimited` 429, `ServerError` ≥ 500.
-Se leen de `{"message","code"}` y de `Retry-After` (segundos o fecha HTTP). El token nunca sale en
-`toString`/`inspect`/JSON de `Client` y `Sandbox`, y se sustituye por `<oculto>` si aparece en un mensaje.
+`SandboxError` -> `ConfigError`, `TransportError` (network, timeout, cut stream) and `ApiError`
+(`status`, `apiMessage`, `code`, `retry_after`) with `BadRequest` 400, `Unauthorized` 401,
+`Forbidden` 403, `NotFound` 404, `Conflict` 409, `PayloadTooLarge` 413, `RateLimited` 429 and
+`ServerError` >= 500. `code` is the gateway's stable error code; `retry_after` comes from
+`Retry-After` (seconds or HTTP date). The token never appears in `toString`/`inspect`/JSON of
+`Client` and `Sandbox`, and is replaced by `<oculto>` if it shows up in a message.
 
-## Cobertura frente a `ext/sandbox/api/openapi.yaml`
+## Coverage of `ext/sandbox/api/openapi.yaml`
 
-| Ruta | SDK | Estado |
-|---|---|---|
-| `GET /v1/health` | `client.health()` | sí (sin token) |
-| `GET /v1/hosts`, `/v1/templates`, `/v1/metrics` | `client.hosts()`, `templates()`, `metrics()` | sí |
-| `POST/GET /v1/sandboxes` | `Sandbox.create`, `Sandbox.list` (`.partial` = `X-Kindling-Partial`) | sí |
-| `GET/DELETE /v1/sandboxes/{id}` | `Sandbox.connect`, `refresh`, `delete`/`kill` | sí |
-| `POST …/renew` | `sb.renew(ttl?)` | sí |
-| `POST …/exec` (NDJSON) | `sb.execStream` | sí, con líneas partidas entre trozos |
-| `POST …/exec?wait=1` | `sb.exec` | sí |
-| `GET/PUT/DELETE …/files` | `sb.files.read/readText/write/delete`, `stat` (`stat=1`) | sí |
-| `…/processes[/{pid}[/output\|/signal]]` | `sb.processes.start/list/get({wait})/output(pid, {offset, follow})/signal/kill/delete` | sí |
-| `…/sessions[/{id}]`, `session` en exec | `sb.sessions.create/list/get/exec/delete`, `exec(cmd, {session})` | sí |
-| `POST …/shell` (`kling-shell/1`) | — | **no implementado**: upgrade a tramas binarias, fuera de alcance |
-| `POST /v1/sandboxes` con `count`/`atomic` | `Sandbox.createMany(n, {atomic})` (`.errors` = los que no salieron) | sí |
-| `/v1/volumes`, `/v1/volumes/{id}`; `volumes` al crear | `client.createVolume/getVolume/listVolumes/deleteVolume`, `Sandbox.create({volumes})` | sí |
-| `/v1/graphs` (GET, POST, GET/DELETE `{id}`) | `client.createGraph/getGraph/listGraphs/deleteGraph` | sí, solo a nivel `Client` |
+Generated by `test/cobertura.test.ts`, which fails if a spec operation has neither an SDK method
+nor an explicit exclusion (today only `shell`). Refresh with `KLING_UPDATE_README=1 npm test`.
 
-## Pruebas
+<!-- coverage:begin -->
+| Operation | SDK |
+|---|---|
+| `GET /v1/health` | `Client.health()` |
+| `GET /v1/hosts` | `Client.hosts()` |
+| `GET /v1/metrics` | `Client.metrics()` |
+| `GET /v1/templates` | `Client.templates()` |
+| `PUT /v1/templates/{name}/pool` | not covered: admin-only operator route (the Kubernetes SandboxPool controller uses it) |
+| `GET /v1/sandboxes` | `Sandbox.list()` |
+| `POST /v1/sandboxes` | `Sandbox.create()` |
+| `GET /v1/sandboxes/{id}` | `Sandbox.connect()` |
+| `DELETE /v1/sandboxes/{id}` | `Sandbox.delete()` |
+| `POST /v1/sandboxes/{id}/renew` | `Sandbox.renew()` |
+| `POST /v1/sandboxes/{id}/pause` | `Sandbox.pause()` |
+| `POST /v1/sandboxes/{id}/resume` | `Sandbox.resume()` |
+| `PATCH /v1/sandboxes/{id}/egress` | `Sandbox.setEgress()` |
+| `POST /v1/sandboxes/{id}/endpoints` | `Endpoints.create()` |
+| `GET /v1/sandboxes/{id}/endpoints` | `Endpoints.list()` |
+| `DELETE /v1/sandboxes/{id}/endpoints/{port}` | `Endpoints.revoke()` |
+| `POST /v1/sandboxes/{id}/exec` | `Sandbox.exec()` |
+| `POST /v1/sandboxes/{id}/code` | `Code.run()` |
+| `POST /v1/sandboxes/{id}/code/contexts` | `CodeContexts.create()` |
+| `GET /v1/sandboxes/{id}/code/contexts` | `CodeContexts.list()` |
+| `GET /v1/sandboxes/{id}/code/contexts/{cid}` | `CodeContexts.get()` |
+| `DELETE /v1/sandboxes/{id}/code/contexts/{cid}` | `CodeContexts.delete()` |
+| `DELETE /v1/sandboxes/{id}/code/contexts/{cid}/execution` | `Code.interrupt()` |
+| `POST /v1/sandboxes/{id}/processes` | `Processes.start()` |
+| `GET /v1/sandboxes/{id}/processes` | `Processes.list()` |
+| `GET /v1/sandboxes/{id}/processes/{pid}` | `Processes.get()` |
+| `DELETE /v1/sandboxes/{id}/processes/{pid}` | `Processes.delete()` |
+| `POST /v1/sandboxes/{id}/processes/{pid}/signal` | `Processes.signal()` |
+| `GET /v1/sandboxes/{id}/processes/{pid}/output` | `Processes.output()` |
+| `POST /v1/sandboxes/{id}/sessions` | `Sessions.create()` |
+| `GET /v1/sandboxes/{id}/sessions` | `Sessions.list()` |
+| `GET /v1/sandboxes/{id}/sessions/{sid}` | `Sessions.get()` |
+| `DELETE /v1/sandboxes/{id}/sessions/{sid}` | `Sessions.delete()` |
+| `POST /v1/sandboxes/{id}/shell` | not covered: interactive shell: upgrade to binary frames (kling-shell/1), out of scope |
+| `GET /v1/sandboxes/{id}/files` | `Files.read()` |
+| `PUT /v1/sandboxes/{id}/files` | `Files.write()` |
+| `DELETE /v1/sandboxes/{id}/files` | `Files.delete()` |
+| `POST /v1/sandboxes/{id}/files/move` | `Files.move()` |
+| `PATCH /v1/sandboxes/{id}/metadata` | `Sandbox.setMetadata()` |
+| `POST /v1/sandboxes/{id}/fork` | `Sandbox.fork()` |
+| `GET /v1/sandboxes/{id}/metrics` | `Sandbox.metrics()` |
+| `POST /v1/sandboxes/{id}/files/chmod` | `Files.chmod()` |
+| `POST /v1/sandboxes/{id}/files/replace` | `Files.replace()` |
+| `POST /v1/sandboxes/{id}/files/mkdir` | `Files.mkdir()` |
+| `GET /v1/sandboxes/{id}/files/search` | `Files.search()` |
+| `GET /v1/volumes` | `Client.listVolumes()` |
+| `POST /v1/volumes` | `Client.createVolume()` |
+| `GET /v1/volumes/{id}` | `Client.getVolume()` |
+| `DELETE /v1/volumes/{id}` | `Client.deleteVolume()` |
+| `GET /v1/graphs` | `Client.listGraphs()` |
+| `POST /v1/graphs` | `Client.createGraph()` |
+| `GET /v1/graphs/{id}` | `Client.getGraph()` |
+| `DELETE /v1/graphs/{id}` | `Client.deleteGraph()` |
+| `GET /v1/tenants` | `Admin.listTenants()` |
+| `POST /v1/tenants` | `Admin.createTenant()` |
+| `GET /v1/tenants/{id}` | `Admin.getTenant()` |
+| `PATCH /v1/tenants/{id}` | `Admin.updateTenant()` |
+| `DELETE /v1/tenants/{id}` | `Admin.deleteTenant()` |
+| `POST /v1/tenants/{id}/keys` | `Admin.createKey()` |
+| `POST /v1/tenants/{id}/keys/{kid}/rotate` | `Admin.rotateKey()` |
+| `DELETE /v1/tenants/{id}/keys/{kid}` | `Admin.revokeKey()` |
+<!-- coverage:end -->
+
+## Tests
 
 ```sh
-cd sdks/typescript && npm test    # node --test sobre test/sdk.test.ts
+cd sdks/typescript && npm test    # node --test over test/*.test.ts
 ```
 
-Los tests (y el servidor falso `test/fake_server.ts`) están en TypeScript y se ejecutan con el
-*type stripping* de Node ≥ 22.18, sin compilar; no se comprueban tipos sin `tsc`. Cubren CRUD, exec
-en flujo (trozos de 7 bytes que parten líneas y caracteres) y en espera, 429 con `Retry-After`,
-binario de ida y vuelta (200 kB), 401/404/red y la ausencia del token en repr y mensajes.
+They run against a local fake gateway (`test/fake_server.ts`) that follows the spec, and the Go
+contract test (`ext/sandbox/internal/frontal`, `TestContratoSDKs`) runs both SDKs against the real
+gateway handler.
 
-Ver también: [docs/sandbox-api.md](../../docs/sandbox-api.md) (la API y su spec), el SDK de
-Python ([README](../python/README.md)) y las [recetas](../../docs/recetas/README.md).
+See also: [docs/sandbox-api.md](../../docs/sandbox-api.md) and the Python SDK
+([README](../python/README.md)).

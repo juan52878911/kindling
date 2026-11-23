@@ -16,6 +16,7 @@ milisegundos.
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -108,7 +109,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("prompt", nargs="+")
-    ap.add_argument("-g", "--gateway", default="http://192.168.2.60:8080")
+    ap.add_argument("-g", "--gateway", default=os.environ.get("KLING_MCP_GATEWAY", "http://127.0.0.1:8080"))
     ap.add_argument("-s", "--service", default="eco")
     ap.add_argument("-m", "--model", default="qwen3:4b")
     ap.add_argument("-o", "--ollama", default="http://127.0.0.1:11434")

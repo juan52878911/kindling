@@ -14,12 +14,15 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -115,6 +118,13 @@ func plistDaemon(a agenteDaemon, exe string, env map[string]string) string {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- Sin esto, un daemon que muere al arrancar se relanza cada ~10 s para siempre. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <!-- Un servicio de fondo que atiende peticiones interactivas: Adaptive lo
+       trata como Background hasta que lo despierta una, y entonces lo sube. -->
+  <key>ProcessType</key>
+  <string>Adaptive</string>
   <!-- SIGTERM al pararlo: el daemon escribe su estado y sale. -->
   <key>ExitTimeOut</key>
   <integer>30</integer>
@@ -128,17 +138,44 @@ func plistDaemon(a agenteDaemon, exe string, env map[string]string) string {
 	return b.String()
 }
 
+// frenoAgente es el ThrottleInterval del plist: lo que launchd espera antes de
+// relanzar un daemon que acaba de caer. La espera de try/up lo suma cuando el
+// agente ya estaba cargado.
+const frenoAgente = 30 * time.Second
+
+// clavesMigrables son las claves del plist cuyo valor cambió entre versiones de
+// kling: un plist instalado que solo difiere en ellas (o en los comentarios) es
+// de kling y se reemplaza; cualquier otra diferencia es de quien lo ajustó.
+var (
+	reComentarioPlist = regexp.MustCompile(`(?s)<!--.*?-->`)
+	reClaveMigrable   = regexp.MustCompile(`<key>(ThrottleInterval|ProcessType|ExitTimeOut)</key>\s*<(integer|string)>[^<]*</(integer|string)>`)
+)
+
+func plistSinMigrables(s string) string {
+	s = reComentarioPlist.ReplaceAllString(s, "")
+	s = reClaveMigrable.ReplaceAllString(s, "")
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // errPlistDistinto es que ya hay un plist con otro contenido.
 var errPlistDistinto = errors.New("launchd agent already exists with different content")
 
 // escribirPlist deja body en a.plist. Igual que el que hay: nada (instalado
-// = false). Distinto: errPlistDistinto, sin tocarlo.
+// = false). Distinto solo en claves migrables: se reemplaza (true). Distinto
+// en otra cosa: errPlistDistinto, sin tocarlo.
 func escribirPlist(a agenteDaemon, body string) (instalado bool, err error) {
 	if old, err := os.ReadFile(a.plist); err == nil {
 		if string(old) == body {
 			return false, nil
 		}
-		return false, fmt.Errorf("%w: %s", errPlistDistinto, a.plist)
+		if plistSinMigrables(string(old)) != plistSinMigrables(body) {
+			return false, fmt.Errorf("%w: %s", errPlistDistinto, a.plist)
+		}
+		// Solo cambian claves conocidas: se migra, atómicamente.
+		if err := escribirAtomico(a.plist, []byte(body), 0o644); err != nil {
+			return false, err
+		}
+		return true, nil
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}
@@ -175,26 +212,89 @@ func escribirPlist(a agenteDaemon, body string) (instalado bool, err error) {
 }
 
 // instalarAgente escribe el plist del daemon (exe daemon) para root.
-func instalarAgente(a agenteDaemon, root string) error {
+func instalarAgente(w io.Writer, a agenteDaemon, root string) error {
 	exe, err := ejecutableReal()
 	if err != nil {
 		return err
 	}
+	existia := fileExists(a.plist)
 	nuevo, err := escribirPlist(a, plistDaemon(a, exe, entornoDelAgente(root)))
 	switch {
 	case errors.Is(err, errPlistDistinto):
-		fmt.Printf("agent:       "+uiMarks().fail+" %s already exists and differs from what -install would write.\n", a.plist)
-		fmt.Println("  To replace it:")
-		fmt.Printf("    launchctl bootout %s/%s\n", a.dominio(), a.label)
-		fmt.Printf("    rm %q\n", a.plist)
-		fmt.Println("    kling up -install")
+		fmt.Fprintf(w, "agent:       "+uiMarks().fail+" %s already exists and differs from what -install would write.\n", a.plist)
+		fmt.Fprintln(w, "  To replace it:")
+		fmt.Fprintf(w, "    launchctl bootout %s/%s\n", a.dominio(), a.label)
+		fmt.Fprintf(w, "    rm %q\n", a.plist)
+		fmt.Fprintln(w, "    kling up -install")
 		return err
 	case err != nil:
 		return fmt.Errorf("writing %s: %w", a.plist, err)
+	case nuevo && existia:
+		fmt.Fprintf(w, "agent:       "+uiMarks().ok+" updated %s to this version's settings; they apply the next time the agent is loaded\n", a.plist)
 	case nuevo:
-		fmt.Printf("agent:       "+uiMarks().ok+" wrote %s (log: %s)\n", a.plist, a.log)
+		fmt.Fprintf(w, "agent:       "+uiMarks().ok+" wrote %s (log: %s)\n", a.plist, a.log)
 	default:
-		fmt.Printf("agent:       "+uiMarks().ok+" %s already installed\n", a.plist)
+		fmt.Fprintf(w, "agent:       "+uiMarks().ok+" %s already installed\n", a.plist)
 	}
+	return nil
+}
+
+// maxLogAgente es lo que puede crecer el registro del agente antes de rotarlo.
+const maxLogAgente = 10 << 20
+
+// rotarLog aparta path a path.1 (pisando el que hubiera) si pasa de max
+// bytes. launchd no rota la salida del agente y el daemon la escribe para
+// siempre; solo se llama con el daemon parado, así que nadie tiene el fichero
+// abierto: launchd lo vuelve a crear al arrancar. Sin fichero no es un error.
+func rotarLog(path string, max int64) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Size() <= max {
+		return nil
+	}
+	return os.Rename(path, path+".1")
+}
+
+// lanzarctl ejecuta launchctl (args[0]) y devuelve su salida; en un test se
+// sustituye.
+var lanzarctl = func(args ...string) ([]byte, error) {
+	return exec.Command(args[0], args[1:]...).CombinedOutput()
+}
+
+// confirmarAgente pregunta si instalar el agente cuando `kling up` o `kling
+// try` encuentran el daemon parado y sin agente. Sin terminal no hay a quién
+// preguntar: no (y el error dice la orden).
+var confirmarAgente = func(a agenteDaemon) bool {
+	if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stderr.Fd()) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "kling needs its background daemon, and nothing starts it yet.\n"+
+		"Install the launchd agent %s so it starts at login? [Y/n] ", a.plist)
+	var r string
+	fmt.Fscanln(os.Stdin, &r)
+	r = strings.ToLower(strings.TrimSpace(r))
+	return r == "" || r == "y" || r == "yes"
+}
+
+// desinstalarAgente descarga el agente de launchd y borra su plist: lo
+// contrario de `kling up -install`. El registro se deja (puede explicar algo).
+func desinstalarAgente(a agenteDaemon) error {
+	if !fileExists(a.plist) {
+		fmt.Printf("agent:       not installed (%s does not exist)\n", a.plist)
+		return nil
+	}
+	if out, err := lanzarctl("launchctl", "bootout", a.dominio()+"/"+a.label); err != nil {
+		// No cargado es lo normal tras un reinicio sin sesión: se sigue.
+		fmt.Printf("agent:       launchctl bootout: %s (continuing)\n", strings.TrimSpace(string(out)))
+	}
+	if err := os.Remove(a.plist); err != nil {
+		return err
+	}
+	fmt.Printf("agent:       "+uiMarks().ok+" removed %s; the daemon no longer starts at login (log kept: %s)\n", a.plist, a.log)
 	return nil
 }

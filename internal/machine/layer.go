@@ -158,6 +158,16 @@ func (m *Manager) ipv6DeReceta(image string) bool {
 	return json.Unmarshal(b, &rec) == nil && rec.GuestIPv6Stack
 }
 
+// redDelAgente dice si la imagen de la máquina id lleva un agente que anuncia
+// "net": entonces la red va en kling.net= y no en ip=. Sin agente conocido o
+// sin Caps (receta de antes) sigue ip= hasta que el segundo arranque la rehaga.
+func (m *Manager) redDelAgente(id string) bool {
+	m.mu.RLock()
+	mc := m.byID[id]
+	m.mu.RUnlock()
+	return mc != nil && m.AgenteDeImagen(mc.Image).Has(api.GuestCapNet)
+}
+
 // techoDeReceta es el cpu_pct que pide una receta para vcpus vCPU (0 = nada).
 func techoDeReceta(rec api.ImageRecipe, vcpus int) int {
 	switch {

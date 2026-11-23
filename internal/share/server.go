@@ -499,6 +499,16 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 			return errReply(id, e)
 		}
 		a, e := s.stat(p)
+		if e == proto.ENOENT && p != "" {
+			// El invitado guarda el ENOENT como entrada negativa con la caché
+			// larga: solo se enterará de que el nombre apareció si el padre
+			// sigue vigilado (ver watcher.notePadre).
+			padre := ""
+			if i := strings.LastIndexByte(p, '/'); i >= 0 {
+				padre = p[:i]
+			}
+			ss.watcher().notePadre(padre)
+		}
 		if e != 0 {
 			return errReply(id, e)
 		}
@@ -524,7 +534,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		attrOf(fi).Put(r)
 		return r.B
 
-	case proto.OpList:
+	case proto.OpList, proto.OpListPlus:
 		p, cookie, max := d.Str(), d.U64(), d.U32()
 		if e := checked(d, p); e != 0 {
 			return errReply(id, e)
@@ -535,7 +545,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if cookie == 0 {
 			ss.watcher().note(p, true)
 		}
-		return ss.list(id, p, cookie, int(max))
+		return ss.list(id, p, cookie, int(max), op == proto.OpListPlus)
 
 	case proto.OpOpen, proto.OpCreate:
 		p, flags := d.Str(), d.U32()
@@ -716,7 +726,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		ss.maxIO.Store(n)
 		r := ok()
 		r.U32(uint32(n))
-		r.U32(proto.CapWriteBehind)
+		r.U32(proto.CapWriteBehind | proto.CapListPlus)
 		return r.B
 
 	case proto.OpSymlink:

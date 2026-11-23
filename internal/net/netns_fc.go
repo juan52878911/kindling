@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // redEnHost: las /30 de los enlaces viven en el host y pueden chocar con las
@@ -36,11 +37,52 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	defer func() { tr.fin(err) }()
 	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
 	// si un reload del cortafuegos las borró, se reponen; si no se puede,
-	// la máquina no arranca con el host abierto.
+	// la máquina no arranca con el host abierto, y no se monta nada.
 	if err := asegurarHost(); err != nil {
 		return fmt.Errorf("host INPUT rules: %w", err)
 	}
 	tr.fase("host_check")
+	return n.montarSetup(tr, egress, domains, owner)
+}
+
+// SetupAparte es Setup con la comprobación de las reglas INPUT del host en
+// paralelo con el montaje: devuelve, además, la función que espera su
+// resultado. QUIEN LLAMA DEBE ESPERARLA antes de que el invitado pueda emitir
+// (en un restore, antes de reanudar la CPU); si devuelve error, la red no es
+// de fiar y hay que desmontarla. Si SetupAparte falla, la comprobación ya
+// terminó y no hay nada que esperar.
+func (n *Net) SetupAparte(egress Egress, domains []string, owner int) (esperar func() error, err error) {
+	tr := nuevaTrazaSetup(n.NS)
+	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
+	// si un reload del cortafuegos las borró, se reponen; si no se puede,
+	// la máquina no arranca con el host abierto.
+	hecho := make(chan error, 1)
+	comprobar := asegurarHost
+	go func() { hecho <- comprobar() }()
+	var (
+		once sync.Once
+		herr error
+	)
+	esperar = func() error {
+		once.Do(func() {
+			herr = <-hecho
+			if herr != nil {
+				herr = fmt.Errorf("host INPUT rules: %w", herr)
+			}
+			tr.fase("host_check")
+			tr.fin(herr)
+		})
+		return herr
+	}
+	if err := n.montarSetup(tr, egress, domains, owner); err != nil {
+		_ = esperar() // que la goroutine no sobreviva a la llamada
+		return nil, err
+	}
+	return esperar, nil
+}
+
+// montarSetup es el resto de Setup, tras lanzar la comprobación del host.
+func (n *Net) montarSetup(tr *trazaSetup, egress Egress, domains []string, owner int) (err error) {
 	// Una ranura (ranuras_fc.go) llega con la base montada: solo se añade lo
 	// propio de la petición. Se consume aquí: un segundo Setup del mismo *Net
 	// ya no la encuentra y monta todo, como cualquier red sin ranura.
@@ -62,9 +104,9 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	n.Teardown()
 	tr.fase("teardown")
 	// Sin ranura, el montaje completo hace cola: a lo sumo 4 a la vez.
-	montajesCompletos <- struct{}{}
+	tomarMontaje(true)
 	err = n.montarBase(tr, owner, false)
-	<-montajesCompletos
+	soltarMontaje()
 	if err != nil {
 		return err
 	}
@@ -94,6 +136,9 @@ func (n *Net) reglaDNAT() []string {
 // Sin conDNAT, el DNAT va en el iptables-restore de aplicarPropio (un proceso
 // menos en Setup) y la base no lleva ninguna regla de salida.
 func (n *Net) montarBase(tr *trazaSetup, owner int, conDNAT bool) error {
+	// Un borrado de conntrack pendiente de este mismo NSIP (la máquina
+	// anterior con este índice) no debe caer sobre los flujos de la nueva.
+	esperarConntrackHost(n.NSIP)
 	// Los 11 procesos de ip del enlace son 3: el netns y un `ip -batch`
 	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
 	// iproute2, el resto de líneas acabaría dentro del netns nuevo.
@@ -184,6 +229,9 @@ func (n *Net) reglasBaseRanura() [][]string {
 // reglas comunes se quedan donde están, salvo el cierre de FORWARD, que
 // diferenciaDeReglas recoloca). El resultado es el del montaje completo.
 func (n *Net) aplicarSobreRanura(tr *trazaSetup, base, egress Egress, domains []string) error {
+	if egress != EgressNone {
+		n.retirarRegistroDeRanura()
+	}
 	if base != EgressNone || !hayRestore() {
 		return n.aplicarPropio(tr, egress, domains, true)
 	}
@@ -290,7 +338,10 @@ func (n *Net) arrancarRegistroNone(egress Egress) error {
 	if err := iniciarResolverNone(n); err != nil {
 		return err
 	}
-	n.instalarRegistroIP()
+	// Una ranura ya trae el registro instalado (MontarRanura).
+	if _, ya := registroEnRanura.LoadAndDelete(n.NS); !ya {
+		n.instalarRegistroIP()
+	}
 	return nil
 }
 
@@ -308,22 +359,36 @@ func (n *Net) Teardown() {
 	stopGraph(n.NS)
 	stopCredProxy(n.NS)
 	cerrarIPSet(n.NS)
-	borrarEnlace(n.NS, n.HostIf)
+	registroEnRanura.Delete(n.NS)
+	// El conntrack del host solo tiene algo que cortar si había enlace: en
+	// una alta nueva (Setup empieza siempre por Teardown) no se lanza nada, y
+	// cuando sí, lo hace un trabajador aparte, fuera del camino del llamante.
+	if borrarEnlace(n.NS, n.HostIf) {
+		encolarConntrackHost(n)
+	}
 }
 
 // borrarEnlace borra el netns y el veth del host, solo si están: Setup
 // empieza siempre por Teardown, y en el caso corriente (una máquina nueva) no
 // hay nada, así que eran dos procesos que fallaban. Mirarlo es un stat.
-func borrarEnlace(ns, hostIf string) {
-	if _, err := os.Stat("/var/run/netns/" + ns); err == nil {
+// Devuelve si había algo que borrar.
+func borrarEnlace(ns, hostIf string) bool {
+	borro := false
+	if existeRuta("/var/run/netns/" + ns) {
 		quiet("ip", "netns", "del", ns)
+		borro = true
 	}
 	// Después del netns: borrarlo se lleva el veth, pero el kernel lo hace en
 	// diferido y puede seguir ahí; `ip link del` lo quita en el acto.
-	if _, err := os.Stat("/sys/class/net/" + hostIf); err == nil {
+	if existeRuta("/sys/class/net/" + hostIf) {
 		quiet("ip", "link", "del", hostIf)
+		borro = true
 	}
+	return borro
 }
+
+// existeRuta es un stat; variable para los tests.
+var existeRuta = func(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // ipBatch ejecuta varias órdenes de ip en un solo proceso (`ip -batch -`),
 // dentro del netns ns si no está vacío. Para en la primera que falla.

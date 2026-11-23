@@ -107,6 +107,17 @@ func (c *Client) do(ctx context.Context, method, path string, body any) error {
 	return nil
 }
 
+// Error es una respuesta >= 300 del VMM. Status es su código HTTP: con él el
+// núcleo distingue el 507 de kling-hv sin cupo (HV_NO_RESOURCES) de un 400 de
+// configuración mala. Msg es el texto de siempre, "firecracker MÉTODO RUTA:
+// estado[: motivo]", que otros reconocen por su prefijo (errorDelVMM).
+type Error struct {
+	Status int
+	Msg    string
+}
+
+func (e *Error) Error() string { return e.Msg }
+
 // errorDeFirecracker es el error de una respuesta >= 300: con su
 // fault_message si lo trae; si no, con lo que contestó (recortado), y sin
 // cuerpo, solo con el código. Antes, sin fault_message, el error acababa en
@@ -123,10 +134,11 @@ func errorDeFirecracker(method, path string, resp *http.Response) error {
 	if motivo == "" {
 		motivo = strings.TrimSpace(string(cuerpo))
 	}
-	if motivo == "" {
-		return fmt.Errorf("firecracker %s %s: %s", method, path, resp.Status)
+	msg := fmt.Sprintf("firecracker %s %s: %s", method, path, resp.Status)
+	if motivo != "" {
+		msg += ": " + motivo
 	}
-	return fmt.Errorf("firecracker %s %s: %s: %s", method, path, resp.Status, motivo)
+	return &Error{Status: resp.StatusCode, Msg: msg}
 }
 
 // Ping comprueba que el socket responde; se usa para esperar el arranque.
@@ -355,11 +367,32 @@ func (c *Client) LoadSnapshot(ctx context.Context, snapPath, memPath string, res
 	return c.LoadSnapshotTracking(ctx, snapPath, memPath, resume, false)
 }
 
+// Repoint son las rutas de confianza que el daemon manda dentro de
+// PUT /snapshot/load (kling_repoint, solo kling-vz y kling-hv): el VMM abre
+// estas y no las que el snap.file dice. Firecracker rechaza campos que no
+// conoce, así que con él se manda nil.
+type Repoint struct {
+	Kernel string                  `json:"kernel"`
+	Drives map[string]RepointDrive `json:"drives"`
+}
+
+// RepointDrive es la ruta de un disco y si va de solo lectura.
+type RepointDrive struct {
+	Path     string `json:"path"`
+	ReadOnly bool   `json:"read_only"`
+}
+
 // LoadSnapshotTracking es LoadSnapshot y, con track, KVM lleva la cuenta de
 // las páginas que el invitado escribe desde ahora: lo que hace posible un
 // SnapshotDiff después. Cuesta ciclos en cada primera escritura de una
 // página, así que solo se pide cuando se va a usar.
 func (c *Client) LoadSnapshotTracking(ctx context.Context, snapPath, memPath string, resume, track bool) error {
+	return c.LoadSnapshotRepoint(ctx, snapPath, memPath, resume, track, nil)
+}
+
+// LoadSnapshotRepoint es LoadSnapshotTracking que, con rp no nil, añade
+// kling_repoint al cuerpo. Con nil el cuerpo es el de siempre.
+func (c *Client) LoadSnapshotRepoint(ctx context.Context, snapPath, memPath string, resume, track bool, rp *Repoint) error {
 	body := map[string]any{
 		"snapshot_path": snapPath,
 		"mem_backend":   map[string]string{"backend_path": memPath, "backend_type": "File"},
@@ -367,6 +400,9 @@ func (c *Client) LoadSnapshotTracking(ctx context.Context, snapPath, memPath str
 	}
 	if track {
 		body["track_dirty_pages"] = true
+	}
+	if rp != nil {
+		body["kling_repoint"] = rp
 	}
 	return c.do(ctx, http.MethodPut, "/snapshot/load", body)
 }

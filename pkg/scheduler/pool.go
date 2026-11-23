@@ -43,6 +43,12 @@ type pool struct {
 	// cuyo Remove falló: siguen vivas, ya no se entregan a nadie, y se vuelven
 	// a intentar en cada evictStale y en drain.
 	pendientes []string
+	// entregadas son las que take dio a una llamada: siguen siendo pool=true
+	// pero ya tienen dueño (quien las usa las destruye). El barrido de
+	// huérfanas no las toca. Una con HoldTTL activo se olvida al soltarlo (al
+	// terminar su llamada), no por reloj; una sin él, pasado su TTL, que las
+	// congelaría.
+	entregadas map[string]*entrega
 
 	// wg cuenta las reposiciones en vuelo para que drain pueda esperarlas.
 	wg sync.WaitGroup
@@ -53,6 +59,12 @@ type pool struct {
 	// newPool los fija a los de verdad.
 	warmFn   func(ctx context.Context, service, snapshot string) (*warmVM, error)
 	removeFn func(ctx context.Context, id string) error
+}
+
+// entrega es una precalentada ya entregada a una llamada.
+type entrega struct {
+	desde    time.Time
+	sostenes int // HoldTTL activos: mientras haya alguno, no caduca por reloj
 }
 
 // warmVM es una microVM restaurada y con su sesión MCP ya abierta.
@@ -90,7 +102,102 @@ func (p *pool) take(service string) *warmVM {
 	}
 	vm := q[0]
 	p.ready[service] = q[1:]
+	if p.entregadas == nil {
+		p.entregadas = map[string]*entrega{}
+	}
+	p.entregadas[vm.id] = &entrega{desde: time.Now()}
 	return vm
+}
+
+// sostener marca la entregada id como en uso por una llamada que mantiene su
+// TTL; la función que devuelve la suelta y, con la última, la olvida (la
+// llamada terminó: la máquina deja de ser del fondo).
+func (p *pool) sostener(id string) (soltar func()) {
+	p.mu.Lock()
+	e := p.entregadas[id]
+	if e == nil {
+		p.mu.Unlock()
+		return func() {}
+	}
+	e.sostenes++
+	p.mu.Unlock()
+	var una sync.Once
+	return func() {
+		una.Do(func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if e.sostenes--; e.sostenes <= 0 && p.entregadas[id] == e {
+				delete(p.entregadas, id)
+			}
+		})
+	}
+}
+
+// LabelPoolOwner marca qué planificador creó una máquina del fondo.
+const LabelPoolOwner = "kling.pool.owner"
+
+// barrerHuerfanas borra del daemon las máquinas pool=true propias (con las
+// etiquetas de este planificador) que el fondo no conoce: las del fondo viven
+// solo en memoria, y si el gateway cayó, el nuevo no las ve, no las adopta
+// (acquire las excluye) y nada más las barre. Se salta las que están en ready,
+// las entregadas a una llamada, las pendientes de borrar, y las más jóvenes
+// que barridoGracia (una en pleno calentamiento aún no está en ready).
+//
+// Solo toca las que llevan la etiqueta LabelPoolOwner de este planificador
+// (PoolOwner): dos gateways sobre un daemon, o una máquina de usuario con
+// pool=true, no se borran entre sí. Sin PoolOwner no barre.
+func (p *pool) barrerHuerfanas(ctx context.Context) {
+	if p.gw.PoolOwner == "" {
+		return
+	}
+	ms, err := p.gw.client.List(ctx)
+	if err != nil {
+		return
+	}
+	p.mu.Lock()
+	conocidas := map[string]bool{}
+	for _, q := range p.ready {
+		for _, vm := range q {
+			conocidas[vm.id] = true
+		}
+	}
+	for _, id := range p.pendientes {
+		conocidas[id] = true
+	}
+	ttl := p.gw.idle*2 + 2*time.Minute
+	for id, e := range p.entregadas {
+		if e.sostenes <= 0 && time.Since(e.desde) > ttl {
+			delete(p.entregadas, id)
+		} else {
+			conocidas[id] = true
+		}
+	}
+	cerrado := p.closed
+	p.mu.Unlock()
+	if cerrado {
+		return
+	}
+	n := 0
+	for _, m := range ms {
+		if m.Labels["pool"] != "true" || m.Labels[LabelPoolOwner] != p.gw.PoolOwner || conocidas[m.ID] || time.Since(m.CreatedAt) < barridoGracia {
+			continue
+		}
+		ajena := false
+		for k, v := range p.gw.MachineLabels {
+			if m.Labels[k] != v {
+				ajena = true
+			}
+		}
+		if ajena {
+			continue
+		}
+		if p.quitar(ctx, m.ID) == nil {
+			n++
+		}
+	}
+	if n > 0 {
+		log.Printf("pool: %d prewarmed instance(s) without an owner removed", n)
+	}
 }
 
 // fill repone el fondo de un servicio hasta su tamaño, en segundo plano.
@@ -169,14 +276,20 @@ func (p *pool) fillN(ctx context.Context, service, snapshot string, want int) {
 	}()
 }
 
+// etiquetasFondo son las de una máquina del fondo, con el dueño si hay.
+func (p *pool) etiquetasFondo(service string) map[string]string {
+	l := map[string]string{api.LabelService: service, "pool": "true"}
+	if p.gw.PoolOwner != "" {
+		l[LabelPoolOwner] = p.gw.PoolOwner
+	}
+	return l
+}
+
 // warm restaura una instancia y la deja con la sesión MCP abierta.
 func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, error) {
 	mc, err := p.gw.client.Run(ctx, api.RunRequest{
-		From: snapshot,
-		Labels: api.MergeLabels(p.gw.MachineLabels, map[string]string{
-			api.LabelService: service,
-			"pool":           "true",
-		}),
+		From:   snapshot,
+		Labels: api.MergeLabels(p.gw.MachineLabels, p.etiquetasFondo(service)),
 		// Red de seguridad para si el gateway muriera: el daemon las congela en
 		// vez de dejarlas vivas para siempre.
 		//

@@ -194,3 +194,58 @@ func TestSplitStatements(t *testing.T) {
 		t.Fatalf("%q", st)
 	}
 }
+
+// B8: la limpieza antes de congelar era `rm -f /tmp/kdb-*`, que no borra
+// directorios: el árbol de -workdir (con su .env) se quedaba en el golden y en
+// todas sus copias. Ahora se borra con rm -rf y, si algo sigue ahí, no se
+// congela.
+func TestLimpiezaAntesDeCongelar(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sin sh")
+	}
+	d := t.TempDir()
+	script := strings.ReplaceAll(limpiezaCongelar, "/tmp/", d+"/")
+	if script == limpiezaCongelar || !strings.Contains(limpiezaCongelar, "rm -rf") {
+		t.Fatalf("la limpieza no borra /tmp/kdb-* con rm -rf: %q", limpiezaCongelar)
+	}
+	for _, p := range []string{"kdb-work/app/sub", "kdb-otro"} {
+		if err := os.MkdirAll(filepath.Join(d, p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{"kdb-work/.env", "kdb-work/app/sub/x", "kdb-step.env", "kdb-work.tgz", "ajeno"} {
+		if err := os.WriteFile(filepath.Join(d, p), []byte("SECRETO=1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	quedan, _ := filepath.Glob(filepath.Join(d, "kdb-*"))
+	if len(quedan) != 0 {
+		t.Fatalf("siguen en la copia: %v", quedan)
+	}
+	if _, err := os.Stat(filepath.Join(d, "ajeno")); err != nil {
+		t.Fatalf("borró lo que no era suyo: %v", err)
+	}
+
+	// Lo que no se puede borrar para la congelación con un error que lo dice.
+	if os.Geteuid() == 0 {
+		t.Skip("como root rm -rf borra igual: el caso de fallo no se reproduce")
+	}
+	atasco := filepath.Join(d, "kdb-work", "fijo")
+	if err := os.MkdirAll(atasco, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(atasco, "f"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(atasco, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(atasco, 0o700) })
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "not freezing") {
+		t.Fatalf("con %s sin borrar: err=%v salida=%q", atasco, err, out)
+	}
+}

@@ -19,7 +19,7 @@ opción: el runtime en el propio Mac.
 | Apple Silicon (arm64) | los invitados son aarch64; en un Mac Intel no hay backend `vz` |
 | macOS 14 (Sonoma) o superior; 15.2 para `kling-hv` | congelar y descongelar usa el guardado y restauración de estado de la VM, que llega en 14; `kling-hv` usa el GIC de Hypervisor.framework (ver la tabla de abajo) |
 | `kling-vz` firmado con `com.apple.security.virtualization` | sin ese permiso macOS no deja crear la VM; una firma ad-hoc basta |
-| e2fsprogs (`brew install e2fsprogs`) | cada microVM lleva un overlay ext4 y las imágenes se inspeccionan con `debugfs` |
+| e2fsprogs (`brew install e2fsprogs`), opcional | solo para un `-disk` distinto de 512 MiB y para inspeccionar imágenes con `debugfs`: la plantilla del overlay por defecto la escribe `kling up` sin él |
 
 No hace falta root: el daemon corre como tu usuario.
 
@@ -61,7 +61,6 @@ cuarentena de la descarga (van firmados ad-hoc, sin notarizar). Desde el repo:
 ```sh
 make vz                 # compila y firma kling-vz y kling-hv (módulo aparte en vz/)
 make install            # el CLI (y el daemon: es el mismo binario) y los VMM de vz/bin
-brew install e2fsprogs
 kling up -check
 ```
 
@@ -98,6 +97,17 @@ si faltan en `images/` (`vmlinux-arm64.zst` y `min-arm64.ext4.zst`),
 verificados contra el `SHA256SUMS` de la release de ese `kling`, igual que
 `install.sh`. Ya no hace falta un host Linux para el primer `kling run -image
 min`; para el resto de imágenes, ver [Conseguir imágenes](#conseguir-imágenes).
+Lo mismo hace `kling try` si no encuentra ninguna imagen, y también deja en
+`lib/kling-guest` el agente de invitado que necesitan `toolchain` y las imágenes
+de Docker (`install.sh` lo instala igual). Con `minisign` instalado, `install.sh` comprueba la
+firma de la release; sin él usa `ssh-keygen -Y verify` si la release trae
+`SHA256SUMS.sshsig`, y si no, solo puede comprobar el sha256 y pedirle al `kling`
+recién bajado que se compruebe a sí mismo, que no es una firma independiente
+(lo dice al instalar). Mientras la última estable sea una 0.x sin firma, el
+one-liner fija `KLING_VERSION`, y tiene que ser una versión desde
+`PRIMER_USO_DESDE` (la primera cuyo `kling` sabe comprobarse): una anterior sin
+`minisign` no se puede verificar y `install.sh` se niega. Lo vigila
+`scripts/readme_test.go`, y `scripts/release.sh` no etiqueta si el README fija otra.
 
 `kling-vz` vive en este repositorio, en `vz/`, como **módulo Go aparte**
 (`github.com/juan52878911/kindling/vz`): necesita cgo y dependencias que el
@@ -240,6 +250,10 @@ Lo que escribe es esto (launchd no expande `~` ni `$HOME`: rutas absolutas):
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Adaptive</string>
   <!-- SIGTERM al pararlo: el daemon escribe su estado y sale. -->
   <key>ExitTimeOut</key>
   <integer>30</integer>
@@ -257,7 +271,13 @@ launchctl kickstart -k gui/$(id -u)/dev.kindling.daemon      # reiniciarlo
 launchctl bootout gui/$(id -u)/dev.kindling.daemon           # pararlo
 ```
 
-Con el plist instalado, `kling up` lo arranca si no está corriendo.
+Con el plist instalado, `kling up` lo arranca si no está corriendo; sin plist y
+con terminal ofrece instalarlo, y sin terminal falla con la orden
+(`kling up -install`) en vez de decir «Next step» con el daemon parado. `kling up
+-uninstall` lo descarga y borra el plist. El plist lleva `ProcessType Adaptive`
+y `ThrottleInterval 30` (un daemon que muere al arrancar no se relanza cada 10 s),
+y `kling up` aparta `~/Library/Logs/kindling.log` a `.log.1` al pasar de 10 MiB
+(launchd no rota).
 
 Con el plist instalado, `kling upgrade` también actualiza el daemon: baja la
 release, verifica `kling`, `kling-vz` y `kling-hv` (y que cada VMM lleva el

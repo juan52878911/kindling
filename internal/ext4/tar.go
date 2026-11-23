@@ -30,12 +30,22 @@ type TarOptions struct {
 	// Entries, si no es nil, cuenta las entradas leídas (se comparte entre
 	// varias llamadas: las capas de una imagen) y MaxEntries es su tope: un
 	// tar con millones de entradas falla al pasarlo, antes de llenar la
-	// memoria de nodos. 0 = sin tope.
+	// memoria de nodos. 0 = defaultMaxEntries.
 	Entries    *int64
 	MaxEntries int64
 }
 
 const maxKeep = 16 << 20
+
+// defaultMaxEntries es el tope de entradas de quien no da uno: cada una es
+// un nodo en memoria, y un tar de millones de cabeceras vacías la llenaba.
+// Es variable para las pruebas.
+var defaultMaxEntries int64 = 4 << 20
+
+// maxCola es lo que se lee después del final del tar (los dos bloques de
+// ceros) hasta el final del flujo: el relleno de tar es de unos KiB; más
+// que esto es otra cosa, y no se sigue descomprimiendo.
+const maxCola = 64 << 20
 
 // AddTar recorre un tar y lo refleja en el árbol: estructura, dueños,
 // modos, horas y xattrs (SCHILY.xattr.*). Los datos de los ficheros no se
@@ -55,19 +65,24 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 	}
 	added := map[hijo]bool{}
 	tr := tar.NewReader(r)
+	entries, maxEntries := o.Entries, o.MaxEntries
+	if entries == nil {
+		entries = new(int64)
+	}
+	if maxEntries <= 0 {
+		maxEntries = defaultMaxEntries
+	}
 	for idx := 0; ; idx++ {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return drenar(r)
 		}
 		if err != nil {
 			return fmt.Errorf("tar entry %d: %w", idx, err)
 		}
-		if o.Entries != nil {
-			*o.Entries++
-			if o.MaxEntries > 0 && *o.Entries > o.MaxEntries {
-				return fmt.Errorf("more than %d tar entries", o.MaxEntries)
-			}
+		*entries++
+		if *entries > maxEntries {
+			return fmt.Errorf("more than %d tar entries", maxEntries)
 		}
 		name := path.Clean("/" + h.Name)
 		if name == "/" {
@@ -179,6 +194,20 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		setMeta(n, h)
 		parent.SetChild(file, n)
 	}
+}
+
+// drenar lee r hasta el final después del fin del tar: archive/tar para en
+// los bloques de ceros, y quien comprueba el flujo entero al llegar a io.EOF
+// (el diff_id de una capa OCI, internal/oci) solo da su error ahí.
+func drenar(r io.Reader) error {
+	n, err := io.Copy(io.Discard, io.LimitReader(r, maxCola+1))
+	if err != nil {
+		return fmt.Errorf("after the end of the tar: %w", err)
+	}
+	if n > maxCola {
+		return fmt.Errorf("more than %d MiB after the end of the tar", maxCola>>20)
+	}
+	return nil
 }
 
 func setMeta(n *Node, h *tar.Header) {

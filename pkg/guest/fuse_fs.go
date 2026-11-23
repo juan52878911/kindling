@@ -53,10 +53,12 @@ type fileHandle struct {
 
 type dirEntry struct {
 	name string
-	typ  uint32 // S_IF*
+	typ  uint32      // S_IF*
+	attr *share.Attr // de OpListPlus; nil si el daemon no los dio
 }
 
 type dirHandle struct {
+	at      time.Time // cuándo se leyó la lista: los atributos envejecen
 	node    *node
 	entries []dirEntry
 }
@@ -88,8 +90,11 @@ type fuseFS struct {
 	kcMu      sync.Mutex // guarda node.openKey/openSeen
 
 	// Avisos de cambios del host (fuse_notify.go).
-	evq       chan pushEvent
-	evOnce    sync.Once
+	evq    chan pushEvent
+	evOnce sync.Once
+	// perdidos: se perdió algún aviso del host (cola llena aquí o en la
+	// sesión). Mientras, ttls da 1 s, y el notificador lo invalida todo.
+	perdidos  atomic.Bool
 	synthTID  atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
 	synMu     sync.Mutex
 	syn       synthOp
@@ -120,8 +125,10 @@ type cacheKey struct {
 // host cada vez. Con ella, el riesgo es enseñar datos viejos si el host cambió
 // el fichero. Por eso solo se pide si:
 //
-//   - el montaje es ro: en rw el invitado también escribe y no se ha estudiado
-//     la coherencia con lo que escribe el host a la vez;
+//   - si el montaje es rw, el nodo no tiene escrituras pendientes ni handles de
+//     escritura abiertos: lo que el kernel guardó entonces es lo que el host
+//     tiene, y lo que el invitado escribió antes cambió el mtime y el tamaño
+//     (la huella ya no coincide);
 //   - el kernel aceptó AUTO_INVAL_DATA, que tira las páginas cuando ve cambiar
 //     mtime o tamaño al refrescar atributos;
 //   - el fichero no ha cambiado desde el OPEN anterior (mismo tamaño, mtime y
@@ -134,18 +141,40 @@ type cacheKey struct {
 //
 // Así se conserva la consistencia de cerrar-y-abrir que había sin la bandera.
 func (fs *fuseFS) keepCache(n *node, at share.Attr) bool {
-	if !fs.readOnly || !fs.autoInval.Load() || at.Mode&share.SIFMT != share.SIFREG {
+	if !fs.autoInval.Load() || at.Mode&share.SIFMT != share.SIFREG {
 		return false
 	}
+	escribe := !fs.readOnly && fs.escribiendo(n)
 	k := cacheKey{size: at.Size, mtime: at.Mtime, ctime: at.Ctime, mtimen: at.Mtimen, ctimen: at.Ctimen}
 	fs.kcMu.Lock()
 	prev, seen := n.openKey, n.openSeen
 	n.openKey, n.openSeen = k, true
 	fs.kcMu.Unlock()
-	if at.Mtimen == 0 && at.Ctimen == 0 {
+	if at.Mtimen == 0 && at.Ctimen == 0 || escribe {
 		return false
 	}
 	return seen && prev == k
+}
+
+// escribiendo dice si n tiene escrituras sin enviar al host o algún handle
+// abierto para escribir.
+func (fs *fuseFS) escribiendo(n *node) bool {
+	if st := n.wb.Load(); st != nil {
+		st.mu.Lock()
+		busy := st.cur != nil || len(st.flying) > 0
+		st.mu.Unlock()
+		if busy {
+			return true
+		}
+	}
+	fs.hmu.Lock()
+	defer fs.hmu.Unlock()
+	for _, h := range fs.files {
+		if h.node == n && h.flags&share.FlagWrite != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // linkChanged apunta la versión (mtime y ctime) del enlace n que acaba de dar
@@ -198,6 +227,13 @@ func (fs *fuseFS) attach(s *shareSession) {
 		for {
 			select {
 			case ev := <-s.events:
+				if s.perdido.Load() {
+					// Primero el de fs y luego se borra el de la sesión: ttls
+					// mira los dos y no hay un momento sin ninguno. Va antes del
+					// enqueue, que despierta al notificador.
+					fs.perdidos.Store(true)
+					s.perdido.Store(false)
+				}
 				fs.enqueue(ev)
 			case <-s.done:
 				return
@@ -410,6 +446,9 @@ func (fs *fuseFS) init(req fuseReq) []byte {
 		readahead = share.MaxIO
 	}
 	want := uint32(initAsyncRead | initAtomicOTrunc | initBigWrites | initAutoInvalData | initParallelDirop | initMaxPages | initCacheSymlinks)
+	if fs.listPlus() {
+		want |= initDoReaddirplus | initReaddirplusAuto
+	}
 	le.PutUint32(out[4:], minor)
 	le.PutUint32(out[8:], readahead)
 	le.PutUint32(out[12:], flags&want)
@@ -422,6 +461,16 @@ func (fs *fuseFS) init(req fuseReq) []byte {
 	le.PutUint32(out[24:], 1)                // time_gran: nanosegundos
 	le.PutUint16(out[28:], share.MaxIO/4096) // max_pages
 	return reply(req.unique, 0, out)
+}
+
+// listPlus dice si el daemon de la sesión actual sirve OpListPlus: solo
+// entonces se pide READDIRPLUS al kernel. Si la sesión cambia a un daemon que
+// no la tiene, READDIRPLUS se contesta sin atributos (readdirplus).
+func (fs *fuseFS) listPlus() bool {
+	fs.smu.Lock()
+	s := fs.sess
+	fs.smu.Unlock()
+	return s != nil && s.caps&share.CapListPlus != 0
 }
 
 func (fs *fuseFS) batchForget(arg []byte) {
@@ -474,6 +523,20 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		// El tamaño que vea el kernel tiene que incluir lo ya escrito.
 		fs.drain(fs.nodes.child(n, name), false)
 		errno, d := fs.call(share.OpStat, func(e *share.Enc) { e.Str(p) })
+		te, ta := fs.ttls()
+		if errno == share.ENOENT {
+			// Entrada negativa: el kernel recuerda que no existe y no vuelve a
+			// preguntar hasta que caduque o el host avise de que apareció. La
+			// larga solo bajo un padre que no sea la raíz: si el daemon deja de
+			// vigilar el padre, o se pierden avisos, se invalida la entrada del
+			// padre y el kernel tira con ella sus negativas (d_invalidate poda
+			// los hijos). La raíz no tiene entrada que invalidar y sus negativas
+			// no se pueden tirar sin saber los nombres: van con 1 s.
+			if n == fs.nodes.root {
+				te = cacheSeconds
+			}
+			return reply(u, 0, entryOutT(0, fattr{}, te, 0))
+		}
 		if errno != 0 {
 			return fail(errno)
 		}
@@ -487,7 +550,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			// CACHE_SYMLINKS: el destino viejo sigue en la caché del kernel.
 			go fs.notifyInode(c.id)
 		}
-		return reply(u, 0, entryOut(c.id, toFattr(at, c.id)))
+		return reply(u, 0, entryOutT(c.id, toFattr(at, c.id), te, ta))
 
 	case opGetattr:
 		if len(a) < 16 {
@@ -500,7 +563,8 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 				if errno == 0 {
 					at := share.GetAttr(d)
 					if d.Err() == nil {
-						return reply(u, 0, attrOut(toFattr(at, n.id)))
+						_, ta := fs.ttls()
+						return reply(u, 0, attrOutT(toFattr(at, n.id), ta))
 					}
 				}
 			}
@@ -834,7 +898,13 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if len(a) < 24 {
 			return fail(share.EINVAL)
 		}
-		return fs.readdir(u, n, le.Uint64(a[0:]), le.Uint64(a[8:]), le.Uint32(a[16:]))
+		return fs.readdir(u, n, le.Uint64(a[0:]), le.Uint64(a[8:]), le.Uint32(a[16:]), false)
+
+	case opReaddirplus:
+		if len(a) < 24 {
+			return fail(share.EINVAL)
+		}
+		return fs.readdir(u, n, le.Uint64(a[0:]), le.Uint64(a[8:]), le.Uint32(a[16:]), true)
 
 	case opReleasedir:
 		if len(a) < 8 {
@@ -951,7 +1021,29 @@ func (fs *fuseFS) statReply(u uint64, n *node) []byte {
 	if d.Err() != nil {
 		return reply(u, share.EIO)
 	}
-	return reply(u, 0, attrOut(toFattr(at, n.id)))
+	_, ta := fs.ttls()
+	return reply(u, 0, attrOutT(toFattr(at, n.id), ta))
+}
+
+// ttls son los plazos (segundos) que el kernel da a una entrada y a sus
+// atributos. Con vigilancia del host (OpWatch) las cachés son largas: el aviso
+// invalida lo que cambie. Los atributos solo si el montaje es ro: en rw los
+// cambia el propio invitado al escribir, y sin aviso del host que los cubra.
+// Sin vigilancia (sondeo, o un daemon anterior), 1 s como siempre.
+func (fs *fuseFS) ttls() (entry, attr uint64) {
+	fs.smu.Lock()
+	s := fs.sess
+	fs.smu.Unlock()
+	if s == nil || !s.watching.Load() || s.perdido.Load() || fs.perdidos.Load() {
+		// Sin vigilancia, o con avisos perdidos que aún no se han compensado
+		// invalidándolo todo (fuse_notify.go): lo que se dé ahora no tiene
+		// quien lo invalide.
+		return cacheSeconds, cacheSeconds
+	}
+	if fs.readOnly {
+		return cacheLargo, cacheLargo
+	}
+	return cacheLargo, cacheSeconds
 }
 
 func (fs *fuseFS) setattr(u uint64, n *node, a []byte) []byte {
@@ -1039,18 +1131,34 @@ func (fs *fuseFS) opendir(u uint64, n *node) []byte {
 	if !ok {
 		return reply(u, share.ENOENT)
 	}
-	entries := []dirEntry{{".", share.SIFDIR}, {"..", share.SIFDIR}}
+	entries := []dirEntry{{name: ".", typ: share.SIFDIR}, {name: "..", typ: share.SIFDIR}}
 	var cookie uint64
+	at := time.Now()
+	plus := fs.listPlus()
 	for {
-		errno, d := fs.call(share.OpList, func(e *share.Enc) { e.Str(p); e.U64(cookie); e.U32(64 << 10) })
+		op := share.OpList
+		if plus {
+			op = share.OpListPlus
+		}
+		errno, d := fs.call(op, func(e *share.Enc) { e.Str(p); e.U64(cookie); e.U32(64 << 10) })
+		if plus && errno == share.ENOSYS {
+			// La sesión cambió a un daemon sin OpListPlus: la lista simple.
+			plus = false
+			continue
+		}
 		if errno != 0 {
 			return reply(u, errno)
 		}
 		eof, count := d.U8(), d.U32()
 		for i := uint32(0); i < count && d.Err() == nil; i++ {
 			name, typ := d.Str(), d.U32()
+			var attr *share.Attr
+			if plus && d.U8() != 0 {
+				a := share.GetAttr(d)
+				attr = &a
+			}
 			if d.Err() == nil && share.ValidName(name) == nil {
-				entries = append(entries, dirEntry{name, typ & share.SIFMT})
+				entries = append(entries, dirEntry{name: name, typ: typ & share.SIFMT, attr: attr})
 			}
 		}
 		next := d.U64()
@@ -1075,11 +1183,16 @@ func (fs *fuseFS) opendir(u uint64, n *node) []byte {
 		return reply(u, share.EMFILE)
 	}
 	fs.nextFH++
-	fs.dirs[fs.nextFH] = &dirHandle{node: n, entries: entries}
+	fs.dirs[fs.nextFH] = &dirHandle{node: n, entries: entries, at: at}
 	return reply(u, 0, openOut(fs.nextFH))
 }
 
-func (fs *fuseFS) readdir(u uint64, n *node, fh, off uint64, size uint32) []byte {
+// plusMaxEdad es lo más viejo que puede ser un listado para que READDIRPLUS
+// dé de él atributos al kernel: pasado, se dan las entradas sin ellos y el
+// kernel pregunta una a una (LOOKUP), como con READDIR.
+const plusMaxEdad = 2 * time.Second
+
+func (fs *fuseFS) readdir(u uint64, n *node, fh, off uint64, size uint32, plus bool) []byte {
 	fs.hmu.Lock()
 	dh := fs.dirs[fh]
 	fs.hmu.Unlock()
@@ -1090,15 +1203,47 @@ func (fs *fuseFS) readdir(u uint64, n *node, fh, off uint64, size uint32) []byte
 		size = share.MaxIO
 	}
 	var buf []byte
+	fresco := time.Since(dh.at) < plusMaxEdad
+	te, ta := fs.ttls()
 	for i := off; i < uint64(len(dh.entries)); i++ {
 		e := dh.entries[i]
-		var ok bool
-		buf, ok = appendDirent(buf, int(size), fs.direntIno(dh.node, e.name), i+1, e.typ>>12, e.name)
-		if !ok {
+		if !plus {
+			var ok bool
+			buf, ok = appendDirent(buf, int(size), fs.direntIno(dh.node, e.name), i+1, e.typ>>12, e.name)
+			if !ok {
+				break
+			}
+			continue
+		}
+		// READDIRPLUS: cada entrada lleva su entry_out. Con nodeid 0 el kernel
+		// la toma como «sin datos» y la pregunta luego si hace falta ("." y
+		// ".." van siempre así).
+		if len(buf)+entryOutSize+(direntBaseSize+len(e.name)+7)&^7 > int(size) {
 			break
 		}
+		eo := make([]byte, entryOutSize)
+		ino := fs.direntIno(dh.node, e.name)
+		if e.attr != nil && fresco && e.name != "." && e.name != ".." && fs.plusEntry(dh.node, e) {
+			c := fs.nodes.lookup(dh.node, e.name)
+			c.typ.Store(e.attr.Mode & share.SIFMT)
+			if e.attr.Mode&share.SIFMT == share.SIFLNK && fs.linkChanged(c, *e.attr) {
+				go fs.notifyInode(c.id)
+			}
+			eo = entryOutT(c.id, toFattr(*e.attr, c.id), te, ta)
+			ino = c.id
+		}
+		buf = append(buf, eo...)
+		buf, _ = appendDirent(buf, int(size), ino, uint64(i)+1, e.typ>>12, e.name)
 	}
 	return reply(u, 0, buf)
+}
+
+// plusEntry dice si la entrada e de dir puede ir con atributos en un
+// READDIRPLUS: no si el invitado tiene escrituras sin enviar en ella (el
+// tamaño de la lista no las incluye; LOOKUP las espera con drain).
+func (fs *fuseFS) plusEntry(dir *node, e dirEntry) bool {
+	c := fs.nodes.child(dir, e.name)
+	return c == nil || c.wb.Load() == nil
 }
 
 // direntIno es el número de inodo de una entrada de READDIR. El del nodo si el

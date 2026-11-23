@@ -546,6 +546,17 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 		// Teardown en curso: el netns y su ipset están a punto de irse.
 		return respondError(query, 2) // SERVFAIL
 	}
+	// R11: la lista se comprueba y se siembra con allowMu en lectura tomado:
+	// fijarDominios (escritura) espera a que acabe la siembra en curso y el
+	// flush del set que viene detrás no deja una IP de un dominio retirado.
+	r.allowMu.RLock()
+	defer r.allowMu.RUnlock()
+	if !r.permitidoConCerrojo(name) {
+		// La lista se estrechó mientras la consulta volaba: no sembrar la IP
+		// de un dominio ya retirado.
+		r.bloq.anotar(name, qtype)
+		return respondError(query, 5) // REFUSED
+	}
 	// Sembrar el ipset con las IPv4 que vamos a devolver, ANTES de responder: así
 	// la IP que el invitado usará ya está permitida cuando abra la conexión.
 	// Se siembran TODOS los A de la respuesta, no solo los cuyo owner == qname:
@@ -818,9 +829,14 @@ func (b *tokenBucket) allow() bool {
 }
 
 func (r *dnsResolver) isAllowed(name string) bool {
-	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
 	r.allowMu.RLock()
 	defer r.allowMu.RUnlock()
+	return r.permitidoConCerrojo(name)
+}
+
+// permitidoConCerrojo es isAllowed con allowMu ya tomado (lectura o escritura).
+func (r *dnsResolver) permitidoConCerrojo(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
 	for _, d := range r.allowed {
 		if name == d || strings.HasSuffix(name, "."+d) {
 			return true

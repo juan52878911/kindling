@@ -20,6 +20,12 @@ rules:
   - apiGroups: ["sandbox.kindling.dev"]
     resources: ["sandboxes/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["sandbox.kindling.dev"]
+    resources: ["sandboxpools"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sandbox.kindling.dev"]
+    resources: ["sandboxpools/status"]
+    verbs: ["get", "update", "patch"]
 ---
 # ClusterRoleBinding y no uno por namespace: el operador vigila TODOS los
 # namespaces con un único watch cluster-wide (ver internal/operator/kube.go,
