@@ -607,6 +607,13 @@ func NewServer(h http.Handler) *http.Server {
 var hopByHop = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
 	"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 
+// cabecerasReescritura son las que algunos proveedores (o los marcos sobre los
+// que corren) honran para cambiar el método o la ruta de la petición. Con
+// permisos en el dominio se borran antes de salir: lo que se comprobó es la
+// línea de petición, y con ellas el proveedor ejecutaría otra operación.
+var cabecerasReescritura = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override",
+	"X-Original-URL", "X-Original-Method", "X-Rewrite-URL"}
+
 // ServeHTTP atiende una petición del invitado. Toda salida, también cada
 // rechazo, deja un registro de auditoría (el defer de arriba): cada return
 // temprano pone antes rec.Reason y, si es por política, rec.Denied.
@@ -820,6 +827,11 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		out.Header.Del(h)
 	}
 	out.Header.Del("X-Forwarded-For")
+	if restringido {
+		for _, h := range cabecerasReescritura {
+			out.Header.Del(h)
+		}
+	}
 	// NO se reenvía Accept-Encoding a propósito: con él, el proveedor contestaría
 	// comprimido y una clave en eco viajaría dentro del gzip sin que el redactor
 	// la viera. Sin él, el transporte de Go pide gzip por su cuenta y lo
