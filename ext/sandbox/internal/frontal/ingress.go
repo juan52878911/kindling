@@ -293,9 +293,7 @@ func (s *Servidor) handleEndpoint(w http.ResponseWriter, r *http.Request, id str
 	exp := time.Now().Add(ttl)
 	if pet.Public {
 		// Leer etiquetas, calcular y escribir, bajo el cerrojo del sandbox.
-		c := g.s.cerrojoDe(id + "\x00endpoints")
-		c.Lock()
-		defer c.Unlock()
+		defer g.s.bloquear(id + "\x00endpoints")()
 		if _, mc, err = s.buscar(r.Context(), t, id); err != nil {
 			fail(w, codigoBuscar(err), err)
 			return
@@ -489,9 +487,7 @@ func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request,
 	// gateway no hay cerrojo común: tras escribir se espera lo que tardó la
 	// escritura (la de otra réplica que ya iba de camino llega en ese plazo),
 	// se relee y, si la marca propia no está, se repite desde la lectura.
-	c := g.s.cerrojoDe(id + "\x00endpoints")
-	c.Lock()
-	defer c.Unlock()
+	defer g.s.bloquear(id + "\x00endpoints")()
 	for intento := 0; ; intento++ {
 		_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
 		if err != nil {

@@ -79,9 +79,7 @@ func (s *Servidor) handleMetadatos(w http.ResponseWriter, r *http.Request, id st
 	}
 	// Leer, contar y escribir bajo el cerrojo del sandbox: dos PATCH a la vez
 	// no se saltan juntos el tope de etiquetas.
-	c := s.cerrojoDe(id + "\x00metadata")
-	c.Lock()
-	defer c.Unlock()
+	defer s.bloquear(id + "\x00metadata")()
 	_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)

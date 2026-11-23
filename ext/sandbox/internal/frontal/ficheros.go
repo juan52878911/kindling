@@ -83,7 +83,8 @@ func (s *Servidor) despachaFicheros(w http.ResponseWriter, r *http.Request, id s
 	}
 }
 
-// rutaAbsoluta valida una ruta de dentro del invitado: absoluta, sin NUL.
+// rutaAbsoluta valida una ruta de dentro del invitado: absoluta, sin NUL y
+// no más larga que maxRuta.
 func rutaAbsoluta(campo, p string) error {
 	switch {
 	case p == "":
@@ -92,9 +93,15 @@ func rutaAbsoluta(campo, p string) error {
 		return fmt.Errorf("%s must be an absolute path", campo)
 	case strings.ContainsRune(p, 0):
 		return fmt.Errorf("%s has a NUL byte", campo)
+	case len(p) > maxRuta:
+		return fmt.Errorf("%s is longer than %d bytes", campo, maxRuta)
 	}
 	return nil
 }
+
+// maxRuta es PATH_MAX de Linux: una ruta más larga la rechaza el invitado de
+// todos modos, y así no llega a claves internas (cerrojos) ni a los hosts.
+const maxRuta = 4096
 
 func (s *Servidor) handleMover(w http.ResponseWriter, r *http.Request, id string) {
 	var req MoverPeticion
@@ -466,9 +473,7 @@ func (s *Servidor) handleReemplazar(w http.ResponseWriter, r *http.Request, id s
 	// Leer, sustituir y escribir bajo el cerrojo del sandbox y la ruta: dos
 	// reemplazos sobre el mismo fichero no se pisan. Un proceso del invitado que
 	// escriba el fichero a la vez sí puede: no hay forma de impedirlo desde fuera.
-	c := s.cerrojoDe(id + "\x00replace\x00" + req.Path)
-	c.Lock()
-	defer c.Unlock()
+	defer s.bloquear(id + "\x00replace\x00" + req.Path)()
 	st, err := h.Cliente.StatFile(r.Context(), mc.ID, req.Path)
 	if err != nil {
 		if esNoEncontrado(err) {
