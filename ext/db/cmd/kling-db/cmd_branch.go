@@ -34,6 +34,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -214,6 +215,37 @@ func (a *app) lockRepo(ctx context.Context, ri *repoInfo) (func(), error) {
 	return un, err
 }
 
+// lockCopy toma, si mc es la copia de una rama o una reserva (lleva el repo),
+// el cerrojo de kling db branch de su repo, y la devuelve releída ya con él.
+// reset, undo y rm borran y recrean copias: sin el cerrojo, un checkout en ese
+// hueco crearía otra copia de la misma rama, y ensureBranch no podría dar por
+// huérfana una copia en preparing. Una copia suelta no espera a nadie. La
+// clave del cerrojo es la del repo de ahora si se está dentro de él (la
+// etiqueta puede llevar aún la clave de antes) y, si no, la de la etiqueta.
+func (a *app) lockCopy(ctx context.Context, mc *api.Machine) (func(), *api.Machine, error) {
+	label := mc.Labels[labelRepo]
+	if label == "" {
+		return func() {}, mc, nil
+	}
+	if !api.KeyPattern.MatchString(label) {
+		return nil, nil, fmt.Errorf("%s has an invalid %s label", mc.Name, labelRepo)
+	}
+	key := label
+	if ri, err := a.repo(ctx); err == nil && ri.is(label) {
+		key = ri.repo
+	}
+	un, err := a.lockRepo(ctx, &repoInfo{repo: key})
+	if err != nil {
+		return nil, nil, err
+	}
+	cur, err := a.inspect(ctx, mc.ID)
+	if err != nil {
+		un()
+		return nil, nil, err
+	}
+	return un, cur, nil
+}
+
 // worktreeBranches son las claves de las ramas que tiene activas algún
 // worktree del repo (git worktree list): esas copias están en uso.
 func (a *app) worktreeBranches(ctx context.Context) (map[string]bool, error) {
@@ -354,9 +386,22 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	if err != nil {
 		return nil, false, err
 	}
-	if mc, err := one(copies, key); err != nil {
+	mc, err := one(copies, key)
+	if err != nil {
 		return nil, false, err
-	} else if mc != nil {
+	}
+	if mc != nil && mc.Labels[labelState] == statePreparing {
+		// Huérfana por construcción: todo el que crea o rehace copias de rama
+		// lo hace con el cerrojo del repo (lockRepo, lockCopy), y lo tenemos
+		// nosotros. Su creador murió entre el fork y marcarla lista (SIGKILL,
+		// OOM): se tira y se rehace como si no existiera.
+		fmt.Fprintf(a.stderr, "branch %s: the copy %s was left half made; removing it and making it again\n", branch, mc.Name)
+		if err := a.remove(ctx, mc); err != nil {
+			return nil, false, fmt.Errorf("removing the half-made copy %s of branch %s: %w", mc.Name, branch, err)
+		}
+		mc = nil
+	}
+	if mc != nil {
 		if mc.Labels[labelState] != stateReady {
 			return nil, false, fmt.Errorf("the copy %s of branch %s is not ready: remove it (kling db branch -rm %s) and try again", mc.Name, branch, branch)
 		}
@@ -445,7 +490,7 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	} else if err := requireGoldenEngine(snap, "branch", branchEngines...); err != nil {
 		return nil, false, err
 	}
-	mc, err := a.upFrom(ctx, golden, golden, branchMachineName(ri.repo, key), 0, owner, extra)
+	mc, err = a.upFrom(ctx, golden, golden, branchMachineName(ri.repo, key), 0, owner, extra)
 	if err != nil {
 		return nil, false, err
 	}
@@ -757,6 +802,47 @@ func (a *app) branchSwitch(ctx context.Context, host, owner, golden string, wait
 // del repo tomado: borrar el .env anterior, tener la copia de la rama, activarla
 // y escribir su conexión.
 func (a *app) switchActivate(ctx context.Context, owner, golden string) (*repoInfo, error) {
+	// El gancho corre dentro del git checkout: con un daemon que no contesta
+	// (thaw sin respuesta, cerrojo que no se suelta) colgaría el checkout. Con
+	// plazo, se rinde y el gancho avisa y sigue.
+	if d := switchTimeout(a.stderr); d > 0 {
+		parent := ctx
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(parent, d)
+		defer cancel()
+		ri, err := a.switchActivateCtx(ctx, owner, golden)
+		if err != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("-switch did not finish within %s (%s sets the limit; 0 = none): %w", d, switchTimeoutEnv, err)
+		}
+		return ri, err
+	}
+	return a.switchActivateCtx(ctx, owner, golden)
+}
+
+// switchTimeoutEnv es el plazo de la parte de -switch que espera el checkout
+// (una duración de Go; 0 = sin plazo). defaultSwitchTimeout cubre crear la
+// copia desde el golden, que tarda segundos.
+const switchTimeoutEnv = "KLING_DB_SWITCH_TIMEOUT"
+
+const defaultSwitchTimeout = 60 * time.Second
+
+func switchTimeout(stderr io.Writer) time.Duration {
+	v := os.Getenv(switchTimeoutEnv)
+	if v == "" {
+		return defaultSwitchTimeout
+	}
+	if v == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		fmt.Fprintf(stderr, "warning: %s=%q is not a duration; using %s\n", switchTimeoutEnv, v, defaultSwitchTimeout)
+		return defaultSwitchTimeout
+	}
+	return d
+}
+
+func (a *app) switchActivateCtx(ctx context.Context, owner, golden string) (*repoInfo, error) {
 	end := a.tr.span("phase resolve")
 	ri, branch, from, err := a.resolve(ctx, "", "")
 	end()
@@ -1147,6 +1233,16 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 	if err != nil {
 		return err
 	}
+	if !dry {
+		un, err := a.lockRepo(ctx, ri)
+		if err != nil {
+			return err
+		}
+		defer un()
+	}
+	// Las ramas, con el cerrojo ya tomado y a la vez que las copias: leídas
+	// antes, un checkout -b que tuviera el cerrojo dejaría una copia cuya rama
+	// no está en la lista, y se borraría.
 	branches, err := a.localBranches(ctx)
 	if err != nil {
 		return err
@@ -1155,13 +1251,6 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 	// fallo de lectura, y las copias no se recuperan.
 	if len(branches) == 0 {
 		return errors.New("git reports no local branches: refusing to prune")
-	}
-	if !dry {
-		un, err := a.lockRepo(ctx, ri)
-		if err != nil {
-			return err
-		}
-		defer un()
 	}
 	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {

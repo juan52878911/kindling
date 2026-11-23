@@ -62,8 +62,10 @@ func usageErr(format string, a ...any) error {
 	return &plugin.ExitError{Code: 2, Err: fmt.Errorf(format, a...)}
 }
 
+// signalCtx se cancela con Ctrl-C, SIGTERM y SIGHUP (cerrar la terminal o el
+// IDE en mitad de una orden): así lo que iba a medias se deshace.
 func signalCtx() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // ── up ───────────────────────────────────────────────────────────────────────
@@ -388,9 +390,16 @@ func cmdFork(args []string) error {
 
 // fork ramifica una copia lista en n copias listas. Todo o nada: si una no se
 // puede preparar, se borran todas las creadas.
+// Las copias no heredan el repo ni la rama del origen: serían otras copias de
+// esa rama (o reservas), creadas sin el cerrojo del repo, y la rama dejaría de
+// tener una sola.
 func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api.Machine, error) {
-	return a.forkWith(ctx, src, n, owner, "", nil)
+	return a.forkWith(ctx, src, n, owner, "", forkDropsBranch)
 }
+
+// forkDropsBranch vacía en las copias de kling db fork las etiquetas de
+// pertenencia a una rama.
+var forkDropsBranch = [][2]string{{labelRepo, ""}, {labelBranch, ""}, {labelUsed, ""}, {labelSpare, ""}, {labelSpareFP, ""}}
 
 // forkWith es fork con etiquetas extra que nacen con las copias (pisan las
 // heredadas del origen: kling db branch pone así su repo y su rama). name, con
@@ -781,6 +790,14 @@ func (a *app) reset(ctx context.Context, ref, owner string) (*api.Machine, error
 	if err := owned(mc, owner); err != nil {
 		return nil, err
 	}
+	un, mc, err := a.lockCopy(ctx, mc)
+	if err != nil {
+		return nil, err
+	}
+	defer un()
+	if err := owned(mc, owner); err != nil {
+		return nil, err
+	}
 	golden := mc.Labels[labelGolden]
 	ttl := time.Duration(mc.TTLSeconds) * time.Second
 	var keep [][2]string
@@ -831,6 +848,14 @@ func (a *app) rmOne(ctx context.Context, ref, owner string) error {
 	if err != nil {
 		return err
 	}
+	if err := owned(mc, owner); err != nil {
+		return err
+	}
+	un, mc, err := a.lockCopy(ctx, mc)
+	if err != nil {
+		return err
+	}
+	defer un()
 	if err := owned(mc, owner); err != nil {
 		return err
 	}
