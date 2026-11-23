@@ -560,10 +560,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	desbloquear := func() {}
 	for _, v := range pet.Volumes {
 		if v.CloneFrom != "" {
-			ct := s.cerrojoDe(t.Nombre + "\x00vol")
-			ct.Lock()
-			var una sync.Once
-			desbloquear = func() { una.Do(ct.Unlock) }
+			desbloquear = s.bloquear(t.Nombre + "\x00vol")
 			defer desbloquear()
 			break
 		}
@@ -900,9 +897,7 @@ func (s *Servidor) reservarN(ctx context.Context, t *Tenant, plantilla string, m
 	// tenía. N peticiones a la vez superaban MaxSandboxes en tanto como N.
 	// Contar de más es posible (la recién creada en la lista y aún en
 	// enVuelo), que es el lado seguro.
-	ct := s.cerrojoDe(t.Nombre)
-	ct.Lock()
-	defer ct.Unlock()
+	defer s.bloquear(t.Nombre)()
 	// Falla CERRADO si algún host no contesta. Contar solo los que sí
 	// responden dejaba crear de más: con un host caído sus sandboxes no
 	// contaban, y al volver el tenant tenía más de los que su cuota permite.
@@ -986,19 +981,42 @@ func (s *Servidor) todosCaidos(ctx context.Context, errs []error) bool {
 	return true
 }
 
-// cerrojoDe es el cerrojo de cuota del tenant nombre.
-func (s *Servidor) cerrojoDe(nombre string) *sync.Mutex {
+// cerrojo es una entrada del mapa de cerrojos con cuántos lo tienen o lo
+// esperan; la última en soltarlo la borra.
+type cerrojo struct {
+	sync.Mutex
+	usos int
+}
+
+// bloquear toma el cerrojo de la clave (el de cuota de un tenant, o uno por
+// sandbox y operación) y devuelve la función que lo suelta. La entrada vive
+// en el mapa solo mientras alguien la tiene o la espera: antes se quedaba
+// para siempre, y con claves que dependen de lo que manda el inquilino (la
+// ruta de files/replace) el mapa crecía sin límite.
+func (s *Servidor) bloquear(clave string) func() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.cerrojos == nil {
-		s.cerrojos = map[string]*sync.Mutex{}
+		s.cerrojos = map[string]*cerrojo{}
 	}
-	c := s.cerrojos[nombre]
+	c := s.cerrojos[clave]
 	if c == nil {
-		c = &sync.Mutex{}
-		s.cerrojos[nombre] = c
+		c = &cerrojo{}
+		s.cerrojos[clave] = c
 	}
-	return c
+	c.usos++
+	s.mu.Unlock()
+	c.Lock()
+	var una sync.Once
+	return func() {
+		una.Do(func() {
+			c.Unlock()
+			s.mu.Lock()
+			if c.usos--; c.usos == 0 {
+				delete(s.cerrojos, clave)
+			}
+			s.mu.Unlock()
+		})
+	}
 }
 
 // errCuotaSinContar es que reservar no pudo contar lo que el tenant ya tiene
@@ -1034,9 +1052,7 @@ func (s *Servidor) liberar(t *Tenant, plantilla string, mem int) {
 
 // liberarN deshace reservarN.
 func (s *Servidor) liberarN(t *Tenant, plantilla string, mem, n int) {
-	ct := s.cerrojoDe(t.Nombre)
-	ct.Lock()
-	defer ct.Unlock()
+	defer s.bloquear(t.Nombre)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for range n {

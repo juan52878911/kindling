@@ -51,7 +51,9 @@ paths:
     get:
       tags: [ops]
       summary: Métricas en formato texto de Prometheus
-      description: Un admin ve las series de todos los inquilinos; los demás, las suyas.
+      description: |
+        Un admin ve las series de todos los inquilinos y las del operador
+        (creaciones, fondo precalentado, hosts); los demás, solo las suyas.
       responses:
         "200":
           description: Exposición de Prometheus 0.0.4
@@ -1320,8 +1322,9 @@ paths:
       description: |
         Lee el fichero, sustituye `old` por `new` y lo escribe con el mismo
         modo. Sin `all`, `old` tiene que aparecer una sola vez (409). El
-        fichero y el resultado no pasan de 64 MiB (413). No es atómico frente
-        a procesos del invitado que escriban el mismo fichero.
+        fichero y el resultado no pasan de 8 MiB (413), y un tenant tiene a lo
+        sumo 4 a la vez (429). No es atómico frente a procesos del invitado
+        que escriban el mismo fichero.
       requestBody:
         required: true
         content:

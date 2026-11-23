@@ -242,6 +242,7 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// Las series por tenant: todas para un admin, la suya para los demás. Los
 	// nombres de los otros tenants (y cuánto usan) no son de quien pregunta.
+	// Las del operador, solo para un admin (ver más abajo).
 	visibles := []Tenant{*tenantDe(r)}
 	if visibles[0].Admin {
 		visibles = s.tenantsTodos()
@@ -254,6 +255,20 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "kling_sandbox_machines{tenant=%q,state=%q} %d\n",
 				t.Nombre, st, porTenantEstado[[2]string{t.Nombre, string(st)}])
 		}
+	}
+
+	fmt.Fprintln(w, "# HELP kling_sandbox_shell_sessions Open interactive shell sessions, by tenant.")
+	fmt.Fprintln(w, "# TYPE kling_sandbox_shell_sessions gauge")
+	abiertas := s.shells.foto()
+	for _, t := range visibles {
+		fmt.Fprintf(w, "kling_sandbox_shell_sessions{tenant=%q} %d\n", t.Nombre, abiertas[t.Nombre])
+	}
+
+	// Lo que sigue es del operador: creaciones de todos los tenants, el fondo
+	// precalentado y el estado de los hosts. Un tenant sin admin no lo ve (como
+	// /v1/hosts): le contaría la actividad de los demás y la capacidad libre.
+	if !tenantDe(r).Admin {
+		return
 	}
 
 	fmt.Fprintln(w, "# HELP kling_sandbox_creations_total Sandbox creation attempts, by result.")
@@ -310,10 +325,4 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "kling_sandbox_host_available_mib{host=%q} %d\n", e.Nombre, e.DisponibleMB)
 	}
 
-	fmt.Fprintln(w, "# HELP kling_sandbox_shell_sessions Open interactive shell sessions, by tenant.")
-	fmt.Fprintln(w, "# TYPE kling_sandbox_shell_sessions gauge")
-	abiertas := s.shells.foto()
-	for _, t := range visibles {
-		fmt.Fprintf(w, "kling_sandbox_shell_sessions{tenant=%q} %d\n", t.Nombre, abiertas[t.Nombre])
-	}
 }

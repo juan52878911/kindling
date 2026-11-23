@@ -481,9 +481,7 @@ func (s *Servidor) handleCrearVolumen(w http.ResponseWriter, r *http.Request, t 
 	}
 	// Contar y crear bajo el cerrojo del tenant: dos POST a la vez no pasan
 	// juntos el tope.
-	ct := s.cerrojoDe(t.Nombre + "\x00vol")
-	ct.Lock()
-	defer ct.Unlock()
+	defer s.bloquear(t.Nombre + "\x00vol")()
 	propios, errs := s.volumenesDe(r.Context(), t)
 	if len(errs) > 0 {
 		fail(w, http.StatusServiceUnavailable, errors.Join(errs...))

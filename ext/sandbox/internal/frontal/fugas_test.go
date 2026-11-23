@@ -52,6 +52,16 @@ func TestMetricasDeUnTenantSoloEnsenanLoSuyo(t *testing.T) {
 			t.Errorf("bob's metrics miss %q:\n%s", quiero, texto)
 		}
 	}
+	// Las series del operador (creaciones de todos, fondo, hosts) tampoco:
+	// /v1/hosts exige admin por lo mismo.
+	for _, nada := range []string{
+		"kling_sandbox_creations_total", "kling_sandbox_create_duration_seconds",
+		"kling_sandbox_create_stage_seconds", "kling_sandbox_prewarmed", "kling_sandbox_host_",
+	} {
+		if strings.Contains(texto, nada) {
+			t.Errorf("bob sees operator series %q:\n%s", nada, texto)
+		}
+	}
 
 	resp = pide(t, srv, tokenAdmin, "GET", "/v1/metrics", nil)
 	esperaCodigo(t, resp, 200)
@@ -60,6 +70,8 @@ func TestMetricasDeUnTenantSoloEnsenanLoSuyo(t *testing.T) {
 		`kling_sandbox_machines{tenant="alice",state="running"} 1`,
 		`kling_sandbox_machines{tenant="bob",state="running"} 1`,
 		`kling_sandbox_shell_sessions{tenant="alice"} 0`,
+		`kling_sandbox_host_up{host="a"} 1`,
+		`kling_sandbox_creations_total{result="ok"} 2`,
 	} {
 		if !strings.Contains(texto, quiero) {
 			t.Errorf("the admin's metrics miss %q:\n%s", quiero, texto)
