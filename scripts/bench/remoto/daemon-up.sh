@@ -6,7 +6,7 @@ set -euo pipefail
 KB=${KB:-/opt/kbench}
 BASE=/srv/kt-bench; UNIT=kt-bench; RUN=/run/$UNIT; SOCK=$RUN/kling.sock; ROOT=$BASE/root; LIB=$BASE/lib
 BINS=$KB/bins
-command -v firecracker >/dev/null && firecracker --version | head -1
+command -v firecracker >/dev/null && { v=$(firecracker --version 2>&1); sed -n 1p <<<"$v"; }
 id kindling-build >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build
 id kindling >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin -G kvm kindling
 mkdir -p "$BASE/bin" "$LIB" "$ROOT/images" "$RUN" "$BASE/shares"
