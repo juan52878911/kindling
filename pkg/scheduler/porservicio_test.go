@@ -344,6 +344,76 @@ func TestMaxInflightForSinTopeDeSesiones(t *testing.T) {
 	}
 }
 
+// olvidosVistos apunta las llamadas a OnForget y si llegaron con g.mu tomado.
+type olvidosVistos struct {
+	mu         sync.Mutex
+	vistos     []string
+	conCerrojo int
+}
+
+func (o *olvidosVistos) gancho(g *Scheduler) func(service, addr string) {
+	return func(service, addr string) {
+		if g.mu.TryLock() {
+			g.mu.Unlock()
+		} else {
+			o.mu.Lock()
+			o.conCerrojo++
+			o.mu.Unlock()
+		}
+		o.mu.Lock()
+		o.vistos = append(o.vistos, service+" "+addr)
+		o.mu.Unlock()
+	}
+}
+
+func (o *olvidosVistos) lista() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.vistos...)
+}
+
+// R8-09: una instancia cuyo TTL ya no se puede renovar (el daemon la congeló o
+// la borró por debajo) salía del mapa sin avisar a nadie: el gateway de IA
+// guardaba para siempre el transporte hacia su dirección. OnForget se llama
+// una vez, con g.mu suelto.
+func TestOnForgetEnTTLVencido(t *testing.T) {
+	d := &daemonFalso{maquinas: map[string]*api.Machine{}, fallarRenew: map[string][]int{}}
+	g := conDaemonFalso(t, d)
+	o := &olvidosVistos{}
+	g.OnForget = o.gancho(g)
+	g.mu.Lock()
+	g.services["svc"] = &entry{machineID: "m1", ip: "10.0.0.9", port: 8000,
+		lastUse: time.Now(), renewedAt: time.Now().Add(-time.Hour)}
+	g.mu.Unlock()
+	g.reapOnce(context.Background())
+	if got := o.lista(); len(got) != 1 || got[0] != "svc 10.0.0.9:8000" {
+		t.Fatalf("OnForget = %v; quería una vez svc 10.0.0.9:8000", got)
+	}
+	if o.conCerrojo != 0 {
+		t.Errorf("OnForget se llamó %d veces con g.mu tomado", o.conCerrojo)
+	}
+}
+
+// R8-09: toda retirada avisa, no solo dormir: la instancia que el proxy da por
+// desaparecida (DropInstance) y la que el segador congela.
+func TestOnForgetEnDropYSegador(t *testing.T) {
+	g, _, _ := gwPausas(0)
+	o := &olvidosVistos{}
+	g.OnForget = o.gancho(g)
+	g.services["a"] = &entry{machineID: "m-a", ip: "10.0.0.1", lastUse: time.Now()}
+	g.services["b"] = &entry{machineID: "m-b", ip: "10.0.0.2", lastUse: time.Now().Add(-time.Hour)}
+	g.Port = 9000
+	g.DropInstance("a", "m-a")
+	g.reapOnce(context.Background())
+	got := o.lista()
+	if len(got) != 2 || got[0] != "a 10.0.0.1:9000" || got[1] != "b 10.0.0.2:9000" {
+		t.Fatalf("OnForget = %v; quería a (drop) y b (segador)", got)
+	}
+	if o.conCerrojo != 0 {
+		t.Errorf("OnForget se llamó %d veces con g.mu tomado", o.conCerrojo)
+	}
+}
+
 // Sin MaxInflightFor (el gateway MCP) se reparte como siempre: por sesiones y
 // MaxInflight global, sin contar reservas como trabajo.
 func TestMaxInflightForNilComoSiempre(t *testing.T) {
