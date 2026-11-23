@@ -16,7 +16,11 @@ install -m755 "$BINS/kling" "$BASE/bin/kling"
 install -m755 "$BINS/kling-guest" "$LIB/kling-guest"
 install -m755 "$BINS/81-base-image.sh" "$BINS/lib-ext4-shrink.sh" "$LIB/"
 install -d -m755 "$BASE/builders"
-printf '#!/bin/sh\nexec %s builder base "$@"\n' "$BASE/bin/kling" > "$BASE/builders/base"; chmod 755 "$BASE/builders/base"
+# Los constructores que usa el banco: base (imágenes), llm (dorados VON de `kling ai model add`)
+# y chispa (`kling ai chispa deploy`). Son el mismo kling con otro subcomando.
+for b in base llm chispa; do
+  printf '#!/bin/sh\nexec %s builder %s "$@"\n' "$BASE/bin/kling" "$b" > "$BASE/builders/$b"; chmod 755 "$BASE/builders/$b"
+done
 for f in vmlinux min.ext4; do [ -f "$ROOT/images/$f" ] || cp /var/lib/kindling/images/$f "$ROOT/images/"; done
 # Barrido: se reenvían al servicio las KLING_* presentes en el entorno.
 EXTRA=()
