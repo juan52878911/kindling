@@ -434,21 +434,48 @@ func runImport(endpoint, service string, vols []api.VolumeAttachment, cfg *confi
 		return mcpImport(args)
 	}
 
-	target := endpoint
-	if rest, ok := strings.CutPrefix(target, "ssh://"); ok {
-		target, _, _ = strings.Cut(rest, "/")
+	target, sshArgs, remoto, err := argsSSHImport(endpoint, args)
+	if err != nil {
+		return err
 	}
-	remote := append([]string{target, "kling", "mcp", "import"}, args...)
 
-	cmd := exec.Command("ssh", remote...)
+	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("import failed on %s: %w\n"+
 			"The image WAS built; retry that step there:\n"+
-			"  ssh %s 'kling mcp import %s'",
-			target, err, target, strings.Join(args, " "))
+			"  ssh -- %s %s",
+			target, err, shQuote(target), strings.Join(remoto, " "))
 	}
 	return nil
+}
+
+// argsSSHImport arma los argumentos de ssh para lanzar `kling mcp import` en el
+// host de endpoint (ssh://host o ssh://host/ruta/al/kling), con las mismas
+// reglas que internal/transport: el destino tras "--" y rechazado si empieza
+// por "-" (ssh lo leeria como una opcion suya), y el kling remoto de la ruta de
+// la URL si la trae. Ademas, ssh junta los argumentos con espacios y se los da
+// a la shell remota: cada uno va entrecomillado para que llegue tal cual.
+// Devuelve tambien la orden remota ya entrecomillada, para el mensaje de error.
+func argsSSHImport(endpoint string, args []string) (target string, sshArgs, remoto []string, err error) {
+	dest := strings.TrimPrefix(endpoint, "ssh://")
+	target, bin := dest, "kling"
+	if i := strings.Index(dest, "/"); i >= 0 {
+		target, bin = dest[:i], dest[i:]
+	}
+	if target == "" || strings.HasPrefix(target, "-") {
+		return "", nil, nil, fmt.Errorf("invalid ssh destination %q: it must be a host, user@host or an ssh config alias", target)
+	}
+	for _, a := range append([]string{bin, "mcp", "import"}, args...) {
+		remoto = append(remoto, shQuote(a))
+	}
+	return target, append([]string{"--", target}, remoto...), remoto, nil
+}
+
+// shQuote entrecomilla s para una shell POSIX: entre comillas simples, y cada
+// comilla simple como '\''.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // explainUnpackageable dice por qué no se puede y qué hacer, en vez de un "no".
