@@ -1753,7 +1753,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		return nil, err
 	}
 	// Disco y red a la vez (clonarYMontarRed): se esperan los dos antes de ceder.
-	modoCoW, err := m.clonarYMontarRed(ctx, fases, dir, netcfg, id, egress, req.AllowDomains,
+	modoCoW, esperarHost, err := m.clonarYMontarRed(ctx, fases, dir, netcfg, id, egress, req.AllowDomains,
 		func(ctx context.Context) (string, error) {
 			return m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
 		})
@@ -2053,6 +2053,12 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	mc.Volumes = withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
 	fases.marca(fcLoad)
+	// Las barreras del host se comprobaron en paralelo con el montaje: aquí se
+	// espera su resultado, y no hay camino a Resume sin pasar por esta línea.
+	// El invitado no emite hasta que se reanuda.
+	if err := esperarHost(); err != nil {
+		return abortar(fmt.Errorf("host INPUT rules: %w", err))
+	}
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
 	}
@@ -2347,8 +2353,12 @@ func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
 // de la red; no dependen entre sí. Si falla una se deshace la otra y se borra
 // dir; el overlay del almacén que haya salido bien lo recoge quien llama con el
 // modo devuelto. Las fases fcDisk y fcNet llevan el tiempo propio de cada rama.
+//
+// Devuelve además la espera de la comprobación de las barreras del host
+// (montarRedAparte): quien llama la ejecuta justo antes de reanudar el
+// invitado, y un fallo ya habrá desmontado la red.
 func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, dir string, n *knet.Net, id string,
-	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, error) {
+	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, func() error, error) {
 	fases.marca(fcDisk)
 	var (
 		modo    string
@@ -2363,13 +2373,14 @@ func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, di
 		dClon = time.Since(t0)
 	}()
 	t1 := time.Now()
-	errRed := m.montarRed(n, id, egress, domains)
+	esperarHost, errRed := m.montarRedAparte(n, id, egress, domains)
 	dRed := time.Since(t1)
 	<-hecho
 	fases.d[fcDisk] += dClon
 	fases.d[fcNet] += dRed
 	fases.ultima = time.Now()
-	return m.cerrarClonYRed(dir, n, id, modo, errClon, errRed)
+	modo, err := m.cerrarClonYRed(dir, n, id, modo, errClon, errRed)
+	return modo, esperarHost, err
 }
 
 // cerrarClonYRed decide el resultado de las dos ramas y deshace lo que toque.

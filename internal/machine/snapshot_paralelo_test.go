@@ -38,7 +38,7 @@ func TestClonarYMontarRedSolapa(t *testing.T) {
 	})
 	dir := t.TempDir()
 	id := "c0ffee00000000b1"
-	modo, err := m.clonarYMontarRed(context.Background(), nuevoCronoCreacion(), dir, knet.Plan(30, id), id, knet.EgressNone, nil,
+	modo, _, err := m.clonarYMontarRed(context.Background(), nuevoCronoCreacion(), dir, knet.Plan(30, id), id, knet.EgressNone, nil,
 		func(context.Context) (string, error) {
 			close(clonIni)
 			select {
@@ -62,7 +62,7 @@ func TestClonarYMontarRedFasesPropias(t *testing.T) {
 	fakeRed(t, func() error { time.Sleep(30 * time.Millisecond); return nil })
 	f := nuevoCronoCreacion()
 	id := "c0ffee00000000b2"
-	_, err := m.clonarYMontarRed(context.Background(), f, t.TempDir(), knet.Plan(31, id), id, knet.EgressNone, nil,
+	_, _, err := m.clonarYMontarRed(context.Background(), f, t.TempDir(), knet.Plan(31, id), id, knet.EgressNone, nil,
 		func(context.Context) (string, error) { time.Sleep(30 * time.Millisecond); return cowModoCopy, nil })
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestClonarYMontarRedFalloClon(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "maq")
 	os.MkdirAll(dir, 0o755)
 	id := "c0ffee00000000b3"
-	_, err := m.clonarYMontarRed(context.Background(), nuevoCronoCreacion(), dir, knet.Plan(32, id), id, knet.EgressNone, nil,
+	_, _, err := m.clonarYMontarRed(context.Background(), nuevoCronoCreacion(), dir, knet.Plan(32, id), id, knet.EgressNone, nil,
 		func(context.Context) (string, error) { return "", errors.New("sin sitio") })
 	if err == nil {
 		t.Fatal("quería error")
@@ -99,7 +99,7 @@ func TestClonarYMontarRedFalloRed(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "maq")
 	os.MkdirAll(dir, 0o755)
 	id := "c0ffee00000000b4"
-	_, err := m.clonarYMontarRed(context.Background(), nuevoCronoCreacion(), dir, knet.Plan(33, id), id, knet.EgressNone, nil,
+	_, _, err := m.clonarYMontarRed(context.Background(), nuevoCronoCreacion(), dir, knet.Plan(33, id), id, knet.EgressNone, nil,
 		func(context.Context) (string, error) { return cowModoCopy, nil })
 	if err == nil {
 		t.Fatal("quería error")

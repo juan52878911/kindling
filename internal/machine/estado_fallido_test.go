@@ -17,14 +17,20 @@ import (
 func discoQueFalla(t *testing.T, n int32) *atomic.Int32 {
 	t.Helper()
 	var llamadas atomic.Int32
-	prev := escribirEstado
+	prev, prevR := escribirEstado, escribirEstadoRapido
 	escribirEstado = func(ruta string, datos []byte, perm os.FileMode) error {
 		if llamadas.Add(1) <= n {
 			return errors.New("disco lleno")
 		}
 		return durable.Escribir(ruta, datos, perm)
 	}
-	t.Cleanup(func() { escribirEstado = prev })
+	escribirEstadoRapido = func(ruta string, datos []byte, perm os.FileMode) error {
+		if llamadas.Add(1) <= n {
+			return errors.New("disco lleno")
+		}
+		return prevR(ruta, datos, perm)
+	}
+	t.Cleanup(func() { escribirEstado, escribirEstadoRapido = prev, prevR })
 	return &llamadas
 }
 

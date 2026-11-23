@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // redEnHost: las /30 de los enlaces viven en el host y pueden chocar con las
@@ -36,11 +37,52 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) (err error) {
 	defer func() { tr.fin(err) }()
 	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
 	// si un reload del cortafuegos las borró, se reponen; si no se puede,
-	// la máquina no arranca con el host abierto.
+	// la máquina no arranca con el host abierto, y no se monta nada.
 	if err := asegurarHost(); err != nil {
 		return fmt.Errorf("host INPUT rules: %w", err)
 	}
 	tr.fase("host_check")
+	return n.montarSetup(tr, egress, domains, owner)
+}
+
+// SetupAparte es Setup con la comprobación de las reglas INPUT del host en
+// paralelo con el montaje: devuelve, además, la función que espera su
+// resultado. QUIEN LLAMA DEBE ESPERARLA antes de que el invitado pueda emitir
+// (en un restore, antes de reanudar la CPU); si devuelve error, la red no es
+// de fiar y hay que desmontarla. Si SetupAparte falla, la comprobación ya
+// terminó y no hay nada que esperar.
+func (n *Net) SetupAparte(egress Egress, domains []string, owner int) (esperar func() error, err error) {
+	tr := nuevaTrazaSetup(n.NS)
+	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
+	// si un reload del cortafuegos las borró, se reponen; si no se puede,
+	// la máquina no arranca con el host abierto.
+	hecho := make(chan error, 1)
+	comprobar := asegurarHost
+	go func() { hecho <- comprobar() }()
+	var (
+		once sync.Once
+		herr error
+	)
+	esperar = func() error {
+		once.Do(func() {
+			herr = <-hecho
+			if herr != nil {
+				herr = fmt.Errorf("host INPUT rules: %w", herr)
+			}
+			tr.fase("host_check")
+			tr.fin(herr)
+		})
+		return herr
+	}
+	if err := n.montarSetup(tr, egress, domains, owner); err != nil {
+		_ = esperar() // que la goroutine no sobreviva a la llamada
+		return nil, err
+	}
+	return esperar, nil
+}
+
+// montarSetup es el resto de Setup, tras lanzar la comprobación del host.
+func (n *Net) montarSetup(tr *trazaSetup, egress Egress, domains []string, owner int) (err error) {
 	// Una ranura (ranuras_fc.go) llega con la base montada: solo se añade lo
 	// propio de la petición. Se consume aquí: un segundo Setup del mismo *Net
 	// ya no la encuentra y monta todo, como cualquier red sin ranura.
