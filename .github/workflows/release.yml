@@ -334,13 +334,16 @@ jobs:
   # Lo del Mac (92 y 95 con kling-hv) lo exige scripts/release.sh antes de
   # crear la etiqueta (docs/releases.md, paso 3c), y el job release lo vuelve a
   # pedir antes de firmar (el commit status e2e-mac/kling-hv).
+  # Arranca el vmlinux y el min de imagenes (los que se publican), no unos
+  # suyos: espera a ese job en vez de ir en paralelo con él.
   e2e:
     name: e2e Linux
-    needs: [test, lint]
+    needs: [test, lint, imagenes]
     uses: ./.github/workflows/e2e-linux.yml
     with:
       ref: ${{ inputs.tag || github.ref }}
       require_kvm: true
+      images_artifact: imagenes
 
   # Los kernels Android del prototipo: artefactos de este run que el job
   # release publica con todo lo demás (lista de assets, SHA256SUMS, firma y
