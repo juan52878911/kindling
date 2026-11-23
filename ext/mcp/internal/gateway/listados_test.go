@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -93,4 +94,33 @@ func BenchmarkPrimerInitializeAgregado(b *testing.B) {
 			b.ReportMetric(float64(listados.Load())/float64(b.N), "listados/op")
 		})
 	}
+}
+
+// BenchmarkToolsOfCaducadoConcurrente mide 8 call_tool simultáneos al mismo
+// servicio justo cuando su entrada del catálogo ha caducado: listados/op son
+// los GET /snapshots que hacen entre todos para refrescarla.
+func BenchmarkToolsOfCaducadoConcurrente(b *testing.B) {
+	sock, listados := daemonContado(b, 20)
+	gw := New(api.NewClient(sock), 5*time.Minute, false, 0, "")
+	cat := gw.agg.cat
+	ctx := b.Context()
+	listados.Store(0)
+	b.ResetTimer()
+	for range b.N {
+		cat.mu.Lock()
+		cat.fetched = map[string]time.Time{} // todo caducado
+		cat.mu.Unlock()
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := cat.toolsOf(ctx, "svc07"); err != nil {
+					b.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	b.ReportMetric(float64(listados.Load())/float64(b.N), "listados/op")
 }
