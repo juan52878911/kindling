@@ -58,7 +58,7 @@ type Config struct {
 
 // ModelConfig es un modelo con nombre.
 type ModelConfig struct {
-	Kind string `json:"kind"` // chispa | von
+	Kind string `json:"kind"` // chispa | von | embed | http (KindHTTP, ronda 8)
 	// Path es el .chispa (kind chispa, backend inprocess). Relativo = relativo al
 	// fichero de config.
 	Path string `json:"path,omitempty"`
@@ -74,6 +74,34 @@ type ModelConfig struct {
 	// MaxReplicas acota las réplicas de este modelo (0 = la del gateway).
 	// Solo aplica a von, embed y chispa con backend microvm.
 	MaxReplicas int `json:"max_replicas,omitempty"`
+
+	// Campos de la ronda 8 (backend.go): el bloque de un backend HTTP. Semilla:
+	// se leen del JSON pero nada los usa todavía. Z1 los valida y los expande a
+	// Backend; Z5 los escribe con `kling ai model deploy`. Ver Backend para el
+	// significado de cada uno; aquí van tal como se escriben en ai.json.
+
+	// Upstream es una URL http/https fija; excluyente con Snapshot.
+	Upstream string `json:"upstream,omitempty"`
+	// Port es el puerto del servidor en la réplica; 0 = DefaultBackendPort.
+	Port int `json:"port,omitempty"`
+	// Contract es una de las constantes Contract*; vacío = la del kind.
+	Contract string `json:"contract,omitempty"`
+	// Routes son "MÉTODO /ruta"; vacío = las del contrato.
+	Routes []string `json:"routes,omitempty"`
+	// Health es la sonda; nil = el dial TCP de hoy.
+	Health *HealthConfig `json:"health,omitempty"`
+	// MaxInflight por réplica; 0 = el -max-inflight del gateway.
+	MaxInflight int `json:"max_inflight,omitempty"`
+	// Idle es una de las constantes Idle*; vacío = el defecto del kind (§1.4).
+	Idle string `json:"idle,omitempty"`
+	// UpstreamModel se escribe en "model" al reenviar; vacío = no se reescribe.
+	UpstreamModel string `json:"upstream_model,omitempty"`
+	// Auth es la credencial que añade el gateway; nil = ninguna.
+	Auth *Auth `json:"auth,omitempty"`
+	// Limits son topes del contrato openai; nil = sin tope.
+	Limits *Limits `json:"limits,omitempty"`
+	// Tenants que pueden usar el modelo; vacío = todos.
+	Tenants []string `json:"tenants,omitempty"`
 }
 
 // Backends de un modelo chispa.

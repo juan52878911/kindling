@@ -148,6 +148,9 @@ type Scheduler struct {
 	// MaxReplicas). El gateway de IA lo usa para que cada modelo tenga el suyo:
 	// una réplica de un modelo grande cuesta el doble que una de uno pequeño.
 	MaxReplicasFor func(service string) int
+	// PorServicio son los ganchos por servicio de la ronda 8 (porservicio.go):
+	// puerto, en vuelo, ociosidad, sonda y olvido. Todos nil = lo de hoy.
+	PorServicio
 
 	// Port es el puerto del invitado al que se espera que escuche el servicio y
 	// al que apunta el proxy de cada instancia. 0 = GuestPort (el puente MCP).
