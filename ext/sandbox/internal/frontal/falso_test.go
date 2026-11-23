@@ -137,6 +137,9 @@ type falso struct {
 	execCorta bool
 	// ultimoTar son los parámetros del último PUT files?format=tar.
 	ultimoTar url.Values
+	// tamanoStat, si no es 0, es el tamaño que anuncia el stat de un fichero
+	// (para probar topes sin guardar cientos de MiB).
+	tamanoStat int64
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -721,7 +724,11 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if q.Get("stat") == "1" {
-			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: int64(len(b)), Mode: "0644"})
+			size := int64(len(b))
+			if f.tamanoStat > 0 {
+				size = f.tamanoStat
+			}
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: size, Mode: "0644"})
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")

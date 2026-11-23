@@ -153,6 +153,19 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		code := c.ProcessState.ExitCode()
 		_ = enc.Encode(api.ExecEvent{Exit: &code})
 	})
+	// stat de verdad: la raíz de una búsqueda es un directorio de esta máquina.
+	m.HandleFunc("GET /machines/{ref}/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("stat") != "1" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		fi, err := os.Stat(r.URL.Query().Get("path"))
+		if err != nil {
+			failDaemon(w, 404, err)
+			return
+		}
+		writeJSON(w, 200, api.FileStat{Path: r.URL.Query().Get("path"), Size: fi.Size(), Mode: "0755"})
+	})
 	m.HandleFunc("PUT /machines/{ref}/files", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")
 		mode, _ := strconv.ParseUint(r.URL.Query().Get("mode"), 8, 32)
