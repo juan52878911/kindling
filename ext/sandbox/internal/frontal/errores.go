@@ -148,3 +148,6 @@ func mensajes(errs []error) []string {
 	}
 	return out
 }
+
+// errorDeFlujo es el texto de un fallo que ocurre cuando el flujo ya empezó.
+func errorDeFlujo(err error) string { return err.Error() }

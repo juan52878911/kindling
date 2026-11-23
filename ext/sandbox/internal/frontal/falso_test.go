@@ -132,6 +132,9 @@ type falso struct {
 	reclamoCorta, reclamoPlano404 bool
 	borrados                      []string
 
+	// execCorta hace que exec mande un evento y corte la conexión.
+	execCorta bool
+
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
 }
@@ -654,6 +657,13 @@ func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 
 	salida := []byte("hola\n")
+	if f.execCorta {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(api.ExecEvent{Stream: "stdout", Data: salida})
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
 	if r.URL.Query().Get("wait") == "1" {
 		if libera != nil {
 			<-libera

@@ -44,6 +44,8 @@ type daemonReal struct {
 	info      map[int]api.ProcessInfo
 	sinPython bool
 	execs     []api.ExecRequest
+	// corta hace que el exec "run" mande un evento y corte la conexión.
+	corta bool
 }
 
 func (d *daemonReal) vivo(pid int) bool {
@@ -95,11 +97,17 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		d.mu.Lock()
 		d.execs = append(d.execs, req)
 		sinPy := d.sinPython
+		corta := d.corta && len(req.Cmd) > 2 && req.Cmd[2] == "run"
 		d.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(200)
 		enc := json.NewEncoder(w)
 		fl := w.(http.Flusher)
+		if corta {
+			_ = enc.Encode(api.ExecEvent{Stream: "stdout", Data: []byte("{\"type\":\"stdout\",\"text\":\"x\"}\n")})
+			fl.Flush()
+			panic(http.ErrAbortHandler)
+		}
 		if sinPy && len(req.Cmd) > 2 && strings.Contains(req.Cmd[2], "python3") {
 			code := 127
 			_ = enc.Encode(api.ExecEvent{Exit: &code})
