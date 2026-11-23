@@ -78,3 +78,54 @@ func BenchmarkClienteLargoConexiones(b *testing.B) {
 		b.ReportMetric(float64(nuevas.Load())/float64(b.N), "conns/op")
 	})
 }
+
+// Por el socket unix, las llamadas de c.long reutilizan la conexión, y tras
+// reiniciar el daemon la siguiente (un POST) no falla por la ociosa muerta.
+func TestClienteLargoReutilizaYSobreviveAReinicio(t *testing.T) {
+	dir, err := os.MkdirTemp("", "kl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "k.sock")
+	var nuevas atomic.Int64
+	arrancar := func() *http.Server {
+		_ = os.Remove(sock)
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatalf("socket unix: %v", err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /sandboxes", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = io.WriteString(w, `{"id":"sb1"}`)
+		})
+		srv := &http.Server{Handler: mux, ConnState: func(_ net.Conn, s http.ConnState) {
+			if s == http.StateNew {
+				nuevas.Add(1)
+			}
+		}}
+		go srv.Serve(ln)
+		return srv
+	}
+	srv := arrancar()
+	c := NewClient(sock)
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		if _, err := c.CreateSandbox(ctx, SandboxRequest{}); err != nil {
+			t.Fatalf("POST %d: %v", i, err)
+		}
+	}
+	if got := nuevas.Load(); got != 1 {
+		t.Fatalf("20 POST en serie por c.long abrieron %d conexiones, quiero 1", got)
+	}
+	srv.Close()
+	srv = arrancar()
+	defer srv.Close()
+	if _, err := c.CreateSandbox(ctx, SandboxRequest{}); err != nil {
+		t.Fatalf("POST tras el reinicio: %v", err)
+	}
+	if got := nuevas.Load(); got != 2 {
+		t.Fatalf("conexiones = %d, quiero 2", got)
+	}
+}

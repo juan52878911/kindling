@@ -80,12 +80,12 @@ func NewClient(endpoint string) *Client {
 		// ociosa ya muerta falla con "server closed idle connection": el
 		// http.Transport solo la repite si es idempotente, y un POST no lo
 		// es. reintentoOciosa la repite una vez (ver internal/apiclienttest).
-		t := c.http.Transport.(*http.Transport)
-		t.DisableKeepAlives = false
-		t.MaxIdleConnsPerHost = 16
-		t.MaxIdleConns = 16
-		t.IdleConnTimeout = 30 * time.Second
-		c.http.Transport = reintentoOciosa{t}
+		// Lo mismo para el cliente largo: exec, crear sandbox o thaw son
+		// justo las llamadas calientes (G-07). Un flujo largo (events, logs)
+		// ocupa su conexión hasta su EOF y no vuelve al pool antes, que es lo
+		// correcto.
+		c.http.Transport = conKeepAliveUnix(c.http.Transport.(*http.Transport))
+		c.long.Transport = conKeepAliveUnix(c.long.Transport.(*http.Transport))
 	}
 	// El daemon no redirige nunca. Sin esto, http.Client seguiría la
 	// redirección que ServeMux hace de una ruta con ".." conservando método y
@@ -122,6 +122,16 @@ func sinRedirecciones(*http.Request, []*http.Request) error { return http.ErrUse
 // al daemon (Authorization: Bearer). Solo tiene efecto con una política de
 // autorización que lo declare (docs/authz.md); sin ella, el daemon lo ignora.
 const AuthzTokenEnv = "KLING_AUTHZ_TOKEN"
+
+// conKeepAliveUnix activa la reutilización de conexiones en t (solo para el
+// socket unix) y lo envuelve en reintentoOciosa.
+func conKeepAliveUnix(t *http.Transport) http.RoundTripper {
+	t.DisableKeepAlives = false
+	t.MaxIdleConnsPerHost = 16
+	t.MaxIdleConns = 16
+	t.IdleConnTimeout = 30 * time.Second
+	return reintentoOciosa{t}
+}
 
 // reintentoOciosa repite UNA vez la petición que falló porque el daemon cerró
 // la conexión ociosa antes de que se escribiera nada en ella (un daemon
