@@ -13,10 +13,11 @@
 #   - Verifica SHA256 contra SHA256SUMS publicado en la misma release, ANTES de
 #     mover nada a su sitio. Si la release trae SHA256SUMS.minisig y hay
 #     `minisign`, comprueba antes la firma de SHA256SUMS con las claves de
-#     KLING_RELEASE_PUBKEYS (docs/firmas.md). Sin minisign: antes de v1.0.0,
-#     solo sha256 y un aviso; desde v1.0.0 (un -rc incluido), error salvo
-#     KLING_INSECURE_NO_MINISIGN=1. Una 0.x sin firma solo se instala
-#     pidiéndola con --tag: como «latest» se trata como una 1.x.
+#     KLING_RELEASE_PUBKEYS (docs/firmas.md). Sin minisign la comprueba el propio
+#     kling recién bajado (`kling up -verify-sums`, Go puro): no hace falta
+#     instalar nada. Una 0.x sin firma se instala con aviso (solo sha256);
+#     desde v1.0.0 (un -rc incluido) la firma es obligatoria, salvo
+#     KLING_INSECURE_NO_MINISIGN=1.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
 #   - --with mcp,sandbox baja además esas extensiones de LA MISMA
@@ -58,9 +59,9 @@
 #   KLING_WITH      extensiones a instalar, como --with (ej. mcp,sandbox)
 #   KLING_PLUGIN_PATH  su primer directorio es donde van las extensiones
 #   KLING_NO_RC     =1 no toca tu rc (como --no-rc)
-#   KLING_INSECURE_NO_MINISIGN  =1 instala una release >= v1.0.0 sin minisign,
-#                   comprobando solo el sha256 (sin la firma no se sabe de dónde
-#                   viene el SHA256SUMS: solo si no puedes instalar minisign)
+#   KLING_INSECURE_NO_MINISIGN  =1 salta la comprobación de la firma y deja solo
+#                   el sha256 (sin la firma no se sabe de dónde viene el
+#                   SHA256SUMS: solo si no hay forma de comprobarla)
 
 set -u
 # NOTA: usamos `set -u` pero NO `set -e`. Los tests `[ ... ]` que comparan
@@ -97,27 +98,28 @@ SIGNED_FROM_MAJOR=1
 
 usage() {
     cat <<EOF
-Uso: install.sh [opciones]
+Usage: install.sh [options]
 
-  --tag VER          instala una versión concreta (ej. v0.1.0). Por defecto: última.
-  --prefix DIR       directorio destino (por defecto: ~/.local/bin)
-  --repo OWNER/NAME  repo de GitHub (por defecto: juan52878911/kindling)
-  --with LISTA       instala también estas extensiones de la misma release,
-                     separadas por comas: mcp, sandbox
-  --plugin-dir DIR   dónde dejar las extensiones (por defecto el directorio de
-                     extensiones de kling: ~/.local/share/kling/plugins)
-  --skip-kling       no instala kling: solo las extensiones de --with
-  --no-companions    no instala los compañeros de las extensiones (kling-bridge)
-  --no-rc            no toca nada fuera de --prefix: ni tu rc ni el completado
-                     en ~/.config/kling; imprime lo que harías tú
-  --force            reinstala aunque ya haya un kling en --prefix (para
-                     actualizar, mejor: kling upgrade)
-  --dry-run          muestra lo que haría sin descargar ni instalar nada
-  -h, --help         muestra esta ayuda
+  --tag VER          install a specific version (e.g. v0.1.0). Default: the latest.
+  --prefix DIR       destination directory (default: ~/.local/bin)
+  --repo OWNER/NAME  GitHub repo (default: juan52878911/kindling)
+  --with LIST        also install these extensions from the same release,
+                     comma separated: mcp, sandbox
+  --plugin-dir DIR   where to put the extensions (default: kling's extension
+                     directory: ~/.local/share/kling/plugins)
+  --skip-kling       don't install kling: only the extensions of --with
+  --no-companions    don't install the extensions' companions (kling-bridge)
+  --no-rc            touch nothing outside --prefix: neither your rc file nor the
+                     completion in ~/.config/kling; print what you would do
+  --force            reinstall even if there is a kling in --prefix (to
+                     upgrade, prefer: kling upgrade)
+  --dry-run          show what it would do without downloading or installing
+  -h, --help         show this help
 
-Variables de entorno equivalentes: KLING_VERSION, KLING_PREFIX, KLING_REPO,
-KLING_WITH. Desde v1.0.0 hace falta minisign para comprobar la firma;
-KLING_INSECURE_NO_MINISIGN=1 instala sin él, solo con sha256.
+Equivalent environment variables: KLING_VERSION, KLING_PREFIX, KLING_REPO,
+KLING_WITH. The signature of SHA256SUMS is checked with minisign if you have it
+and, if not, with the kling it just downloaded: you don't need to install
+anything. KLING_INSECURE_NO_MINISIGN=1 skips the check (sha256 only).
 EOF
 }
 
@@ -138,7 +140,7 @@ while [ $# -gt 0 ]; do
         --dry-run)   DRY_RUN=1; shift ;;
         --force)     FORCE=1; shift ;;
         -h|--help)   usage; exit 0 ;;
-        *)           echo "opción desconocida: $1" >&2; usage >&2; exit 2 ;;
+        *)           echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
@@ -151,8 +153,8 @@ detect_platform() {
         linux)  PLAT_OS="linux" ;;
         darwin) PLAT_OS="darwin" ;;
         *)
-            echo "Sistema operativo no soportado: $OS" >&2
-            echo "kling corre en Linux y macOS. Windows no está soportado." >&2
+            echo "Unsupported operating system: $OS" >&2
+            echo "kling runs on Linux and macOS. Windows is not supported." >&2
             exit 1
             ;;
     esac
@@ -161,7 +163,7 @@ detect_platform() {
         x86_64|amd64)  PLAT_ARCH="amd64" ;;
         aarch64|arm64) PLAT_ARCH="arm64" ;;
         *)
-            echo "Arquitectura no soportada: $ARCH" >&2
+            echo "Unsupported architecture: $ARCH" >&2
             exit 1
             ;;
     esac
@@ -181,13 +183,13 @@ EXTS=""
 for e in $(printf '%s' "$WITH" | tr ',' ' '); do
     case "$e" in
         mcp|sandbox|db|phone) ;;
-        *) echo "extensión desconocida en --with: $e (válidas: mcp, sandbox, db, phone)" >&2; exit 2 ;;
+        *) echo "unknown extension in --with: $e (valid: mcp, sandbox, db, phone)" >&2; exit 2 ;;
     esac
     # Sin repetidas: --bridge y --with mcp a la vez no la instalan dos veces.
     case " $EXTS " in *" $e "*) ;; *) EXTS="${EXTS:+$EXTS }$e" ;; esac
 done
 if [ "$SKIP_KLING" = "1" ] && [ -z "$EXTS" ]; then
-    echo "--skip-kling sin --with no instala nada" >&2
+    echo "--skip-kling without --with installs nothing" >&2
     exit 2
 fi
 
@@ -226,7 +228,7 @@ resolve_tag() {
     fi
     TAG_LATEST=1
     if [ -z "$TAG" ] || [ "$TAG" = "latest" ]; then
-        echo "No pude resolver la última release. Pasa --tag vX.Y.Z." >&2
+        echo "Could not resolve the latest release. Pass --tag vX.Y.Z." >&2
         exit 1
     fi
 }
@@ -237,16 +239,16 @@ resolve_tag() {
 # `kling version` no hable con uno ni abra un ssh del contexto activo.
 if [ "$SKIP_KLING" != "1" ] && [ "$FORCE" != "1" ] && [ -x "$PREFIX/kling" ] \
    && [ -n "$EXTS" ] && [ -z "$TAG" ]; then
-    echo "Ya hay un kling en $PREFIX/kling: lo dejo como está y solo instalo $EXTS (actualizarlo es kling upgrade)."
+    echo "There is already a kling in $PREFIX/kling: leaving it as is and installing only $EXTS (to upgrade it: kling upgrade)."
     SKIP_KLING=1
 fi
 if [ "$SKIP_KLING" != "1" ] && [ "$FORCE" != "1" ] && [ -x "$PREFIX/kling" ]; then
     HAVE_VER="$(KLING_HOST=unix:///nonexistent/kling-install.sock "$PREFIX/kling" version 2>/dev/null | awk 'NR==1{print $2}')"
-    echo "Ya hay un kling ${HAVE_VER:-} en $PREFIX/kling." >&2
-    echo "Para actualizarlo:  kling upgrade${TAG:+ -tag $TAG}   (con el daemon: sudo kling upgrade en Linux)" >&2
-    echo "  baja y verifica la release, para el daemon, cambia, arranca, comprueba y" >&2
-    echo "  vuelve atrás solo si algo falla. Un kling anterior a v0.18 no lo tiene:" >&2
-    echo "  vuelve a lanzar este script con --force." >&2
+    echo "There is already a kling ${HAVE_VER:-} in $PREFIX/kling." >&2
+    echo "To upgrade it:  kling upgrade${TAG:+ -tag $TAG}   (with the daemon: sudo kling upgrade on Linux)" >&2
+    echo "  it downloads and verifies the release, stops the daemon, swaps, starts, checks and" >&2
+    echo "  rolls back by itself if something fails. A kling older than v0.18 lacks it:" >&2
+    echo "  run this script again with --force." >&2
     exit 1
 fi
 
@@ -269,10 +271,10 @@ fetch() {
         # --https-only es el --proto-redir de wget: una redirección no puede
         # llevar la descarga a http. Un wget sin la opción (busybox) no vale.
         wget --help 2>&1 | grep -q -- '--https-only' \
-            || fail "este wget no tiene --https-only: instala curl"
+            || fail "this wget has no --https-only: install curl"
         wget -q --https-only --tries=3 -O "$DEST" "$URL"
     else
-        fail "ni curl ni wget disponibles"
+        fail "neither curl nor wget is available"
     fi
 }
 
@@ -292,20 +294,21 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
 echo
-echo "kling ${TAG} — instalación"
-echo "  plataforma:  ${PLAT}"
-echo "  destino:     ${PREFIX}"
-[ -n "$EXTS" ] && echo "  extensiones: ${EXTS} (en ${PLUGIN_DIR})"
+echo "kling ${TAG} — install"
+echo "  platform:    ${PLAT}"
+echo "  target:      ${PREFIX}"
+[ -n "$EXTS" ] && echo "  extensions:  ${EXTS} (in ${PLUGIN_DIR})"
 echo
 
 if [ "$DRY_RUN" = "1" ]; then
-    echo "(dry-run) NO descargo ni instalo nada."
-    echo "Descargaría:"
+    echo "(dry-run) NOT downloading or installing anything."
+    echo "Would download:"
     info "$BASE/SHA256SUMS"
-    info "$BASE/SHA256SUMS.minisig (si la release lo trae)"
+    info "$BASE/SHA256SUMS.minisig (if the release has it)"
     if [ "$SKIP_KLING" != "1" ]; then
         info "$BASE/$BIN_NAME"
-        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (si la release lo trae)" && info "$BASE/kling-credproxy-darwin-arm64 (si la release lo trae)"
+        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-guest-linux-arm64  ->  \$KLING_ROOT/lib/kling-guest (if the release has it)"
+        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (if the release has it)" && info "$BASE/kling-credproxy-darwin-arm64 (if the release has it)"
     fi
     for e in $EXTS; do
         info "$BASE/kling-${e}-${PLAT}  ->  $PLUGIN_DIR/kling-$e"
@@ -323,10 +326,10 @@ fi
 # "" = "" daría por bueno un binario sin verificar.
 verify() {
     EXPECTED="$(grep -E "  ${1}\$" "$WORK/SHA256SUMS" | awk '{print $1}')"
-    [ -n "$EXPECTED" ] || fail "no encuentro $1 en SHA256SUMS"
+    [ -n "$EXPECTED" ] || fail "cannot find $1 in SHA256SUMS"
     ACTUAL="$(sha256_of "$WORK/$1")"
-    [ -n "$ACTUAL" ] || fail "no puedo calcular el sha256 de $1 (falta sha256sum/shasum)"
-    [ "$EXPECTED" = "$ACTUAL" ] || fail "checksum de $1 no coincide (esperaba $EXPECTED, obtuve $ACTUAL)"
+    [ -n "$ACTUAL" ] || fail "cannot compute the sha256 of $1 (sha256sum/shasum missing)"
+    [ "$EXPECTED" = "$ACTUAL" ] || fail "checksum of $1 does not match (expected $EXPECTED, got $ACTUAL)"
 }
 
 # place ORIGEN DESTINO: deja ORIGEN en DESTINO sin tocar el fichero que ya
@@ -344,10 +347,11 @@ place() {
 
 # get NOMBRE: descarga y verifica. Nada sale de $WORK sin pasar por aquí.
 get() {
-    info "descargando $1"
-    fetch "$BASE/$1" "$WORK/$1" || fail "no pude descargar $BASE/$1"
+    [ -f "$WORK/$1" ] && return 0   # already downloaded and verified (signature check)
+    info "downloading $1"
+    fetch "$BASE/$1" "$WORK/$1" || fail "could not download $BASE/$1"
     verify "$1"
-    ok "$1 verificado"
+    ok "$1 verified"
 }
 
 # verify_sums_signature: comprueba SHA256SUMS.minisig contra
@@ -365,45 +369,59 @@ verify_sums_signature() {
         ''|*[!0-9]*) REQUIRED=1 ;;
         *) [ "$TAG_MAJOR" -ge "$SIGNED_FROM_MAJOR" ] && REQUIRED=1 ;;
     esac
-    if [ "$TAG_LATEST" = "1" ] && [ "$REQUIRED" = "0" ]; then
-        # Una 0.x como «latest» es una vuelta atrás que nadie pidió.
-        REQUIRED=1
-        NOT_SIGNED_HINT=" (es la «latest»: una 0.x sin firma solo la instalo pedida con --tag)"
-    fi
+    # Una 0.x como «latest» sin firma se instala con aviso: las 0.x nunca se
+    # firmaron, y es lo que resuelve el one-liner del README mientras la 1.x no
+    # sea la «latest». Exigirla lo rompía.
     if ! fetch "$BASE/SHA256SUMS.minisig" "$WORK/SHA256SUMS.minisig" 2>/dev/null; then
         rm -f "$WORK/SHA256SUMS.minisig"
-        [ "$REQUIRED" = "1" ] && fail "la release $TAG no trae SHA256SUMS.minisig: desde v${SIGNED_FROM_MAJOR}.0.0 van firmadas${NOT_SIGNED_HINT:-} (docs/firmas.md)"
-        warn "la release $TAG no trae SHA256SUMS.minisig: verifico solo por sha256 (docs/firmas.md)"
+        [ "$REQUIRED" = "1" ] && fail "release $TAG has no SHA256SUMS.minisig: releases are signed from v${SIGNED_FROM_MAJOR}.0.0 on (docs/firmas.md)"
+        warn "release $TAG has no SHA256SUMS.minisig: checking with sha256 only (docs/firmas.md)"
         return 0
     fi
     if [ -z "$KLING_RELEASE_PUBKEYS" ]; then
-        [ "$REQUIRED" = "1" ] && fail "este install.sh no trae las claves públicas de las releases: usa el de esa release"
-        warn "este install.sh no trae la clave pública de las releases: verifico solo por sha256"
+        [ "$REQUIRED" = "1" ] && fail "this install.sh has no release public keys: use the one from that release"
+        warn "this install.sh has no release public key: checking with sha256 only"
         return 0
     fi
-    if ! command -v minisign >/dev/null 2>&1; then
-        if [ "$REQUIRED" = "1" ] && [ "${KLING_INSECURE_NO_MINISIGN:-0}" != "1" ]; then
-            fail "desde v${SIGNED_FROM_MAJOR}.0.0 compruebo la firma de SHA256SUMS y no encuentro minisign.
-  Instálalo y repite: brew install minisign (macOS), apt install minisign (Debian/Ubuntu),
-  dnf install minisign (Fedora) o https://jedisct1.github.io/minisign/.
-  Sin él, solo con sha256 y bajo tu responsabilidad: KLING_INSECURE_NO_MINISIGN=1"
-        fi
-        warn "sin minisign no compruebo la firma de SHA256SUMS, solo sha256 (brew install minisign / apt install minisign)"
+    if command -v minisign >/dev/null 2>&1; then
+        for K in $KLING_RELEASE_PUBKEYS; do
+            if OUT="$(minisign -V -P "$K" -m "$WORK/SHA256SUMS" -x "$WORK/SHA256SUMS.minisig" 2>&1)"; then
+                printf '%s\n' "$OUT" | tr '\t' '\n' | grep -qx "tag:${TAG}" \
+                    || fail "SHA256SUMS.minisig is not signed for $TAG"
+                ok "SHA256SUMS signature (minisign)"
+                return 0
+            fi
+        done
+        fail "the SHA256SUMS signature is not valid with any release key: installing nothing"
+    fi
+    if [ "${KLING_INSECURE_NO_MINISIGN:-0}" = "1" ]; then
+        warn "skipping the signature check (KLING_INSECURE_NO_MINISIGN=1): sha256 only"
         return 0
     fi
-    for K in $KLING_RELEASE_PUBKEYS; do
-        if OUT="$(minisign -V -P "$K" -m "$WORK/SHA256SUMS" -x "$WORK/SHA256SUMS.minisig" 2>&1)"; then
-            printf '%s\n' "$OUT" | tr '\t' '\n' | grep -qx "tag:${TAG}" \
-                || fail "SHA256SUMS.minisig no está firmado para $TAG"
-            ok "firma de SHA256SUMS (minisign)"
-            return 0
-        fi
-    done
-    fail "la firma de SHA256SUMS no es válida con ninguna clave de las releases: no instalo nada"
+    # Sin minisign: el propio kling que se acaba de bajar (ya comprobado contra
+    # SHA256SUMS) lleva el verificador en Go y las mismas claves que este script
+    # le pasa. No es independiente del binario que se instala, como sí lo es
+    # minisign; es lo que hay sin pedirle nada más a quien instala.
+    info "checking the SHA256SUMS signature with the kling just downloaded (no minisign needed)"
+    get "$BIN_NAME"
+    chmod +x "$WORK/$BIN_NAME"
+    OUT="$("$WORK/$BIN_NAME" up -verify-sums "$WORK/SHA256SUMS" -sig "$WORK/SHA256SUMS.minisig" -tag "$TAG" -key "$KLING_RELEASE_PUBKEYS" 2>&1)"
+    RC=$?
+    if [ "$RC" = "0" ]; then
+        ok "SHA256SUMS signature (checked by kling)"
+        return 0
+    fi
+    if [ "$RC" != "2" ]; then
+        fail "the SHA256SUMS signature check failed: $OUT"
+    fi
+    # 2: este kling no sabe verificar (una release anterior).
+    [ "$REQUIRED" = "1" ] && fail "cannot check the SHA256SUMS signature: this kling cannot do it and minisign is not installed (brew install minisign / apt install minisign)"
+    warn "cannot check the SHA256SUMS signature (no minisign): sha256 only"
+    return 0
 }
 
-info "descargando SHA256SUMS"
-fetch "$BASE/SHA256SUMS" "$WORK/SHA256SUMS" || fail "no pude descargar SHA256SUMS"
+info "downloading SHA256SUMS"
+fetch "$BASE/SHA256SUMS" "$WORK/SHA256SUMS" || fail "could not download SHA256SUMS"
 verify_sums_signature
 ok "SHA256SUMS"
 
@@ -425,6 +443,13 @@ if [ "$SKIP_KLING" != "1" ]; then
         if grep -Eq '[ *]kling-credproxy-darwin-arm64$' "$WORK/SHA256SUMS"; then
             get "kling-credproxy-darwin-arm64"
             CP_NAME="kling-credproxy-darwin-arm64"
+        fi
+        # El agente de invitado (kling-guest, de Linux) lo necesita el daemon
+        # para construir imágenes (toolchain) o importar las de Docker: sin él
+        # `kling try -image alpine` no arranca. Una release anterior no lo trae.
+        if grep -Eq '[ *]kling-guest-linux-arm64$' "$WORK/SHA256SUMS"; then
+            get "kling-guest-linux-arm64"
+            GUEST_NAME="kling-guest-linux-arm64"
         fi
     fi
 fi
@@ -469,15 +494,15 @@ check_min_kling() {
     [ "$SKIP_KLING" = "1" ] || return 0
     MIN="$("$1" --kling-manifest 2>/dev/null | tr -d '\n' | grep -o '"min_kling": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')"
     if ! command -v kling >/dev/null 2>&1; then
-        warn "no encuentro kling en el PATH. Las extensiones son de kling: instálalo ${MIN:+(>= v$MIN) }quitando --skip-kling."
+        warn "kling is not in the PATH. The extensions are kling's: install it ${MIN:+(>= v$MIN) }by dropping --skip-kling."
         return 0
     fi
     [ -n "$MIN" ] || return 0
     HAVE="$(KLING_HOST=unix:///nonexistent/kling-install.sock kling version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//')"
     case "$HAVE" in
         [0-9]*.[0-9]*)
-            semver_ge "$HAVE" "$MIN" || fail "tu kling es $HAVE y $(basename "$1") necesita >= $MIN. Quita --skip-kling para actualizarlo." ;;
-        *) warn "no sé leer la versión de kling (\"$HAVE\"); sigo sin comprobar el mínimo ($MIN)" ;;
+            semver_ge "$HAVE" "$MIN" || fail "your kling is $HAVE and $(basename "$1") needs >= $MIN. Drop --skip-kling to upgrade it." ;;
+        *) warn "cannot read the kling version (\"$HAVE\"); continuing without checking the minimum ($MIN)" ;;
     esac
 }
 
@@ -489,15 +514,15 @@ done
 # Preparar directorio destino
 if [ ! -d "$PREFIX" ]; then
     if mkdir -p "$PREFIX" 2>/dev/null; then
-        ok "creado $PREFIX"
+        ok "created $PREFIX"
     else
-        fail "no puedo crear $PREFIX — prueba --prefix o ejecuta como root"
+        fail "cannot create $PREFIX — try --prefix or run as root"
     fi
 fi
 
 if [ "$SKIP_KLING" != "1" ]; then
-    place "$WORK/$BIN_NAME" "$PREFIX/kling" || fail "no puedo escribir en $PREFIX"
-    ok "instalado en $PREFIX/kling"
+    place "$WORK/$BIN_NAME" "$PREFIX/kling" || fail "cannot write to $PREFIX"
+    ok "installed $PREFIX/kling"
 
     # En un Mac Apple Silicon el daemon arranca las microVMs con kling-vz, que
     # tiene que vivir junto a kling. Va firmado ad-hoc y sin notarizar: la
@@ -506,46 +531,53 @@ if [ "$SKIP_KLING" != "1" ]; then
     if [ "$PLAT" = "darwin-arm64" ]; then
         VZ_NAME="kling-vz-darwin-arm64"
         xattr -d com.apple.quarantine "$WORK/$VZ_NAME" 2>/dev/null || true
-        place "$WORK/$VZ_NAME" "$PREFIX/kling-vz" || fail "no puedo escribir en $PREFIX"
-        ok "instalado en $PREFIX/kling-vz (backend nativo de macOS)"
+        place "$WORK/$VZ_NAME" "$PREFIX/kling-vz" || fail "cannot write to $PREFIX"
+        ok "installed $PREFIX/kling-vz (native macOS backend)"
         # kling-hv (Hypervisor.framework), igual: junto a kling y sin
         # cuarentena. Con daemon.vmm auto el daemon lo elige si este macOS lo
         # admite (docs/mac.md).
         if [ -n "${HV_NAME:-}" ]; then
             xattr -d com.apple.quarantine "$WORK/$HV_NAME" 2>/dev/null || true
-            place "$WORK/$HV_NAME" "$PREFIX/kling-hv" || fail "no puedo escribir en $PREFIX"
-            ok "instalado en $PREFIX/kling-hv (backend hv de macOS)"
+            place "$WORK/$HV_NAME" "$PREFIX/kling-hv" || fail "cannot write to $PREFIX"
+            ok "installed $PREFIX/kling-hv (macOS hv backend)"
         fi
         # kling-credproxy, igual. Firmado con hardened runtime: place no lo
         # toca más que para copiarlo.
         if [ -n "${CP_NAME:-}" ]; then
             xattr -d com.apple.quarantine "$WORK/$CP_NAME" 2>/dev/null || true
-            place "$WORK/$CP_NAME" "$PREFIX/kling-credproxy" || fail "no puedo escribir en $PREFIX"
-            ok "instalado en $PREFIX/kling-credproxy (proxy de credenciales aparte)"
+            place "$WORK/$CP_NAME" "$PREFIX/kling-credproxy" || fail "cannot write to $PREFIX"
+            ok "installed $PREFIX/kling-credproxy (separate credentials proxy)"
+        fi
+        # lib/ de la raíz de datos: donde el daemon de Mac busca kling-guest.
+        if [ -n "${GUEST_NAME:-}" ]; then
+            LIB_DIR="${KLING_ROOT:-$HOME/Library/Application Support/kindling}/lib"
+            mkdir -p "$LIB_DIR" 2>/dev/null || fail "cannot create $LIB_DIR"
+            place "$WORK/$GUEST_NAME" "$LIB_DIR/kling-guest" || fail "cannot write to $LIB_DIR"
+            ok "installed $LIB_DIR/kling-guest (guest agent)"
         fi
     fi
 fi
 
 # ── extensiones ────────────────────────────────────────────────────────────
 if [ -n "$EXTS" ]; then
-    mkdir -p "$PLUGIN_DIR" 2>/dev/null || fail "no puedo crear $PLUGIN_DIR — prueba --plugin-dir"
+    mkdir -p "$PLUGIN_DIR" 2>/dev/null || fail "cannot create $PLUGIN_DIR — try --plugin-dir"
     NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 for e in $EXTS; do
     ASSET="kling-${e}-${PLAT}"
     SUM="$(sha256_of "$WORK/$ASSET")"
-    place "$WORK/$ASSET" "$PLUGIN_DIR/kling-$e" || fail "no puedo escribir en $PLUGIN_DIR"
+    place "$WORK/$ASSET" "$PLUGIN_DIR/kling-$e" || fail "cannot write to $PLUGIN_DIR"
     # Lo mismo que deja `kling plugin install`: de dónde salió y con qué suma.
     # Empieza por kling- pero acaba en .json, así que el descubrimiento de
     # extensiones no lo confunde con un ejecutable.
     printf '{"name":"%s","version":"%s","url":"%s","sha256":"%s","installed":"%s"}\n' \
         "$e" "$TAG" "$BASE/$ASSET" "$SUM" "$NOW" > "$PLUGIN_DIR/kling-$e.json" \
-        || fail "no puedo escribir $PLUGIN_DIR/kling-$e.json"
-    ok "instalado en $PLUGIN_DIR/kling-$e"
+        || fail "cannot write $PLUGIN_DIR/kling-$e.json"
+    ok "installed $PLUGIN_DIR/kling-$e"
     if [ "$NO_COMPANIONS" != "1" ]; then
         for c in $(companions_of "$e"); do
-            place "$WORK/${c}-${PLAT}" "$PREFIX/$c" || fail "no puedo escribir en $PREFIX"
-            ok "instalado en $PREFIX/$c"
+            place "$WORK/${c}-${PLAT}" "$PREFIX/$c" || fail "cannot write to $PREFIX"
+            ok "installed $PREFIX/$c"
         done
     fi
 done
@@ -572,7 +604,7 @@ add_rc() {
     else
         printf "\n# kling\n%s\n" "$1" >> "$RC" || return 1
     fi
-    ok "añadido a $RC: $1"
+    ok "added to $RC: $1"
 }
 
 KLING_BIN="$PREFIX/kling"
@@ -602,7 +634,7 @@ fi
 echo
 if [ -n "$PATH_LINE" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
 cat <<EOF
-  Para usar kling desde una shell abierta, añade a tu rc:
+  To use kling in an open shell, add this to your rc file:
 
       $PATH_LINE
 
@@ -610,38 +642,40 @@ EOF
 fi
 if [ "$NO_RC" = "1" ] || [ -z "$RC" ]; then
 cat <<EOF
-  Completado de la shell: escribe el script y añade a tu rc la línea que imprime:
+  Shell completion: write the script and add the line it prints to your rc file:
 
       kling completion install
 
 EOF
 fi
 cat <<EOF
-  Comprobar (en una shell nueva, o tras 'source ${RC:-tu rc}'):
+  Try it (in a new shell, or after 'source ${RC:-your rc}'):
 
-      kling doctor
       kling try -- uname -a
 
-  Para conectar con un daemon remoto:
+  The first run starts the daemon and downloads the guest kernel and image
+  (about 10 MB); after that it runs in well under a second.
 
-      kling context add lab ssh://juan@<host-con-kvm>
+  To use a remote daemon instead:
+
+      kling context add lab ssh://user@<host-with-kvm>
 
 EOF
 
 if [ -n "$EXTS" ]; then
 cat <<EOF
-  Extensiones instaladas en $PLUGIN_DIR:
+  Extensions installed in $PLUGIN_DIR:
 
       kling plugin ls
 
-  En una shell ya abierta, recarga el completado para ver sus comandos:
+  In an open shell, reload the completion to see their commands:
 
       $RELOAD
 
 EOF
 fi
 
-ok "listo"
+ok "done"
 }
 
 # Entre llaves: la shell lee el grupo entero antes de ejecutarlo, así que un

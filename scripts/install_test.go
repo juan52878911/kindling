@@ -452,7 +452,7 @@ func TestInstallFirmadaSinMinisignEnElPATH(t *testing.T) {
 
 func TestInstallSinMinisignRechazaFirmaMala(t *testing.T) {
 	for nombre, rel := range map[string]releaseFalsa{
-		"suma alterada":       {sinMinisign: true, sumaAlterada: true},
+		"sin firma":           {sinMinisign: true, sinFirma: true},
 		"firma de otra etiq.": {sinMinisign: true, tagFirmado: "v0.9.0"},
 	} {
 		t.Run(nombre, func(t *testing.T) {
