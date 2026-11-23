@@ -3,6 +3,8 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -91,6 +93,9 @@ func daemonContadoFallable(t testing.TB, n int) (sock string, listados *atomic.I
 // (catálogo vacío) con 5, 20 y 50 servicios; listados/op son los GET
 // /snapshots que hace al daemon.
 func BenchmarkPrimerInitializeAgregado(b *testing.B) {
+	// Sin el registro de cada petición, que se mezclaría con la salida.
+	log.SetOutput(io.Discard)
+	b.Cleanup(func() { log.SetOutput(os.Stderr) })
 	for _, n := range []int{5, 20, 50} {
 		b.Run(fmt.Sprintf("servicios=%d", n), func(b *testing.B) {
 			sock, listados := daemonContado(b, n)
