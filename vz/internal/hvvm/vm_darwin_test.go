@@ -140,6 +140,42 @@ func TestGuardarCPUDiceLosFallos(t *testing.T) {
 	}
 }
 
+// Timings (GET /kling/info) da en números lo mismo que el resumen: las fases
+// que pasaron, los hitos desde que se soltó la VM y el total; nada de lo que
+// no pasó.
+func TestTrazaTimings(t *testing.T) {
+	_, tm := trazaPruebaFases()
+	if tm["kind"] != "boot" {
+		t.Errorf("kind = %v", tm["kind"])
+	}
+	fases, _ := tm["phases_ms"].(map[string]float64)
+	for _, f := range []string{"ram", "kernel+fdt", "vcpus"} {
+		if v, ok := fases[f]; !ok || v < 0 {
+			t.Errorf("phase %q = %v, %v (phases %v)", f, v, ok, fases)
+		}
+	}
+	for _, f := range []string{"vm+gic", "pausa", "snap-clon", "estado-cpu"} {
+		if _, ok := fases[f]; ok {
+			t.Errorf("phase %q did not happen but is in %v", f, fases)
+		}
+	}
+	hitos, _ := tm["since_release_ms"].(map[string]float64)
+	if _, ok := hitos["agente"]; !ok {
+		t.Errorf("milestones %v lack agente", hitos)
+	}
+	if _, ok := hitos["primer-uart"]; ok {
+		t.Errorf("milestones %v have primer-uart, which did not happen", hitos)
+	}
+	if _, ok := hitos["soltar"]; ok {
+		t.Errorf("milestones %v count release from itself", hitos)
+	}
+	for _, k := range []string{"wait_ms", "total_ms"} {
+		if v, ok := tm[k].(float64); !ok || v < 0 {
+			t.Errorf("%s = %v", k, tm[k])
+		}
+	}
+}
+
 // El resumen de KLING_HV_TRACE: las fases de antes de soltar la VM por
 // orden, la espera, los hitos desde que se soltó y el total hasta el agente.
 func TestTrazaResumen(t *testing.T) {

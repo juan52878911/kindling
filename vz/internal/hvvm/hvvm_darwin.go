@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -478,6 +479,60 @@ func (m *machine) EndReason() string { return FinMotivo() }
 
 // DeadDevices: ver DeadDevices (server.DeviceHealth).
 func (m *machine) DeadDevices() []string { return DeadDevices() }
+
+// VMMTimings: ver Timings (server.VMMTimer).
+func (m *machine) VMMTimings() map[string]any { return Timings() }
+
+// Timings es el desglose de traza.c (khv_traza_fases) del arranque o la
+// restauración de este proceso, en ms: process (de lanzar kling-hv a
+// khv_create), phases (cada fase de antes de soltar la VM), wait (lo que no
+// cae en ninguna), since_release (cada hito desde que se soltó) y total (de
+// khv_create al agente). Lo que no pasó no sale. Es lo mismo que la línea de
+// KLING_HV_TRACE=1, sin tener que leer el log.
+func Timings() map[string]any {
+	var f C.KhvFases
+	restaura := bool(C.khv_traza_fases(&f))
+	return timingsDe(&f, restaura)
+}
+
+func timingsDe(f *C.KhvFases, restaura bool) map[string]any {
+	kind := "boot"
+	if restaura {
+		kind = "restore"
+	}
+	out := map[string]any{"kind": kind}
+	if v := float64(f.proceso); v >= 0 {
+		out["process_ms"] = redondearMs(v)
+	}
+	fases := map[string]float64{}
+	for i := 0; i < int(C.KHV_F_N); i++ {
+		if v := float64(f.fase[i]); v >= 0 {
+			fases[C.GoString(C.khv_traza_nombre_fase(C.int(i)))] = redondearMs(v)
+		}
+	}
+	if len(fases) > 0 {
+		out["phases_ms"] = fases
+	}
+	if v := float64(f.espera); v >= 0 {
+		out["wait_ms"] = redondearMs(v)
+	}
+	hitos := map[string]float64{}
+	for i := int(C.KHV_H_SOLTAR) + 1; i < int(C.KHV_H_N); i++ {
+		if v := float64(f.hito[i]); v >= 0 {
+			hitos[C.GoString(C.khv_traza_nombre_hito(C.int(i)))] = redondearMs(v)
+		}
+	}
+	if len(hitos) > 0 {
+		out["since_release_ms"] = hitos
+	}
+	if v := float64(f.total); v >= 0 {
+		out["total_ms"] = redondearMs(v)
+	}
+	return out
+}
+
+// redondearMs deja dos decimales (10 µs): lo que da la línea del log.
+func redondearMs(v float64) float64 { return math.Round(v*100) / 100 }
 
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
 // lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.

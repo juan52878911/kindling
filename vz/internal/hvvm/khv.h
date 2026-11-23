@@ -544,6 +544,17 @@ void khv_traza_salida(int cpu, unsigned ec, uint64_t ipa, uint64_t ns);
 // khv_traza_resumen escribe en buf la línea del resumen (la del log); para
 // las pruebas y para quien no lea la consola.
 void khv_traza_resumen(char *buf, size_t n);
+// khv_traza_fases: el resumen en números (ms, -1 = no pasó), para el API.
+typedef struct {
+  double proceso;           // de que arrancó el proceso a khv_create
+  double fase[KHV_F_N];     // duración de cada fase de antes de soltar la VM
+  double espera;            // lo de antes de soltar que no cae en ninguna fase
+  double hito[KHV_H_N];     // cada hito desde que se soltó la VM
+  double total;             // de khv_create al agente
+} KhvFases;
+bool khv_traza_fases(KhvFases *out);  // true si es una restauración
+const char *khv_traza_nombre_fase(int i);
+const char *khv_traza_nombre_hito(int i);
 void khv_traza_freeze(void);  // resumen del freeze (con KLING_HV_TRACE=1)
 // khv_traza_prueba: un arranque de mentira (fases y hitos seguidos, sin VM)
 // desde cero y su resumen en buf. Solo para las pruebas.
