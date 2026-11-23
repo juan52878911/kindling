@@ -112,7 +112,7 @@ func TestReleaseWorkflowExigeElE2EDeKlingHV(t *testing.T) {
 	if !ok {
 		t.Fatal("release.yml sin job release")
 	}
-	if !regexp.MustCompile(`(?m)^      statuses:\s*read\s*$`).MatchString(rel) {
+	if !regexp.MustCompile(`(?m)^      statuses:\s*read\b`).MatchString(rel) {
 		t.Error("job release sin permissions statuses: read")
 	}
 	puerta, firma := -1, -1

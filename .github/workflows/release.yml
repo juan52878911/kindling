@@ -332,7 +332,8 @@ jobs:
   # e2e-linux.yml entero (unos 5 min con el kernel en la caché que llena el
   # nocturno, más la imagen pg16 y su plantilla de la parte db); con require_kvm, un runner sin /dev/kvm falla en vez de avisar.
   # Lo del Mac (92 y 95 con kling-hv) lo exige scripts/release.sh antes de
-  # crear la etiqueta (docs/releases.md, paso 3c).
+  # crear la etiqueta (docs/releases.md, paso 3c), y el job release lo vuelve a
+  # pedir antes de firmar (el commit status e2e-mac/kling-hv).
   e2e:
     name: e2e Linux
     needs: [test, lint]
@@ -363,6 +364,7 @@ jobs:
       contents: write
       id-token: write     # la atestación de procedencia (Sigstore, sin claves)
       attestations: write
+      statuses: read      # el commit status e2e-mac/kling-hv
     outputs:
       version: ${{ steps.ver.outputs.version }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
@@ -389,6 +391,22 @@ jobs:
             *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
             *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
+
+      # Desde 1.0, ninguna release sin el e2e de kling-hv sobre este commit:
+      # la misma consulta que scripts/release.sh, porque una etiqueta empujada
+      # a mano (o un workflow_dispatch) no pasa por release.sh. Va antes de
+      # bajar y firmar nada.
+      - name: e2e de kling-hv (commit status e2e-mac/kling-hv)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "${VERSION#v}" in
+            0.*) echo "$VERSION: before 1.0 the kling-hv e2e is not required"; exit 0 ;;
+          esac
+          sh scripts/e2e-hv-estado.sh "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)"
 
       # Solo los artefactos de los jobs que producen assets, por nombre: con
       # merge-multiple, uno de otro job (un log de un e2e, por ejemplo) con el
