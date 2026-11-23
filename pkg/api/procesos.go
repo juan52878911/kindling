@@ -173,7 +173,7 @@ func (c *Client) StartProcess(ctx context.Context, ref string, r ProcessStartReq
 // Processes lista los procesos de fondo de la máquina.
 func (c *Client) Processes(ctx context.Context, ref string) ([]ProcessInfo, error) {
 	var out []ProcessInfo
-	return out, c.do(ctx, http.MethodGet, procPath(ref, 0, ""), nil, &out)
+	return out, c.doMax(ctx, MaxListResponseBytes, http.MethodGet, procPath(ref, 0, ""), nil, &out)
 }
 
 // Process da el estado de un proceso. Con wait>0 espera hasta ese tiempo a que
@@ -261,7 +261,7 @@ func (c *Client) CreateSession(ctx context.Context, ref string, r SessionRequest
 // Sessions lista las sesiones de la máquina.
 func (c *Client) Sessions(ctx context.Context, ref string) ([]Session, error) {
 	var out []Session
-	return out, c.do(ctx, http.MethodGet, "/machines/"+url.PathEscape(ref)+"/sessions", nil, &out)
+	return out, c.doMax(ctx, MaxListResponseBytes, http.MethodGet, "/machines/"+url.PathEscape(ref)+"/sessions", nil, &out)
 }
 
 // GetSession da el estado de una sesión.
