@@ -550,3 +550,110 @@ func TestRegistroDeNoneVieneEnLaRanura(t *testing.T) {
 		t.Fatalf("instalaciones = %d, quería 3", instalaciones.Load())
 	}
 }
+
+// fondoDeMuestra: crear/destruir falsos, con reloj inyectado.
+func fondoDeMuestra(min, max int, ahora *atomic.Int64) (*Fondo, *atomic.Int32) {
+	var i atomic.Int64
+	var destruidas atomic.Int32
+	f := NuevoFondo(min, func() (*Ranura, error) {
+		k := int(i.Add(1))
+		id := fmt.Sprintf("%08x00000000", 0xc0000000+k)
+		return &Ranura{ID: id, Net: Plan(k, id)}, nil
+	}, func(*Ranura) { destruidas.Add(1) })
+	f.ahora = func() time.Time { return time.Unix(ahora.Load(), 0) }
+	f.Adaptar(max)
+	return f, &destruidas
+}
+
+func TestFondoCreceConUnaRafagaYBajaEnReposo(t *testing.T) {
+	var reloj atomic.Int64
+	reloj.Store(1_700_000_000)
+	f, destruidas := fondoDeMuestra(4, 12, &reloj)
+	t.Cleanup(f.Cerrar)
+	f.Reponer()
+	esperarListas(t, f, 4)
+	for range 30 {
+		if r := f.Tomar(); r != nil {
+			f.Entregar(r.ID) // en uso: Recoger no las toca
+		}
+	}
+	if got := f.Objetivo(); got != 12 {
+		t.Fatalf("objetivo tras la ráfaga = %d, quería 12", got)
+	}
+	esperarListas(t, f, 12)
+	// Se mantiene antes del minuto.
+	reloj.Add(50)
+	f.Recoger()
+	if f.Objetivo() != 12 || destruidas.Load() != 0 {
+		t.Fatalf("a los 50 s: objetivo=%d destruidas=%d", f.Objetivo(), destruidas.Load())
+	}
+	// Después, baja de 2 en 2 destruyendo listas.
+	reloj.Add(20)
+	f.Recoger()
+	if f.Objetivo() != 10 || destruidas.Load() != 2 || f.Len() != 10 {
+		t.Fatalf("1ª vuelta: objetivo=%d destruidas=%d listas=%d", f.Objetivo(), destruidas.Load(), f.Len())
+	}
+	for range 5 {
+		f.Recoger()
+	}
+	if f.Objetivo() != 4 || f.Len() != 4 || destruidas.Load() != 8 {
+		t.Fatalf("al final: objetivo=%d destruidas=%d listas=%d", f.Objetivo(), destruidas.Load(), f.Len())
+	}
+}
+
+func TestFondoSinAdaptacionSiMaximoMenorQueMinimo(t *testing.T) {
+	var reloj atomic.Int64
+	reloj.Store(1_700_000_000)
+	f, _ := fondoDeMuestra(4, 2, &reloj)
+	t.Cleanup(f.Cerrar)
+	f.Reponer()
+	esperarListas(t, f, 4)
+	for range 10 {
+		f.Tomar()
+	}
+	if f.Objetivo() != 4 {
+		t.Fatalf("objetivo = %d, quería 4", f.Objetivo())
+	}
+}
+
+func TestReponedoresCuatroSinCreacionesYDosCon(t *testing.T) {
+	if got := reponedoresPermitidos(); got != 4 {
+		t.Fatalf("sin creaciones esperando: %d, quería 4", got)
+	}
+	creacionesEsperando.Add(1)
+	defer creacionesEsperando.Add(-1)
+	if got := reponedoresPermitidos(); got != 2 {
+		t.Fatalf("con creaciones esperando: %d, quería 2", got)
+	}
+}
+
+// R3-6: retirar el registro de una ranura espera a que acabe su instalación.
+func TestRetirarRegistroEsperaALaInstalacion(t *testing.T) {
+	viejoH, viejoE := hayNft, ejecutarNft
+	t.Cleanup(func() { hayNft, ejecutarNft = viejoH, viejoE })
+	hayNft = func() bool { return true }
+	var mu sync.Mutex
+	var orden []string
+	suelta := make(chan struct{})
+	ejecutarNft = func(ns, stdin string, args ...string) error {
+		if args[0] == "-f" {
+			<-suelta
+		}
+		mu.Lock()
+		orden = append(orden, args[0])
+		mu.Unlock()
+		return nil
+	}
+	n := Plan(777, "feedface00000777")
+	done := n.instalarRegistroIP()
+	registroEnRanura.Store(n.NS, done)
+	n.retirarRegistroDeRanura()
+	time.Sleep(30 * time.Millisecond)
+	close(suelta)
+	registrosEnVuelo.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(orden) != 2 || orden[0] != "-f" || orden[1] != "delete" {
+		t.Fatalf("orden = %v, quería [-f delete]", orden)
+	}
+}
