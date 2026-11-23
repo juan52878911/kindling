@@ -991,3 +991,43 @@ func TestErroresDeCredencialesNoRegistranLaClave(t *testing.T) {
 		t.Fatalf("una clave acabó en el registro de errores:\n%s", s)
 	}
 }
+
+// Lo que escribe un VMM no decide qué abre el siguiente: las rutas de disco y
+// de kernel de un snap.file no se abren si el daemon no las ha reapuntado. Una
+// ruta fuera del directorio de la máquina no llega a Confine, y create() falla
+// sin el PATCH.
+func TestCargaNoAbreRutasDelVolcado(t *testing.T) {
+	r := newRig(t)
+	var confinados []Confinamiento
+	r.srv.d.Confine = func(c Confinamiento) error { confinados = append(confinados, c); return nil }
+	snap, mem := writeSnapshot(t, t.TempDir())
+	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":false}`)
+
+	// Solo el overlay reapuntado: quedan el rootfs y el kernel del volcado.
+	r.must("PATCH", "/drives/overlay", `{"drive_id":"overlay","path_on_host":"/m/1/overlay.ext4"}`)
+	r.mustFail("PATCH", "/vm", `{"state":"Resumed"}`, "snapshot")
+	if len(confinados) != 0 || len(r.f.vms) != 0 {
+		t.Fatalf("con rutas sin reapuntar se confinó (%d) o se creó la VM (%d)", len(confinados), len(r.f.vms))
+	}
+
+	// Reapuntado todo, la VM se crea y Confine solo ve las rutas del daemon.
+	r.must("PATCH", "/drives/rootfs", `{"drive_id":"rootfs","path_on_host":"/m/1/rootfs.ext4"}`)
+	r.must("PUT", "/boot-source", `{"kernel_image_path":"/m/1/vmlinux","boot_args":"x"}`)
+	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
+	if len(confinados) != 1 {
+		t.Fatalf("Confine llamado %d veces", len(confinados))
+	}
+	for _, p := range append(confinados[0].Lectura, confinados[0].Escritura...) {
+		if p != mem && !strings.HasPrefix(p, "/m/1/") {
+			t.Fatalf("Confine vio una ruta del volcado: %s", p)
+		}
+	}
+}
+
+// El VMM anuncia que exige el reapuntado, para que el daemon lo haga entero.
+func TestInfoAnunciaReapuntado(t *testing.T) {
+	r := newRig(t)
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"snapshot_repoint":true`) {
+		t.Fatalf("GET /kling/info = %s", out)
+	}
+}
