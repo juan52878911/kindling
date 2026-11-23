@@ -21,9 +21,9 @@ type clienteFalso struct {
 	commit    string
 	replace   bool
 	borradas  []string
-	cargando  int    // respuestas 503 de la sonda antes de la buena
-	salud     int    // código de la sonda cuando ya no carga (0 = 200)
-	warmCod   int    // código de cada petición de calentamiento (0 = 200)
+	cargando  int // respuestas 503 de la sonda antes de la buena
+	salud     int // código de la sonda cuando ya no carga (0 = 200)
+	warmCod   int // código de cada petición de calentamiento (0 = 200)
 	cuerpos   []string
 	cabeceras []map[string]string
 	puertos   []int
