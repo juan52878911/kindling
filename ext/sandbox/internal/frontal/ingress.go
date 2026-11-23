@@ -69,7 +69,11 @@ const (
 	ttlEndpointPorDefecto = time.Hour
 	ttlEndpointMax        = 7 * 24 * time.Hour
 	vidaCache             = 3 * time.Second
-	maxCuerpoGuest        = 1 << 20
+	// vidaAusente es cuánto se recuerda que un id no existe: corto, porque
+	// un sandbox recién reclamado puede aparecer en cualquier momento.
+	vidaAusente    = time.Second
+	plazoListado   = 30 * time.Second
+	maxCuerpoGuest = 1 << 20
 )
 
 // IngresoOpciones configura la entrada a puertos. Dominio vacío = apagada.
@@ -118,6 +122,21 @@ type ingreso struct {
 	epoca uint64
 	// repasando: hay una vuelta de repaso en marcha.
 	repasando bool
+	// ausentes son los ids que un listado reciente no encontró, con hasta
+	// cuándo vale esa respuesta: sin ella, cada petición a un subdominio
+	// inventado (también sin credencial) listaba el host entero.
+	ausentes map[string]time.Time
+	// vuelos son los listados en curso por host: las peticiones que no
+	// encuentran su entrada en la caché a la vez comparten uno.
+	vuelos map[string]*vuelo
+}
+
+// vuelo es un listado de un host en curso; fin se cierra al terminar.
+type vuelo struct {
+	fin   chan struct{}
+	epoca uint64
+	ms    []*api.Machine
+	err   error
 }
 
 // viva es una petición en curso: cómo cortarla y con qué credencial entró,
@@ -191,6 +210,7 @@ func nuevoIngreso(s *Servidor, o IngresoOpciones) (*ingreso, error) {
 			IdleConnTimeout:       30 * time.Second,
 		},
 		cache: map[string]*entrada{}, conns: map[string]int{},
+		ausentes: map[string]time.Time{}, vuelos: map[string]*vuelo{},
 		vivas: map[claveViva]map[uint64]*viva{},
 	}, nil
 }
@@ -311,6 +331,9 @@ func (s *Servidor) handleEndpoint(w http.ResponseWriter, r *http.Request, id str
 		}
 		g.olvidar(id)
 	} else {
+		g.mu.Lock()
+		delete(g.ausentes, id)
+		g.mu.Unlock()
 		out.Token = g.firmar(cargaEndpoint{Tenant: t.Nombre, ID: id, Puerto: pet.Port, Exp: exp.Unix(), Iat: time.Now().UnixMicro()})
 	}
 	writeJSON(w, http.StatusCreated, out)
@@ -893,6 +916,7 @@ func (g *ingreso) olvidar(id string) {
 	g.mu.Lock()
 	e := g.cache[id]
 	delete(g.cache, id)
+	delete(g.ausentes, id)
 	g.epoca++
 	g.mu.Unlock()
 	if e != nil {
@@ -910,6 +934,7 @@ func (g *ingreso) olvidar(id string) {
 func (g *ingreso) entrada(ctx context.Context, id string) (*entrada, error) {
 	g.mu.Lock()
 	e := g.cache[id]
+	ausente := time.Now().Before(g.ausentes[id])
 	g.mu.Unlock()
 	if e != nil {
 		e.mu.Lock()
@@ -919,15 +944,15 @@ func (g *ingreso) entrada(ctx context.Context, id string) (*entrada, error) {
 			return e, nil
 		}
 	}
+	if ausente {
+		return nil, noSandbox(id)
+	}
 	nombre, ref, _ := partirID(id)
 	h, ok := g.s.reg.Host(nombre)
 	if !ok {
 		return nil, noSandbox(id)
 	}
-	g.mu.Lock()
-	epoca := g.epoca
-	g.mu.Unlock()
-	ms, err := h.Cliente.Sandboxes(ctx)
+	ms, epoca, err := g.listar(ctx, h)
 	if err != nil {
 		return nil, deHost(h, err)
 	}
@@ -948,7 +973,48 @@ func (g *ingreso) entrada(ctx context.Context, id string) (*entrada, error) {
 			return e, nil
 		}
 	}
+	g.mu.Lock()
+	if g.epoca == epoca {
+		if len(g.ausentes) > 4096 {
+			g.ausentes = map[string]time.Time{}
+		}
+		g.ausentes[id] = time.Now().Add(vidaAusente)
+	}
+	g.mu.Unlock()
 	return nil, noSandbox(id)
+}
+
+// listar lista los sandboxes de h, compartiendo el listado con las demás
+// peticiones que lo piden a la vez. Un listado que empezó antes de la última
+// invalidación (epoca) no se comparte con las que llegan después. Devuelve
+// también la época en que empezó.
+func (g *ingreso) listar(ctx context.Context, h *hosts.Host) ([]*api.Machine, uint64, error) {
+	g.mu.Lock()
+	v := g.vuelos[h.Nombre]
+	if v == nil || v.epoca != g.epoca {
+		v = &vuelo{fin: make(chan struct{}), epoca: g.epoca}
+		g.vuelos[h.Nombre] = v
+		// No depende de la petición que lo lanza: otras esperan su
+		// resultado.
+		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazoListado)
+		go func() {
+			defer cancel()
+			v.ms, v.err = h.Cliente.Sandboxes(lctx)
+			g.mu.Lock()
+			if g.vuelos[h.Nombre] == v {
+				delete(g.vuelos, h.Nombre)
+			}
+			g.mu.Unlock()
+			close(v.fin)
+		}()
+	}
+	g.mu.Unlock()
+	select {
+	case <-v.fin:
+		return v.ms, v.epoca, v.err
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
 }
 
 // preparar despierta el sandbox si hace falta y devuelve el puerto del host
