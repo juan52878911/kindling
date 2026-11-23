@@ -116,3 +116,31 @@ func BenchmarkSondeoAgente(b *testing.B) {
 		}
 	})
 }
+
+// G-08: pausar y reanudar deja el mismo VMM (mismo PID) y el mismo agente,
+// pero reanudarLocked reescribe StartedAt. Cuenta los sondeos (conexiones
+// nuevas al agente) que hace el primer exec tras cada pausa→reanudar.
+func TestPausaReanudarSondeos(t *testing.T) {
+	s := &Server{}
+	sondeos := 0
+	s.sondearAgente = func(context.Context, *api.Machine) error {
+		sondeos++
+		return nil
+	}
+	desde := time.Now()
+	mc := &api.Machine{ID: "cccc000000000001", Name: "pausable", PID: 20, StartedAt: &desde}
+	if err := s.esperarAgenteUnaVez(context.Background(), mc); err != nil {
+		t.Fatal(err)
+	}
+	const ciclos = 10
+	antes := sondeos
+	for i := range ciclos {
+		// Lo que hace reanudarLocked con la máquina: mismo PID, StartedAt nuevo.
+		reanudada := mc.Clone()
+		ahora := desde.Add(time.Duration(i+1) * time.Second)
+		reanudada.StartedAt = &ahora
+		_ = s.esperarAgenteUnaVez(context.Background(), reanudada)
+		mc = reanudada
+	}
+	t.Logf("pausa→exec: %d sondeos en %d ciclos", sondeos-antes, ciclos)
+}
