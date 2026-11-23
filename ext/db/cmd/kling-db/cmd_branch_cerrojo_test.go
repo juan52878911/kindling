@@ -100,3 +100,58 @@ func TestForkDeUnaRamaNoDuplicaLaRama(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Una copia de rama que se quedó en preparing (su creador murió entre el fork y
+// marcarla lista) es huérfana: quien crea copias de rama lo hace con el
+// cerrojo del repo, y aquí lo tiene quien la encuentra. Se tira y se rehace, en
+// vez de bloquear la rama hasta un -rm a mano.
+func TestBranchHuerfanaEnPreparingSeRehace(t *testing.T) {
+	ta, dir := branchTestApp(t)
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	main := ta.copyOf(t, "main")
+	gitT(t, dir, "checkout", "-q", "-b", "feat")
+	l := clone(main.Labels)
+	l[labelBranch] = branchKey("feat")
+	l[labelState] = statePreparing
+	ta.f.mu.Lock()
+	orphan := ta.f.newMachine("huerfana", l)
+	ta.f.mu.Unlock()
+
+	if err := ta.branchSwitch(ctx, "", defaultOwner, "", true); err != nil {
+		t.Fatalf("switch with an orphan copy in preparing: %v\n%s", err, ta.err)
+	}
+	if ta.f.find(orphan.ID) != nil {
+		t.Error("the orphan copy is still there")
+	}
+	mc := ta.copyOf(t, "feat")
+	if mc == nil || mc.ID == orphan.ID || mc.Labels[labelState] != stateReady {
+		t.Fatalf("copy of feat = %+v", mc)
+	}
+}
+
+// Otro estado que no es ni ready ni preparing no se toca: no se sabe de dónde
+// sale.
+func TestBranchCopiaEnEstadoRaroNoSeTira(t *testing.T) {
+	ta, dir := branchTestApp(t)
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	main := ta.copyOf(t, "main")
+	gitT(t, dir, "checkout", "-q", "-b", "feat")
+	l := clone(main.Labels)
+	l[labelBranch] = branchKey("feat")
+	l[labelState] = "otro"
+	ta.f.mu.Lock()
+	odd := ta.f.newMachine("rara", l)
+	ta.f.mu.Unlock()
+	if err := ta.branchSwitch(ctx, "", defaultOwner, "", true); err == nil || !strings.Contains(err.Error(), "is not ready") {
+		t.Fatalf("err = %v", err)
+	}
+	if ta.f.find(odd.ID) == nil {
+		t.Fatal("a copy in an unknown state was removed")
+	}
+}
