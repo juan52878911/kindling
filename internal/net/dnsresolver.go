@@ -546,6 +546,12 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 		// Teardown en curso: el netns y su ipset están a punto de irse.
 		return respondError(query, 2) // SERVFAIL
 	}
+	if !r.isAllowed(name) {
+		// La lista se estrechó mientras la consulta volaba: no sembrar la IP
+		// de un dominio ya retirado.
+		r.bloq.anotar(name, qtype)
+		return respondError(query, 5) // REFUSED
+	}
 	// Sembrar el ipset con las IPv4 que vamos a devolver, ANTES de responder: así
 	// la IP que el invitado usará ya está permitida cuando abra la conexión.
 	// Se siembran TODOS los A de la respuesta, no solo los cuyo owner == qname:

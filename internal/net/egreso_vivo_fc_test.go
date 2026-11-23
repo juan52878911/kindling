@@ -3,6 +3,7 @@
 package net
 
 import (
+	"errors"
 	stdnet "net"
 	"slices"
 	"strconv"
@@ -227,6 +228,10 @@ func TestCambiarEgresoAllowlistANoneCierraConexiones(t *testing.T) {
 	if !res.Estrecha || !res.ConexionesCortadas || !f.vio("conntrack -D --orig-src "+GuestIP) {
 		t.Fatalf("res=%+v cmds=%v", res, f.cmds)
 	}
+	// B1: también las entradas del host con el NSIP de origen o destino.
+	if !f.vio("conntrack -D --orig-dst "+n.NSIP) || !f.vio("conntrack -D --orig-src "+n.NSIP) {
+		t.Errorf("faltan los borrados del host: %v", f.cmds)
+	}
 	if !f.vio("ipset destroy") {
 		t.Errorf("el ipset debía borrarse: %v", f.cmds)
 	}
@@ -392,5 +397,48 @@ func TestResolverEsperaAlPuertoRecienSoltado(t *testing.T) {
 	t.Cleanup(func() { stopResolver(n.NS) })
 	if err := startDNSResolver(n, []string{"a.com"}); err != nil {
 		t.Fatalf("el resolver no esperó al puerto: %v", err)
+	}
+}
+
+// B1: si falla el borrado del host, ConexionesCortadas no se promete.
+func TestCortarConexionesFalloEnElHostNoPrometeCorte(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressInternet)
+	base := ejecutar
+	ejecutar = func(args ...string) error {
+		_ = base(args...)
+		if strings.Contains(strings.Join(args, " "), "--orig-dst "+n.NSIP) {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	if n.cortarConexiones() {
+		t.Fatalf("no debía prometer el corte: %v", f.cmds)
+	}
+}
+
+// B1: Teardown borra también el conntrack del host (la máquina que reuse el
+// índice no hereda flujos).
+func TestTeardownBorraConntrackDelHost(t *testing.T) {
+	n := redDePrueba()
+	f := nuevoFakeRed(t, n, EgressNone)
+	n.Teardown()
+	if !f.vio("conntrack -D --orig-dst "+n.NSIP) || !f.vio("conntrack -D --orig-src "+n.NSIP) {
+		t.Fatalf("cmds=%v", f.cmds)
+	}
+}
+
+// B1: las ranuras heredan las dos reglas del veth, antes del ESTABLISHED.
+func TestReglasBaseRanuraLlevanLasReglasDelVeth(t *testing.T) {
+	n := redDePrueba()
+	var ls []string
+	for _, r := range n.reglasBaseRanura() {
+		ls = append(ls, strings.Join(r, " "))
+	}
+	nueva := slices.Index(ls, "-A FORWARD -i "+n.NSIf+" -m conntrack --ctstate NEW ! -s "+n.HostIP+" -j DROP")
+	inval := slices.Index(ls, "-A FORWARD -i "+n.NSIf+" -m conntrack --ctstate INVALID -j DROP")
+	estab := slices.IndexFunc(ls, func(s string) bool { return strings.Contains(s, "ESTABLISHED,RELATED") })
+	if nueva < 0 || inval < 0 || estab < 0 || nueva > estab || inval > estab {
+		t.Fatalf("nueva=%d invalida=%d established=%d", nueva, inval, estab)
 	}
 }
