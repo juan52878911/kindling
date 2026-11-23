@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,7 +17,7 @@ func TestHintFor(t *testing.T) {
 		err  error
 		want string
 	}{
-		{errors.New(`Get "http://kling/machines": cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: no such file or directory`), "kling doctor"},
+		{errors.New(`Get "http://kling/machines": cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: no such file or directory`), "kling up"},
 		{errors.New(`cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: permission denied`), "KLING_SOCKET_USER"},
 		{errors.New(`machine "web" does not exist`), "kling ps -a"},
 		{errors.New(`snapshot "tpl" does not exist`), "kling template ls"},
@@ -120,8 +122,52 @@ func TestSaveSinDaemon(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "not serving") {
 		t.Fatalf("save sin daemon: %v", err)
 	}
-	if h := hintFor(err); h != "kling doctor" {
+	if h := hintFor(err); !strings.HasPrefix(h, "kling up") {
 		t.Fatalf("pista %q (error %v)", h, err)
 	}
 	_ = salida
+}
+
+// `kling sbx` y `kling phone` sin su extensión dicen cuál instalar.
+func TestSbxYPhoneMovidosAExtension(t *testing.T) {
+	for cmd, ext := range map[string]string{"sbx": "sandbox", "phone": "phone"} {
+		if movedToExtension[cmd] != ext {
+			t.Errorf("movedToExtension[%q] = %q, want %q", cmd, movedToExtension[cmd], ext)
+		}
+		if h := hintFor(movedError(cmd, movedToExtension[cmd])); h != "kling plugin install "+ext {
+			t.Errorf("pista de %s: %q", cmd, h)
+		}
+	}
+}
+
+// Un daemon que no corre sugiere kling up, y ninguna pista manda a -host.
+func TestDaemonInalcanzableSugiereUp(t *testing.T) {
+	for _, msg := range []string{
+		"cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: no such file or directory",
+		"cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: connection refused",
+	} {
+		if h := hintFor(errors.New(msg)); !strings.HasPrefix(h, "kling up") {
+			t.Errorf("hintFor(%q) = %q", msg, h)
+		}
+	}
+	// Un socket sin permiso sigue con su pista.
+	if h := hintFor(errors.New("cannot talk to the daemon at /run/k.sock: connect: permission denied")); !strings.Contains(h, "KLING_SOCKET_USER") {
+		t.Errorf("permission denied: %q", h)
+	}
+}
+
+func TestNingunaPistaNombraHost(t *testing.T) {
+	for _, f := range []string{"upgrade.go", "hints.go", "primer_uso.go", "up.go"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range strings.Split(string(b), "\n") {
+			if strings.Contains(l, "hint:") || strings.Contains(l, "hints") {
+				if regexp.MustCompile(`"[^"]*-host[ )"][^"]*"`).MatchString(l) {
+					t.Errorf("%s:%d nombra -host en una pista: %s", f, i+1, strings.TrimSpace(l))
+				}
+			}
+		}
+	}
 }

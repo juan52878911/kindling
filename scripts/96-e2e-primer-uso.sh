@@ -62,6 +62,16 @@ fi
 t1="$(ahora)"
 echo "install.sh: $((t1 - t0)) s"
 
+# En Linux con KVM, `up -install -dry-run` dice los pasos (firecracker, jailer,
+# usuarios, unidad) y no toca nada: se comprueba sin root.
+if [ "$(uname -s)" = Linux ] && [ -e /dev/kvm ]; then
+    if ! DRY="$(KLING_HOST=unix:///nonexistent/kling.sock "$HOME_T/bin/kling" up -install -dry-run 2>&1)"; then
+        echo "FALLO: kling up -install -dry-run: $DRY" >&2
+        exit 1
+    fi
+    printf '%s\n' "$DRY" | sed 's/^/  dry-run| /'
+fi
+
 if [ "$(uname -s)" != Darwin ] && { [ "${SKIP_TRY:-1}" = 1 ] || [ "$(id -u)" != 0 ]; }; then
     printf '{"install_s":%s,"try_s":null}\n' "$((t1 - t0))"
     exit 0

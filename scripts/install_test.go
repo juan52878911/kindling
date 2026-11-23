@@ -44,6 +44,7 @@ type releaseFalsa struct {
 	firmaMinisig func(sums, tag string) []byte
 	firmaSSH     func(sums, tag string) []byte
 	env          []string // variables extra para install.sh
+	sinPrefix    bool     // sin --prefix: el prefijo por defecto de install.sh
 }
 
 type resultadoInstall struct {
@@ -240,7 +241,11 @@ esac
 	if !r.latest {
 		todos = append(todos, "--tag", tagRel)
 	}
-	todos = append(append(todos, "--prefix", res.prefijo, "--plugin-dir", res.plugins, "--no-rc"), args...)
+	if r.sinPrefix {
+		todos = append(append(todos, "--plugin-dir", res.plugins, "--no-rc"), args...)
+	} else {
+		todos = append(append(todos, "--prefix", res.prefijo, "--plugin-dir", res.plugins, "--no-rc"), args...)
+	}
 	cmd := exec.Command("/bin/sh", todos...)
 	cmd.Env = append([]string{"HOME=" + home, "PATH=" + falsos + ":" + sistema, "LC_ALL=C"}, r.env...)
 	out, err := cmd.CombinedOutput()
@@ -629,5 +634,54 @@ func TestInstallConKlingRealSinMinisign(t *testing.T) {
 	mala := correrInstall(t, releaseFalsa{sinMinisign: true, klingReal: bin, firmaMinisig: firmar("v0.9.0"), env: []string{"KLING_RELEASE_PUBKEYS=" + pub}})
 	if mala.ok || existe(filepath.Join(mala.prefijo, "kling")) {
 		t.Fatalf("a signature for another tag must be refused by the real kling:\n%s", mala.salida)
+	}
+}
+
+// Corrido como root, install.sh instala en /usr/local/bin (donde sudo y
+// systemd encuentran kling); como usuario, en ~/.local/bin. KLING_INSTALL_UID
+// simula `id -u`.
+func TestInstallPrefijoPorDefectoSegunElUID(t *testing.T) {
+	root := correrInstall(t, releaseFalsa{sinPrefix: true, env: []string{"KLING_INSTALL_UID=0"}}, "--dry-run")
+	if !root.ok || !strings.Contains(root.salida, "target:      /usr/local/bin") {
+		t.Fatalf("como root debía apuntar a /usr/local/bin:\n%s", root.salida)
+	}
+	user := correrInstall(t, releaseFalsa{sinPrefix: true, env: []string{"KLING_INSTALL_UID=1000"}}, "--dry-run")
+	if !user.ok || !strings.Contains(user.salida, ".local/bin") || strings.Contains(user.salida, "target:      /usr/local/bin") {
+		t.Fatalf("como usuario debía apuntar a ~/.local/bin:\n%s", user.salida)
+	}
+}
+
+// En Linux, como usuario, termina con la orden exacta para dejar kling donde
+// sudo lo encuentra; en un Mac o como root no.
+func TestInstallLinuxUsuarioDaLaOrdenDeSudo(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{plat: "linux-amd64", env: []string{"KLING_INSTALL_UID=1000"}})
+	if !r.ok {
+		t.Fatalf("no instaló:\n%s", r.salida)
+	}
+	want := "sudo install -m755 " + filepath.Join(r.prefijo, "kling") + " /usr/local/bin/kling && sudo /usr/local/bin/kling up -install"
+	if !strings.Contains(r.salida, want) {
+		t.Fatalf("falta la orden exacta %q:\n%s", want, r.salida)
+	}
+	mac := correrInstall(t, releaseFalsa{plat: "darwin-arm64", env: []string{"KLING_INSTALL_UID=1000"}})
+	if strings.Contains(mac.salida, "up -install") {
+		t.Fatalf("en un Mac no hay unidad de systemd:\n%s", mac.salida)
+	}
+	root := correrInstall(t, releaseFalsa{plat: "linux-amd64", env: []string{"KLING_INSTALL_UID=0"}})
+	if !strings.Contains(root.salida, "kling up -install") || strings.Contains(root.salida, "sudo install -m755") {
+		t.Fatalf("como root basta kling up -install:\n%s", root.salida)
+	}
+}
+
+// Una raíz de confianza que viene del entorno se dice; la de fábrica no.
+func TestInstallAvisaDeClavesDelEntorno(t *testing.T) {
+	limpia := correrInstall(t, releaseFalsa{})
+	if strings.Contains(limpia.salida, "comes from the environment") {
+		t.Fatalf("sin variables no hay aviso:\n%s", limpia.salida)
+	}
+	for _, v := range []string{"KLING_RELEASE_PUBKEYS", "KLING_RELEASE_SSH_SIGNERS"} {
+		r := correrInstall(t, releaseFalsa{env: []string{v + "=RWQotraClaveDeLaPrueba"}})
+		if !strings.Contains(r.salida, v+" comes from the environment") {
+			t.Errorf("%s del entorno sin aviso:\n%s", v, r.salida)
+		}
 	}
 }

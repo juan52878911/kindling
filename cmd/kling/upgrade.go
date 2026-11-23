@@ -322,7 +322,7 @@ func prepararSystemd(o *upgrade.Opciones, c *api.Client, unit, arch string) erro
 	}
 	if err := esElDelSocket(c, unit+".service", pid); err != nil {
 		return &errWithHint{err: err,
-			hint: "-unit NAME picks the unit that runs it, and -host (or KLING_HOST) the socket of the daemon to upgrade"}
+			hint: "-unit NAME picks the unit that runs it, and -H (or KLING_HOST) the socket of the daemon to upgrade"}
 	}
 	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
@@ -469,7 +469,7 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 	}
 	if err := esElDelSocket(c, launchAgentLabel, pidLaunchd(out)); err != nil {
 		return &errWithHint{err: err,
-			hint: "-host (or KLING_HOST) picks the socket of the daemon to upgrade; a daemon not run by launchd: stop it and use kling upgrade -cli"}
+			hint: "-H (or KLING_HOST) picks the socket of the daemon to upgrade; a daemon not run by launchd: stop it and use kling upgrade -cli"}
 	}
 	exe := programaLaunchd(out)
 	if exe == "" {
@@ -729,7 +729,7 @@ func prepararVueltaSinDaemon(o *upgrade.Opciones, c *api.Client, unit, root stri
 	}
 	if rutaSocket(sock) != rutaSocket(c.Endpoint()) {
 		return &errWithHint{err: fmt.Errorf("no daemon answers at %s, and %s serves %s instead", c.Endpoint(), o.Servicio, sock),
-			hint: "-host unix://" + sock + " rolls back that one"}
+			hint: "-H unix://" + sock + " rolls back that one"}
 	}
 	o.Daemon, o.Raiz, o.Dir = c, raiz, filepath.Join(raiz, "upgrade")
 	fmt.Printf("no daemon answers at %s (%v): rolling back from %s\n\n", c.Endpoint(), causa, o.Dir)

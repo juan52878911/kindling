@@ -115,7 +115,7 @@ func TestTree(t *testing.T) {
 	for in, want := range map[string]string{
 		"run -h": "run", "run --help": "run", "run -help": "run", "template rm -h": "template rm",
 		"ai model -h": "ai model", "ai model add -h": "ai model add", "ai model zzz -h": "ai model",
-		"exec box -h": "exec", "exec box ls -h": "exec", "run -name x -h": "run", "nope -h": "nope",
+		"exec box -h": "exec", "exec box ls -h": "", "run -name x -h": "run", "nope -h": "nope",
 		"ai zzz -h": "ai", "status -v -h": "status",
 		"commit -h": "save", "-h": "",
 		"help": "", "exec box -- ls -h": "", "run": "", "ps -a": "",

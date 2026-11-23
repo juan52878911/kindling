@@ -562,3 +562,49 @@ func TestEscribirPlistMigraClavesConocidas(t *testing.T) {
 		t.Fatalf("a hand-edited plist must be left alone: %v", err)
 	}
 }
+
+// `kling try df -h` ejecuta df -h: el -h tras el comando es del comando, no
+// ayuda de kling. Antes de él (o sin comando) sí es ayuda.
+func TestHelpRequestDejaDeMirarTrasElPrimerPosicional(t *testing.T) {
+	for in, want := range map[string]string{
+		"try df -h": "", "try -h": "try", "try -h df": "try", "try -mem 512M df -h": "",
+		"try -keep -h": "try", "try -image alpine:3.20 ls --help": "", "try -- df -h": "",
+		"exec box ls -h": "", "exec box -h": "exec", "exec -w /tmp box ls -help": "",
+		"run alpine ls -h": "", "run -name x -h": "run", "run -fresh -h": "run",
+	} {
+		f := strings.Fields(in)
+		path, ok := helpRequest(f[0], f[1:])
+		if got := strings.Join(path, " "); ok != (want != "") || got != want {
+			t.Errorf("helpRequest(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+// main pone `--` antes del comando de try para que reorderFor no suba su -h.
+func TestTryArgsConGuion(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"df -h", "-- df -h"},
+		{"-image alpine df -h", "-image alpine -- df -h"},
+		{"-keep ls -la", "-keep -- ls -la"},
+		{"-mem=512M uname -a", "-mem=512M -- uname -a"},
+		{"-h", "-h"}, {"-keep", "-keep"}, {"-- df -h", "-- df -h"}, {"", ""},
+	} {
+		got := strings.Join(tryArgsConGuion(strings.Fields(c.in)), " ")
+		if got != c.want {
+			t.Errorf("tryArgsConGuion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// La pista de kling up da la orden de copiar cuando el binario no es de root.
+func TestOrdenUpInstallSegunElBinario(t *testing.T) {
+	if got := ordenUpInstallSegun(errors.New("owned by uid 1000")); got != dondeCopiar {
+		t.Fatalf("binario no de root: %q", got)
+	}
+	if !strings.Contains(dondeCopiar, "sudo install -m 755") || !strings.HasSuffix(dondeCopiar, "sudo /usr/local/bin/kling up -install") {
+		t.Fatalf("dondeCopiar = %q", dondeCopiar)
+	}
+	if got := ordenUpInstallSegun(nil); strings.Contains(got, "install -m") || !strings.HasSuffix(got, "up -install") {
+		t.Fatalf("binario de root: %q", got)
+	}
+}

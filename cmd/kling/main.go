@@ -79,7 +79,7 @@ func main() {
 		err = cmdDoctor(args)
 	case "try":
 		// Como exec: termina con el código del comando de dentro.
-		code, xerr := cmdTry(args)
+		code, xerr := cmdTry(tryArgsConGuion(args))
 		if xerr != nil {
 			printError(os.Stderr, xerr)
 			if code == 0 {

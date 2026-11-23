@@ -391,6 +391,7 @@ kling try:  -mem
 kling try:  -ttl
 kling up:  -H
 kling up:  -check
+kling up:  -dry-run
 kling up:  -install
 kling up:  -key
 kling up:  -root

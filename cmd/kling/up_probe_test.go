@@ -228,3 +228,58 @@ func TestRemoteProbeRechazaDestinoConGuion(t *testing.T) {
 		t.Fatal("ssh se lanzó con el destino como opción")
 	}
 }
+
+// El daemon se niega a crear máquinas sin jailer: `up -check` (y doctor) lo
+// dicen antes, y que /dev/kvm exista no basta si no se puede abrir.
+func TestChecksOfJailerYKVMAbrible(t *testing.T) {
+	base := probe{kvm: true, firecracker: "/usr/local/bin/firecracker", ip: true, iptables: true, nft: true,
+		runAs: "kindling", runAsExists: true, buildAs: "kindling-build", buildAsExists: true,
+		kernel: true, baseImage: true, root: "/var/lib/kindling", remote: true}
+	p := base
+	p.jailerExigido = true
+	f := onlyFailed(checksOf(p))
+	if len(f) != 1 || f[0].label != "jailer" || !f[0].fatal {
+		t.Fatalf("sin jailer: %+v", f)
+	}
+	if len(f[0].fix) == 0 || strings.Contains(strings.Join(f[0].fix, " "), "./scripts/") {
+		t.Fatalf("la solución no puede mandar a un script del repo: %v", f[0].fix)
+	}
+	p.jailer = "/usr/local/bin/jailer"
+	if f := onlyFailed(checksOf(p)); len(f) != 0 {
+		t.Fatalf("con jailer: %+v", f)
+	}
+	// KLING_JAILER=0: no se exige.
+	p = base
+	if f := onlyFailed(checksOf(p)); len(f) != 0 {
+		t.Fatalf("sin exigirlo: %+v", f)
+	}
+	p.kvmError = "open /dev/kvm: permission denied"
+	f = onlyFailed(checksOf(p))
+	if len(f) != 1 || f[0].label != "/dev/kvm" || !strings.Contains(f[0].found, "permission denied") {
+		t.Fatalf("kvm sin abrir: %+v", f)
+	}
+}
+
+// Con KLING_JAILER_BIN o en /usr/local/bin, lookJailer lo encuentra.
+func TestLookJailer(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mi-jailer")
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	t.Setenv("KLING_JAILER_BIN", bin)
+	if got := lookJailer(); got != bin {
+		t.Fatalf("lookJailer = %q", got)
+	}
+	t.Setenv("KLING_JAILER_BIN", filepath.Join(dir, "no-existe"))
+	if got := lookJailer(); got != "" {
+		t.Fatalf("lookJailer = %q, quería vacío", got)
+	}
+}
+
+func TestJailerExigido(t *testing.T) {
+	for v, want := range map[string]bool{"": true, "1": true, "0": false} {
+		t.Setenv("KLING_JAILER", v)
+		if got := jailerExigidoPorElEnv(); got != want {
+			t.Errorf("KLING_JAILER=%q: %v, quería %v", v, got, want)
+		}
+	}
+}
