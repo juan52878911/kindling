@@ -54,6 +54,18 @@ type guestPool struct {
 	headerTimeout time.Duration // 0 = sin tope (solo el contexto)
 	mu            sync.Mutex
 	byAddr        map[string]*http.Transport
+
+	// El catálogo de backends del registro efectivo, calculado una vez por
+	// *Config (proxy_modelo.go). backendsDe es de dónde sale: nil =
+	// (*Config).Backends; los tests ponen backends hechos a mano.
+	catMu      sync.Mutex
+	catCfg     *Config
+	cat        *catalogo
+	backendsDe func(*Config) []*Backend
+
+	// ups es el estado de cada backend upstream por nombre (upstream.go).
+	upsMu sync.Mutex
+	ups   map[string]*upstreamReplicas
 }
 
 // newGuestPool crea el pool. idle es el plazo de inactividad del segador: las
@@ -70,7 +82,7 @@ func newGuestPool(idle, cabeceras time.Duration) *guestPool {
 	if t <= 0 || t > 90*time.Second {
 		t = 90 * time.Second
 	}
-	return &guestPool{idleTimeout: t, headerTimeout: cabeceras, byAddr: map[string]*http.Transport{}}
+	return &guestPool{idleTimeout: t, headerTimeout: cabeceras, byAddr: map[string]*http.Transport{}, ups: map[string]*upstreamReplicas{}}
 }
 
 // transport devuelve el transporte de addr, creándolo si no existe. El
