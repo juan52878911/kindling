@@ -106,6 +106,13 @@ type falso struct {
 	sandboxesUnaVez   sync.Once
 	sandboxesColgarN  int
 	sandboxesLlamadas int
+	// sandboxesFoto hace que el GET /sandboxes retenido conteste con lo que
+	// había al RECIBIRLO y no al soltarlo: un listado lento cuyo contenido ya
+	// es viejo cuando llega.
+	sandboxesFoto bool
+	// etiquetasDemora retrasa cada PUT labels antes de aplicarlo: ensancha la
+	// ventana entre leer y escribir de dos réplicas del frontal.
+	etiquetasDemora time.Duration
 	// snapLista y snapUno cuentan GET /snapshots y GET /snapshots/{name};
 	// snapUnoViejo hace que la segunda ruta no exista (un daemon anterior).
 	snapLista, snapUno int
@@ -367,6 +374,19 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 500, fmt.Errorf("listing timed out"))
 			return
 		}
+		var foto []*api.Machine
+		if colgar && f.sandboxesFoto {
+			f.mu.Lock()
+			foto = []*api.Machine{}
+			for _, mc := range f.maquinas {
+				if mc.Labels[api.LabelKind] == api.KindSandbox {
+					c := *mc
+					c.Labels = api.MergeLabels(nil, mc.Labels)
+					foto = append(foto, &c)
+				}
+			}
+			f.mu.Unlock()
+		}
 		if colgar {
 			f.sandboxesUnaVez.Do(func() { close(f.sandboxesEmpezado) })
 			select {
@@ -374,6 +394,10 @@ func (f *falso) rutas() http.Handler {
 			case <-r.Context().Done():
 				return
 			}
+		}
+		if foto != nil {
+			writeJSON(w, 200, foto)
+			return
 		}
 		f.mu.Lock()
 		out := []*api.Machine{}
@@ -452,6 +476,9 @@ func (f *falso) rutas() http.Handler {
 			if primera {
 				<-f.etiquetasEspera
 			}
+		}
+		if f.etiquetasDemora > 0 {
+			time.Sleep(f.etiquetasDemora)
 		}
 		if _, conTenant := labels[LabelTenant]; conTenant && f.etiquetasLentas > 0 {
 			time.Sleep(f.etiquetasLentas)
