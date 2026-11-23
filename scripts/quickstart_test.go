@@ -96,3 +96,48 @@ func TestPlantillaPython(t *testing.T) {
 		}
 	}
 }
+
+// sdks-release.yml no publica nada por su cuenta: solo workflow_dispatch, con
+// environment, OIDC y sin acciones sin fijar por SHA.
+func TestSDKsReleaseWorkflow(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "sdks-release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, prohibido := range []string{"\n  push:", "\n  pull_request:", "\n  schedule:", "\n  release:"} {
+		if strings.Contains(s, prohibido) {
+			t.Errorf("sdks-release.yml no puede arrancar con %q", strings.TrimSpace(prohibido))
+		}
+	}
+	for _, w := range []string{"workflow_dispatch:", "environment: sdks-release", "id-token: write", "--provenance"} {
+		if !strings.Contains(s, w) {
+			t.Errorf("sdks-release.yml no tiene %q", w)
+		}
+	}
+	for _, l := range strings.Split(s, "\n") {
+		if i := strings.Index(l, "uses:"); i >= 0 && !strings.HasPrefix(strings.TrimSpace(l), "#") {
+			ref := strings.TrimSpace(l[i+len("uses:"):])
+			at := strings.Index(ref, "@")
+			if at < 0 || len(strings.Fields(ref[at+1:])[0]) != 40 {
+				t.Errorf("acción sin fijar por SHA: %s", ref)
+			}
+		}
+	}
+}
+
+// El paquete de TypeScript corre en Node 18; el requisito de 22.18 es solo de
+// sus tests, y lo comprueba `npm test`.
+func TestSDKTypeScriptEngines(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "sdks", "typescript", "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `"engines": { "node": ">=18" }`) {
+		t.Error(`engines debe ser node ">=18"`)
+	}
+	if !strings.Contains(s, "devEngines") || !strings.Contains(s, ">=22.18") || !strings.Contains(s, `"pretest"`) {
+		t.Error("los tests deben exigir Node >= 22.18 (devEngines y pretest)")
+	}
+}
