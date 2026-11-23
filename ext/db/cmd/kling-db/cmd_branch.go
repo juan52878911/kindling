@@ -385,9 +385,22 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	if err != nil {
 		return nil, false, err
 	}
-	if mc, err := one(copies, key); err != nil {
+	mc, err := one(copies, key)
+	if err != nil {
 		return nil, false, err
-	} else if mc != nil {
+	}
+	if mc != nil && mc.Labels[labelState] == statePreparing {
+		// Huérfana por construcción: todo el que crea o rehace copias de rama
+		// lo hace con el cerrojo del repo (lockRepo, lockCopy), y lo tenemos
+		// nosotros. Su creador murió entre el fork y marcarla lista (SIGKILL,
+		// OOM): se tira y se rehace como si no existiera.
+		fmt.Fprintf(a.stderr, "branch %s: the copy %s was left half made; removing it and making it again\n", branch, mc.Name)
+		if err := a.remove(ctx, mc); err != nil {
+			return nil, false, fmt.Errorf("removing the half-made copy %s of branch %s: %w", mc.Name, branch, err)
+		}
+		mc = nil
+	}
+	if mc != nil {
 		if mc.Labels[labelState] != stateReady {
 			return nil, false, fmt.Errorf("the copy %s of branch %s is not ready: remove it (kling db branch -rm %s) and try again", mc.Name, branch, branch)
 		}
@@ -476,7 +489,7 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	} else if err := requireGoldenEngine(snap, "branch", branchEngines...); err != nil {
 		return nil, false, err
 	}
-	mc, err := a.upFrom(ctx, golden, golden, branchMachineName(ri.repo, key), 0, owner, extra)
+	mc, err = a.upFrom(ctx, golden, golden, branchMachineName(ri.repo, key), 0, owner, extra)
 	if err != nil {
 		return nil, false, err
 	}

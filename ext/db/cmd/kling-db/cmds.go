@@ -62,8 +62,10 @@ func usageErr(format string, a ...any) error {
 	return &plugin.ExitError{Code: 2, Err: fmt.Errorf(format, a...)}
 }
 
+// signalCtx se cancela con Ctrl-C, SIGTERM y SIGHUP (cerrar la terminal o el
+// IDE en mitad de una orden): así lo que iba a medias se deshace.
 func signalCtx() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // ── up ───────────────────────────────────────────────────────────────────────
