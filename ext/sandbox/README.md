@@ -37,6 +37,8 @@ esto es lo que el núcleo no debe llevar:
 No es aislamiento entre inquilinos: comparten daemon y host. Es reparto y
 contabilidad. Quien necesite aislamiento fuerte, hosts separados.
 
+Para crear el primer sandbox paso a paso (en inglés): [`docs/quickstart-sandbox.md`](../../docs/quickstart-sandbox.md); ejemplos que copiar: [`examples/sandbox`](../../examples/sandbox/README.md).
+
 ## Instalación
 
 Primero kindling, y esta extensión encima, de la misma release:

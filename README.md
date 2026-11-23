@@ -94,8 +94,9 @@ failure; `kling help <command>` shows one command's help.
 
 - **`kling mcp`** — any MCP server (npm or PyPI) as a service that wakes on demand from
   a golden snapshot, behind one gateway for your AI agent. [`ext/mcp`](ext/mcp/README.md)
-- **`kling sandbox`** — multi-tenant sandboxes for code agents: tokens, quotas,
-  templates and a prewarmed pool. [`ext/sandbox`](ext/sandbox/README.md)
+- **`kling sbx`** — multi-tenant sandboxes for code agents: tokens, quotas,
+  templates and a prewarmed pool. Start with the [quickstart](docs/quickstart-sandbox.md) and
+  the [examples](examples/sandbox/README.md). [`ext/sandbox`](ext/sandbox/README.md)
 - **`kling db`** — a disposable Postgres (also MySQL, Redis, SQLite) per test or agent,
   copied from a warm template in milliseconds. [`docs/db.md`](docs/db.md)
 - **`kling phone`** — Android phones (Redroid) in microVMs, each with its own identity,

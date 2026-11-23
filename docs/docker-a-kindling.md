@@ -91,3 +91,6 @@ va a disco y despertar tarda milisegundos.
   arrancado (postgres sin initdb ni arranque).
 - **Un núcleo por servicio**: lo que haga un servicio no ve al host ni a los
   demás salvo por las aristas del grafo.
+- **Sandboxes para agentes**: para ejecutar el código de un agente, con fork y pausa con
+  memoria, no hace falta un compose: [`quickstart-sandbox.md`](quickstart-sandbox.md) (en
+  inglés) lleva de la instalación al primer sandbox.
