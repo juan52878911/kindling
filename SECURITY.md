@@ -843,10 +843,9 @@ con todo lo del usuario del Mac) cuando: el daemon no les pasa `KLING_VZ_CONFINE
 en cualquier momento anterior a crear la VM (la carga del volcado, la red y la API van sin
 perfil). Cada caso queda en el log del VMM (`not confined`, `WARNING: not confined`).
 Un VMM de Mac sin sandbox es equivalente a un Firecracker con `KLING_JAILER=0`: un escape
-del invitado alcanza todo lo que alcanza el usuario. Además, ninguno de los dos se fía de lo que
-escribió otro VMM: un `snap.file` cargado no hace que se abra ninguna de las rutas de disco o de
-kernel que lleva (`PUT /snapshot/load` las marca y `create()` falla si el daemon no las ha
-reapuntado; `GET /kling/info` anuncia `snapshot_repoint`), y los binarios salen firmados con
+del invitado alcanza todo lo que alcanza el usuario. Pendiente: hoy un `snap.file` cargado
+todavía puede decidir qué rutas de disco o de kernel abre el VMM en el siguiente arranque; que el
+daemon las reapunte todas y el VMM rechace las que no, va en un cambio aparte. Los binarios salen firmados con
 hardened runtime (sin JIT, sin `DYLD_*`, sin bibliotecas sin firmar) y `kling-hv` con
 `-fstack-protector-strong`.
 
