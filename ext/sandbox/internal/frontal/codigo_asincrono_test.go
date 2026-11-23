@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -55,6 +56,46 @@ func TestRevJSAsincronoSuelto(t *testing.T) {
 		final(t, evs)
 		if s := texto(evs, "stdout") + texto(evs, "stderr"); strings.Contains(s, "tardia-ajena") {
 			t.Fatalf("salida de la ejecución anterior en esta: %+v", evs)
+		}
+	})
+
+	// R4-13: al cerrar una ejecución se limpian sus temporizadores; un
+	// setInterval no sigue corriendo (con la salida tirada) hasta borrar el
+	// contexto.
+	t.Run("setInterval no sigue vivo tras done", func(t *testing.T) {
+		b := montarCodigo(t)
+		id := b.contextoDe(t, "javascript")
+		ejecutaOK(t, b.corre(t, id, "var k = 0; setInterval(() => { k++; }, 10); 1"))
+		evs := b.corre(t, id, "(async () => { const a = k; await new Promise(r => setTimeout(r, 200)); return k - a; })()")
+		ejecutaOK(t, evs)
+		if texto(evs, "result") != "0" {
+			t.Fatalf("el setInterval de la ejecución anterior sigue corriendo: %+v", evs)
+		}
+		// Los temporizadores de la ejecución en curso sí corren mientras dura.
+		evs = b.corre(t, id, "(async () => { let j = 0; const h = setInterval(() => { j++; }, 10); await new Promise(r => setTimeout(r, 200)); clearInterval(h); return j > 3; })()")
+		ejecutaOK(t, evs)
+		if texto(evs, "result") != "true" {
+			t.Fatalf("el setInterval de la ejecución en curso no corrió: %+v", evs)
+		}
+	})
+
+	// R4-13: un fallo que no es de ninguna ejecución (aquí, un oyente de
+	// señal que se lanza cuando no corre nada) no se traga: el conductor
+	// termina y el contexto se da por perdido, en vez de seguir en un estado
+	// que nadie conoce.
+	t.Run("fallo fuera de toda ejecución termina el conductor", func(t *testing.T) {
+		b := montarCodigo(t)
+		id := b.contextoDe(t, "javascript")
+		// El oyente se añade tarde, desde un temporizador: el vm con
+		// breakOnSigint rehace los de SIGINT al acabar la parte síncrona.
+		ejecutaOK(t, b.corre(t, id, "new Promise(r => setTimeout(() => { process.on('SIGINT', () => { throw new Error('fuera-de-todo'); }); r(1); }, 10))"))
+		resp := pide(t, b.srv, tokenAlice, "DELETE", b.base+"/code/contexts/"+id+"/execution", nil)
+		esperaCodigo(t, resp, 204)
+		resp.Body.Close()
+		time.Sleep(300 * time.Millisecond)
+		evs := b.corre(t, id, "1 + 1")
+		if f := final(t, evs); f.OK == nil || *f.OK || !hayError(evs, "ContextError") {
+			t.Fatalf("el conductor siguió vivo tras un fallo fuera de toda ejecución: %+v", evs)
 		}
 	})
 }
