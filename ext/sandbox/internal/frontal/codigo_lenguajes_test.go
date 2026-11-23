@@ -92,6 +92,11 @@ func TestCodigoResultsPorMIME(t *testing.T) {
 
 func TestCodigoBash(t *testing.T) {
 	sinHerramienta(t, "bash")
+	// El conductor de bash usa bash 4 o posterior (el de las imágenes Linux);
+	// el /bin/bash 3.2 de macOS no guarda el estado entre celdas.
+	if v, err := exec.Command("bash", "-c", "echo ${BASH_VERSINFO[0]}").Output(); err != nil || strings.TrimSpace(string(v)) < "4" {
+		t.Skipf("hace falta bash >= 4 (hay %q)", strings.TrimSpace(string(v)))
+	}
 	b := montarCodigo(t)
 	id := b.contextoDe(t, "bash")
 
