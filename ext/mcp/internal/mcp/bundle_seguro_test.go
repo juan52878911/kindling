@@ -37,7 +37,11 @@ func TestBundleEsbuildFijadoYSinShell(t *testing.T) {
 			t.Errorf("%s is not a pinned sha512", v)
 		}
 	}
-	if !strings.Contains(s, `chroot "$mnt" /tmp/kling-esbuild/esbuild "$ENTRY"`) {
+	// enjaula es `PATH=<fijo> chroot "$mnt" "$@"` (H-01): sigue siendo una
+	// ejecución directa, sin shell de por medio.
+	if !strings.Contains(s, `chroot "$mnt" /tmp/kling-esbuild/esbuild "$ENTRY"`) &&
+		!(strings.Contains(s, `enjaula /tmp/kling-esbuild/esbuild "$ENTRY"`) &&
+			strings.Contains(s, `enjaula() { PATH="$CHROOT_PATH" chroot "$mnt" "$@"; }`)) {
 		t.Error("esbuild is not run directly with ENTRY as an argument")
 	}
 }
