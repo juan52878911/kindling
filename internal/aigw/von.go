@@ -1,7 +1,6 @@
 package aigw
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -36,12 +35,24 @@ type Replicas interface {
 	Acquire(ctx context.Context, snapshot string) (*Replica, error)
 }
 
+// replicasConPuerto es Replicas que sabe dar la dirección de otro puerto que
+// el de VON: un backend HTTP escucha donde diga su bloque ("port"). Una
+// Replicas que no lo implementa da siempre la misma dirección (las de los
+// tests).
+type replicasConPuerto interface {
+	AcquirePort(ctx context.Context, snapshot string, port int) (*Replica, error)
+}
+
 // schedReplicas es Replicas sobre pkg/scheduler: la primera petición despierta
 // (thaw) o restaura una réplica, las concurrentes provocan réplicas nuevas
 // hasta el tope del modelo, y el segador congela lo ocioso.
 type schedReplicas struct{ s *scheduler.Scheduler }
 
 func (r schedReplicas) Acquire(ctx context.Context, snap string) (*Replica, error) {
+	return r.AcquirePort(ctx, snap, von.Port)
+}
+
+func (r schedReplicas) AcquirePort(ctx context.Context, snap string, port int) (*Replica, error) {
 	r.s.Observe(snap) // guía el keepwarm por popularidad
 	e, err := r.s.PickInstance(ctx, snap, scheduler.TenantFrom(ctx))
 	if err != nil {
@@ -50,11 +61,19 @@ func (r schedReplicas) Acquire(ctx context.Context, snap string) (*Replica, erro
 	r.s.Begin(e)
 	id := e.MachineID()
 	return &Replica{
-		Addr:    e.Addr(von.Port),
+		Addr:    e.Addr(port),
 		Release: func() { r.s.End(e) },
 		Drop:    func() { r.s.DropInstance(snap, id) },
 		Wake:    e.TakeWake(),
 	}, nil
+}
+
+// adquirir pide una réplica de snap con su dirección en port.
+func (g *Gateway) adquirir(ctx context.Context, snap string, port int) (*Replica, error) {
+	if rp, ok := g.replicas.(replicasConPuerto); ok {
+		return rp.AcquirePort(ctx, snap, port)
+	}
+	return g.replicas.Acquire(ctx, snap)
 }
 
 // isDialError dice si err es no haber podido conectar: lo único que se
@@ -73,26 +92,36 @@ func seed() int64 {
 	return int64(binary.LittleEndian.Uint64(b[:]) >> 1)
 }
 
-// postGuest manda body a path de una réplica del dorado snap, por las
-// conexiones reutilizables de g.guests (guestpool.go). Dos fallos se repiten,
-// cada uno una vez: no haber podido conectar (olvida esa réplica y prueba con
-// otra: el daemon la congeló o la retiró por debajo) y una conexión reutilizada
-// que muere sin respuesta (la dejó muerta un congelar/despertar; se repite por
-// una conexión nueva). En ninguno de los dos la réplica llegó a contestar.
+// postGuest manda body (JSON) a path de una réplica del dorado snap, en el
+// puerto de su backend. Es aReplica con un cuerpo en memoria, que siempre se
+// puede repetir.
 func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte) (*http.Response, *Replica, error) {
+	s := &salida{method: http.MethodPost, path: path, bytes: body, hdr: http.Header{
+		"Content-Type": {"application/json"},
+		"Accept":       {"application/json, text/event-stream"},
+	}}
+	return g.aReplica(ctx, g.nombreModelo(snap), snap, g.catalogo().puertoDe(snap), s)
+}
+
+// aReplica manda s a una réplica del dorado snap (name es el modelo, para las
+// métricas), por las conexiones reutilizables de g.guests (guestpool.go). Dos
+// fallos se repiten, cada uno una vez y solo si el cuerpo no llegó a salir: no
+// haber podido conectar (olvida esa réplica y prueba con otra: el daemon la
+// congeló o la retiró por debajo) y una conexión reutilizada que muere sin
+// respuesta (la dejó muerta un congelar/despertar; se repite por una conexión
+// nueva). En ninguno de los dos la réplica llegó a contestar.
+func (g *Gateway) aReplica(ctx context.Context, name, snap string, port int, s *salida) (*http.Response, *Replica, error) {
 	var dialRetried, staleRetried bool
 	for {
-		rep, err := g.replicas.Acquire(ctx, snap)
+		rep, err := g.adquirir(ctx, snap, port)
 		if err != nil {
 			return nil, nil, &wakeError{err}
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+rep.Addr+path, bytes.NewReader(body))
+		req, err := s.request(ctx, "http://"+rep.Addr)
 		if err != nil {
 			rep.Release()
 			return nil, nil, err
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
 		if rep.Wake != nil {
 			// Se acaba de despertar: lo que hubiera en el pool hacia esta
 			// dirección es de antes de dormirse (ver guestpool.go).
@@ -107,15 +136,15 @@ func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte)
 			return resp, rep, nil
 		}
 		rep.Release()
-		if staleConn(ctx, reused, err) && !staleRetried {
+		if staleConn(ctx, reused, err) && !staleRetried && s.reintentable() {
 			staleRetried = true
-			g.met.vonErr(g.nombreModelo(snap), "stale")
+			g.met.vonErr(name, "stale")
 			g.guests.closeIdle(rep.Addr)
 			continue
 		}
-		if isDialError(err) && !dialRetried {
+		if isDialError(err) && !dialRetried && s.reintentable() {
 			dialRetried = true
-			g.met.vonErr(g.nombreModelo(snap), "dial")
+			g.met.vonErr(name, "dial")
 			g.guests.forget(rep.Addr)
 			rep.Drop()
 			continue

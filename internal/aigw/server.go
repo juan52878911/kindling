@@ -46,6 +46,9 @@ func (g *Gateway) Handler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", g.handleProxy)
 	mux.HandleFunc("POST /v1/completions", g.handleProxy)
+	mux.HandleFunc("POST /v1/embeddings", g.handleEmbeddings)
+	mux.HandleFunc("POST /v1/m/{modelo}/{ruta...}", g.handleModelo)
+	mux.HandleFunc("GET /v1/m/{modelo}/{ruta...}", g.handleModelo)
 	mux.HandleFunc("POST /v1/classify", g.handleClassify("classify"))
 	mux.HandleFunc("POST /v1/decide", g.handleClassify("decide"))
 	mux.HandleFunc("POST /v1/generate", g.handleGenerate)
@@ -244,21 +247,23 @@ func (g *Gateway) handleEval(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"record": rec, "cascade": g.cascade(req.Task)})
 }
 
-// handleModels lista los modelos VON y los codificadores del registro sin despertar nada: una
-// consulta de catálogo no debe costar un thaw.
-func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
-	cfg := g.config()
+// handleModels lista los modelos de contrato openai y openai-embeddings (de
+// dorado o de upstream) que el token puede usar, sin despertar nada: una
+// consulta de catálogo no debe costar un thaw. Los de otros contratos van por
+// /v1/m/{modelo}/… y no son modelos de OpenAI.
+func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	type model struct {
 		ID       string `json:"id"`
 		Object   string `json:"object"`
 		Created  int64  `json:"created"`
 		OwnedBy  string `json:"owned_by"`
-		Snapshot string `json:"snapshot"`
+		Snapshot string `json:"snapshot,omitempty"`
 	}
+	tenant := scheduler.TenantFrom(r.Context()).Name()
 	data := []model{}
-	for _, n := range sortedKeys(cfg.Models) {
-		if m := cfg.Models[n]; m.Kind == KindVON || m.Kind == KindEmbed {
-			data = append(data, model{ID: n, Object: "model", OwnedBy: "kindling", Snapshot: m.Snapshot})
+	for _, b := range g.catalogo().lista {
+		if (b.Contract == ContractOpenAI || b.Contract == ContractOpenAIEmbeddings) && permitido(b, tenant) {
+			data = append(data, model{ID: b.Name, Object: "model", OwnedBy: "kindling", Snapshot: b.Snapshot})
 		}
 	}
 	writeJSON(w, map[string]any{"object": "list", "data": data})
@@ -402,10 +407,6 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 
 // ---- proxy OpenAI
 
-// handleProxy reenvía una petición OpenAI a una réplica del modelo que nombra
-// "model", con streaming. El cuerpo ya viene acotado; lo que vuelve del
-// invitado se acota en bytes y en tiempo, y solo se copian las cabeceras que
-// un cliente necesita (el invitado no decide cookies ni cabeceras propias).
 // errorProxy contesta un fallo de reenvío sin el texto del error interno, que
 // lleva direcciones de invitados y mensajes del daemon (R8-11): eso va al log.
 func (g *Gateway) errorProxy(w http.ResponseWriter, name string, err error) {
@@ -418,7 +419,7 @@ func (g *Gateway) errorProxy(w http.ResponseWriter, name string, err error) {
 	case errors.As(err, &we):
 		g.met.vonErr(name, "wake")
 		g.met.inc(g.met.proxy, name, "5xx")
-		writeError(w, http.StatusServiceUnavailable, "server_error", fmt.Sprintf("no replica of model %q is available; retry later", name))
+		writeError(w, http.StatusServiceUnavailable, "server_error", fmt.Sprintf("model %q is not available; retry later", name))
 	default:
 		g.met.vonErr(name, "request")
 		g.met.inc(g.met.proxy, name, "5xx")
@@ -426,7 +427,21 @@ func (g *Gateway) errorProxy(w http.ResponseWriter, name string, err error) {
 	}
 }
 
+// handleProxy reenvía una petición OpenAI (chat o completions) al backend del
+// modelo que nombra "model", con streaming. El cuerpo ya viene acotado; lo
+// que vuelve se acota en bytes y en tiempo, y solo se copian las cabeceras
+// que un cliente necesita (el backend no decide cookies ni cabeceras propias).
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
+	g.proxyOpenAI(w, r, ContractOpenAI)
+}
+
+// handleEmbeddings es /v1/embeddings: lo mismo hacia los backends
+// openai-embeddings.
+func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	g.proxyOpenAI(w, r, ContractOpenAIEmbeddings)
+}
+
+func (g *Gateway) proxyOpenAI(w http.ResponseWriter, r *http.Request, contract string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "body too large")
@@ -442,42 +457,105 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if raw, ok := req["model"]; ok {
 		_ = json.Unmarshal(raw, &model)
 	}
-	cfg := g.config()
-	name, mc := cfg.vonModel(model)
-	if mc == nil && model == "" {
-		// Sin "model" y con un solo modelo VON registrado, es ese.
-		var vons []string
-		for _, n := range sortedKeys(cfg.Models) {
-			if cfg.Models[n].Kind == KindVON {
-				vons = append(vons, n)
-			}
-		}
-		if len(vons) == 1 {
-			name, mc = vons[0], cfg.Models[vons[0]]
-		}
-	}
-	if mc == nil {
-		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("model %q is not a von model of this gateway (see GET /v1/models)", model))
+	b := g.catalogo().porModelo(model, contract)
+	if b == nil {
+		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("model %q does not serve %s on this gateway (see GET /v1/models)", model, r.URL.Path))
 		return
 	}
-	if _, ok := req["seed"]; !ok {
-		req["seed"] = json.RawMessage(strconv.FormatInt(seed(), 10))
+	if !permitido(b, scheduler.TenantFrom(r.Context()).Name()) {
+		writeError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("this token cannot use model %q", b.Name))
+		return
+	}
+	if len(b.Routes) > 0 && !b.permite(r.Method, r.URL.Path) {
+		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("model %q does not serve %s", b.Name, r.URL.Path))
+		return
+	}
+	if contract == ContractOpenAI {
+		if err := aplicarLimites(req, b.Limits); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		if _, ok := req["seed"]; !ok && b.Snapshot != "" {
+			// Las réplicas nacen del mismo volcado: la semilla la pone el host.
+			req["seed"] = json.RawMessage(strconv.FormatInt(seed(), 10))
+		}
+	}
+	if b.UpstreamModel != "" {
+		req["model"], _ = json.Marshal(b.UpstreamModel)
 	}
 	stream := string(req["stream"]) == "true"
 	out, err := json.Marshal(req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
 		return
 	}
 
+	id := idPeticion(r)
+	w.Header().Set("X-Request-Id", id)
 	ctx, cancel := context.WithTimeout(r.Context(), g.opts.ProxyTimeout)
 	defer cancel()
-	resp, rep, err := g.postGuest(ctx, mc.Snapshot, r.URL.Path, out)
+	s := &salida{method: http.MethodPost, path: r.URL.Path, bytes: out, hdr: cabecerasSalida(r, id)}
+	s.hdr.Set("Content-Type", "application/json")
+	resp, soltar, err := g.reenviar(ctx, b, s)
 	if err != nil {
-		g.errorProxy(w, name, err)
+		g.errorProxy(w, b.Name, err)
 		return
 	}
-	defer rep.Release()
+	defer soltar()
 	defer resp.Body.Close()
-	g.devolver(w, resp, name, stream)
+	g.devolver(w, resp, b.Name, stream)
+}
+
+// camposTokens son los que acotan cuánto genera una petición: los de OpenAI y
+// el propio de llama-server, que manda sobre max_tokens si viene.
+var camposTokens = []string{"max_tokens", "max_completion_tokens", "n_predict"}
+
+// aplicarLimites aplica los topes del modelo (R8-04a) a una petición openai:
+// cada campo de tokens se recorta al tope (y si no viene ninguno se pone
+// max_tokens, porque sin él la generación solo acaba con el contexto); un n o
+// best_of mayor que el tope es un 400. Un tope 0 no topa nada.
+func aplicarLimites(req map[string]json.RawMessage, l Limits) error {
+	entero := func(k string) (int64, bool, error) {
+		raw, ok := req[k]
+		if !ok || string(raw) == "null" {
+			return 0, false, nil
+		}
+		var v int64
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return 0, false, fmt.Errorf("%s must be an integer", k)
+		}
+		return v, true, nil
+	}
+	if l.MaxTokens > 0 {
+		tope := json.RawMessage(strconv.Itoa(l.MaxTokens))
+		alguno := false
+		for _, k := range camposTokens {
+			v, ok, err := entero(k)
+			if err != nil {
+				return err
+			}
+			if ok {
+				alguno = true
+				// <1 es «sin tope» en llama-server (-1): también se recorta.
+				if v < 1 || v > int64(l.MaxTokens) {
+					req[k] = tope
+				}
+			}
+		}
+		if !alguno {
+			req["max_tokens"] = tope
+		}
+	}
+	if l.N > 0 {
+		for _, k := range []string{"n", "best_of"} {
+			v, ok, err := entero(k)
+			if err != nil {
+				return err
+			}
+			if ok && v > int64(l.N) {
+				return fmt.Errorf("%s is limited to %d for this model", k, l.N)
+			}
+		}
+	}
+	return nil
 }

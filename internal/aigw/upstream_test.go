@@ -54,13 +54,17 @@ func newInestable(t *testing.T) *inestable {
 func upstreamBackend(url string) *Backend {
 	return &Backend{Name: "gpu", Upstream: url, Contract: ContractRaw,
 		Routes: []Route{{"POST", "/v1/decide"}}, MaxInflight: 2,
-		Health: Health{Path: "/health", Timeout: time.Second, Every: 20 * time.Millisecond}}
+		// Sin every: con el circuito cerrado no hay sondas y los fallos que
+		// cuenta el test son solo los de las peticiones.
+		Health: Health{Path: "/health", Timeout: time.Second}}
 }
 
 // Un upstream caído: tres fallos seguidos abren el circuito y desde ahí cada
 // petición recibe 503 con Retry-After al instante, sin tocar el upstream;
 // cuando una sonda vuelve a pasar, el circuito se cierra solo.
 func TestUpstreamCircuito(t *testing.T) {
+	defer func(d time.Duration) { sondaAbierto = d }(sondaAbierto)
+	sondaAbierto = 20 * time.Millisecond
 	f := newInestable(t)
 	f.caido.Store(true)
 	g, h, _ := pasarela(t, f.srv, upstreamBackend(f.srv.URL))
