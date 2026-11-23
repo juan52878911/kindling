@@ -425,13 +425,14 @@ type Proxy struct {
 
 	// Credenciales con UpstreamMachine (maquina.go): el resolvedor, el
 	// dialer, la comprobación del destino resuelto (campo para los tests) y
-	// las sesiones vivas hacia cada máquina, para cortarlas (Invalidar).
+	// las sesiones de base de datos vivas (hacia una máquina o un dominio),
+	// para cortarlas (Invalidar, SetCredentials).
 	resolveMaq ResolveMachineFunc
 	abrirMaq   DialMachineFunc
 	dialMaq    func(ctx context.Context, network, addr string) (net.Conn, error)
 	destinoMaq func(netip.AddrPort) error
 	sesMu      sync.Mutex
-	sesiones   map[*sesionPG]sesionMaquina
+	sesiones   map[*sesionPG]sesionBD
 }
 
 // credCompilada es una credencial con su Allow ya partido.
@@ -510,7 +511,7 @@ func New(o Options) *Proxy {
 		abrirMaq:   o.DialMachine,
 		dialMaq:    (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive}).DialContext,
 		destinoMaq: destinoMaquinaValido,
-		sesiones:   map[*sesionPG]sesionMaquina{},
+		sesiones:   map[*sesionPG]sesionBD{},
 	}
 	p.dialUp = dialFijado(func(ctx context.Context, host string) ([]netip.Addr, error) {
 		return p.lookupUp(ctx, host)
@@ -573,16 +574,16 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	for d, cc := range byDomain {
 		redaccion[d] = paresRedaccion(credencialesDe(cc))
 	}
-	// sesMu antes que mu (el mismo orden que registrarSesion): una sesión
-	// hacia una máquina cuya credencial desaparece o cambia (kling db detach,
-	// otra copia bajo la misma variable) se corta aquí, y una que se registre
-	// después ya ve el juego nuevo.
+	// sesMu antes que mu (el mismo orden que registrarSesion): una sesión de
+	// base de datos cuya credencial desaparece o cambia (kling db detach, otra
+	// copia bajo la misma variable, una clave rotada) se corta aquí, y una que
+	// se registre después ya ve el juego nuevo.
 	p.sesMu.Lock()
 	defer p.sesMu.Unlock()
 	p.mu.Lock()
 	p.creds, p.ocultar, p.redaccion, p.pg, p.my = byDomain, ocultar, redaccion, pg, my
 	p.mu.Unlock()
-	p.cortarSesionesHuerfanasLocked(pg)
+	p.cortarSesionesHuerfanasLocked(pg, my)
 	return domains, nil
 }
 
