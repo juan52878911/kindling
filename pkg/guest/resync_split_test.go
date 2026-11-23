@@ -53,17 +53,20 @@ func TestResyncRespondeCriticoYOrigen(t *testing.T) {
 	esperarSegundoTiempo(t)
 }
 
-// Las direcciones propias se leen una vez y se vuelven a leer tras un /resync
-// con restauración, que es cuando pueden cambiar.
-func TestDireccionesPropiasSeCachean(t *testing.T) {
+// Un origen que es la pasarela por defecto no mira las direcciones del
+// invitado; las rutas se leen una vez y se releen tras un /resync con
+// restauración, que es cuando pueden cambiar.
+func TestRutasSeCacheanYElHostNoLeeInterfaces(t *testing.T) {
 	falsos(t, nil, nil)
 	conExec(t)
-	conRutas(t, tablaInvitado(), nil)
+	lecturasRutas := 0
+	viejas := rutasInvitado
+	rutasInvitado = func() ([]rutaIPv4, error) { lecturasRutas++; return parseRutas(tablaInvitado()), nil }
+	invalidarRutas()
 	lecturas := 0
 	viejo := leerDireccionesPropias
 	leerDireccionesPropias = func() []net.IP { lecturas++; return []net.IP{net.ParseIP("172.16.0.2")} }
-	t.Cleanup(func() { leerDireccionesPropias = viejo; invalidarDireccionesPropias() })
-	invalidarDireccionesPropias()
+	t.Cleanup(func() { leerDireccionesPropias, rutasInvitado = viejo, viejas; invalidarRutas() })
 
 	a := &Agent{Reaper: DefaultReaper, Volumes: &Volumes{}}
 	mux := http.NewServeMux()
@@ -73,8 +76,11 @@ func TestDireccionesPropiasSeCachean(t *testing.T) {
 			t.Fatalf("resync sin restauración: %d: %s", rr.Code, rr.Body)
 		}
 	}
-	if lecturas != 1 {
-		t.Fatalf("lecturas tras 3 peticiones sin restauración = %d, quería 1", lecturas)
+	if lecturas != 0 {
+		t.Fatalf("el host (la pasarela) leyó las interfaces %d veces, quería 0", lecturas)
+	}
+	if lecturasRutas != 1 {
+		t.Fatalf("lecturas de rutas tras 3 peticiones = %d, quería 1", lecturasRutas)
 	}
 	// Con restauración se invalida: la siguiente petición lee de nuevo.
 	if rr := peticionHost(t, mux, cuerpoInstancia(t)); rr.Code != http.StatusOK {
@@ -82,8 +88,8 @@ func TestDireccionesPropiasSeCachean(t *testing.T) {
 	}
 	esperarSegundoTiempo(t)
 	peticionHost(t, mux, cuerpoArranque(t))
-	if lecturas != 2 {
-		t.Fatalf("lecturas tras la restauración = %d, quería 2", lecturas)
+	if lecturasRutas != 2 {
+		t.Fatalf("lecturas de rutas tras la restauración = %d, quería 2", lecturasRutas)
 	}
 	esperarSegundoTiempo(t)
 }

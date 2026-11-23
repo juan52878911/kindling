@@ -279,39 +279,28 @@ func requestFromGuest(r *http.Request) bool {
 			}
 		}
 	}
+	// El origen es la pasarela por defecto: el host. No hace falta mirar las
+	// direcciones del invitado (una propia no puede ser la pasarela).
+	if esLaPasarela(rip) {
+		return false
+	}
 	// Una dirección propia sin ruta en la tabla principal (una /32 en una
-	// interfaz dummy) caería en la ruta por defecto: se descarta antes.
+	// interfaz dummy) caería en la ruta por defecto: se descarta antes. Se leen
+	// las interfaces en el momento, sin caché: una dirección añadida después
+	// del primer /resync no puede pasar por el host.
 	if esDireccionPropia(rip) {
 		return true
 	}
 	return !llegaPorLaPasarela(rip)
 }
 
-var (
-	direccionesMu    sync.Mutex
-	direccionesCache []net.IP
-	direccionesHay   bool
-)
+// direccionesPropias da las IPs del invitado, leídas en el momento. Variable
+// para los tests.
+var direccionesPropias = func() []net.IP { return leerDireccionesPropias() }
 
-// invalidarDireccionesPropias olvida las direcciones leídas: se llama en cada
+// invalidarDireccionesPropias olvida las rutas leídas: se llama en cada
 // /resync con restauración, que es cuando pueden cambiar.
-func invalidarDireccionesPropias() {
-	direccionesMu.Lock()
-	direccionesCache, direccionesHay = nil, false
-	direccionesMu.Unlock()
-}
-
-// direccionesPropias da las IPs del invitado. Se leen una vez (volcar las
-// interfaces en cada petición costaba lo que /resync no puede perder) y se
-// releen tras invalidarDireccionesPropias. Variable para los tests.
-var direccionesPropias = func() []net.IP {
-	direccionesMu.Lock()
-	defer direccionesMu.Unlock()
-	if !direccionesHay {
-		direccionesCache, direccionesHay = leerDireccionesPropias(), true
-	}
-	return direccionesCache
-}
+func invalidarDireccionesPropias() { invalidarRutas() }
 
 // leerDireccionesPropias vuelca las IPs de las interfaces del invitado
 // (variable para los tests). Un error deja la lista vacía: requestFromGuest ya

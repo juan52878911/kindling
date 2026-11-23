@@ -78,6 +78,7 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	// entorno finales por el descriptor 3 (sesiones.go).
 	argv, dir, baseEnv := req.Cmd, req.Dir, env
 	var cp *capturaSesion
+	var errSesion string
 	if req.Session != "" {
 		ses, ok := usarSesion(req.Session)
 		if !ok {
@@ -157,7 +158,11 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 		// Solo si el trap llegó a escribir: un comando matado por el plazo no
 		// toca la sesión.
 		if st, ok := cp.resultado(); ok {
-			guardarEstado(req.Session, st.dir, envComoMapa(append(append([]string(nil), baseEnv...), req.Env...)), st.env)
+			if err := guardarEstado(req.Session, st.dir, envComoMapa(append(append([]string(nil), baseEnv...), req.Env...)), st.env); err != nil {
+				errSesion = err.Error()
+			}
+		} else if cp.excedido.Load() {
+			errSesion = fmt.Sprintf("session state not saved: the environment after the command exceeds %d bytes", api.SessionMaxEnv)
 		}
 	}
 	stdout.flush()
@@ -190,21 +195,29 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 		code = c
 	}
 	ev.Exit = &code
+	ev.Error = errSesion
 	return ev
 }
 
 // emitter escribe eventos NDJSON y los empuja al momento. Lo usan a la vez los
 // dos flujos, de ahí el cerrojo.
 type emitter struct {
-	mu  sync.Mutex
-	w   io.Writer
-	fl  http.Flusher
-	enc *json.Encoder
+	mu   sync.Mutex
+	w    io.Writer
+	fl   http.Flusher
+	enc  *json.Encoder
+	rc   *http.ResponseController
+	roto bool // una escritura falló: el cliente se fue o está colgado
 }
+
+// topeEscrituraEvento es lo que puede tardar un evento en escribirse y
+// vaciarse: un cliente colgado no puede retener el cerrojo (y con él los dos
+// flujos del comando) indefinidamente. Variable para los tests.
+var topeEscrituraEvento = 30 * time.Second
 
 func newEmitter(w http.ResponseWriter) *emitter {
 	fl, _ := w.(http.Flusher)
-	return &emitter{w: w, fl: fl, enc: json.NewEncoder(w)}
+	return &emitter{w: w, fl: fl, enc: json.NewEncoder(w), rc: http.NewResponseController(w)}
 }
 
 func (e *emitter) emit(ev api.ExecEvent) {
@@ -212,7 +225,17 @@ func (e *emitter) emit(ev api.ExecEvent) {
 	defer e.mu.Unlock()
 	// Un error de escritura es que quien llama se fue: el comando se corta por
 	// el contexto de la petición, aquí no hay nada más que hacer.
-	_ = e.enc.Encode(ev)
+	if e.roto {
+		return
+	}
+	if e.rc != nil {
+		// Sin soporte (un grabador de tests) el error se ignora.
+		_ = e.rc.SetWriteDeadline(time.Now().Add(topeEscrituraEvento))
+	}
+	if err := e.enc.Encode(ev); err != nil {
+		e.roto = true
+		return
+	}
 	if e.fl != nil {
 		e.fl.Flush()
 	}

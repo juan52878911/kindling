@@ -238,6 +238,7 @@ var (
 func vigilarSegundoTiempo(restore string, gen uint64) {
 	fn, topeT := hacerSegundoTiempo, topeSegundoTiempo
 	hecho := make(chan struct{})
+	segundoVencido.Store(0) // la marca de una generación anterior ya no vale
 	go func() {
 		defer close(hecho)
 		defer func() {
@@ -253,43 +254,60 @@ func vigilarSegundoTiempo(restore string, gen uint64) {
 	case <-hecho:
 	case <-tope.C:
 		segundosTiemposVencidos.Add(1)
+		segundoVencido.Store(gen)
 		log.Printf("resync: second phase still running after %s; opening the door anyway", topeT)
 	}
 	puertaResync.Abrir()
 	resyncMu.Unlock()
 }
 
+// segundoVencido es la generación cuyo segundo tiempo pasó su tope: la puerta
+// ya se abrió y entraron exec nuevos, así que lo que quede de él no debe
+// cortar nada ni publicar una generación vieja.
+var segundoVencido atomic.Uint64
+
 // segundoTiempo es lo que se hace tras contestar. Se llama con resyncMu
-// tomado y la puerta cerrada.
+// tomado y la puerta cerrada. Primero lo que es solo memoria (cortar execs y
+// procesos), después la E/S; antes de cada paso mira si ya venció.
 func segundoTiempo(restore string, gen uint64) {
 	ini := time.Now()
 	var t ResyncTiempos
-	t0 := time.Now()
-	if err := writeGeneration(generationFile, gen); err != nil {
-		log.Printf("resync: writing %s: %v", generationFile, err)
-	}
-	t.FicheroGen = us(time.Since(t0))
-	// Una copia de un dorado no es la misma máquina: machine-id propio.
-	// Al descongelar la misma máquina no se toca.
+	vencido := func() bool { return gen != 0 && segundoVencido.Load() == gen }
+	// Una copia de un dorado no es la misma máquina. Al descongelar la misma
+	// máquina no se toca nada de esto.
 	if restore == api.ResyncInstance {
-		t0 = time.Now()
-		renovarIdentidad()
-		t.MachineID = us(time.Since(t0))
 		// Los exec que corrían al volcar el dorado no son de esta copia
-		// (cortarExecs). Al descongelar la misma máquina no se tocan: su
-		// petición puede seguir viva, y la red los corta si no.
-		t0 = time.Now()
+		// (cortarExecs); su petición puede seguir viva, y la red los corta si no.
+		t0 := time.Now()
 		if n := cortarProcesos(); n > 0 {
 			log.Printf("resync: stopped %d command(s) left running in the snapshot", n)
 		}
 		t.Exec = us(time.Since(t0))
+		if vencido() {
+			return
+		}
 		// Y los procesos de fondo y las sesiones: eran de otra máquina.
 		t0 = time.Now()
 		if n := limpiarFondo(); n > 0 {
 			log.Printf("resync: stopped %d background process(es) left running in the snapshot", n)
 		}
 		t.Procesos = us(time.Since(t0))
+		if vencido() {
+			return
+		}
+		// machine-id propio.
+		t0 = time.Now()
+		renovarIdentidad()
+		t.MachineID = us(time.Since(t0))
+		if vencido() {
+			return
+		}
 	}
+	t0 := time.Now()
+	if err := writeGenerationSi(generationFile, gen, func() bool { return !vencido() }); err != nil {
+		log.Printf("resync: writing %s: %v", generationFile, err)
+	}
+	t.FicheroGen = us(time.Since(t0))
 	t.DiferidoUS = us(time.Since(ini))
 	guardarTiempos(func(u *ResyncTiempos) {
 		u.FicheroGen, u.MachineID, u.Exec, u.Procesos, u.DiferidoUS, u.Diferido = t.FicheroGen, t.MachineID, t.Exec, t.Procesos, t.DiferidoUS, true
@@ -327,12 +345,22 @@ var (
 )
 
 func writeGeneration(p string, n uint64) error {
+	return writeGenerationSi(p, n, func() bool { return true })
+}
+
+// writeGenerationSi escribe el fichero y solo lo publica (rename) si vigente
+// sigue siendo cierto tras la E/S, que puede haber tardado.
+func writeGenerationSi(p string, n uint64, vigente func() bool) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(n, 10)+"\n"), 0o644); err != nil {
 		return err
+	}
+	if !vigente() {
+		os.Remove(tmp)
+		return errors.New("second phase expired; generation not published")
 	}
 	return os.Rename(tmp, p)
 }

@@ -318,6 +318,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	ruta(api.GuestMemInfoPath, MemInfoHandler())
 	// /drop-caches: el host la pide antes de apretar, congelar o guardar un
 	// dorado (dropcaches.go).
+	// Fuera de la puerta del resync (decidido): ninguna toca lo que el segundo
+	// tiempo cambia (machine-id, execs, procesos, generación), y retenerlas
+	// retrasaría al host en el camino de apretar/congelar.
 	ruta(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
