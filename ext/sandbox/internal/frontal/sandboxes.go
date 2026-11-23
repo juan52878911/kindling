@@ -512,6 +512,12 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if len(pet.Env) > 0 {
+		if pet.Labels == nil {
+			pet.Labels = map[string]string{}
+		}
+		pet.Labels[LabelEnv] = "1"
+	}
 	n := 1
 	if pet.Count != nil {
 		n = *pet.Count
@@ -776,6 +782,27 @@ func entornoDe(env map[string]string) ([]string, error) {
 
 // idSesionPorDefecto es la sesión que guarda el env de la creación.
 const idSesionPorDefecto = "default"
+
+// LabelEnv marca los sandboxes creados con env: su sesión "default" guarda ese
+// entorno y todo lo que se ejecute sin sesión propia la usa. Va en el espacio
+// reservado: el cliente no la ve ni la pone.
+const LabelEnv = "kling.sandbox.env"
+
+// sesionPorDefecto es la sesión que se aplica a lo que no pide ninguna: la del
+// env de la creación, si el sandbox la tiene; si no, ninguna.
+func sesionPorDefecto(mc *api.Machine) string {
+	if mc.Labels[LabelEnv] != "" {
+		return idSesionPorDefecto
+	}
+	return ""
+}
+
+// esSesionPerdida dice si el daemon contestó que la sesión no existe (caducó
+// tras SessionMaxTTL sin uso, o el sandbox se restauró sin ella).
+func esSesionPerdida(err error) bool {
+	var se *api.StatusError
+	return errors.As(err, &se) && se.Code == http.StatusNotFound && strings.Contains(se.Message, "no session")
+}
 
 // tamanoEfectivo es p con mem_mib y vcpus a lo que de verdad tendrá el
 // sandbox: lo pedido o, si es más, el mayor de los snapshots de la plantilla en

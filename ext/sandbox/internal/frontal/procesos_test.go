@@ -22,7 +22,7 @@ type procsFalsos struct {
 	ultimaSe api.SessionRequest
 	// ultimoProc es el último POST processes recibido.
 	ultimoProc api.ProcessStartRequest
-	senales  []string
+	senales    []string
 }
 
 func (f *falso) rutasProcesos(m *http.ServeMux) {
