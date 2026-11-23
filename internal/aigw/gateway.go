@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/chispa"
@@ -143,6 +144,14 @@ type Gateway struct {
 	deploy      chispaDeployLookup
 	deployMu    sync.Mutex
 	deployCache map[string]deployCacheEntry
+
+	// backends expande un registro a sus backends HTTP: (*Config).Backends;
+	// los tests lo sustituyen.
+	backends func(*Config) []*Backend
+	// porDorado son los backends del registro efectivo por dorado (el
+	// "service" del planificador). Lo rehace setConfig (New y Reload) y lo
+	// leen los ganchos del planificador sin candado.
+	porDorado atomic.Pointer[map[string]*Backend]
 }
 
 // New crea el gateway. No habla con el daemon hasta Start o la primera
@@ -160,6 +169,7 @@ func New(o Options) (*Gateway, error) {
 		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), guests: newGuestPool(o.Idle, max(o.ProxyTimeout, o.VONTimeout)), auditSem: make(chan struct{}, 1),
 		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
 		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
+		backends: (*Config).Backends,
 	}
 	g.setConfig(cfg)
 	for _, n := range g.domainNotes(cfg) {
@@ -197,6 +207,36 @@ func New(o Options) (*Gateway, error) {
 	// Una réplica que se duerme se lleva sus conexiones: las del pool hacia
 	// ella no sobreviven a un congelar/despertar (guestpool.go).
 	s.OnSleep = func(_, addr string) { g.guests.forget(addr) }
+	// Ganchos por servicio (ronda 8): salen del backend de cada dorado y se
+	// recalculan en Reload, porque leen porDorado en cada llamada. Sin
+	// backend, el cero de cada uno es lo de hoy.
+	s.PortFor = func(snap string) int {
+		if b := g.backendDe(snap); b != nil {
+			return b.Port
+		}
+		return 0
+	}
+	s.MaxInflightFor = func(snap string) int {
+		if b := g.backendDe(snap); b != nil {
+			return b.MaxInflight
+		}
+		return 0
+	}
+	s.IdleFor = func(snap string) scheduler.IdlePolicy {
+		if b := g.backendDe(snap); b != nil {
+			return scheduler.IdlePolicy(b.Idle)
+		}
+		return scheduler.IdleDefault
+	}
+	s.ReadyFor = func(snap string) *scheduler.Probe {
+		if b := g.backendDe(snap); b != nil && b.Health.Path != "" {
+			return &scheduler.Probe{Path: b.Health.Path, Expect: b.Health.Expect, Timeout: b.Health.Timeout}
+		}
+		return nil
+	}
+	// Toda réplica que el planificador deja de tener (borrada, congelada,
+	// caída) se lleva sus conexiones del pool, como OnSleep.
+	s.OnForget = func(_, addr string) { g.guests.forget(addr) }
 	s.OnAcquire = func(snap, how string, d time.Duration) {
 		name, _ := g.config().replicaModel(snap)
 		if name == "" {
@@ -204,19 +244,42 @@ func New(o Options) (*Gateway, error) {
 		}
 		g.met.wake(name, how, d)
 	}
-	if len(cfg.Tenants) > 0 {
-		ts := make([]scheduler.TenantLimit, len(cfg.Tenants))
-		for i, t := range cfg.Tenants {
-			ts[i] = scheduler.TenantLimit{Name: t.Name, Token: t.Token, MaxInflight: t.MaxInflight, MaxInstances: t.MaxInstances}
-		}
-		s.SetTenants(ts)
-	}
+	s.SetTenants(tenantLimits(cfg))
 	g.sched = s
 	g.replicas = o.Replicas
 	if g.replicas == nil {
 		g.replicas = schedReplicas{s}
 	}
 	return g, nil
+}
+
+// tenantLimits pasa los inquilinos del registro al planificador.
+func tenantLimits(c *Config) []scheduler.TenantLimit {
+	ts := make([]scheduler.TenantLimit, len(c.Tenants))
+	for i, t := range c.Tenants {
+		ts[i] = scheduler.TenantLimit{Name: t.Name, Token: t.Token, MaxInflight: t.MaxInflight, MaxInstances: t.MaxInstances}
+	}
+	return ts
+}
+
+// backendDe devuelve el backend cuyo dorado es snap, o nil.
+func (g *Gateway) backendDe(snap string) *Backend {
+	if m := g.porDorado.Load(); m != nil {
+		return (*m)[snap]
+	}
+	return nil
+}
+
+// indexarBackends rehace porDorado desde el registro efectivo. Los backends
+// con Upstream no tienen dorado: no son del planificador.
+func (g *Gateway) indexarBackends(c *Config) {
+	m := map[string]*Backend{}
+	for _, b := range g.backends(c) {
+		if b != nil && b.Snapshot != "" {
+			m[b.Snapshot] = b
+		}
+	}
+	g.porDorado.Store(&m)
 }
 
 func (g *Gateway) config() *Config {
@@ -232,6 +295,7 @@ func (g *Gateway) config() *Config {
 func (g *Gateway) setConfig(c *Config) []string {
 	eff, ls := g.learnView(c) // lee ficheros: fuera del candado
 	st := g.gates(eff)
+	g.indexarBackends(eff)
 	g.cfgMu.Lock()
 	defer g.cfgMu.Unlock()
 	old := g.rings
@@ -275,6 +339,12 @@ func (g *Gateway) domainNotes(c *Config) []string {
 // Reload relee el registro del disco. Los modelos Chispa se vuelven a leer en su
 // siguiente uso (el fichero pudo cambiar). Devuelve las notas de las cascadas:
 // quien activa escalate_to sin una evaluación que la respalde se entera aquí.
+//
+// También sustituye los inquilinos (R8-02): un token quitado da 401 desde la
+// siguiente petición, uno nuevo entra y una cuota cambiada vale ya. Y los
+// ganchos del planificador ven los backends nuevos (indexarBackends). Un
+// registro con tokens de inquilino legible por otros se rechaza, como al
+// arrancar, y se queda el de antes.
 func (g *Gateway) Reload() ([]string, error) {
 	if g.opts.ConfigPath == "" {
 		return nil, errors.New("no config file to reload")
@@ -283,6 +353,11 @@ func (g *Gateway) Reload() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(c.Tenants) > 0 {
+		if st, err := os.Stat(g.opts.ConfigPath); err == nil && st.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("%s holds tenant tokens and is readable by others (%v): chmod 600 it; the previous registry stays", g.opts.ConfigPath, st.Mode().Perm())
+		}
+	}
 	old := g.config()
 	for _, m := range old.Models {
 		if m.Kind == KindChispa {
@@ -290,7 +365,9 @@ func (g *Gateway) Reload() ([]string, error) {
 		}
 	}
 	g.files.reset()
-	return g.setConfig(c), nil
+	notes := g.setConfig(c)
+	g.sched.SetTenants(tenantLimits(c))
+	return notes, nil
 }
 
 // Start pone en marcha el segador (congela réplicas ociosas, mantiene el
@@ -315,8 +392,15 @@ func (g *Gateway) Start(ctx context.Context) {
 			if info.Has("renew") {
 				g.sched.MachineTTL = 0 // 2 × idle, renovado mientras el gateway viva
 			}
-			if n := g.freezeOwn(ctx); n > 0 {
-				log.Printf("froze %d replica(s) left running by a previous gateway %q", n, g.opts.ID)
+			r := g.ordenarPropias(ctx, true)
+			if r.dormidas > 0 {
+				log.Printf("froze %d replica(s) left running by a previous gateway %q", r.dormidas, g.opts.ID)
+			}
+			if r.borradas > 0 {
+				log.Printf("removed %d replica(s) of idle-remove models left by a previous gateway %q", r.borradas, g.opts.ID)
+			}
+			if r.barridas > 0 {
+				log.Printf("removed %d replica(s) of models no longer in the registry", r.barridas)
 			}
 		}
 	}
@@ -328,10 +412,16 @@ func (g *Gateway) Start(ctx context.Context) {
 	go g.sched.Reap(ctx)
 }
 
-// Close congela las réplicas de este gateway que sigan corriendo: al salir no
-// queda nada gastando CPU ni RAM, y la próxima vez vuelven con un thaw. Sin
-// modelos VON/embed en el registro, o sin daemon, no hay nada que congelar y
-// no se intenta hablar con él.
+// Close duerme las réplicas de este gateway que sigan corriendo: al salir no
+// queda nada gastando CPU ni RAM. Las de un modelo con idle "remove" se
+// borran (vuelven restaurando del dorado); las demás se congelan y vuelven
+// con un thaw. Se salta la que tenga una petición en vuelo dentro (una
+// escalada, una auditoría): congelarla la cortaría (R8-03); la recoge el
+// siguiente Start. Sin modelos VON/embed en el registro, o sin daemon, no hay
+// nada que dormir y no se intenta hablar con él.
+//
+// Quien llama debe haber drenado antes el servidor HTTP (kling ai serve espera
+// a Shutdown): Close no espera a nadie.
 func (g *Gateway) Close(ctx context.Context) {
 	// Lo capturado que quede en la cola se escribe antes de salir.
 	g.learn.flush()
@@ -339,29 +429,94 @@ func (g *Gateway) Close(ctx context.Context) {
 	if g.opts.Client == nil || !g.config().NeedsDaemon() {
 		return
 	}
-	if n := g.freezeOwn(ctx); n > 0 {
-		log.Printf("froze %d replica(s) on shutdown", n)
+	r := g.ordenarPropias(ctx, false)
+	if r.dormidas > 0 {
+		log.Printf("froze %d replica(s) on shutdown", r.dormidas)
+	}
+	if r.borradas > 0 {
+		log.Printf("removed %d replica(s) of idle-remove models on shutdown", r.borradas)
+	}
+	if r.enVuelo > 0 {
+		log.Printf("left %d replica(s) running with requests in flight; the next start puts them to sleep", r.enVuelo)
 	}
 }
 
-func (g *Gateway) freezeOwn(ctx context.Context) int {
+// recuento es lo que hizo ordenarPropias.
+type recuento struct {
+	dormidas, borradas, barridas, enVuelo int
+}
+
+// doradoDe es el dorado del que salió una máquina: From, o la etiqueta
+// service si no lo trae.
+func doradoDe(m *api.Machine) string {
+	if m.From != "" {
+		return m.From
+	}
+	return m.Service()
+}
+
+// conocido dice si snap es el dorado de algún modelo del registro (efectivo o
+// tal cual: una versión de la mejora continua o el dorado base).
+func (g *Gateway) conocido(snap string) bool {
+	if g.backendDe(snap) != nil {
+		return true
+	}
+	g.cfgMu.RLock()
+	eff, raw := g.cfg, g.rawCfg
+	g.cfgMu.RUnlock()
+	if _, m := eff.replicaModel(snap); m != nil {
+		return true
+	}
+	_, m := raw.replicaModel(snap)
+	return m != nil
+}
+
+// ordenarPropias recorre las máquinas con la etiqueta de este gateway y, salvo
+// las que tienen peticiones en vuelo:
+//   - al arrancar, borra las de un dorado que ya no es de ningún modelo del
+//     registro, en cualquier estado (R8-06b): nadie las va a volver a pedir y
+//     ocupan disco para siempre. Una máquina sin dorado conocido no se toca;
+//   - borra las de un modelo con idle "remove" (no se congelan nunca);
+//   - congela las demás que corren (lo de siempre).
+func (g *Gateway) ordenarPropias(ctx context.Context, arranque bool) recuento {
+	var r recuento
 	ms, err := g.opts.Client.List(ctx)
 	if err != nil {
 		log.Printf("listing machines: %v", err)
-		return 0
+		return r
 	}
-	n := 0
+	enVuelo := g.sched.InflightByMachine()
 	for _, m := range ms {
-		if m.Labels[LabelGateway] != g.opts.ID || m.State != api.StateRunning {
+		if m.Labels[LabelGateway] != g.opts.ID {
 			continue
 		}
-		if _, err := g.opts.Client.Freeze(ctx, m.ID); err != nil {
-			log.Printf("freezing %s: %v", m.Name, err)
+		if enVuelo[m.ID] > 0 {
+			r.enVuelo++
 			continue
 		}
-		n++
+		snap := doradoDe(m)
+		switch {
+		case arranque && snap != "" && !g.conocido(snap):
+			if err := g.opts.Client.Remove(ctx, m.ID); err != nil {
+				log.Printf("removing %s (model gone from the registry): %v", m.Name, err)
+				continue
+			}
+			r.barridas++
+		case snap != "" && g.backendDe(snap) != nil && g.backendDe(snap).Idle == IdleRemove:
+			if err := g.opts.Client.Remove(ctx, m.ID); err != nil {
+				log.Printf("removing %s: %v", m.Name, err)
+				continue
+			}
+			r.borradas++
+		case m.State == api.StateRunning:
+			if _, err := g.opts.Client.Freeze(ctx, m.ID); err != nil {
+				log.Printf("freezing %s: %v", m.Name, err)
+				continue
+			}
+			r.dormidas++
+		}
 	}
-	return n
+	return r
 }
 
 // ---- clasificación (Chispa, y la cascada si está respaldada)

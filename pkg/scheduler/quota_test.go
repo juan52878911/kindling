@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -276,5 +278,124 @@ func TestScaleOutSueltaLaCuotaAlRegistrar(t *testing.T) {
 	}
 	if n := g.tenantInstances("t"); n != 2 {
 		t.Fatalf("instancias del tenant = %d, quería 2", n)
+	}
+}
+
+// BenchmarkAuthHandler mide el coste por petición de resolver el token con
+// varios inquilinos registrados (el camino caliente de toda petición).
+func BenchmarkAuthHandler(b *testing.B) {
+	g := &Scheduler{}
+	g.SetTenants([]TenantLimit{
+		{Name: "a", Token: "tok-a-0123456789"}, {Name: "b", Token: "tok-b-0123456789"},
+		{Name: "c", Token: "tok-c-0123456789"}, {Name: "d", Token: "tok-d-0123456789"},
+	})
+	h := g.authHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "tok-main-0123456789")
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer tok-c-0123456789")
+	w := httptest.NewRecorder()
+	b.ReportAllocs()
+	for range b.N {
+		h.ServeHTTP(w, r)
+	}
+}
+
+// SetTenants después de construir el handler se aplica a la siguiente
+// petición: un token retirado da 401, uno nuevo entra y una cuota cambiada
+// vale ya (R8-02). Antes el handler copiaba la lista al construirse.
+func TestSetTenantsTrasElHandler(t *testing.T) {
+	g := &Scheduler{}
+	g.SetTenants([]TenantLimit{{Name: "ana", Token: "tok-ana", MaxInflight: 1}})
+	quien := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tn := tenantFrom(r.Context())
+		_, _ = fmt.Fprintf(w, "%s/%d", tn.name, tn.maxInflight)
+	})
+	h := g.authHandler(quien, "tok-main")
+	pide := func(tok string) (int, string) {
+		r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+	if c, b := pide("tok-ana"); c != 200 || b != "ana/1" {
+		t.Fatalf("ana before: %d %q", c, b)
+	}
+	g.SetTenants([]TenantLimit{{Name: "ana", Token: "tok-ana", MaxInflight: 3}, {Name: "bea", Token: "tok-bea"}})
+	if c, b := pide("tok-ana"); c != 200 || b != "ana/3" {
+		t.Fatalf("ana with a new quota: %d %q", c, b)
+	}
+	if c, b := pide("tok-bea"); c != 200 || b != "bea/0" {
+		t.Fatalf("bea added: %d %q", c, b)
+	}
+	g.SetTenants(nil)
+	if c, _ := pide("tok-ana"); c != http.StatusUnauthorized {
+		t.Fatalf("ana revoked: %d, want 401", c)
+	}
+	if c, b := pide("tok-main"); c != 200 || b != "default/0" {
+		t.Fatalf("main token: %d %q", c, b)
+	}
+	if !g.AuthDisabled("") {
+		t.Fatal("AuthDisabled with no tenants and no token must be true")
+	}
+}
+
+// Un handler hecho sin token ni tenants deja pasar (el -no-auth de siempre);
+// si luego llegan tenants, exige token: nunca se queda abierto con tokens
+// registrados.
+func TestSetTenantsCierraUnHandlerAbierto(t *testing.T) {
+	g := &Scheduler{}
+	h := g.authHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "")
+	pide := func(tok string) int {
+		r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		if tok != "" {
+			r.Header.Set("Authorization", "Bearer "+tok)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if c := pide(""); c != 200 {
+		t.Fatalf("open handler: %d", c)
+	}
+	g.SetTenants([]TenantLimit{{Name: "ana", Token: "tok-ana"}})
+	if c := pide(""); c != http.StatusUnauthorized {
+		t.Fatalf("no token once tenants exist: %d, want 401", c)
+	}
+	if c := pide("tok-ana"); c != 200 {
+		t.Fatalf("tenant token: %d", c)
+	}
+}
+
+// SetTenants y las peticiones pueden cruzarse (SIGHUP en mitad del tráfico):
+// sin carreras (lo mira -race).
+func TestSetTenantsConcurrente(t *testing.T) {
+	g := &Scheduler{}
+	h := g.authHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "tok-main")
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+				r.Header.Set("Authorization", "Bearer tok-main")
+				h.ServeHTTP(httptest.NewRecorder(), r)
+			}
+		}()
+	}
+	for i := range 200 {
+		g.SetTenants([]TenantLimit{{Name: "x", Token: fmt.Sprintf("tok-%d", i)}})
+		_ = g.AuthDisabled("")
+	}
+	wg.Wait()
+}
+
+// El 401 dice dónde está el token del gateway de IA (ai.token), no solo el
+// del gateway MCP: quien lo lee está mirando uno de los dos.
+func TestAuthFailNombraAiToken(t *testing.T) {
+	w := httptest.NewRecorder()
+	authFail(w)
+	if !strings.Contains(w.Body.String(), "ai.token") || !strings.Contains(w.Body.String(), "gateway.token") {
+		t.Fatalf("401 body = %q, want it to name ai.token and gateway.token", w.Body.String())
 	}
 }
