@@ -175,15 +175,6 @@ func (g *Gateway) catalogo() *catalogo {
 	for _, b := range bs {
 		c.byName[b.Name] = b
 	}
-	// Los atajos de hoy siempre están, aunque Backends no los dé (la semilla
-	// de la ronda 8 aún no los expande): el proxy no puede perder un von.
-	for _, n := range sortedKeys(cfg.Models) {
-		if c.byName[n] == nil {
-			if b := backendAtajo(n, cfg.Models[n]); b != nil {
-				c.byName[n] = b
-			}
-		}
-	}
 	for _, n := range sortedKeys(c.byName) {
 		b := c.byName[n]
 		c.lista = append(c.lista, b)
@@ -193,26 +184,6 @@ func (g *Gateway) catalogo() *catalogo {
 	}
 	p.catCfg, p.cat = cfg, c
 	return c
-}
-
-// backendAtajo es lo mínimo que el proxy necesita de un modelo von, embed o
-// chispa con backend microvm cuando Config.Backends no lo da: dorado, puerto
-// de siempre y contrato. nil para lo que no es un backend HTTP.
-func backendAtajo(name string, m *ModelConfig) *Backend {
-	b := &Backend{Name: name, Snapshot: m.Snapshot, Port: DefaultBackendPort, MaxReplicas: m.MaxReplicas}
-	switch {
-	case m.Kind == KindVON:
-		b.Contract = ContractOpenAI
-		b.Routes = []Route{{http.MethodPost, "/v1/chat/completions"}, {http.MethodPost, "/v1/completions"}}
-	case m.Kind == KindEmbed:
-		b.Contract = ContractOpenAIEmbeddings
-		b.Routes = []Route{{http.MethodPost, "/v1/embeddings"}}
-	case m.Kind == KindChispa && m.Backend == BackendMicroVM:
-		b.Contract = ContractChispaClassify
-	default:
-		return nil
-	}
-	return b
 }
 
 // porModelo busca el backend de contrato contract que nombra model (por su

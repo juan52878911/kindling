@@ -89,10 +89,10 @@ func (p *puertoReplicas) AcquirePort(_ context.Context, _ string, port int) (*Re
 	return &Replica{Addr: p.addr, Release: func() {}, Drop: func() {}}, nil
 }
 
-// conBackends sustituye el catálogo de backends del gateway: Config.Backends
-// es de otra zona, y aquí se prueba el proxy con backends hechos a mano.
+// conBackends añade al catálogo del gateway (el de Config.Backends) backends
+// hechos a mano; uno con el nombre de un modelo del registro lo sustituye.
 func conBackends(g *Gateway, bs ...*Backend) {
-	g.guests.backendsDe = func(*Config) []*Backend { return bs }
+	g.guests.backendsDe = func(c *Config) []*Backend { return append(c.Backends(), bs...) }
 }
 
 const (
