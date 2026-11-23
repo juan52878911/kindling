@@ -232,6 +232,9 @@ type Scheduler struct {
 	// segador las renueva en su vuelta siguiente sin esperar al umbral (ver
 	// renovarTTL). Se toca con mu.
 	sinRenovar map[string]bool
+	// olvidos son las instancias que salieron del mapa y aún no se han
+	// avisado a OnForget (ver avisarOlvidos). Se toca con g.mu.
+	olvidos []olvido
 	// tenantCreando cuenta, por tenant, las instancias que se están
 	// creando/despertando pero aún no están registradas en g.services/g.extra:
 	// sin esto, dos buildEntry concurrentes de SERVICIOS DISTINTOS del mismo
@@ -994,6 +997,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (_ *entry, err e
 		muerta, vieja = e.machineID, e
 	}
 	g.mu.Unlock()
+	g.avisarOlvidos()
 
 	// A partir de aquí se DESPIERTA/CREA la instancia primaria del servicio.
 	e, err := g.buildEntry(ctx, service, tnt, false)
@@ -1366,8 +1370,9 @@ func (g *Scheduler) sessionCountLocked(machineID string) int {
 // Es removeEntryLocked para quien no lo tiene.
 func (g *Scheduler) olvidarInstancia(service, machineID string) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.removeEntryLocked(service, machineID)
+	g.mu.Unlock()
+	g.avisarOlvidos()
 }
 
 // transporteInvitado es el transporte del proxy de una instancia. Las
@@ -1405,6 +1410,7 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 		delete(g.services, service)
 		e.cerrarConexiones()
 		e.cortarStreamsLocked()
+		g.encolarOlvidoLocked(service, e)
 		return
 	}
 	es := g.extra[service]
@@ -1412,6 +1418,7 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 		if e.machineID == machineID {
 			e.cerrarConexiones()
 			e.cortarStreamsLocked()
+			g.encolarOlvidoLocked(service, e)
 			g.extra[service] = append(es[:i], es[i+1:]...)
 			if len(g.extra[service]) == 0 {
 				delete(g.extra, service)
@@ -2360,6 +2367,9 @@ type apartada struct {
 }
 
 func (g *Scheduler) reapOnce(ctx context.Context) {
+	// Lo que este pase saque del mapa (TTL vencido, dormidas, aisladas
+	// caducadas) se avisa a OnForget al acabar, con g.mu suelto.
+	defer g.avisarOlvidos()
 	type victim = dormida
 	var victims []victim
 
@@ -2717,6 +2727,7 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		addr := victima.Addr(g.puertoDe(victima))
 		g.removeEntryLocked(elegido, id)
 		g.mu.Unlock()
+		g.avisarOlvidos()
 
 		if g.OnSleep != nil {
 			g.OnSleep(elegido, addr)

@@ -261,3 +261,34 @@ func (g *Scheduler) borrarCongeladas(ctx context.Context, service string, ids []
 		g.mu.Unlock()
 	}
 }
+
+// olvido es una instancia que salió del mapa, pendiente de avisar a OnForget.
+type olvido struct{ service, addr string }
+
+// encolarOlvidoLocked apunta que e (del servicio) salió del mapa, para avisar
+// a OnForget cuando se suelte g.mu (avisarOlvidos). Sin gancho no apunta
+// nada. Con g.mu tomado.
+func (g *Scheduler) encolarOlvidoLocked(service string, e *entry) {
+	if g.OnForget == nil {
+		return
+	}
+	g.olvidos = append(g.olvidos, olvido{service, e.Addr(g.puertoDe(e))})
+}
+
+// avisarOlvidos llama a OnForget, con g.mu suelto, por cada instancia que
+// salió del mapa desde el último aviso. Cada una sale de la cola una sola vez,
+// así que no se avisa dos veces aunque dos goroutines avisen a la vez. Lo que
+// encole un camino que no avisa (las sesiones aisladas) sale en el siguiente
+// aviso, como tarde en la siguiente vuelta del segador.
+func (g *Scheduler) avisarOlvidos() {
+	if g.OnForget == nil {
+		return
+	}
+	g.mu.Lock()
+	l := g.olvidos
+	g.olvidos = nil
+	g.mu.Unlock()
+	for _, o := range l {
+		g.OnForget(o.service, o.addr)
+	}
+}
