@@ -344,9 +344,7 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		s.log = log.Default()
 	}
 	for _, t := range s.tenantsTodos() {
-		if t.MaxSandboxes == 0 && t.MaxMemTotalMiB == 0 {
-			s.log.Printf("frontal: warning: tenant %q has neither MaxSandboxes nor MaxMemTotalMiB: its sandboxes are limited only per request, so it can fill the hosts", t.Nombre)
-		}
+		s.avisarCuotasAbiertas(t)
 	}
 	s.rutas()
 	ing, err := nuevoIngreso(s, o.Ingreso)
@@ -355,6 +353,15 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	}
 	s.ingreso = ing
 	return s, nil
+}
+
+// avisarCuotasAbiertas deja en el log un inquilino sin tope de sandboxes ni de
+// memoria total: solo lo acota cada petición, así que puede llenar los hosts.
+// Sale al arrancar y cada vez que se crea o edita uno.
+func (s *Servidor) avisarCuotasAbiertas(t Tenant) {
+	if t.MaxSandboxes == 0 && t.MaxMemTotalMiB == 0 {
+		s.log.Printf("frontal: warning: tenant %q has neither MaxSandboxes nor MaxMemTotalMiB: its sandboxes are limited only per request, so it can fill the hosts", t.Nombre)
+	}
 }
 
 func (s *Servidor) rutas() {
