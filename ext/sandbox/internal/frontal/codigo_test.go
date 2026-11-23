@@ -77,7 +77,7 @@ func (d *daemonReal) vivo(pid int) bool {
 	}
 }
 
-func ponerReal(t *testing.T, f *falso) *daemonReal {
+func ponerReal(t testing.TB, f *falso) *daemonReal {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("no python3 in this runner")
@@ -324,7 +324,7 @@ type bancoCodigo struct {
 	base string
 }
 
-func montarCodigo(t *testing.T) *bancoCodigo {
+func montarCodigo(t testing.TB) *bancoCodigo {
 	t.Helper()
 	f := nuevoFalso(t)
 	d := ponerReal(t, f)
@@ -349,7 +349,7 @@ func (b *bancoCodigo) contexto(t *testing.T) string {
 }
 
 // corre manda código y devuelve los eventos del flujo.
-func (b *bancoCodigo) corre(t *testing.T, ctxID, codigo string) []evCodigo {
+func (b *bancoCodigo) corre(t testing.TB, ctxID, codigo string) []evCodigo {
 	t.Helper()
 	cuerpo := map[string]any{"code": codigo}
 	if ctxID != "" {

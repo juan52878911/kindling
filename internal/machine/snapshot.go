@@ -1854,20 +1854,6 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	}
 	fases.marca(fcPersist)
 
-	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
-	// como encender en frío, y es EL camino del gateway cuando despierta varios
-	// servicios de golpe. Sin acotarlo, esa ráfaga simultánea cuelga el host bajo
-	// anidamiento. El defer suelta el hueco al volver; si el contexto se cancela en
-	// la cola, se deshace lo ya montado igual que un fallo de spawn.
-	release, glErr := m.enterRestore(ctx)
-	if glErr != nil {
-		m.desmontarRed(netcfg, id)
-		m.fail(mc, glErr)
-		return nil, glErr
-	}
-	defer release()
-	fases.marca(fcGateWait)
-
 	var sock string
 	var pid int
 	var c *fc.Client
@@ -1986,6 +1972,23 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	}
 	m.credsPrevias.Delete(id) // solo la usa el thaw
 	fases.marca(fcVMM)
+
+	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
+	// como encender en frío, y es EL camino del gateway cuando despierta varios
+	// servicios de golpe. Sin acotarlo, esa ráfaga simultánea cuelga el host bajo
+	// anidamiento. Se toma aquí, con el VMM ya lanzado y su jail poblado, y no
+	// antes: lanzar el proceso, esperar su socket y enlazar los ficheros del jail
+	// no tocan KVM, y dentro de la puerta ocupaban ~18 de los ~68 ms que cada
+	// alta retenía su hueco en una ráfaga (G-02). Los topes de antes (admisión
+	// de memoria, montajes de red) siguen delante. El defer suelta el hueco al
+	// volver; si el contexto se cancela en la cola, abortar mata el VMM ya
+	// lanzado y deshace lo montado, como un fallo de spawn.
+	release, glErr := m.enterRestore(ctx)
+	if glErr != nil {
+		return abortar(glErr)
+	}
+	defer release()
+	fases.marca(fcGateWait)
 	start := time.Now()
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
 	// plazo del volcado y no el de 30 s: cargar también es mover la memoria
@@ -2106,7 +2109,16 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	fases.marca(fcResume)
 	// Si el agente debía contestar y no lo hace, la copia no se entrega
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
-	resync, err := m.resyncCopia(ctx, id, snap, pid)
+	//
+	// Un snapshot por imagen habla dos veces con el agente (resync y start):
+	// por la misma conexión, que se cierra al acabar (clienteDeOperacion).
+	ctxAgente := ctx
+	if ai != nil {
+		var cerrar func()
+		ctxAgente, cerrar = clienteDeOperacion(ctx)
+		defer cerrar()
+	}
+	resync, err := m.resyncCopia(ctxAgente, id, snap, pid)
 	if err != nil {
 		// El diagnóstico (otra goroutine) necesita el VMM vivo.
 		esperarDiagnostico(resync.diag)
@@ -2122,7 +2134,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 			return m.descartarCopia(id, soltarCiclo, abortar,
 				fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
 		}
-		if err := m.entregarMaquina(ctx, id, ai); err != nil {
+		if err := m.entregarMaquina(ctxAgente, id, ai); err != nil {
 			return abortar(fmt.Errorf("image snapshot %s: %w", req.From, err))
 		}
 		fases.marca(fcStart)
@@ -2165,7 +2177,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	now := time.Now()
 	mc.PID = pid
 	mc.State = api.StateRunning
-	mc.StartedAt = &now
+	mc.StartedAt, mc.VMMStartedAt = &now, &now
 	mc.VMM = m.origenActual().vmm
 	mc.ThawMS = elapsed
 	mc.CredentialDomains, mc.CredentialAnyDatabase = dominiosCred, anyDBCred
@@ -2205,6 +2217,8 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	m.persist()
 	out := *mc
 	m.mu.Unlock()
+	// El desglose del VMM (solo macOS), después de crearla (K-03).
+	m.tiemposVMMTrasCrear(c, id, creacion)
 	log.Printf("%s from snapshot %s: %s", mc.Name, req.From, notaCreacion(creacion))
 	// Las carpetas vivas, como en el arranque en frío: el agente de la copia
 	// las espera para lanzar el servicio.

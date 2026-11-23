@@ -189,7 +189,7 @@ func (a *aggregator) snapshotOf(ctx context.Context, service string) (string, *r
 		return name, nil
 	}
 
-	snaps, err := a.gw.Client().Snapshots(ctx)
+	snaps, err := listarSnapshots(ctx, a.gw.Client())
 	if err != nil {
 		return "", &rpcFault{-32000, err.Error()}
 	}

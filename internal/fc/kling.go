@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // maxRespuestaKling acota lo que se lee de una respuesta del ayudante. Todas
@@ -35,6 +37,9 @@ type KlingInfo struct {
 	// SnapshotRepoint: sabe leer kling_repoint en PUT /snapshot/load y no abrir
 	// las rutas del snap.file. Un VMM anterior no lo manda: ignora el campo.
 	SnapshotRepoint bool `json:"snapshot_repoint,omitempty"`
+	// Timings es el desglose de la última vez que el VMM creó su VM (K-03).
+	// Un VMM anterior no lo manda.
+	Timings *api.VMMPhases `json:"timings,omitempty"`
 }
 
 // KlingNetwork es la política de salida de una máquina (PUT /kling/network).

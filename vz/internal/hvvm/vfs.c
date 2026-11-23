@@ -484,6 +484,7 @@ void vvfs_set(int idx, const struct vvfs_state *s) {
   if (!v) return;
   pthread_mutex_lock(&v->mu);
   v->s = *s;
+  vmmio_restaurado(&v->s.m, 1u << VIRTIO_RING_F_INDIRECT_DESC);
   memset(v->vuelo, 0, sizeof v->vuelo);
   int total = 0;
   for (int c = 0; c < VFS_NQ; c++) {

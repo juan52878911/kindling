@@ -32,6 +32,12 @@ func trazaPrueba() string {
 	return C.GoString(&b[0])
 }
 
+// trazaPruebaFases es trazaPrueba y, tras él, Timings.
+func trazaPruebaFases() (string, map[string]any) {
+	r := trazaPrueba()
+	return r, Timings()
+}
+
 // sysregISS es khv_sysreg_iss: el hv_sys_reg_t de un MSR/MRS atrapado.
 func sysregISS(iss uint64) uint16 { return uint16(C.khv_sysreg_iss(C.uint64_t(iss))) }
 

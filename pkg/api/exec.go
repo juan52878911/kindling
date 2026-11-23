@@ -250,6 +250,21 @@ func (c *Client) Exec(ctx context.Context, ref string, r ExecRequest, onOutput f
 
 	res := &ExecResult{}
 	var stdout, stderr bytes.Buffer
+	// B-16: sin onOutput la salida se junta en memoria, y el tope que se pidió
+	// se hace cumplir también aquí en vez de fiarse del otro extremo (lo mismo
+	// que decodeAcotado en do). Lo que pase se descarta y se marca Truncated,
+	// como hace el daemon.
+	tope := ExecMaxOutput
+	if _, m, err := r.Limits(); err == nil {
+		tope = m
+	}
+	recortado := false
+	guardar := func(b *bytes.Buffer, data []byte) {
+		if n := tope - b.Len(); len(data) > n {
+			data, recortado = data[:max(n, 0)], true
+		}
+		b.Write(data)
+	}
 	sc := bufio.NewScanner(resp.Body)
 	// Un trozo son hasta 32 KiB de salida, que en base64 y con el sobre JSON
 	// ronda los 44 KiB: el búfer por defecto del Scanner (64 KiB) ya da, pero se
@@ -270,7 +285,7 @@ func (c *Client) Exec(ctx context.Context, ref string, r ExecRequest, onOutput f
 		case ev.Exit != nil:
 			res.ExitCode = *ev.Exit
 			res.DurationMS = ev.DurationMS
-			res.Truncated = ev.Truncated
+			res.Truncated = ev.Truncated || recortado
 			res.TimedOut = ev.TimedOut
 			if onOutput == nil {
 				res.Stdout, res.Stderr = stdout.Bytes(), stderr.Bytes()
@@ -282,9 +297,9 @@ func (c *Client) Exec(ctx context.Context, ref string, r ExecRequest, onOutput f
 					return nil, err
 				}
 			} else if ev.Stream == "stderr" {
-				stderr.Write(ev.Data)
+				guardar(&stderr, ev.Data)
 			} else {
-				stdout.Write(ev.Data)
+				guardar(&stdout, ev.Data)
 			}
 		}
 	}

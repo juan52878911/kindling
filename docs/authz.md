@@ -24,6 +24,19 @@ propias para saber quién está al otro lado: se lo dice el kernel.
 Se lee **una vez por conexión**, al aceptarla, y no se puede falsificar desde el
 cliente: no viaja en la petición.
 
+El **rol** que sale de esa identidad también se resuelve una vez por conexión y
+se recuerda en ella: antes cada petición volvía a preguntar los grupos a la base
+de usuarios (con NSS, LDAP o sssd eso puede ser lento o bloquear) delante de
+cada exec. La consecuencia: **un cambio de grupos del usuario vale desde su
+siguiente conexión**, no desde su siguiente petición; un cliente que mantiene
+la conexión abierta (`api.Client` reutiliza conexiones por el socket) sigue con
+el rol de cuando conectó hasta que la cierra. La política no cambia sin
+reiniciar el daemon, así que eso no se queda atrás. No se recuerda un rol que
+no sea fiable: si la consulta de grupos vuelve vacía (lo mismo que da un fallo
+pasajero de la base de usuarios) o el usuario no casa con ninguna regla, la
+petición siguiente vuelve a calcularlo. El token (`Authorization`) se sigue
+mirando en cada petición.
+
 ## La política
 
 Se lee de `/etc/kling/authz.json` al arrancar el daemon, o del fichero que diga

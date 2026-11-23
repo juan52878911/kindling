@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -54,6 +55,12 @@ type VM interface {
 // invitado se apagó, pidió reiniciarse...). Vale tras recibir de Stopped.
 type endReasoner interface {
 	EndReason() string
+}
+
+// VMMTimer es la VM que sabe partir su propio arranque o restauración por
+// fases (kling-hv: traza.c). GET /kling/info lo devuelve en timings.vmm.
+type VMMTimer interface {
+	VMMTimings() map[string]any
 }
 
 // VsockDialer es lo que una VM con virtio-vsock (Spec.Vsock) ofrece: una
@@ -261,6 +268,11 @@ const (
 type Server struct {
 	d     Deps
 	store *mmds.Store
+
+	// tiempos: el desglose de la última creación de la VM (arranque o
+	// restauración), para GET /kling/info. Fuera de mu: la ruta no debe
+	// esperar a una restauración en curso.
+	tiempos atomic.Pointer[tiemposCreacion]
 
 	mu        sync.Mutex
 	st        state
@@ -1118,6 +1130,12 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 		}
 		info["credential_kinds"] = kinds
 	}
+	// timings: lo que tardó la última creación de la VM, por fases (net,
+	// sandbox, create, restore/start, resume) y, en kling-hv, lo de dentro
+	// del VMM (vmm). Lo pide el daemon tras una restauración.
+	if t := s.tiempos.Load(); t != nil {
+		info["timings"] = t.json()
+	}
 	writeJSON(w, info)
 }
 
@@ -1555,7 +1573,40 @@ func (s *Server) ensureNet() error {
 	return nil
 }
 
-func (s *Server) create() error {
+// tiemposCreacion es lo que tardó cada paso de crear la VM visto desde aquí;
+// lo de dentro del VMM (crear la VM, leer el estado, el GIC...) lo da vm.
+type tiemposCreacion struct {
+	restaura                                      bool
+	red, confinar, crear, cargar, reanudar, total time.Duration
+	vm                                            VMMTimer
+}
+
+func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+
+func (t *tiemposCreacion) json() map[string]any {
+	out := map[string]any{
+		"kind":       "boot",
+		"net_ms":     ms(t.red),
+		"sandbox_ms": ms(t.confinar),
+		"create_ms":  ms(t.crear),
+		"total_ms":   ms(t.total),
+	}
+	if t.restaura {
+		out["kind"] = "restore"
+		out["restore_ms"] = ms(t.cargar)
+		out["resume_ms"] = ms(t.reanudar)
+	} else {
+		out["start_ms"] = ms(t.reanudar)
+	}
+	// Los hitos del VMM (el agente contesta después de esta respuesta) se
+	// leen al pedirlos, no al crear.
+	if t.vm != nil {
+		out["vmm"] = t.vm.VMMTimings()
+	}
+	return out
+}
+
+func (s *Server) create(t *tiemposCreacion) error {
 	if err := s.spec.Validate(); err != nil {
 		return err
 	}
@@ -1568,12 +1619,15 @@ func (s *Server) create() error {
 			}
 		}
 	}
+	t0 := time.Now()
 	if err := s.ensureNet(); err != nil {
 		return err
 	}
+	t1 := time.Now()
 	if err := s.confinar(); err != nil {
 		return err
 	}
+	t2 := time.Now()
 	args := spec.TranslateBootArgs(s.spec.BootSource.BootArgs)
 	if s.spec.Vsock {
 		args += " " + VsockBootParam
@@ -1582,6 +1636,8 @@ func (s *Server) create() error {
 	if err != nil {
 		return fmt.Errorf("creating the VM: %w", err)
 	}
+	t.red, t.confinar, t.crear = t1.Sub(t0), t2.Sub(t1), time.Since(t2)
+	t.vm, _ = vm.(VMMTimer)
 	// El estado de las carpetas por virtio-fs de un snapshot ya lo tiene la VM.
 	s.soltarEstadoShares()
 	s.vm = vm
@@ -1685,13 +1741,17 @@ func (s *Server) start() error {
 		s.spec.Graphics = &g
 	}
 	t0 := time.Now()
-	if err := s.create(); err != nil {
+	var t tiemposCreacion
+	if err := s.create(&t); err != nil {
 		return err
 	}
+	tStart := time.Now()
 	if err := s.vm.Start(); err != nil {
 		s.abandon()
 		return fmt.Errorf("starting the VM: %w", err)
 	}
+	t.reanudar, t.total = time.Since(tStart), time.Since(t0)
+	s.tiempos.Store(&t)
 	s.st = stRunning
 	s.avisarCPU()
 	s.applyBalloon()
@@ -1704,18 +1764,24 @@ func (s *Server) start() error {
 
 func (s *Server) restore() error {
 	t0 := time.Now()
-	if err := s.create(); err != nil {
+	t := tiemposCreacion{restaura: true}
+	if err := s.create(&t); err != nil {
 		return err
 	}
+	tCargar := time.Now()
 	if err := s.vm.RestoreState(s.statePath); err != nil {
 		s.abandon()
 		return fmt.Errorf("restoring the machine state: %w", err)
 	}
 	tRestore := time.Since(t0)
+	tResume := time.Now()
+	t.cargar = tResume.Sub(tCargar)
 	if err := s.vm.Resume(); err != nil {
 		s.abandon()
 		return fmt.Errorf("resuming the restored VM: %w", err)
 	}
+	t.reanudar, t.total = time.Since(tResume), time.Since(t0)
+	s.tiempos.Store(&t)
 	s.st = stRunning
 	s.avisarCPU()
 	s.applyBalloon()

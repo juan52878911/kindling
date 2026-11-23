@@ -137,8 +137,17 @@ type Almacen struct {
 	mu      sync.Mutex
 	est     *estado
 	indice  map[string]ubicacion // id de clave → posición; se rehace al escribir
-	sucio   bool                 // hay "último uso" sin volcar
 	volcado time.Time
+	// gen cuenta las versiones del estado en memoria (con a.mu); escrita es
+	// la última que llegó a disco (con a.esc). gen por delante de escrita: hay
+	// "último uso" sin volcar.
+	gen uint64
+
+	// esc ordena las escrituras del fichero. Se toma después de a.mu (mutar
+	// la toma con a.mu tomado) o sin a.mu (el volcado del último uso, que no
+	// para a las autenticaciones mientras hace fsync).
+	esc     sync.Mutex
+	escrita uint64
 }
 
 // Abrir carga (o crea) el almacén en dir.
@@ -228,11 +237,33 @@ func (a *Almacen) mutar(f func(e *estado) error) error {
 	if err := f(c); err != nil {
 		return err
 	}
-	if err := a.guardar(c); err != nil {
+	g := a.gen + 1
+	if err := a.escribir(c, g); err != nil {
 		return err
 	}
-	a.est, a.sucio, a.volcado = c, false, a.op.Ahora()
+	a.est, a.gen, a.volcado = c, g, a.op.Ahora()
 	a.reindexar()
+	return nil
+}
+
+// escribir guarda e, que es la versión g del estado, salvo que en disco ya
+// haya una igual o más nueva: un volcado del último uso que se quedó atrás no
+// pisa lo que escribió un cambio posterior (una revocación, por ejemplo).
+func (a *Almacen) escribir(e *estado, g uint64) error {
+	a.esc.Lock()
+	defer a.esc.Unlock()
+	return a.escribirLocked(e, g)
+}
+
+// escribirLocked es escribir con a.esc ya tomado.
+func (a *Almacen) escribirLocked(e *estado, g uint64) error {
+	if g <= a.escrita {
+		return nil
+	}
+	if err := a.guardar(e); err != nil {
+		return err
+	}
+	a.escrita = g
 	return nil
 }
 
@@ -467,7 +498,6 @@ func (a *Almacen) Resolver(texto string) (Inquilino, bool) {
 		id, secreto = texto[len(pre):len(pre)+largoID], texto[len(pre)+largoID+1:]
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	var cl *Clave
 	var ti int
 	if bien {
@@ -482,34 +512,42 @@ func (a *Almacen) Resolver(texto string) (Inquilino, bool) {
 	}
 	coincide := subtle.ConstantTimeCompare(hash(sal, secreto), esperado) == 1
 	if cl == nil || !coincide {
+		a.mu.Unlock()
 		return Inquilino{}, false
 	}
 	now := a.op.Ahora().UTC()
 	if cl.Revocada != nil || caducada(*cl, now) {
+		a.mu.Unlock()
 		return Inquilino{}, false
 	}
 	cl.UltimoUso = &now
-	a.sucio = true
+	a.gen++
+	out := copiar(a.est.Inquilinos[ti])
+	// El volcado se prepara con el cerrojo (una copia del estado) y se escribe
+	// sin él (D-06): el fsync ya no para a las demás autenticaciones. Solo lo
+	// paga la petición a la que le toca, una vez por Opciones.CadaUso.
+	var copia *estado
+	var g uint64
 	if now.Sub(a.volcado) >= a.op.CadaUso {
-		a.volcarLocked()
+		copia, g = a.est.clonar(), a.gen
+		a.volcado = a.op.Ahora()
 	}
-	return copiar(a.est.Inquilinos[ti]), true
+	a.mu.Unlock()
+	if copia != nil && a.esc.TryLock() {
+		// Si ya se está escribiendo, no se hace cola detrás: gen sigue por
+		// delante de lo escrito y el volcado siguiente lo recoge. Un fallo
+		// solo pierde el "último uso", igual que antes.
+		_ = a.escribirLocked(copia, g)
+		a.esc.Unlock()
+	}
+	return out, true
 }
 
-func (a *Almacen) volcarLocked() {
-	if !a.sucio {
-		return
-	}
-	// Un fallo aquí solo pierde el "último uso": se reintenta en el siguiente.
-	if err := a.guardar(a.est); err == nil {
-		a.sucio = false
-	}
-	a.volcado = a.op.Ahora()
-}
-
-// Cerrar vuelca lo pendiente.
+// Cerrar vuelca lo pendiente. escribir espera al volcado de Resolver que
+// pudiera estar a medias y no reescribe si ese ya dejó en disco lo último.
 func (a *Almacen) Cerrar() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.volcarLocked()
+	_ = a.escribir(a.est, a.gen)
+	a.volcado = a.op.Ahora()
 }

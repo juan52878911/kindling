@@ -103,14 +103,21 @@ func (s *Server) objetivoConAgente(ctx context.Context, ref string) (*api.Machin
 var maxAgentesVistos = 4096
 
 // firmaAgente identifica la vida de VMM en la que se vio escuchar al agente
-// de mc: su PID y cuándo arrancó. Un freeze y thaw, un stop y start o un VMM
-// nuevo cambian el PID, y con él la firma. "" = no se sabe decir (sin PID o
+// de mc: su PID y cuándo se lanzó ese proceso (VMMStartedAt). Un freeze y
+// thaw, un stop y start o un VMM nuevo cambian las dos cosas, y con ellas la
+// firma. Pausar y reanudar no (G-08): es el mismo proceso con el mismo
+// agente, aunque StartedAt se reescriba al reanudar. Un estado de antes de
+// VMMStartedAt usa StartedAt, como siempre. "" = no se sabe decir (sin PID o
 // sin arranque): entonces no se recuerda nada.
 func firmaAgente(mc *api.Machine) string {
-	if mc.PID <= 0 || mc.StartedAt == nil {
+	desde := mc.VMMStartedAt
+	if desde == nil {
+		desde = mc.StartedAt
+	}
+	if mc.PID <= 0 || desde == nil {
 		return ""
 	}
-	return strconv.Itoa(mc.PID) + "@" + strconv.FormatInt(mc.StartedAt.UnixNano(), 10)
+	return strconv.Itoa(mc.PID) + "@" + strconv.FormatInt(desde.UnixNano(), 10)
 }
 
 // agenteVisto dice si el agente de mc ya contestó en esta misma vida de su
@@ -328,13 +335,22 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 	// callado las retrasa hasta acabar. Se esperan lo mismo que el cuerpo, su
 	// timeout más execBodyGrace, no los plazoCabeceras (5 min) de siempre.
 	ctx = conPlazoCabeceras(ctx, execBodyTimeout(req))
+	// B-16: además del plazo de inactividad del cuerpo, uno TOTAL con el mismo
+	// valor desde que se pide. Un agente que gotee líneas vacías o eventos de
+	// un flujo desconocido no deja nunca de dar señales de vida, y retendría la
+	// goroutine, la conexión y la plaza del inquilino mientras quien llama siga
+	// conectado. El agente mata el comando en su timeout y manda el evento
+	// final; execBodyGrace cubre eso.
+	ctx, cancel := context.WithTimeout(ctx, execBodyTimeout(req))
 	greq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec/stream", bytes.NewReader(body))
 	if err != nil {
+		cancel()
 		return nil, http.StatusInternalServerError, err
 	}
 	greq.Header.Set("Content-Type", "application/json")
 	resp, err := guestClient.Do(greq)
 	if err != nil {
+		cancel()
 		return nil, http.StatusBadGateway, fmt.Errorf("talking to the guest agent: %w", err)
 	}
 	if resp.StatusCode == http.StatusOK {
@@ -344,8 +360,9 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		// compilación, `npm ci`) puede callar legítimamente hasta su propio
 		// timeout, y el agente ya lo mata al llegar ahí y manda el evento
 		// final. Se le da ese timeout más execBodyGrace de margen.
-		return wrapGuestBodyCon(resp.Body, execBodyTimeout(req)), 0, nil
+		return cuerpoConPlazo{wrapGuestBodyCon(resp.Body, execBodyTimeout(req)), cancel}, 0, nil
 	}
+	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, http.StatusNotImplemented, errors.New("the guest agent has no exec streaming")
@@ -358,6 +375,18 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		return nil, http.StatusTooManyRequests, invitadoOcupado(msg)
 	}
 	return nil, http.StatusBadGateway, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
+}
+
+// cuerpoConPlazo suelta el plazo total del flujo de exec al cerrarlo.
+type cuerpoConPlazo struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cuerpoConPlazo) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // errInvitadoOcupado: el agente del invitado contestó 429 porque ya corre

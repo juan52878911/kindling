@@ -8,9 +8,15 @@ package sandbox
 // qué le dejó hacer la red.
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -40,7 +46,9 @@ type orden struct {
 // prueba: Op "bind" (escuchar en Addr), "connect" (conectar a Addr por TCP),
 // "bindunix" (escuchar en el socket Unix Addr), "remove" y "mkdir" (Addr),
 // "unix" (conectar al socket Unix Addr), "read" o "write" (el fichero Addr),
-// "accept" (aceptar, ya confinado, en la escucha previa Addr).
+// "accept" (aceptar, ya confinado, en la escucha previa Addr), "x509"
+// (verificar un certificado contra la confianza del sistema, ver
+// verificarX509).
 type prueba struct{ Op, Addr string }
 
 // resultado: cuánto tardó sandbox_init y, por prueba, "ok", "denied" (EPERM:
@@ -107,6 +115,8 @@ func hijo(s string) int {
 			if l, err = net.Listen("unix", p.Addr); err == nil {
 				l.Close()
 			}
+		case "x509":
+			err = verificarX509()
 		case "remove":
 			err = os.Remove(p.Addr)
 		case "mkdir":
@@ -383,6 +393,49 @@ func TestPerfilFicheros(t *testing.T) {
 			r := encerrado(t, orden{Perfil: perfil, Pares: pares, Pruebas: pruebas})
 			if !slices.Equal(r.Res, quiere) {
 				t.Fatalf("pruebas %v\n got  %v\n want %v", pruebas, r.Res, quiere)
+			}
+		})
+	}
+}
+
+// verificarX509 verifica un certificado autofirmado contra la confianza del
+// sistema. En macOS crypto/x509 se lo pide a Security.framework, que habla con
+// trustd: sin trustd el error no es «autoridad desconocida» sino un OSStatus
+// (-26276, medido en macOS 26.5 con un perfil sin system.sb).
+func verificarX509() error {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "x.example"},
+		DNSNames: []string{"x.example"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
+	if err != nil {
+		return err
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		return err
+	}
+	_, err = c.Verify(x509.VerifyOptions{DNSName: "x.example"})
+	return err
+}
+
+// Encerrado, el VMM sigue pudiendo verificar TLS con la confianza del sistema:
+// el proxy de credenciales dentro del proceso lo hace con cada upstream HTTPS.
+// Es lo primero que se rompe al quitar (import "system.sb") de un perfil
+// (K-01): el perfil tiene que seguir dejando hablar con trustd.
+func TestPerfilVerificaTLS(t *testing.T) {
+	fuera := verificarX509()
+	var ua x509.UnknownAuthorityError
+	if !errors.As(fuera, &ua) {
+		t.Skipf("outside the sandbox the self-signed certificate gives %v, not an unknown authority", fuera)
+	}
+	for nombre, perfil := range perfiles(t) {
+		t.Run(nombre, func(t *testing.T) {
+			r := encerrado(t, orden{Perfil: perfil, Pares: pares(t, true, ""), Pruebas: []prueba{{"x509", ""}}})
+			if len(r.Res) != 1 || r.Res[0] != fuera.Error() {
+				t.Fatalf("confined, verifying TLS gives %v; outside, %q (trustd unreachable?)", r.Res, fuera)
 			}
 		})
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/upgrade"
 )
 
@@ -39,6 +40,8 @@ type releaseFalsa struct {
 	conWget      bool   // sin curl en el PATH: baja con un wget falso
 	plat         string // si no vacío, la plataforma que dice un uname falso (darwin-arm64)
 	sinGuest     bool   // la release no publica kling-guest-linux-<arch>
+	sinUnpack    bool   // la release no publica kling-unpack-<plat> (las anteriores a C-10)
+	unpackMalo   bool   // kling-unpack-<plat> no es el de SHA256SUMS
 	klingReal    string // si no vacío, ruta de un kling de verdad que sirve como binario de la release
 	// firmaMinisig y firmaSSH, si no nil, dan el contenido de SHA256SUMS.minisig
 	// y SHA256SUMS.sshsig a partir del SHA256SUMS firmado y la etiqueta.
@@ -111,6 +114,10 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 			binarios["kling-guest-linux-arm64"] = "#!/bin/sh\nexit 0\n"
 		}
 	}
+	// kling-unpack: en Linux y en el Mac Apple Silicon, donde corre un daemon.
+	if (strings.HasPrefix(plat, "linux-") || plat == "darwin-arm64") && !r.sinUnpack {
+		binarios["kling-unpack-"+plat] = "#!/bin/sh\nexec cat\n"
+	}
 	if r.klingReal != "" {
 		b, err := os.ReadFile(r.klingReal)
 		if err != nil {
@@ -135,6 +142,9 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 	}
 	if r.binAlterado {
 		binarios["kling-"+plat] = "#!/bin/sh\necho alterado\n"
+	}
+	if r.unpackMalo {
+		binarios["kling-unpack-"+plat] = "#!/bin/sh\necho alterado\n"
 	}
 	for n, c := range binarios {
 		escribir(t, filepath.Join(dirTag, n), c, 0o755)
@@ -702,5 +712,85 @@ func TestInstallAvisaDeClavesDelEntorno(t *testing.T) {
 		if !strings.Contains(r.salida, v+" comes from the environment") {
 			t.Errorf("%s del entorno sin aviso:\n%s", v, r.salida)
 		}
+	}
+}
+
+// C-10: install.sh deja kling-unpack donde lo busca el constructor de
+// imágenes (internal/oci unpackHelper: $KLING_LIB_DIR/kling-unpack; en el Mac,
+// sin KLING_LIB_DIR, el lib/ de la raíz de datos), verificado con el mismo
+// SHA256SUMS firmado que kling. Sin él las capas se descomprimen en Go, que es
+// lo más lento de importar una imagen.
+func TestInstallMacDejaLibKlingUnpack(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{plat: "darwin-arm64"})
+	if !r.ok {
+		t.Fatalf("install failed:\n%s", r.salida)
+	}
+	lib := filepath.Join(filepath.Dir(r.plugins), "Library", "Application Support", "kindling", "lib")
+	comprobarUnpackEn(t, lib, r.salida)
+}
+
+func TestInstallLinuxRootDejaKlingUnpackEnLibDir(t *testing.T) {
+	lib := filepath.Join(t.TempDir(), "lib", "kindling")
+	r := correrInstall(t, releaseFalsa{plat: "linux-amd64", env: []string{"KLING_INSTALL_UID=0", "KLING_LIB_DIR=" + lib}})
+	if !r.ok {
+		t.Fatalf("install failed:\n%s", r.salida)
+	}
+	comprobarUnpackEn(t, lib, r.salida)
+}
+
+// Como usuario en Linux el daemon es el de systemd (root) y su lib es
+// /usr/local/lib/kindling: kling-unpack se deja verificado en ~/.local/lib y la
+// orden final lo copia allí con la misma sudo que copia kling.
+func TestInstallLinuxUsuarioDaLaOrdenDeKlingUnpack(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{plat: "linux-arm64", env: []string{"KLING_INSTALL_UID=1000"}})
+	if !r.ok {
+		t.Fatalf("install failed:\n%s", r.salida)
+	}
+	staged := filepath.Join(filepath.Dir(r.plugins), ".local", "lib", "kindling", "kling-unpack")
+	if !existe(staged) {
+		t.Fatalf("kling-unpack not staged at %s:\n%s", staged, r.salida)
+	}
+	want := "sudo install -D -m755 " + staged + " /usr/local/lib/kindling/kling-unpack && "
+	if !strings.Contains(r.salida, want) {
+		t.Fatalf("missing the command %q:\n%s", want, r.salida)
+	}
+	seco := correrInstall(t, releaseFalsa{plat: "linux-amd64", sinPrefix: true, env: []string{"KLING_INSTALL_UID=0"}}, "--dry-run")
+	if !strings.Contains(seco.salida, "kling-unpack-linux-amd64  ->  /usr/local/lib/kindling/kling-unpack") {
+		t.Fatalf("dry-run does not say where kling-unpack goes:\n%s", seco.salida)
+	}
+}
+
+// Una release anterior a C-10 no lo trae y se instala igual; uno que no cuadra
+// con SHA256SUMS no deja nada, ni siquiera kling.
+func TestInstallKlingUnpackOpcionalYVerificado(t *testing.T) {
+	for _, plat := range []string{"darwin-arm64", "linux-amd64"} {
+		lib := filepath.Join(t.TempDir(), "lib")
+		env := []string{"KLING_INSTALL_UID=0", "KLING_LIB_DIR=" + lib}
+		r := correrInstall(t, releaseFalsa{plat: plat, sinUnpack: true, env: env})
+		if !r.ok || existe(filepath.Join(lib, "kling-unpack")) {
+			t.Fatalf("%s: a release without kling-unpack must install without it:\n%s", plat, r.salida)
+		}
+		r = correrInstall(t, releaseFalsa{plat: plat, unpackMalo: true, env: env})
+		if r.ok || existe(filepath.Join(r.prefijo, "kling")) || existe(filepath.Join(lib, "kling-unpack")) {
+			t.Fatalf("%s: installed with a kling-unpack that does not match SHA256SUMS:\n%s", plat, r.salida)
+		}
+	}
+}
+
+// comprobarUnpackEn: el ayudante está en lib, es ejecutable y es justo el que
+// el constructor elegiría con ese KLING_LIB_DIR.
+func comprobarUnpackEn(t *testing.T, lib, salida string) {
+	t.Helper()
+	p := filepath.Join(lib, "kling-unpack")
+	fi, err := os.Stat(p)
+	if err != nil || fi.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("kling-unpack missing or not executable at %s (%v):\n%s", p, err, salida)
+	}
+	t.Setenv("KLING_LIB_DIR", lib)
+	t.Setenv("KLING_UNPACK", "")
+	os.Unsetenv("KLING_UNPACK")
+	oci.SetUnpackHelper("")
+	if got := oci.UnpackHelper(); got != p {
+		t.Fatalf("the image builder would use %q, not the installed %q", got, p)
 	}
 }

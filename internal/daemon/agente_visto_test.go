@@ -116,3 +116,53 @@ func BenchmarkSondeoAgente(b *testing.B) {
 		}
 	})
 }
+
+// G-08: pausar y reanudar deja el mismo VMM (mismo PID) y el mismo agente,
+// pero reanudarLocked reescribe StartedAt. Cuenta los sondeos (conexiones
+// nuevas al agente) que hace el primer exec tras cada pausa→reanudar: ahora
+// ninguno. Otro proceso VMM (thaw, start), aunque repitiera el PID, sí sondea.
+func TestPausaReanudarSondeos(t *testing.T) {
+	s := &Server{}
+	sondeos := 0
+	s.sondearAgente = func(context.Context, *api.Machine) error {
+		sondeos++
+		return nil
+	}
+	desde := time.Now()
+	// Lo que apunta el manager al lanzar el VMM: StartedAt y VMMStartedAt.
+	mc := &api.Machine{ID: "cccc000000000001", Name: "pausable", PID: 20, StartedAt: &desde, VMMStartedAt: &desde}
+	if err := s.esperarAgenteUnaVez(context.Background(), mc); err != nil {
+		t.Fatal(err)
+	}
+	const ciclos = 10
+	antes := sondeos
+	for i := range ciclos {
+		// Lo que hace reanudarLocked con la máquina: mismo PID, StartedAt nuevo.
+		reanudada := mc.Clone()
+		ahora := desde.Add(time.Duration(i+1) * time.Second)
+		reanudada.StartedAt = &ahora
+		_ = s.esperarAgenteUnaVez(context.Background(), reanudada)
+		mc = reanudada
+	}
+	t.Logf("pausa→exec: %d sondeos en %d ciclos", sondeos-antes, ciclos)
+	if n := sondeos - antes; n != 0 {
+		t.Fatalf("pausa→exec sondeó %d veces en %d ciclos; quería 0", n, ciclos)
+	}
+	// Un thaw que repite el PID es otro proceso: otra vida, se sondea.
+	thaw := mc.Clone()
+	lanzado := desde.Add(time.Hour)
+	thaw.StartedAt, thaw.VMMStartedAt = &lanzado, &lanzado
+	antes = sondeos
+	_ = s.esperarAgenteUnaVez(context.Background(), thaw)
+	if sondeos-antes != 1 {
+		t.Fatalf("un VMM nuevo con el mismo PID no se sondeó (%d)", sondeos-antes)
+	}
+	// Y otro PID con el mismo instante, tampoco hereda nada.
+	otro := thaw.Clone()
+	otro.PID = 21
+	antes = sondeos
+	_ = s.esperarAgenteUnaVez(context.Background(), otro)
+	if sondeos-antes != 1 {
+		t.Fatalf("otro PID heredó el agente visto (%d sondeos)", sondeos-antes)
+	}
+}

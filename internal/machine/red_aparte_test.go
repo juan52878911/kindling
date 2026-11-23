@@ -12,15 +12,14 @@ import (
 // ejecuta justo antes de Resume: no hay camino a Resume sin ella.
 func TestMontarRedAparteFalloAlEsperarDesmonta(t *testing.T) {
 	m := newTestManager(t)
-	oldA, oldD := montarRedHostAparte, desmontarRedHost
-	oldM := montarRedHost
-	t.Cleanup(func() { montarRedHostAparte, desmontarRedHost, montarRedHost = oldA, oldD, oldM })
-	montarRedHost = nil
-	montarRedHostAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
-		return func() error { return errors.New("barrera caída") }, nil
-	}
 	desmontadas := 0
-	desmontarRedHost = func(*knet.Net) { desmontadas++ }
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montar = nil
+		g.montarAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
+			return func() error { return errors.New("barrera caída") }, nil
+		}
+		g.desmontar = func(*knet.Net) { desmontadas++ }
+	})
 	n := knet.Plan(40, "ab0000000000a001")
 	esperar, err := m.montarRedAparte(n, "ab0000000000a001", knet.EgressNone, nil)
 	if err != nil {
@@ -44,15 +43,15 @@ func TestMontarRedAparteFalloAlEsperarDesmonta(t *testing.T) {
 // dentro del montaje y, si falla, no queda nada montado ni marcado.
 func TestMontarRedEsperaLaComprobacion(t *testing.T) {
 	m := newTestManager(t)
-	oldA, oldD, oldM := montarRedHostAparte, desmontarRedHost, montarRedHost
-	t.Cleanup(func() { montarRedHostAparte, desmontarRedHost, montarRedHost = oldA, oldD, oldM })
-	montarRedHostAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
-		t.Fatal("montarRed no debe usar el montaje aparte")
-		return nil, nil
-	}
-	montarRedHost = func(*knet.Net, knet.Egress, []string, int) error { return errors.New("barrera caída") }
 	desmontadas := 0
-	desmontarRedHost = func(*knet.Net) { desmontadas++ }
+	cambiarGanchosRed(t, func(g *ganchosRed) {
+		g.montarAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
+			t.Fatal("montarRed no debe usar el montaje aparte")
+			return nil, nil
+		}
+		g.montar = func(*knet.Net, knet.Egress, []string, int) error { return errors.New("barrera caída") }
+		g.desmontar = func(*knet.Net) { desmontadas++ }
+	})
 	if err := m.montarRed(knet.Plan(41, "ab0000000000a002"), "ab0000000000a002", knet.EgressNone, nil); err == nil {
 		t.Fatal("montarRed debe fallar si la comprobación falla")
 	}

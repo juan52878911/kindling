@@ -289,6 +289,15 @@ simultáneas por sandbox, WebSocket incluidos: 64 (`-ingress-max-conns`, 429); e
 cabeceras de la respuesta del invitado: 60 s (504). El acceso por la URL no renueva el TTL
 del sandbox: ninguna otra ruta del gateway lo hace por actividad.
 
+**El SDK de Python reutiliza conexiones.** Cada hilo guarda una conexión abierta
+(keep-alive) con el gateway y cada cliente un solo contexto TLS (crearlo carga el almacén de
+CAs), en vez de una conexión y un handshake por llamada; `close()` cierra las de todos los
+hilos, también las de la capa asíncrona. Si el gateway cerró la conexión ociosa justo al
+usarla, solo se repiten en una conexión nueva los métodos idempotentes (`GET`, `HEAD`,
+`PUT`, `DELETE`, `OPTIONS`); un `POST` que pudo llegar a procesarse no se manda dos veces y
+sale el error. Un cuerpo en flujo va siempre
+por una conexión nueva, y un flujo abandonado a medias cierra la suya.
+
 Ver también: [e2b.md](e2b.md) (la misma API con el protocolo de E2B), los SDKs
 ([Python](../sdks/python/README.md), [TypeScript](../sdks/typescript/README.md)), las
 [recetas](recetas/README.md) y [kubernetes.md](kubernetes.md) (despliegue con Helm).

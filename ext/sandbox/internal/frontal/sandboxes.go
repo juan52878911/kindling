@@ -244,16 +244,21 @@ func (s *Servidor) buscar(ctx context.Context, t *Tenant, id string) (*hosts.Hos
 	if !ok {
 		return nil, nil, noSandbox(id)
 	}
-	ms, err := h.Cliente.Sandboxes(ctx)
+	// Por id y no listando el host (D-01): con miles de sandboxes, el listado
+	// era O(N) en JSON por cada operación. El daemon resuelve primero por id
+	// exacto; aun así se exige que el que vuelve sea ese id (no un nombre ni un
+	// prefijo) y que sea un sandbox de t: lo demás es el mismo 404 de siempre.
+	mc, err := h.Cliente.Get(ctx, ref)
 	if err != nil {
+		if api.IsNotFound(err) {
+			return nil, nil, noSandbox(id)
+		}
 		return nil, nil, deHost(h, err)
 	}
-	for _, mc := range ms {
-		if mc.ID == ref && esSandboxDe(mc, t) {
-			return h, mc, nil
-		}
+	if mc.ID != ref || !esSandboxDe(mc, t) {
+		return nil, nil, noSandbox(id)
 	}
-	return nil, nil, noSandbox(id)
+	return h, mc, nil
 }
 
 // ---- rutas

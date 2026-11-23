@@ -30,9 +30,7 @@ func TestReproR6_CreatedSinVMMQuedaZombi(t *testing.T) {
 	m.mu.Unlock()
 
 	desmontadas := 0
-	previo := desmontarRedHost
-	desmontarRedHost = func(*knet.Net) { desmontadas++ }
-	defer func() { desmontarRedHost = previo }()
+	cambiarGanchosRed(t, func(g *ganchosRed) { g.desmontar = func(*knet.Net) { desmontadas++ } })
 
 	m.reconcile()
 
@@ -55,9 +53,7 @@ func TestReconcileCreatedSinVMMEnFrioVaAStopped(t *testing.T) {
 	mc.Name, mc.State, mc.PID = "fria", api.StateCreated, 0
 	m.mu.Unlock()
 	desmontadas := 0
-	previo := desmontarRedHost
-	desmontarRedHost = func(*knet.Net) { desmontadas++ }
-	defer func() { desmontarRedHost = previo }()
+	cambiarGanchosRed(t, func(g *ganchosRed) { g.desmontar = func(*knet.Net) { desmontadas++ } })
 	m.reconcile()
 	if s := vivaDe(t, m, id).State; s != api.StateStopped {
 		t.Errorf("state=%s, quería stopped", s)
@@ -100,9 +96,7 @@ func TestReconcileLimpiaRedYCgroupDeLasQueNoTienenVMM(t *testing.T) {
 	m.bus = events.New()
 	m.cgroupRoot = t.TempDir()
 	var n atomic.Int32
-	previo := desmontarRedHost
-	desmontarRedHost = func(*knet.Net) { n.Add(1) }
-	defer func() { desmontarRedHost = previo }()
+	cambiarGanchosRed(t, func(g *ganchosRed) { g.desmontar = func(*knet.Net) { n.Add(1) } })
 
 	casos := map[string]api.State{
 		"c1c10001aaaaaaaa": api.StateCreated,
@@ -120,7 +114,7 @@ func TestReconcileLimpiaRedYCgroupDeLasQueNoTienenVMM(t *testing.T) {
 	}
 	m.reconcile()
 	if got := n.Load(); got != int32(len(casos)) {
-		t.Errorf("desmontarRedHost llamado %d veces, quería %d", got, len(casos))
+		t.Errorf("el desmontaje de la red se llamó %d veces, quería %d", got, len(casos))
 	}
 	for id, st := range casos {
 		if existe(filepath.Join(m.cgroupRoot, cgName(id))) {

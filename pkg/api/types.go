@@ -78,6 +78,10 @@ type Machine struct {
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	FrozenAt  *time.Time `json:"frozen_at,omitempty"`
+	// VMMStartedAt es cuándo se lanzó (o se readoptó al despertar) el proceso
+	// VMM que corre ahora. A diferencia de StartedAt, reanudar una pausada no
+	// lo toca: es el mismo proceso. Con el PID identifica esa vida del VMM.
+	VMMStartedAt *time.Time `json:"vmm_started_at,omitempty"`
 
 	// FailedAt es cuándo pasó a failed. Es lo que permite recogerla después de
 	// un tiempo de gracia: una failed sin fecha no se puede envejecer, y las
@@ -297,6 +301,10 @@ type CreatePhases struct {
 	// FinishMS es el resto hasta devolver la copia.
 	FinishMS float64 `json:"finish_ms"`
 	TotalMS  float64 `json:"total_ms"`
+	// VMM parte VMMMS, LoadMS y ResumeMS por dentro, como los vio el propio
+	// VMM (solo macOS). Llega después de devolver la copia: una lectura justo
+	// tras crearla puede no traerlo aún.
+	VMM *VMMPhases `json:"vmm,omitempty"`
 }
 
 // StuckMachine es una máquina atascada a mitad de una operación (Info.Stuck).
@@ -351,6 +359,74 @@ type WakePhases struct {
 	// FinishMS es apuntar el estado y el resto hasta contestar.
 	FinishMS float64 `json:"finish_ms"`
 	TotalMS  float64 `json:"total_ms"`
+	// VMM parte SpawnMS, SocketMS y LoadMS por dentro, como los vio el propio
+	// VMM (solo macOS, y solo al despertar de un snapshot: una pausada no
+	// crea VM). Llega después de contestar, como en CreatePhases.VMM.
+	VMM *VMMPhases `json:"vmm,omitempty"`
+}
+
+// VMMPhases es el desglose que da el VMM de macOS (kling-vz, kling-hv) de la
+// última vez que creó su VM, en milisegundos (GET /kling/info, timings). Lo
+// que no pasó no sale. Firecracker no lo da.
+type VMMPhases struct {
+	// Kind es "restore" (desde un snapshot) o "boot" (arranque en frío).
+	Kind string `json:"kind"`
+	// NetMS es montar su pila de red y reenvíos.
+	NetMS float64 `json:"net_ms"`
+	// SandboxMS es confinarse (sandbox_init) antes de crear la VM.
+	SandboxMS float64 `json:"sandbox_ms"`
+	// CreateMS es crear la VM.
+	CreateMS float64 `json:"create_ms"`
+	// RestoreMS es cargar el estado guardado (solo restore).
+	RestoreMS float64 `json:"restore_ms,omitempty"`
+	// ResumeMS es reanudarla (solo restore); StartMS, arrancarla (solo boot).
+	ResumeMS float64 `json:"resume_ms,omitempty"`
+	StartMS  float64 `json:"start_ms,omitempty"`
+	TotalMS  float64 `json:"total_ms"`
+	// Inside es lo de dentro del VMM (kling-hv: traza.c); kling-vz no lo da.
+	Inside *VMMInside `json:"vmm,omitempty"`
+}
+
+// VMMInside son las fases que kling-hv mide por dentro, en milisegundos: las
+// mismas que su línea de KLING_HV_TRACE=1.
+type VMMInside struct {
+	Kind string `json:"kind,omitempty"`
+	// ProcessMS va de lanzar el proceso a empezar a crear la VM.
+	ProcessMS float64 `json:"process_ms,omitempty"`
+	// PhasesMS es cada fase de antes de soltar la VM, por nombre.
+	PhasesMS map[string]float64 `json:"phases_ms,omitempty"`
+	// WaitMS es lo que no cae en ninguna fase.
+	WaitMS float64 `json:"wait_ms,omitempty"`
+	// SinceReleaseMS es cada hito desde que se soltó la VM, por nombre.
+	SinceReleaseMS map[string]float64 `json:"since_release_ms,omitempty"`
+	// TotalMS va de crear la VM a que conteste el agente.
+	TotalMS float64 `json:"total_ms,omitempty"`
+}
+
+// Clone copia p entero, mapas incluidos. nil da nil.
+func (p *VMMPhases) Clone() *VMMPhases {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	if p.Inside != nil {
+		in := *p.Inside
+		in.PhasesMS = clonarMs(p.Inside.PhasesMS)
+		in.SinceReleaseMS = clonarMs(p.Inside.SinceReleaseMS)
+		out.Inside = &in
+	}
+	return &out
+}
+
+func clonarMs(m map[string]float64) map[string]float64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]float64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // StartRequest es el cuerpo de POST /machines/{ref}/start. Env es el entorno

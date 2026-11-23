@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // defaultMaxParallelLaunch es cuántos encendidos simultáneos se permiten en un
@@ -148,6 +149,16 @@ func (m *Manager) enterLaunch(ctx context.Context) (func(), error) {
 		return func() {}, nil
 	}
 	m.ajustarPuerta()
+	if ctx.Value(ctxFondo{}) != nil {
+		return m.entrarPuertaCediendo(ctx)
+	}
+	m.esperandoPuerta.Add(1)
+	defer m.esperandoPuerta.Add(-1)
+	return m.entrarPuerta(ctx)
+}
+
+// entrarPuerta espera un hueco de launchGate y devuelve cómo soltarlo.
+func (m *Manager) entrarPuerta(ctx context.Context) (func(), error) {
 	select {
 	case m.launchGate <- struct{}{}:
 		var once sync.Once
@@ -162,5 +173,29 @@ func (m *Manager) enterLaunch(ctx context.Context) (func(), error) {
 		}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// entrarPuertaCediendo es la entrada de las altas del propio fondo (ctxFondo):
+// ceden el hueco mientras haya peticiones reales esperando, como el reponedor
+// de ranuras de red con tomarMontaje (G-15). Sin esto, en una ráfaga que vacía
+// el fondo el relleno se ponía en la misma cola FIFO que las peticiones y se
+// llevaba huecos delante de ellas. El relleno se retrasa mientras dura la
+// ráfaga, que es lo que se quiere; el contexto lo corta igual que en la cola.
+func (m *Manager) entrarPuertaCediendo(ctx context.Context) (func(), error) {
+	for {
+		for m.esperandoPuerta.Load() > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Millisecond):
+			}
+		}
+		soltar, err := m.entrarPuerta(ctx)
+		if err != nil || m.esperandoPuerta.Load() == 0 {
+			return soltar, err
+		}
+		// Llegó una petición real mientras esperaba: se lo deja.
+		soltar()
 	}
 }

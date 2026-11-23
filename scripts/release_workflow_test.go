@@ -183,3 +183,31 @@ func TestReleaseWorkflowExigeElE2EDeKlingHV(t *testing.T) {
 		t.Errorf("job release: el e2e de kling-hv (paso %d) no va antes de firmar (paso %d)", puerta, firma)
 	}
 }
+
+// C-10: kling-unpack (rust/kling-unpack) se publica para las plataformas con
+// daemon (linux amd64/arm64 estático y darwin arm64), compilado con su
+// Cargo.lock, comprobado contra el camino de Go antes de subirlo y metido en
+// el contrato de assets, así que entra en el SHA256SUMS que se firma.
+func TestReleaseWorkflowPublicaKlingUnpack(t *testing.T) {
+	jobs := jobsDeWorkflow(t, "../.github/workflows/release.yml")
+	u, ok := jobs["unpack"]
+	if !ok {
+		t.Fatal("release.yml sin job unpack")
+	}
+	for _, s := range []string{"--locked", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
+		"aarch64-apple-darwin", "KLING_UNPACK_TEST", "-run UnpackHelper", "persist-credentials: false"} {
+		if !strings.Contains(u, s) {
+			t.Errorf("job unpack sin %q", s)
+		}
+	}
+	rel := jobs["release"]
+	if !regexp.MustCompile(`(?m)^    needs: \[[^\]]*\bunpack\b`).MatchString(rel) {
+		t.Error("job release no depende de unpack")
+	}
+	if !strings.Contains(rel, "pattern: unpack-*") {
+		t.Error("job release no baja los artefactos unpack-*")
+	}
+	if !strings.Contains(rel, `"kling-unpack-linux-$arch"`) || !strings.Contains(rel, "kling-unpack-darwin-arm64") {
+		t.Error("el contrato de assets no lleva kling-unpack")
+	}
+}

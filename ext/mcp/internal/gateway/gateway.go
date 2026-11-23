@@ -96,6 +96,10 @@ type Gateway struct {
 	linkMu    sync.RWMutex
 	linkCache []*mcp.Link
 	linkAt    time.Time
+
+	// El mux de routes(), hecho la primera vez que se pide.
+	rutasOnce sync.Once
+	rutas     http.Handler
 }
 
 // PoolOwnerDe da un id derivado de la dirección de escucha y del socket del
@@ -269,7 +273,16 @@ func conLoopback(s *scheduler.Scheduler, h http.Handler, token string) http.Hand
 // de cada host tal cual —proxy, cuotas, sesiones pegajosas, todo lo que ya
 // tenía un solo host— y envolver el token UNA sola vez él mismo, en vez de una
 // vez por host.
+// routes devuelve el mux del gateway, construido una sola vez: el router lo
+// pide en cada petición que delega en este host, y rehacerlo eran ~17
+// patrones analizados y 77 reservas por petición. PprofEnabled se lee la
+// primera vez, así que se fija antes de servir (como hace kling-mcp).
 func (g *Gateway) routes() http.Handler {
+	g.rutasOnce.Do(func() { g.rutas = g.construirRutas() })
+	return g.rutas
+}
+
+func (g *Gateway) construirRutas() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

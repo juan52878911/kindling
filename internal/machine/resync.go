@@ -149,6 +149,29 @@ func (m *Manager) resyncCopia(ctx context.Context, id string, snap *api.Snapshot
 // descriptor hasta que el invitado muera.
 var resyncClient = guesthttp.New(nil, 0)
 
+// ctxClienteAgente lleva en el contexto un cliente hacia el agente de UNA
+// operación (clienteDeOperacion): el resync y el POST /machine/start de una
+// copia por imagen van así por la misma conexión (G-05).
+type ctxClienteAgente struct{}
+
+// clienteDeOperacion da un contexto con un cliente hacia el agente que guarda
+// UNA conexión ociosa, y la función que la cierra al acabar la operación. Así
+// no queda ningún descriptor hacia la microVM fuera de la operación (lo que
+// evita resyncClient), y el segundo viaje no paga otra conexión con el
+// invitado recién despierto.
+func clienteDeOperacion(ctx context.Context) (context.Context, func()) {
+	t := &http.Transport{MaxIdleConns: 1, MaxIdleConnsPerHost: 1, IdleConnTimeout: 5 * time.Second}
+	return context.WithValue(ctx, ctxClienteAgente{}, guesthttp.New(t, 0)), t.CloseIdleConnections
+}
+
+// clienteAgenteDe es el cliente de la operación de ctx, o def si no lleva.
+func clienteAgenteDe(ctx context.Context, def *http.Client) *http.Client {
+	if c, ok := ctx.Value(ctxClienteAgente{}).(*http.Client); ok {
+		return c
+	}
+	return def
+}
+
 // resultadoResync es lo que dio resyncGuest: cuánto tardó, si el agente lo
 // aplicó, lo que contestó de su "listo" (nil si nada), y si falló con un
 // agente que debía contestar. fallo es falso cuando no se intentó (sin
@@ -491,7 +514,7 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	req.Header.Set("Content-Type", "application/json")
 	traza := trazaResyncNueva(base)
 	req = traza.sobre(req)
-	resp, err := resyncClient.Do(req)
+	resp, err := clienteAgenteDe(ctx, resyncClient).Do(req)
 	traza.fin(err)
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {

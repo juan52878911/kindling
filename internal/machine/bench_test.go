@@ -30,7 +30,7 @@ import (
 // aviso a m.wake es un envío no bloqueante sobre un canal con hueco.
 func benchManager(n int) *Manager {
 	m := &Manager{
-		root:   "/nonexistent", // nunca se escribe: nadie vacía m.pending
+		root:   "/nonexistent", // nunca se escribe: no hay escritor
 		byID:   make(map[string]*api.Machine, n),
 		socket: make(map[string]string, n),
 		wake:   make(chan struct{}, 1),
@@ -80,6 +80,23 @@ func BenchmarkPersist(b *testing.B) {
 			defer m.mu.RUnlock()
 			for b.Loop() {
 				m.persist()
+			}
+		})
+	}
+}
+
+// BenchmarkFotoEstadoClon mide sacar la foto (copia profunda de la flota) con
+// m.mu en lectura: lo que el escritor paga una vez por escritura desde que
+// persist() ya no la saca en cada transición (A-19).
+func BenchmarkFotoEstadoClon(b *testing.B) {
+	for _, n := range []int{100, 1000} {
+		m := benchManager(n)
+		b.Run(fmt.Sprintf("maquinas=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			m.mu.RLock()
+			defer m.mu.RUnlock()
+			for b.Loop() {
+				_ = m.fotoEstadoLocked()
 			}
 		})
 	}

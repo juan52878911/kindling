@@ -166,6 +166,23 @@ fichero de prueba): 1,34 s / 153 ms / 7 ms. `barrier` es ~12× más rápido que
 `full` y conserva el orden; `none` solo para volúmenes de desarrollo que se
 pueden perder.
 
+**Cuota de `F_FULLFSYNC` en `full`.** Un `F_FULLFSYNC` vacía la caché del SSD
+entero, la de todo el Mac (~6 ms en un M4, y las escrituras de los demás
+procesos esperan detrás), y un invitado que alterne una escritura y un FLUSH
+lo pedía sin tope (~150 por segundo con `BenchmarkFlushAlternado`). Ahora cada
+disco en `full` tiene una cuota de **32 por segundo con ráfagas de 32**
+(`KHV_FULL_POR_S` y `KHV_FULL_RAFAGA` en `khv.h`). Por encima, el FLUSH se
+asienta con `F_BARRIERFSYNC`, que mantiene el orden, y el `F_FULLFSYNC` que
+falta lo hace el siguiente FLUSH con cuota o, si no llega ninguno, el hilo del
+disco en cuanto se repone (sin que el invitado mande otro). Qué cambia si el
+Mac se cae: lo que se puede perder queda acotado a ~1/32 s (~31 ms) de FLUSH,
+**pero no el orden**: el journal de ext4 queda coherente y el sistema de
+ficheros monta, como en `barrier`. Un invitado que asienta a un ritmo normal
+(el commit de ext4 cada 5 s, un Postgres con decenas de commits por segundo)
+no llega a la cuota y no ve diferencia. Si un `F_FULLFSYNC` diferido falla no
+se reintenta: el FLUSH ya contestó bien y lo de antes llegó al SSD con
+`F_BARRIERFSYNC`. `barrier` y `none` no cambian.
+
 ### DISCARD y WRITE_ZEROES
 
 Los discos de escritura ofrecen `VIRTIO_BLK_F_DISCARD` y
@@ -624,6 +641,20 @@ kling-hv: trace freeze ms: pausa 0.04 snap-estado 2.40 snap-clon 0.16 snap-pagin
 llamadas de configuración del daemon); `wait`, lo que pasa entre fases antes
 de soltar la VM (Go y el API); los `->` cuentan desde que se suelta y `total`
 va de `khv_create` al agente.
+
+**Sin `KLING_HV_TRACE`.** El mismo desglose está siempre en `GET /kling/info`
+(`timings`): lo que vio el servidor de API de la última creación de la VM
+(`net_ms`, `sandbox_ms`, `create_ms`, `restore_ms` y `resume_ms` en una
+restauración, `start_ms` en un arranque, `total_ms`) y, dentro, en `vmm`, lo
+de `traza.c` (`process_ms`, `phases_ms`, `wait_ms`, `since_release_ms`,
+`total_ms`; `kling-vz` no lo da). El daemon lo pide **después** de contestar
+un `thaw` desde disco o una creación desde un snapshot, en segundo plano (no
+suma una petición al camino de quien espera), y lo cuelga de `wake.vmm` o
+`create.vmm` de la máquina: `kling inspect <máquina>` lo enseña. Una lectura
+justo después de despertar puede no traerlo aún; un despertar posterior no se
+lo queda (solo se anota sobre el desglose del que salió), una pausada no lo
+tiene (reanudar no crea VM) y un VMM anterior, sin `timings`, no deja nada. En
+Linux (Firecracker) no se pide.
 
 Medido el 2026-11-05 (M4, macOS 26.5, el Mac en uso: carga 2,5-5; daemon
 privado, imagen `e2e-tools`, 256 MiB, egress none; con 10 vCPU, 512 MiB),

@@ -39,10 +39,16 @@ class Estado:
         self.contextos = {}  # (id, cid) -> dict
         self.fork_cuota = 0  # con >0, un fork de más copias da 429
         self.lote_falla_desde = 0  # en un lote, los índices >= esto fallan (500)
+        self.conexiones = 0  # conexiones TCP aceptadas
 
 
 class Manejador(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        super().setup()
+        with self.server.cerrojo_conexiones:
+            self.server.estado.conexiones += 1
 
     def log_message(self, *a):
         pass
@@ -613,6 +619,7 @@ class ServidorFalso:
         self.estado = Estado()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Manejador)
         self.httpd.estado = self.estado
+        self.httpd.cerrojo_conexiones = threading.Lock()
         self.httpd.daemon_threads = True
         self.url = "http://127.0.0.1:%d" % self.httpd.server_address[1]
         self._t = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=0.01), daemon=True)
