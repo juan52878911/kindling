@@ -1606,13 +1606,6 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		req.CPUPct = m.techoCPUPorDefecto(snap.Image, max(req.VCPUs, snap.VCPUs), req.CPUPctDefault)
 	}
 
-	id := m.nuevoIDMaquina()
-	if req.Name == "" {
-		req.Name = req.From + "-" + id[:6]
-		if ai != nil {
-			req.Name = snap.Image + "-" + id[:6] // como en frío
-		}
-	}
 	// Reserva de memoria, igual que en Run y por la misma razón: el gateway
 	// despierta varios servicios a la vez cuando el anfitrión aprieta, y sin
 	// reservar veían todos la misma memoria libre. Ahora el segundo ve que no
@@ -1642,6 +1635,19 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		return nil, merr
 	}
 	defer releaseMem()
+
+	// El id, y con él la ranura de red del fondo, se toman al final de los
+	// filtros baratos (cuota, admisión, memoria): una alta rechazada antes no
+	// quema una ranura. Si la creación se abandona antes de asignarRed, la
+	// ranura se descarta en el acto (no espera al plazo de Recoger).
+	id := m.nuevoIDMaquina()
+	if req.Name == "" {
+		req.Name = req.From + "-" + id[:6]
+		if ai != nil {
+			req.Name = snap.Image + "-" + id[:6] // como en frío
+		}
+	}
+	defer m.ranuraDescartar(id)
 
 	// El directorio nace RESERVADO: desde aquí hasta la entrada en byID —copiar
 	// el overlay dorado, resolver volúmenes, montar la red— es de lejos la

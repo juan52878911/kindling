@@ -141,6 +141,15 @@ func (m *Manager) ranuraEntregar(id string) *knet.Net {
 	return f.Entregar(id)
 }
 
+// ranuraDescartar destruye la ranura tomada para id si nadie la entregó
+// (asignarRed): una alta que falla antes de la red no la deja esperando al
+// plazo de Recoger. Tras la entrega, o si id no es de una ranura, no hace nada.
+func (m *Manager) ranuraDescartar(id string) {
+	if f := m.fondoActivo(); f != nil {
+		f.Descartar(id)
+	}
+}
+
 // ranuraPropia: el namespace es de una ranura del fondo (en espera, tomada o
 // a medio montar): el barrido de huérfanos no lo toca.
 func (m *Manager) ranuraPropia(ns string) bool {

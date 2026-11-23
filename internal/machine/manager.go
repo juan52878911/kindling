@@ -1976,6 +1976,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
 	// reserva tiene que existir antes de que empiece nada lento.
 	id := m.nuevoIDMaquina()
+	// Si la alta se abandona antes de asignarRed, la ranura se descarta en el
+	// acto; entregada, es no-op.
+	defer m.ranuraDescartar(id)
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]
 	}

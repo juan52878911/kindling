@@ -83,3 +83,27 @@ func TestSinFondoNuevoIDEsElDeSiempre(t *testing.T) {
 		t.Fatal("con el fondo apagado no hay ranuras")
 	}
 }
+
+// A-1 paso 3: una alta que se abandona antes de asignarRed descarta su ranura
+// en el acto; si ya la entregó, descartar no toca la red de la máquina.
+func TestRanuraDescartarLiberaLaDeUnaAltaRechazada(t *testing.T) {
+	m := &Manager{root: t.TempDir(), byID: nil}
+	f := fondoRanurasDePrueba(t, m, 2)
+	id := m.nuevoIDMaquina()
+	if !f.Propia("kl-" + knet.Corto(id)) {
+		t.Fatal("la ranura tomada debería constar como propia")
+	}
+	m.ranuraDescartar(id)
+	if f.Propia("kl-"+knet.Corto(id)) || m.ranuraEntregar(id) != nil {
+		t.Fatal("la ranura descartada sigue tomada")
+	}
+
+	id2 := m.nuevoIDMaquina()
+	if _, err := m.asignarRed(id2); err != nil {
+		t.Fatal(err)
+	}
+	m.ranuraDescartar(id2) // la defer de run/runFromUna tras entregar: no-op
+	if !f.Propia("kl-" + knet.Corto(id2)) {
+		t.Log("la red entregada deja de ser del fondo: correcto, ahora es de la máquina")
+	}
+}

@@ -104,9 +104,9 @@ func (n *Net) montarSetup(tr *trazaSetup, egress Egress, domains []string, owner
 	n.Teardown()
 	tr.fase("teardown")
 	// Sin ranura, el montaje completo hace cola: a lo sumo 4 a la vez.
-	montajesCompletos <- struct{}{}
+	tomarMontaje(true)
 	err = n.montarBase(tr, owner, false)
-	<-montajesCompletos
+	soltarMontaje()
 	if err != nil {
 		return err
 	}
@@ -229,6 +229,9 @@ func (n *Net) reglasBaseRanura() [][]string {
 // reglas comunes se quedan donde están, salvo el cierre de FORWARD, que
 // diferenciaDeReglas recoloca). El resultado es el del montaje completo.
 func (n *Net) aplicarSobreRanura(tr *trazaSetup, base, egress Egress, domains []string) error {
+	if egress != EgressNone {
+		n.retirarRegistroDeRanura()
+	}
 	if base != EgressNone || !hayRestore() {
 		return n.aplicarPropio(tr, egress, domains, true)
 	}
@@ -335,7 +338,10 @@ func (n *Net) arrancarRegistroNone(egress Egress) error {
 	if err := iniciarResolverNone(n); err != nil {
 		return err
 	}
-	n.instalarRegistroIP()
+	// Una ranura ya trae el registro instalado (MontarRanura).
+	if _, ya := registroEnRanura.LoadAndDelete(n.NS); !ya {
+		n.instalarRegistroIP()
+	}
 	return nil
 }
 
@@ -353,6 +359,7 @@ func (n *Net) Teardown() {
 	stopGraph(n.NS)
 	stopCredProxy(n.NS)
 	cerrarIPSet(n.NS)
+	registroEnRanura.Delete(n.NS)
 	// El conntrack del host solo tiene algo que cortar si había enlace: en
 	// una alta nueva (Setup empieza siempre por Teardown) no se lanza nada, y
 	// cuando sí, lo hace un trabajador aparte, fuera del camino del llamante.

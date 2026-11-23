@@ -427,3 +427,126 @@ func TestRanuraEquivaleAlMontajeCompleto(t *testing.T) {
 		})
 	}
 }
+
+// A-1 paso 4: con creaciones esperando hueco, un reponedor no lo toma.
+func TestReponedorCedeElHuecoALasCreaciones(t *testing.T) {
+	for range cap(montajesCompletos) {
+		montajesCompletos <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for len(montajesCompletos) > 0 {
+			<-montajesCompletos
+		}
+	})
+	orden := make(chan string, 2)
+	go func() { tomarMontaje(false); orden <- "reponedor" }()
+	time.Sleep(20 * time.Millisecond) // el reponedor ya está esperando hueco
+	go func() { tomarMontaje(true); orden <- "creacion" }()
+	for creacionesEsperando.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	<-montajesCompletos // se libera UN hueco
+	select {
+	case quien := <-orden:
+		if quien != "creacion" {
+			t.Fatalf("el hueco lo tomó el %s con una creación esperando", quien)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nadie tomó el hueco")
+	}
+	select {
+	case quien := <-orden:
+		t.Fatalf("%s tomó hueco sin que se liberara otro", quien)
+	case <-time.After(30 * time.Millisecond):
+	}
+	<-montajesCompletos // sin creaciones esperando, el reponedor pasa
+	select {
+	case <-orden:
+	case <-time.After(2 * time.Second):
+		t.Fatal("el reponedor no tomó el hueco al quedar libre")
+	}
+}
+
+// Una ranura descartada (alta rechazada antes de la red) se destruye en el
+// acto y deja sitio: el fondo se repone sin esperar al plazo de Recoger.
+func TestDescartarDevuelveElHuecoYRepone(t *testing.T) {
+	var i atomic.Int64
+	var destruidas atomic.Int32
+	f := NuevoFondo(2, func() (*Ranura, error) {
+		k := int(i.Add(1))
+		id := fmt.Sprintf("%08x00000000", 0xb0000000+k)
+		return &Ranura{ID: id, Net: Plan(k, id)}, nil
+	}, func(*Ranura) { destruidas.Add(1) })
+	t.Cleanup(f.Cerrar)
+	f.Reponer()
+	for n := 0; n < 2000 && f.Len() < 2; n++ {
+		time.Sleep(time.Millisecond)
+	}
+	r := f.Tomar()
+	if r == nil {
+		t.Fatal("sin ranura")
+	}
+	f.Descartar(r.ID)
+	if destruidas.Load() != 1 || f.Entregar(r.ID) != nil || f.Propia(r.Net.NS) {
+		t.Fatalf("la ranura descartada sigue viva (destruidas=%d)", destruidas.Load())
+	}
+	for n := 0; n < 2000 && f.Len() < 2; n++ {
+		time.Sleep(time.Millisecond)
+	}
+	if f.Len() != 2 {
+		t.Fatalf("el fondo no se repuso: %d", f.Len())
+	}
+	f.Descartar(r.ID) // idempotente
+	if destruidas.Load() != 1 {
+		t.Fatal("Descartar dos veces destruyó dos")
+	}
+}
+
+// A-1 paso 5: el registro nft de none lo instala el reponedor (MontarRanura);
+// crear la máquina en none no lo repite, y en otro modo lo retira.
+func TestRegistroDeNoneVieneEnLaRanura(t *testing.T) {
+	sustituirProcesos(t)
+	viejo, viejoH := iniciarResolverNone, instalarRegistroHook
+	t.Cleanup(func() { iniciarResolverNone, instalarRegistroHook = viejo, viejoH })
+	iniciarResolverNone = func(*Net) error { return nil }
+	var instalaciones atomic.Int32
+	instalarRegistroHook = func(*Net) { instalaciones.Add(1) }
+
+	r, err := ranuraFalsa()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instalaciones.Load() != 1 {
+		t.Fatalf("MontarRanura instaló el registro %d veces, quería 1", instalaciones.Load())
+	}
+	if err := r.Net.Setup(EgressNone, nil, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if instalaciones.Load() != 1 {
+		t.Fatalf("Setup en none repitió el registro (%d instalaciones)", instalaciones.Load())
+	}
+	if _, queda := registroEnRanura.Load(r.Net.NS); queda {
+		t.Fatal("la marca de registro de la ranura no se consumió")
+	}
+
+	// Otro modo: se retira la marca (y la tabla, en segundo plano).
+	r2, err := ranuraFalsa()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r2.Net.Setup(EgressInternet, nil, 1000); err != nil {
+		t.Fatal(err)
+	}
+	registrosEnVuelo.Wait()
+	if _, queda := registroEnRanura.Load(r2.Net.NS); queda {
+		t.Fatal("una ranura entregada en internet conserva el registro de none")
+	}
+	// Sin ranura, en none, se instala como siempre.
+	n := Plan(900, "feedface00000009")
+	if err := n.Setup(EgressNone, nil, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if instalaciones.Load() != 3 { // r, r2 y el de n
+		t.Fatalf("instalaciones = %d, quería 3", instalaciones.Load())
+	}
+}
