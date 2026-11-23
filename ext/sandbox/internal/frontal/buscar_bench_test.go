@@ -97,3 +97,39 @@ func crearBench(b *testing.B, srv *httptest.Server) string {
 	}
 	return sb.ID
 }
+
+// D-01: resolver un id pide esa máquina al host y no lista el host; y lo que
+// vuelve se sigue comprobando: una máquina que no es sandbox, aunque lleve la
+// etiqueta del inquilino, da el mismo 404 que una que no existe.
+func TestBuscarPorIDSinListarElHost(t *testing.T) {
+	f := nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	sb := crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
+	exec := func(tok, id string) *http.Response {
+		return pide(t, srv, tok, "POST", "/v1/sandboxes/"+id+"/exec?wait=1", api.ExecRequest{Cmd: []string{"true"}})
+	}
+	f.mu.Lock()
+	antes := f.sandboxesLlamadas
+	f.mu.Unlock()
+	resp := exec(tokenAlice, sb.ID)
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	f.mu.Lock()
+	listados := f.sandboxesLlamadas - antes
+	f.mu.Unlock()
+	if listados != 0 {
+		t.Fatalf("exec listed the host %d times", listados)
+	}
+
+	esperaCodigo(t, exec(tokenBob, sb.ID), 404)
+	f.mu.Lock()
+	ref := sb.ID[len("a/"):]
+	otra := *f.maquinas[ref]
+	otra.ID = "0123456789abcdef"
+	otra.Labels = api.MergeLabels(nil, f.maquinas[ref].Labels)
+	otra.Labels[api.LabelKind] = "service"
+	f.maquinas[otra.ID] = &otra
+	f.mu.Unlock()
+	esperaCodigo(t, exec(tokenAlice, "a/"+otra.ID), 404)
+	esperaCodigo(t, exec(tokenAlice, "a/fedcba9876543210"), 404)
+}
