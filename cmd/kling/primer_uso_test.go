@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/internal/upgrade"
 )
 
@@ -220,7 +223,7 @@ func TestStartMacDaemonSinAgenteFallaSiNoHayQuienConfirme(t *testing.T) {
 	old := confirmarAgente
 	confirmarAgente = func(agenteDaemon) bool { return false }
 	t.Cleanup(func() { confirmarAgente = old })
-	err := startMacDaemon(a, "/tmp/kling-no-such.sock", t.TempDir())
+	err := startMacDaemon(io.Discard, a, "/tmp/kling-no-such.sock", t.TempDir())
 	if err == nil {
 		t.Fatal("kling up without a daemon and without an agent must fail, not say 'Next step'")
 	}
@@ -239,7 +242,7 @@ func TestStartMacDaemonInstalaElAgenteSiConfirman(t *testing.T) {
 	lanzarctl = func(args ...string) ([]byte, error) { cmds = append(cmds, strings.Join(args, " ")); return nil, nil }
 	t.Cleanup(func() { confirmarAgente, lanzarctl, esperaDaemonMac = oldC, oldL, oldE })
 	// launchctl "funciona" pero el socket nunca contesta: error, no éxito.
-	err := startMacDaemon(a, "/tmp/kling-no-such.sock", dir)
+	err := startMacDaemon(io.Discard, a, "/tmp/kling-no-such.sock", dir)
 	if _, serr := os.Stat(a.plist); serr != nil {
 		t.Fatalf("the agent was not written: %v", serr)
 	}
@@ -432,5 +435,130 @@ func TestImagenesMacIncluyeElAgenteDeInvitado(t *testing.T) {
 		if !strings.Contains(strings.Join(vistos, "\n"), want) {
 			t.Fatalf("missing %q in %v", want, vistos)
 		}
+	}
+}
+
+// ── revisión de primer uso (R20-R28) ─────────────────────────────────────────
+
+// R23: `kling try` que arranca el daemon no escribe nada propio en stdout: es
+// de lo que se capture con out=$(kling try -- cmd) o -json.
+func TestTryArrancandoNoEnsuciaStdout(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("KLING_LAUNCH_AGENT_PLIST", filepath.Join(dir, "x.plist"))
+	t.Setenv("KLING_LAUNCH_AGENT_LABEL", "dev.kindling.revtest")
+	t.Setenv("KLING_ROOT", filepath.Join(dir, "root"))
+	t.Setenv("HOME", dir)
+	oldC, oldL, oldE := confirmarAgente, lanzarctl, esperaDaemonMac
+	esperaDaemonMac = 100 * time.Millisecond
+	confirmarAgente = func(agenteDaemon) bool { return true }
+	lanzarctl = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { confirmarAgente, lanzarctl, esperaDaemonMac = oldC, oldL, oldE })
+	if runtime.GOOS != "darwin" {
+		t.Skip("el agente de launchd solo existe en macOS")
+	}
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+	_ = arrancarDaemonLocal(context.Background(), transport.DefaultSocketPath())
+	w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	if len(b) != 0 {
+		t.Errorf("kling try wrote %d bytes of its own to stdout: %q", len(b), b)
+	}
+}
+
+// R24: varios `kling up` a la vez sobre la misma raíz no se pisan el temporal.
+func TestPlantillaOverlayVariasAlaVez(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		root := t.TempDir()
+		var wg sync.WaitGroup
+		errs := make([]error, 4)
+		for j := range errs {
+			wg.Add(1)
+			go func() { defer wg.Done(); errs[j] = escribirPlantillaOverlay(root, 64) }()
+		}
+		wg.Wait()
+		for _, e := range errs {
+			if e != nil {
+				t.Errorf("round %d: %v", i, e)
+			}
+		}
+		if ents, _ := os.ReadDir(filepath.Join(root, "images")); len(ents) != 1 {
+			t.Errorf("round %d: left %d files in images/, want just the template", i, len(ents))
+		}
+	}
+}
+
+// R22: la unidad de systemd la ejecuta root: el binario y cada directorio por
+// encima tienen que ser de root y no escribibles por otros.
+func TestUnidadSystemdRechazaBinarioEscribible(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "kling")
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := comprobarBinarioDeRoot(exe)
+	if err == nil {
+		t.Fatal("a binary in a world-writable directory must be refused")
+	}
+	if h := hintFor(err); !strings.Contains(h, "/usr/local/bin/kling") {
+		t.Errorf("the hint should say where to copy it: %q", h)
+	}
+	if runtime.GOOS != "windows" {
+		if err := comprobarBinarioDeRoot("/bin/sh"); err != nil {
+			t.Errorf("a system binary must pass: %v", err)
+		}
+	}
+}
+
+func TestTextoUnidadCitaLaRuta(t *testing.T) {
+	if got := textoUnidad("/opt/with space/kling"); !strings.Contains(got, `ExecStart="/opt/with space/kling" daemon`) {
+		t.Errorf("ExecStart must quote the path:\n%s", got)
+	}
+}
+
+// R25: try solo arranca el agente si el destino es el socket por defecto.
+func TestDestinoEsElLocal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	def := transport.DefaultSocketPath()
+	for _, ok := range []string{"", def, "unix://" + def} {
+		if !destinoEsElLocal(ok) {
+			t.Errorf("%q is the local daemon", ok)
+		}
+	}
+	if destinoEsElLocal("/tmp/otra-raiz/kling.sock") || destinoEsElLocal("unix:///tmp/otra-raiz/kling.sock") {
+		t.Error("a socket under another root is not the local daemon")
+	}
+}
+
+// R27: un plist que solo difiere en claves conocidas se migra; otro cambio no.
+func TestEscribirPlistMigraClavesConocidas(t *testing.T) {
+	dir := t.TempDir()
+	a := agenteDaemon{label: "dev.kindling.test", plist: filepath.Join(dir, "x.plist"), log: filepath.Join(dir, "x.log")}
+	nuevo := plistDaemon(a, "/usr/local/bin/kling", nil)
+	viejo := strings.Replace(nuevo, "<integer>30</integer>", "<integer>10</integer>", 1)
+	viejo = strings.Replace(viejo, "<key>ProcessType</key>\n  <string>Adaptive</string>\n", "", 1)
+	if viejo == nuevo {
+		t.Fatal("the test did not alter the plist")
+	}
+	if err := os.WriteFile(a.plist, []byte(viejo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := escribirPlist(a, nuevo); err != nil || !ok {
+		t.Fatalf("known keys must migrate: %v %v", ok, err)
+	}
+	if b, _ := os.ReadFile(a.plist); string(b) != nuevo {
+		t.Error("not migrated")
+	}
+	ajustado := strings.Replace(nuevo, "<true/>", "<false/>", 1)
+	if err := os.WriteFile(a.plist, []byte(ajustado), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := escribirPlist(a, nuevo); !errors.Is(err, errPlistDistinto) {
+		t.Fatalf("a hand-edited plist must be left alone: %v", err)
 	}
 }

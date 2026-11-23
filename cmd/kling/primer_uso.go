@@ -15,9 +15,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/internal/upgrade"
@@ -62,14 +62,33 @@ func asegurarDaemon(ctx context.Context, c *api.Client, endpoint string) error {
 	return arrancarDaemonTry(ctx, endpoint)
 }
 
+// destinoEsElLocal dice si endpoint es el socket por defecto del daemon de
+// esta máquina (el que arranca el agente de launchd con su raíz): ese y no otro
+// puede arrancar try. Con -H o KLING_HOST a un socket de otra raíz, arrancar el
+// agente real levantaría un daemon distinto del que se pidió.
+func destinoEsElLocal(endpoint string) bool {
+	p := strings.TrimPrefix(endpoint, "unix://")
+	if p == "" {
+		return true
+	}
+	return filepath.Clean(p) == filepath.Clean(transport.DefaultSocketPath())
+}
+
 // arrancarDaemonLocal arranca el daemon de esta máquina. En Mac, por el
 // agente de launchd (instalándolo si quien está delante lo confirma). En
-// Linux hace falta root: se dice la orden.
+// Linux hace falta root: se dice la orden. Lo que dice va a stderr: stdout es
+// del comando de try.
 func arrancarDaemonLocal(ctx context.Context, endpoint string) error {
 	if runtime.GOOS != "darwin" {
 		return &errWithHint{
 			err:  errors.New("the daemon is not running"),
-			hint: "sudo kling up   (installs and starts the systemd unit)",
+			hint: "kling up -install, as root, installs and starts the systemd unit (the binary must be root-owned: " + dondeCopiar + ")",
+		}
+	}
+	if !destinoEsElLocal(endpoint) {
+		return &errWithHint{
+			err:  fmt.Errorf("no daemon answers on %s, and it is not this machine's default socket", endpoint),
+			hint: "start the daemon that listens there (kling daemon -root <its root>), or drop -H / KLING_HOST to use the local one",
 		}
 	}
 	a, err := agenteDaemonMac()
@@ -77,7 +96,7 @@ func arrancarDaemonLocal(ctx context.Context, endpoint string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "kling: the daemon is not running; starting it")
-	return startMacDaemon(a, endpoint, raizLocal())
+	return startMacDaemon(os.Stderr, a, endpoint, raizLocal())
 }
 
 // bajarImagenesLocal baja de la release de este kling el kernel y min.
@@ -85,7 +104,15 @@ func bajarImagenesLocal(ctx context.Context, endpoint string) error {
 	if esRemoto(endpoint) {
 		return errors.New("the daemon is remote: copy the image from a host that has it")
 	}
-	return bajarImagenesMac(ctx, &upgrade.Fuente{VersionPropia: Version}, "v"+strings.TrimPrefix(Version, "v"), raizLocal(), runtime.GOARCH, os.Stderr)
+	// La imagen va a la raíz con la que corre el daemon que contesta, no a la
+	// por defecto: con otra raíz (KLING_ROOT del daemon) no la vería.
+	root := raizLocal()
+	ictx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if info, err := api.NewClient(endpoint).Info(ictx); err == nil && info.Root != "" {
+		root = info.Root
+	}
+	return bajarImagenesMac(ctx, &upgrade.Fuente{VersionPropia: Version}, "v"+strings.TrimPrefix(Version, "v"), root, runtime.GOARCH, os.Stderr)
 }
 
 // elegirImagenTry devuelve la imagen con la que try crea el sandbox cuando no
@@ -157,12 +184,13 @@ func escribirPlantillaOverlay(root string, mib int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := dst + ".tmp"
-	_ = os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	// Un temporal propio de cada llamada: con uno fijo, dos `kling up` a la vez
+	// se pisaban (ENOENT al renombrar, o un fichero a medias publicado).
+	f, err := os.CreateTemp(dir, ".overlay-template.ext4.tmp-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	defer os.Remove(tmp)
 	_, err = ext4.Write(f, ext4.NewDir(0o755, 0, 0, time.Now()), nil, ext4.Options{
 		LostFound:  true,
@@ -174,6 +202,9 @@ func escribirPlantillaOverlay(root string, mib int) error {
 		err = f.Truncate(int64(mib) << 20)
 	}
 	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
@@ -182,7 +213,15 @@ func escribirPlantillaOverlay(root string, mib int) error {
 	if err != nil {
 		return err
 	}
-	return durable.Renombrar(tmp, dst)
+	// Link y no Rename: la primera que llega gana y la plantilla publicada no
+	// cambia nunca; las demás dan por buena la que hay.
+	if err := os.Link(tmp, dst); err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // verificarSumas es `kling up -verify-sums`: lo que install.sh usa para
@@ -224,6 +263,16 @@ func verificarSumas(sumas, firma, etiqueta, claves string) error {
 	return nil
 }
 
+// citarExec entrecomilla la ruta del binario para ExecStart si lleva algo que
+// systemd interpretaría (espacios, comillas, %, $, \\).
+func citarExec(exe string) string {
+	if !strings.ContainsAny(exe, " \t\"'\\$%;") {
+		return exe
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`, `$`, `$$`)
+	return `"` + r.Replace(exe) + `"`
+}
+
 // textoUnidad es la unidad systemd del daemon con kling en exe. Son las mismas
 // líneas que packaging/kling.service (que make deploy instala), sin sus
 // comentarios; un test las compara.
@@ -237,7 +286,7 @@ ConditionPathExists=/dev/kvm
 [Service]
 Type=simple
 EnvironmentFile=-/etc/default/kling
-ExecStart=` + exe + ` daemon
+ExecStart=` + citarExec(exe) + ` daemon
 Restart=on-failure
 RestartSec=2
 KillMode=process
@@ -263,6 +312,9 @@ func instalarUnidadSystemd() error {
 	if err != nil {
 		return err
 	}
+	if err := comprobarBinarioDeRoot(exe); err != nil {
+		return err
+	}
 	body := textoUnidad(exe)
 	if old, err := os.ReadFile(rutaUnidad); err == nil {
 		if string(old) == body {
@@ -272,7 +324,7 @@ func instalarUnidadSystemd() error {
 		fmt.Printf("unit:        %s already exists and differs: leaving it as it is\n", rutaUnidad)
 		return nil
 	}
-	if err := os.WriteFile(rutaUnidad, []byte(body), 0o644); err != nil {
+	if err := escribirAtomico(rutaUnidad, []byte(body), 0o644); err != nil {
 		return err
 	}
 	fmt.Printf("unit:        "+uiMarks().ok+" wrote %s\n", rutaUnidad)
@@ -280,4 +332,74 @@ func instalarUnidadSystemd() error {
 		return fmt.Errorf("systemctl daemon-reload: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// dondeCopiar es la orden que deja el binario donde root puede fiarse de él.
+const dondeCopiar = "sudo install -m 755 <path to kling> /usr/local/bin/kling && sudo /usr/local/bin/kling up -install"
+
+// comprobarBinarioDeRoot es lo que hay que cumplir para que una unidad de
+// systemd ejecute exe como root: exe y cada directorio por encima son de root y
+// no los escribe el grupo ni otros (salvo un directorio con bit pegajoso por
+// encima, como /tmp, que no deja renombrar ni borrar lo ajeno). Con el kling de
+// ~/.local/bin el usuario reescribiría el binario y sería root en el siguiente
+// arranque. Como upgrade.bloquear con el directorio de estado.
+func comprobarBinarioDeRoot(exe string) error {
+	real, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return err
+	}
+	if real, err = filepath.Abs(real); err != nil {
+		return err
+	}
+	rechazo := func(motivo string) error {
+		return &errWithHint{
+			err:  fmt.Errorf("refusing to run %s as root from the systemd unit: %s", real, motivo),
+			hint: dondeCopiar,
+		}
+	}
+	for d := real; ; d = filepath.Dir(d) {
+		fi, err := os.Stat(d)
+		if err != nil {
+			return err
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			return rechazo(d + ": cannot read its owner")
+		}
+		if st.Uid != 0 {
+			return rechazo(fmt.Sprintf("%s is owned by uid %d, not root", d, st.Uid))
+		}
+		if fi.Mode().Perm()&0o022 != 0 && (d == real || fi.Mode()&os.ModeSticky == 0) {
+			return rechazo(fmt.Sprintf("%s is writable by group or others (%v)", d, fi.Mode().Perm()))
+		}
+		if p := filepath.Dir(d); p == d {
+			return nil
+		}
+	}
+}
+
+// escribirAtomico escribe datos en path vía un temporal del mismo directorio y
+// un rename: quien lo lea ve el fichero entero o el que había.
+func escribirAtomico(path string, datos []byte, modo os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(datos); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(modo); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

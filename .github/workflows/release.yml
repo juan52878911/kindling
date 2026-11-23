@@ -525,6 +525,32 @@ jobs:
           go run ./internal/upgrade/firmar verify -tag "$VERSION" -in release/SHA256SUMS
           cat release/SHA256SUMS.minisig
 
+      # Segunda firma, con ssh-keygen: install.sh la comprueba sin minisign y,
+      # a diferencia de la comprobación con el kling bajado, no depende del
+      # binario que se instala. Lo firmado es «tag:<versión>» y el SHA256SUMS
+      # (namespace kling-release). Sin el secreto no se publica el .sshsig y
+      # se avisa; la clave pública va en KLING_RELEASE_SSH_SIGNERS de install.sh.
+      - name: firmar SHA256SUMS con ssh-keygen
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          KLING_RELEASE_SSH_KEY: ${{ secrets.KLING_RELEASE_SSH_KEY }}
+        run: |
+          set -eu
+          if [ -z "$KLING_RELEASE_SSH_KEY" ]; then
+            echo "::warning::KLING_RELEASE_SSH_KEY no está en el environment release: $VERSION sale sin SHA256SUMS.sshsig (install.sh sin minisign lo comprobará con el kling bajado)"
+            exit 0
+          fi
+          t="$(mktemp -d)"
+          trap 'rm -rf "$t"' EXIT
+          umask 077
+          printf '%s\n' "$KLING_RELEASE_SSH_KEY" > "$t/key"
+          { printf 'tag:%s\n' "$VERSION"; cat release/SHA256SUMS; } > "$t/msg"
+          ssh-keygen -Y sign -q -f "$t/key" -n kling-release "$t/msg"
+          mv "$t/msg.sig" release/SHA256SUMS.sshsig
+          printf 'kling-release %s\n' "$(ssh-keygen -y -f "$t/key" | cut -d' ' -f1-2)" > "$t/allowed"
+          ssh-keygen -Y verify -f "$t/allowed" -I kling-release -n kling-release \
+            -s release/SHA256SUMS.sshsig < "$t/msg"
+
       # Procedencia SLSA de cada asset (firma, fórmula y SHA256SUMS incluidos)
       # con el OIDC del job: se comprueba con `gh attestation verify`.
       - name: atestación de procedencia
@@ -590,7 +616,8 @@ jobs:
           # Lo que tiene que haber: el contrato (want.txt) y lo que este job
           # le añade (SHA256SUMS, la fórmula y, si se firmó, la firma).
           { cat want.txt; echo SHA256SUMS; echo kling.rb
-            if [ -f release/SHA256SUMS.minisig ]; then echo SHA256SUMS.minisig; fi; } | sort > final.txt
+            if [ -f release/SHA256SUMS.minisig ]; then echo SHA256SUMS.minisig; fi
+            if [ -f release/SHA256SUMS.sshsig ]; then echo SHA256SUMS.sshsig; fi; } | sort > final.txt
           (cd release && ls -1) | sort > local.txt
           diff -u final.txt local.txt || { echo "::error::release/ is not the expected list (- missing, + extra)"; exit 1; }
           # Y lo que GitHub dice tener, fichero a fichero: nombre, tamaño y

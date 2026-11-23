@@ -14,6 +14,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -136,17 +138,44 @@ func plistDaemon(a agenteDaemon, exe string, env map[string]string) string {
 	return b.String()
 }
 
+// frenoAgente es el ThrottleInterval del plist: lo que launchd espera antes de
+// relanzar un daemon que acaba de caer. La espera de try/up lo suma cuando el
+// agente ya estaba cargado.
+const frenoAgente = 30 * time.Second
+
+// clavesMigrables son las claves del plist cuyo valor cambió entre versiones de
+// kling: un plist instalado que solo difiere en ellas (o en los comentarios) es
+// de kling y se reemplaza; cualquier otra diferencia es de quien lo ajustó.
+var (
+	reComentarioPlist = regexp.MustCompile(`(?s)<!--.*?-->`)
+	reClaveMigrable   = regexp.MustCompile(`<key>(ThrottleInterval|ProcessType|ExitTimeOut)</key>\s*<(integer|string)>[^<]*</(integer|string)>`)
+)
+
+func plistSinMigrables(s string) string {
+	s = reComentarioPlist.ReplaceAllString(s, "")
+	s = reClaveMigrable.ReplaceAllString(s, "")
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // errPlistDistinto es que ya hay un plist con otro contenido.
 var errPlistDistinto = errors.New("launchd agent already exists with different content")
 
 // escribirPlist deja body en a.plist. Igual que el que hay: nada (instalado
-// = false). Distinto: errPlistDistinto, sin tocarlo.
+// = false). Distinto solo en claves migrables: se reemplaza (true). Distinto
+// en otra cosa: errPlistDistinto, sin tocarlo.
 func escribirPlist(a agenteDaemon, body string) (instalado bool, err error) {
 	if old, err := os.ReadFile(a.plist); err == nil {
 		if string(old) == body {
 			return false, nil
 		}
-		return false, fmt.Errorf("%w: %s", errPlistDistinto, a.plist)
+		if plistSinMigrables(string(old)) != plistSinMigrables(body) {
+			return false, fmt.Errorf("%w: %s", errPlistDistinto, a.plist)
+		}
+		// Solo cambian claves conocidas: se migra, atómicamente.
+		if err := escribirAtomico(a.plist, []byte(body), 0o644); err != nil {
+			return false, err
+		}
+		return true, nil
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}
@@ -183,26 +212,29 @@ func escribirPlist(a agenteDaemon, body string) (instalado bool, err error) {
 }
 
 // instalarAgente escribe el plist del daemon (exe daemon) para root.
-func instalarAgente(a agenteDaemon, root string) error {
+func instalarAgente(w io.Writer, a agenteDaemon, root string) error {
 	exe, err := ejecutableReal()
 	if err != nil {
 		return err
 	}
+	existia := fileExists(a.plist)
 	nuevo, err := escribirPlist(a, plistDaemon(a, exe, entornoDelAgente(root)))
 	switch {
 	case errors.Is(err, errPlistDistinto):
-		fmt.Printf("agent:       "+uiMarks().fail+" %s already exists and differs from what -install would write.\n", a.plist)
-		fmt.Println("  To replace it:")
-		fmt.Printf("    launchctl bootout %s/%s\n", a.dominio(), a.label)
-		fmt.Printf("    rm %q\n", a.plist)
-		fmt.Println("    kling up -install")
+		fmt.Fprintf(w, "agent:       "+uiMarks().fail+" %s already exists and differs from what -install would write.\n", a.plist)
+		fmt.Fprintln(w, "  To replace it:")
+		fmt.Fprintf(w, "    launchctl bootout %s/%s\n", a.dominio(), a.label)
+		fmt.Fprintf(w, "    rm %q\n", a.plist)
+		fmt.Fprintln(w, "    kling up -install")
 		return err
 	case err != nil:
 		return fmt.Errorf("writing %s: %w", a.plist, err)
+	case nuevo && existia:
+		fmt.Fprintf(w, "agent:       "+uiMarks().ok+" updated %s to this version's settings; they apply the next time the agent is loaded\n", a.plist)
 	case nuevo:
-		fmt.Printf("agent:       "+uiMarks().ok+" wrote %s (log: %s)\n", a.plist, a.log)
+		fmt.Fprintf(w, "agent:       "+uiMarks().ok+" wrote %s (log: %s)\n", a.plist, a.log)
 	default:
-		fmt.Printf("agent:       "+uiMarks().ok+" %s already installed\n", a.plist)
+		fmt.Fprintf(w, "agent:       "+uiMarks().ok+" %s already installed\n", a.plist)
 	}
 	return nil
 }

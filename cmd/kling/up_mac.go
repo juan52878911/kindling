@@ -297,7 +297,7 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 		return err
 	}
 	if install {
-		if err := instalarAgente(a, root); err != nil {
+		if err := instalarAgente(os.Stdout, a, root); err != nil {
 			return err
 		}
 	}
@@ -310,7 +310,7 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 			fmt.Println("             not from the launchd agent: it starts the daemon at the next login, or stop")
 			fmt.Println("             this one and run `kling up` to start it from the agent now")
 		}
-	} else if err := startMacDaemon(a, endpoint, root); err != nil {
+	} else if err := startMacDaemon(os.Stdout, a, endpoint, root); err != nil {
 		return err
 	}
 	if bajadas {
@@ -343,7 +343,7 @@ var esperaDaemonMac = 10 * time.Second
 // (confirmarAgente); si no, error con la orden. Y si tras arrancarlo no
 // contesta, también error: `kling up` no dice «Next step» sobre un daemon
 // parado. La orden de launchctl se imprime antes de lanzarla.
-func startMacDaemon(a agenteDaemon, endpoint, root string) error {
+func startMacDaemon(w io.Writer, a agenteDaemon, endpoint, root string) error {
 	if !fileExists(a.plist) {
 		if !confirmarAgente(a) {
 			return &errWithHint{
@@ -351,27 +351,38 @@ func startMacDaemon(a agenteDaemon, endpoint, root string) error {
 				hint: "kling up -install   (starts it now and at every login; or, in another terminal: kling daemon)",
 			}
 		}
-		if err := instalarAgente(a, root); err != nil {
+		if err := instalarAgente(w, a, root); err != nil {
 			return err
 		}
 	}
-	if err := rotarLog(a.log, maxLogAgente); err != nil {
-		fmt.Printf("agent:       could not rotate %s: %v\n", a.log, err)
+	// El registro solo se aparta con el agente descargado: launchd abre la
+	// salida al lanzar el daemon, y uno que sigue vivo seguiría escribiendo en
+	// el fichero ya renombrado.
+	if fi, err := os.Stat(a.log); err == nil && fi.Size() > maxLogAgente {
+		if out, err := lanzarctl("launchctl", "bootout", a.dominio()+"/"+a.label); err != nil {
+			fmt.Fprintf(w, "agent:       not rotating %s: launchctl bootout: %s\n", a.log, strings.TrimSpace(string(out)))
+		} else if err := rotarLog(a.log, maxLogAgente); err != nil {
+			fmt.Fprintf(w, "agent:       could not rotate %s: %v\n", a.log, err)
+		}
 	}
+	espera := esperaDaemonMac
 	argv := []string{"launchctl", "bootstrap", a.dominio(), a.plist}
-	fmt.Printf("daemon:      $ %s\n", strings.Join(argv, " "))
+	fmt.Fprintf(w, "daemon:      $ %s\n", strings.Join(argv, " "))
 	if out, err := lanzarctl(argv...); err != nil {
 		// Ya cargado: bootstrap falla, pero kickstart lo arranca.
 		argv = []string{"launchctl", "kickstart", a.dominio() + "/" + a.label}
-		fmt.Printf("             (%s) $ %s\n", strings.TrimSpace(string(out)), strings.Join(argv, " "))
+		fmt.Fprintf(w, "             (%s) $ %s\n", strings.TrimSpace(string(out)), strings.Join(argv, " "))
 		if out, err := lanzarctl(argv...); err != nil {
 			return fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
 		}
+		// Cargado y sin contestar: puede estar frenado por ThrottleInterval
+		// tras una caída; la espera cubre el freno.
+		espera += frenoAgente
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), esperaDaemonMac)
+	ctx, cancel := context.WithTimeout(context.Background(), espera)
 	defer cancel()
 	if info := waitDaemonEn(ctx, endpoint); info != nil {
-		fmt.Printf("daemon:      "+uiMarks().ok+" responding (%s, backend %s)\n", info.Version, info.Backend)
+		fmt.Fprintf(w, "daemon:      "+uiMarks().ok+" responding (%s, backend %s)\n", info.Version, info.Backend)
 		return nil
 	}
 	return &errWithHint{
