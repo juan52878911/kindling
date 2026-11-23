@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -201,11 +202,21 @@ func TestBackendHTTPValida(t *testing.T) {
 	if len(malas) < 12 {
 		t.Fatal("the plan asks for at least 12 bad configurations")
 	}
+	// "/k" es un fichero de credencial válido: así los casos de auth fallan por
+	// lo que dicen y no porque falte el fichero.
+	clave := filepath.Join(t.TempDir(), "k")
+	if err := os.WriteFile(clave, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conClave := func(m string) string { return strings.ReplaceAll(m, `"/k"`, strconv.Quote(clave)) }
 	for nombre, m := range malas {
-		src := `{"models":{"m":` + m + `}` + ten + `}`
-		if _, err := ParseConfig(strings.NewReader(src)); err == nil {
+		src := `{"models":{"m":` + conClave(m) + `}` + ten + `}`
+		_, err := ParseConfig(strings.NewReader(src))
+		if err == nil {
 			t.Errorf("%s: accepted %s", nombre, m)
+			continue
 		}
+		t.Logf("%s: %v", nombre, err)
 	}
 	// Y lo que sí vale, para que la tabla no pase por rechazarlo todo.
 	buenas := []string{
@@ -217,9 +228,10 @@ func TestBackendHTTPValida(t *testing.T) {
 		`{"kind":"von","snapshot":"s","idle":"freeze","max_inflight":2,"tenants":["acme"],"limits":{"max_tokens":64}}`,
 		`{"kind":"embed","snapshot":"s","idle":"pause","health":{"path":"/ready"}}`,
 		`{"kind":"chispa","backend":"microvm","snapshot":"s","idle":"remove","max_inflight":8}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","auth":{"header":"X-Api-Key","file":"/k"}}`,
 	}
 	for _, m := range buenas {
-		src := `{"models":{"m":` + m + `}` + ten + `}`
+		src := `{"models":{"m":` + conClave(m) + `}` + ten + `}`
 		if _, err := ParseConfig(strings.NewReader(src)); err != nil {
 			t.Errorf("rejected %s: %v", m, err)
 		}
