@@ -525,15 +525,6 @@ func (s *Server) putBootSource(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Con un snapshot cargado y sin reanudar, el daemon reapunta el kernel
-	// (putSnapshotLoad): solo la ruta; los argumentos son los del volcado,
-	// que la memoria del invitado ya lleva.
-	if s.st == stPendingLoad && s.spec.BootSource != nil {
-		s.spec.BootSource.KernelImagePath = b.KernelImagePath
-		s.spec.BootSource.DelVolcado = false
-		noContent(w)
-		return
-	}
 	if err := s.preBoot(); err != nil {
 		fault(w, err)
 		return
@@ -1070,10 +1061,6 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("a snapshot can only be loaded into a fresh, unconfigured kling-vz"))
 		return
 	}
-	// Las rutas de disco y de kernel del volcado no se abren: el daemon las
-	// reapunta (PATCH /drives, PUT /boot-source) y create() falla si queda
-	// alguna (GET /kling/info: snapshot_repoint).
-	loaded.MarcarVolcado()
 	s.spec = loaded
 	s.statePath = statePath
 	s.st = stPendingLoad
@@ -1102,9 +1089,6 @@ var credentialKinds = credapi.Kinds
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": s.backend(), "version": s.d.Version}
-	// Un snapshot cargado no abre sus rutas de disco ni de kernel: el daemon
-	// debe reapuntarlas todas antes de reanudar.
-	info["snapshot_repoint"] = true
 	if s.d.Credentials != nil {
 		kinds := credentialKinds
 		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.
@@ -1558,9 +1542,6 @@ func (s *Server) ensureNet() error {
 func (s *Server) create() error {
 	if err := s.spec.Validate(); err != nil {
 		return err
-	}
-	if rs := s.spec.RutasDelVolcado(); len(rs) > 0 {
-		return fmt.Errorf("the snapshot's paths were not repointed by the daemon (%s): not opening them", strings.Join(rs, ", "))
 	}
 	if err := s.ensureNet(); err != nil {
 		return err

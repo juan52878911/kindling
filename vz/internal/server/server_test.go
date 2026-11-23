@@ -273,16 +273,6 @@ func (r *rig) mustFail(method, path, body, contains string) {
 	}
 }
 
-// reapuntar hace lo que el daemon tras cargar un snapshot sin reanudar: lleva
-// el kernel y los discos dados a rutas suyas (sin ello create() falla).
-func (r *rig) reapuntar(ids ...string) {
-	r.t.Helper()
-	r.must("PUT", "/boot-source", `{"kernel_image_path":"/m/1/vmlinux","boot_args":"x"}`)
-	for _, id := range ids {
-		r.must("PATCH", "/drives/"+id, `{"drive_id":"`+id+`","path_on_host":"/m/1/`+id+`.ext4"}`)
-	}
-}
-
 // configure repite la secuencia de boot() del núcleo (manager.go).
 func (r *rig) configure(dir string) {
 	r.must("PUT", "/boot-source", `{"kernel_image_path":"/k/vmlinux","boot_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off"}`)
@@ -503,7 +493,7 @@ func TestDeferredRestore(t *testing.T) {
 	if !strings.Contains(again, fw.Forwards["8080"]) {
 		t.Fatalf("repeating a port must return the same address: %s vs %s", again, out)
 	}
-	r.reapuntar("rootfs", "overlay")
+	r.must("PATCH", "/drives/overlay", `{"drive_id":"overlay","path_on_host":"/m/1/overlay.ext4"}`)
 	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
 
 	vm, s, args := r.f.last()
@@ -529,9 +519,7 @@ func TestDeferredRestore(t *testing.T) {
 func TestLoadAndResume(t *testing.T) {
 	r := newRig(t)
 	snap, mem := writeSnapshot(t, t.TempDir())
-	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":false}`)
-	r.reapuntar("rootfs", "overlay")
-	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
+	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":true}`)
 	vm, _, _ := r.f.last()
 	if ops := vm.ops(); strings.Join(ops, "|") != "restore "+mem+"|resume" {
 		t.Fatalf("ops = %v", ops)
@@ -556,9 +544,7 @@ func TestFailedRestoreCanRetry(t *testing.T) {
 	r := newRig(t)
 	snap, mem := writeSnapshot(t, t.TempDir())
 	r.f.failNext = "restore " + mem
-	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`"},"resume_vm":false}`)
-	r.reapuntar("rootfs", "overlay")
-	r.mustFail("PATCH", "/vm", `{"state":"Resumed"}`, "restoring the machine state")
+	r.mustFail("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`"},"resume_vm":true}`, "restoring the machine state")
 	first, _, _ := r.f.last()
 	if ops := first.ops(); ops[len(ops)-1] != "stop" {
 		t.Fatalf("the failed VM must be stopped, ops %v", ops)
