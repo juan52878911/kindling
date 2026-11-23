@@ -2523,7 +2523,10 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			// Las aisladas de salvo SÍ valen: son de otras sesiones del mismo
 			// servicio, y congelar la más vieja es justo lo que hace sitio a
 			// una sesión nueva sin tocar a nadie activo.
-			if (svc == salvo && e.aislada == "") || e.inflight > 0 || descartadas[e.machineID] {
+			// Una reserva vigente es una sesión cuyo initialize va en camino
+			// (aún sin Begin): congelarla en ese hueco le daba un invitado
+			// pausado, como ya evitaba el segador (B-05).
+			if (svc == salvo && e.aislada == "") || e.inflight > 0 || descartadas[e.machineID] || e.reservasLocked() > 0 {
 				return
 			}
 			if mismo != (e.tenant == tenant) {
@@ -2562,43 +2565,28 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		if elegido == "" {
 			elegido, id = pick(false)
 		}
-		var victima *entry
-		if elegido != "" {
-			victima = g.entryByMachineLocked(elegido, id)
-			// Se saca del mapa (primaria o réplica, por machineID) ANTES de
-			// congelar: si alguien pide ese servicio mientras tanto, que lo
-			// reconstruya en vez de enrutar a una máquina que está a punto de
-			// dejar de existir.
-			g.removeEntryLocked(elegido, id)
-		}
-		g.mu.Unlock()
-
 		if elegido == "" {
+			g.mu.Unlock()
 			return "" // ya no queda ninguna candidata
 		}
-
-		// devolver repone la instancia. Se saco para que nadie enrutara a una
-		// maquina a punto de congelarse; si al final NO se congela, dejarla
-		// fuera es peor que no haberla tocado: el gateway cree que no existe,
-		// y el siguiente ensure la adopta desde List() cuando ya no toca.
-		devolver := func() {
-			if victima == nil {
-				return
-			}
-			g.mu.Lock()
-			g.reponerEntryLocked(elegido, victima)
-			g.mu.Unlock()
-		}
 		descartadas[id] = true
+		victima := g.entryByMachineLocked(elegido, id)
+		if victima == nil || g.adquiriendo[id] {
+			g.mu.Unlock()
+			continue
+		}
 
-		// El candado del servicio víctima, para no congelar debajo de un ensure
-		// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace
-		// List(), la ve todavía running (el freeze tarda ~2 s), la adopta como
-		// "ya en marcha" y espera 20 s a un invitado que se está pausando.
+		// Se aparta como en el segador (B-05): primero el candado de quien la
+		// despertaría y la marca en adquiriendo, y solo entonces se saca del
+		// mapa. Sacarla antes dejaba un hueco en que un ensure no la
+		// encontraba, creaba otra máquina y dejaba la original sin dueño; y
+		// sin la marca, un acquire la veía "running" en List(), la adoptaba y
+		// el freeze llegaba por debajo.
+		//
 		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
 		// de SU servicio, y un Lock aquí podría cruzarse con él.
 		var vlock *sync.Mutex
-		if victima != nil && victima.aislada != "" {
+		if victima.aislada != "" {
 			// La de una sesión aislada se despierta bajo SU candado, no el
 			// del servicio (ver isolatedSession).
 			vlock = g.probarAislada(victima.aislada)
@@ -2606,18 +2594,33 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			vlock = l
 		}
 		if vlock == nil {
-			devolver()
+			g.mu.Unlock()
 			continue // esa esta ocupada; se prueba otra
 		}
+		if g.adquiriendo == nil {
+			g.adquiriendo = map[string]bool{}
+		}
+		g.adquiriendo[id] = true
+		addr := victima.Addr(g.port())
+		g.removeEntryLocked(elegido, id)
+		g.mu.Unlock()
 
-		if g.OnSleep != nil && victima != nil {
-			g.OnSleep(elegido, victima.Addr(g.port()))
+		if g.OnSleep != nil {
+			g.OnSleep(elegido, addr)
 		}
 		err := freeze(id)
+		g.mu.Lock()
+		delete(g.adquiriendo, id)
+		// Si NO se congeló, dejarla fuera es peor que no haberla tocado: el
+		// gateway cree que no existe, y el siguiente ensure la adopta desde
+		// List() cuando ya no toca.
+		if err != nil {
+			g.reponerEntryLocked(elegido, victima)
+		}
+		g.mu.Unlock()
 		vlock.Unlock()
 		if err != nil {
 			log.Printf("could not freeze %s to make room: %v", elegido, err)
-			devolver()
 			continue
 		}
 		return elegido
