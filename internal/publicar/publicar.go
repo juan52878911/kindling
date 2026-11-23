@@ -106,7 +106,12 @@ type Publicador struct {
 	topeTCP, topeUDP int
 
 	guardando sync.Mutex
-	guardados sync.WaitGroup // guardados en segundo plano aún en curso
+	// Guardados en segundo plano aún en curso. Un contador con su cerrojo y no
+	// un WaitGroup: el barrido lanza guardados mientras alguien espera, y un
+	// Add desde cero a la vez que un Wait es un mal uso de WaitGroup.
+	guardadosMu sync.Mutex
+	guardadosN  int
+	guardadosC  *sync.Cond
 	// intocable: publish.json lo dejó un kling más nuevo (versionPublicar):
 	// no se escribe encima, o se perdería lo que este binario no conoce.
 	intocable bool
@@ -1112,15 +1117,38 @@ func (p *Publicador) ocioso(miembros []*api.Machine, pubs map[string]estadoPub, 
 // guardarFondo guarda sin bloquear a quien publica; Esperar aguarda a que
 // acaben los guardados en curso.
 func (p *Publicador) guardarFondo() {
-	p.guardados.Add(1)
+	p.guardadosMu.Lock()
+	p.guardadosN++
+	p.guardadosMu.Unlock()
 	go func() {
-		defer p.guardados.Done()
+		defer func() {
+			p.guardadosMu.Lock()
+			p.guardadosN--
+			if p.guardadosN == 0 {
+				p.condGuardados().Broadcast()
+			}
+			p.guardadosMu.Unlock()
+		}()
 		p.guardar()
 	}()
 }
 
+// condGuardados se crea al primer uso; se llama con guardadosMu tomado.
+func (p *Publicador) condGuardados() *sync.Cond {
+	if p.guardadosC == nil {
+		p.guardadosC = sync.NewCond(&p.guardadosMu)
+	}
+	return p.guardadosC
+}
+
 // Esperar vuelve cuando no queda ningún guardado en segundo plano.
-func (p *Publicador) Esperar() { p.guardados.Wait() }
+func (p *Publicador) Esperar() {
+	p.guardadosMu.Lock()
+	defer p.guardadosMu.Unlock()
+	for p.guardadosN > 0 {
+		p.condGuardados().Wait()
+	}
+}
 
 func (p *Publicador) guardar() {
 	if p.ruta == "" {
