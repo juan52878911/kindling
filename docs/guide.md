@@ -28,19 +28,16 @@ inside. See [SECURITY.md](../SECURITY.md) for the threat model, the barriers in 
 
 ## At a glance
 
-Every number below is measured, not estimated — the how and where is in the linked
-sections:
+The numbers below are measured, not estimated — the how and where is in the linked
+sections. Timings (boot, restore, thaw, concurrency) are not repeated here: the ones that
+still stand, with their hardware and method, are in [`benchmarks.md`](benchmarks.md).
 
 | | Measured |
 |---|---|
-| Thaw a frozen tool | **~30 ms** — imperceptible inside a tool call |
-| Ephemeral action, end to end | **19 ms** (2 ms of actual execution) |
-| Tool call, hot | **9 ms** |
 | RAM of a `frozen` machine | **0** — it is a file on disk, not a process |
 | Density | **142 microVMs in 3.9 GB** of host RAM |
 | 10 instances from one golden snapshot | **+68 MiB** total (12× denser than cold boots) |
 | Disk for a service, layered images | **1300 MiB → 433 MiB** for a 7-service fleet |
-| 20 concurrent calls, same service | p50 **4.66 s** (was 44 s before v0.4) |
 
 ## Table of contents
 
@@ -132,7 +129,7 @@ it is worth being clear about it before writing another line.
 flowchart TD
     A["Your agent<br/>(Claude Code, opencode, a local model…)"] -- "MCP / Streamable HTTP" --> G[gateway]
     G -- link --> E["external server<br/>(outside kindling)"]
-    G -- "restores (~30 ms) and proxies to :8080/mcp" --> V1["µVM service<br/>bridge → stdio"]
+    G -- "restores and proxies to :8080/mcp" --> V1["µVM service<br/>bridge → stdio"]
     G --> V2["µVM service<br/>native HTTP"]
     G --> V3["µVM ephemeral<br/>dies at the end"]
     D[daemon] -. "lifecycle · network · snapshots<br/>one network namespace each" .- V1
@@ -153,22 +150,13 @@ times out.
 
 ## Measured numbers
 
-Measured on Proxmox (Intel i7-8700T) with Firecracker v1.16.1 running **nested** inside a
-VM, kernel 6.1.177 and an 800 MB Ubuntu 24.04 rootfs:
+Boot, snapshot and restore timings depend on the host and have been re-measured since this
+guide's first figures, so they are not quoted here. The current ones, with the hardware and
+the script that reproduces each, are in [`docs/benchmarks.md`](benchmarks.md).
 
-| Operation | Time |
-|---|---|
-| Cold boot | **2,643 ms** |
-| Snapshot creation | 305 ms |
-| **Restore from snapshot** | **~30 ms** |
-
-Reproduce them with `scripts/40-bench-boot.sh` (or `scripts/bench-all.sh` for every bench
-in one run). Every number in this README, its hardware, and which ones are stale after
-the latest boot-latency work: [`docs/benchmarks.md`](benchmarks.md).
-
-**The conclusion that defines the architecture:** 2.6 s cold makes the one-microVM-per-request
+**The conclusion that defines the architecture:** a cold boot takes seconds, which makes the one-microVM-per-request
 model unworkable. The 125 ms Firecracker advertises assume a trimmed kernel and a minimal
-rootfs on bare metal. With snapshot/restore, 30 ms is imperceptible inside a tool call.
+rootfs on bare metal. With snapshot/restore, waking is imperceptible inside a tool call.
 
 Therefore: **every tool boots once, is frozen with the MCP server already listening, and
 the gateway restores it on demand.** The snapshot is not an optional optimization; it is
@@ -444,7 +432,7 @@ $ kling logs <ref> -tail 50        # serial console: the only window inside
 ```
 
 - **`-ttl`** freezes the machine by itself once that time passes. Freeze, not kill: it
-  stops costing CPU and RAM, but comes back in ~30 ms. It is what makes the model
+  stops costing CPU and RAM, but comes back in milliseconds. It is what makes the model
   serverless.
 - **`-cpu-pct`** bounds CPU usage with its own cgroup (50% of a core by default).
 - **Reconciliation at startup**: the daemon compares its saved state against the host's
@@ -541,8 +529,7 @@ interrupting what runs inside instead of the session. `kling exec` exits with th
 exit code, separates stdout from stderr, takes stdin with `-i` and kills the whole
 process group on `-timeout`. Prepare a template once
 (`kling run -allow-exec`, install what you need, `kling save`) and every sandbox
-created with `-from` starts in **~300 ms** with it already inside — five in parallel took
-0.57 s in the lab.
+created with `-from` starts with it already inside, restored from a snapshot (timings: [`benchmarks.md`](benchmarks.md)).
 
 `-ttl` is its lifetime and `-on-ttl` what happens when it runs out: `remove` (the default)
 destroys it; `freeze` turns the ttl into idle time, each exec renews it, and the next one
@@ -1165,7 +1152,7 @@ Firecracker dumps the entire memory when freezing, but most of it is zeroed page
 kindling punches them out with `fallocate --dig-holes`: the kernel returns zeros when
 reading a hole, which is exactly what was there, so the restore never notices.
 
-**256 MB → 81 MB, and `thaw` is still ~30 ms.**
+**256 MB → 81 MB, and `thaw` still takes milliseconds.**
 
 ### What drives that cost
 
@@ -1241,7 +1228,7 @@ Measured by instantiating one at a time and watching system RAM:
 |---|---|---|
 | Total RAM added | **+68 MiB** | +824 MiB |
 | Per machine | **6.8 MiB** | 82 MiB |
-| Time per machine | ~40 ms | ~2.6 s to userspace |
+| Time per machine | restore (milliseconds) | a full boot (seconds) |
 
 **12x the density.** The proof that pages are shared is in the gap between two numbers: the
 sum of RSS across the ten processes came to 258 MiB, but system RAM only rose by 68 MiB.
@@ -1294,8 +1281,8 @@ without a restart.
 Three measured levers, from the v0.3–v0.4 performance work:
 
 - **The warm child** (default, [see commit](#golden-snapshots)): the golden freezes with
-  the runtime already started. Wake-up drops from 4,350 ms to **175–202 ms**, and a 20-call
-  concurrent burst from 44 s to **4.66 s**.
+  the runtime already started. The wake-up and a concurrent burst of calls get much
+  cheaper (figures: [`benchmarks.md`](benchmarks.md)).
 - **The integrity verdict is remembered.** A golden is immutable once frozen; hashing its
   512 MiB overlay on every instantiation was 67% of the wake-up. It is verified once per
   daemon lifetime (and re-verified if size or mtime change).
@@ -1581,7 +1568,7 @@ whichever one you pick is detailed below.
                         │ 11 tools      │  doesn't run here
  ┌ host ────────────┐   └───────────────┘
  │ ssh://…2.60    − ├───┌ filesystem ───┐   ┌ fs-66e51d ────┐
- └──────────────────┘   │ 14 tools      ├───┤ 244f32b7      │  172.30.0.54 · thaw 30 ms
+ └──────────────────┘   │ 14 tools      ├───┤ 244f32b7      │  172.30.0.54 · thawed on demand
                         └───────────────┘   └───────────────┘
 ```
 

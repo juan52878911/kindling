@@ -29,19 +29,17 @@ todo — lo que NO está resuelto todavía.
 
 ## De un vistazo
 
-Cada número de abajo está medido, no estimado — el cómo y el dónde, en las secciones
-enlazadas:
+Los números de abajo están medidos, no estimados — el cómo y el dónde, en las secciones
+enlazadas. Los tiempos (arranque, restauración, descongelado, concurrencia) no se repiten
+aquí: los que siguen vigentes, con su hardware y su método, están en
+[`benchmarks.md`](benchmarks.md) (inglés).
 
 | | Medido |
 |---|---|
-| Descongelar una herramienta | **~30 ms** — imperceptible dentro de una llamada |
-| Acción efímera, de punta a punta | **19 ms** (2 ms de ejecución real) |
-| Llamada a herramienta, en caliente | **9 ms** |
 | RAM de una máquina `frozen` | **0** — es un fichero en disco, no un proceso |
 | Densidad | **142 microVMs en 3,9 GB** de RAM del host |
 | 10 instancias de un mismo dorado | **+68 MiB** en total (12× más denso que arrancar en frío) |
 | Disco por servicio, con imágenes por capas | **1300 MiB → 433 MiB** en un parque de 7 servicios |
-| 20 llamadas concurrentes, mismo servicio | p50 **4,66 s** (eran 44 s antes de v0.4) |
 
 ## Índice
 
@@ -134,7 +132,7 @@ más.
 flowchart TD
     A["Tu agente<br/>(Claude Code, opencode, un modelo local…)"] -- "MCP / Streamable HTTP" --> G[gateway]
     G -- link --> E["servidor externo<br/>(fuera de kindling)"]
-    G -- "restaura (~30 ms) y proxya a :8080/mcp" --> V1["µVM servicio<br/>puente → stdio"]
+    G -- "restaura y proxya a :8080/mcp" --> V1["µVM servicio<br/>puente → stdio"]
     G --> V2["µVM servicio<br/>HTTP nativo"]
     G --> V3["µVM efímera<br/>muere al terminar"]
     D[daemon] -. "ciclo de vida · red · snapshots<br/>un namespace de red cada una" .- V1
@@ -154,23 +152,14 @@ ejecutando el CLI en el propio host — por SSH la sonda no tiene ruta y agota e
 
 ## Números medidos
 
-Medidos en Proxmox (Intel i7-8700T) con Firecracker v1.16.1 corriendo **anidado** dentro
-de una VM, kernel 6.1.177 y un rootfs Ubuntu 24.04 de 800 MB:
-
-| Operación | Tiempo |
-|---|---|
-| Arranque en frío | **2.643 ms** |
-| Crear el snapshot | 305 ms |
-| **Restaurar desde snapshot** | **~30 ms** |
-
-Se reproducen con `scripts/40-bench-boot.sh` (o `scripts/bench-all.sh` para todos los
-benchmarks en una sola pasada). Cada cifra de este README, su hardware, y cuáles quedan
-obsoletas por las últimas mejoras de arranque: [`docs/benchmarks.md`](benchmarks.md)
+Los tiempos de arranque, snapshot y restauración dependen del host y se han vuelto a medir
+desde las primeras cifras de esta guía, así que no se citan aquí. Los vigentes, con su
+hardware y el script que reproduce cada uno, están en [`docs/benchmarks.md`](benchmarks.md)
 (inglés).
 
-**La conclusión que define la arquitectura:** 2,6 s en frío hacen inviable el modelo de
+**La conclusión que define la arquitectura:** un arranque en frío de segundos hace inviable el modelo de
 una-microVM-por-petición. Los 125 ms que anuncia Firecracker asumen un kernel recortado y
-un rootfs mínimo en metal desnudo. Con snapshot/restore, 30 ms son imperceptibles dentro
+un rootfs mínimo en metal desnudo. Con snapshot/restore, despertar es imperceptible dentro
 de una llamada a herramienta.
 
 Por tanto: **cada herramienta arranca una vez, se congela con el servidor MCP ya
@@ -466,7 +455,7 @@ $ kling logs <ref> -tail 50        # consola serie: la única ventana hacia dent
 ```
 
 - **`-ttl`** congela la máquina por sí sola pasado ese tiempo. Congela, no mata: deja de
-  costar CPU y RAM, pero vuelve en ~30 ms. Es lo que hace serverless el modelo.
+  costar CPU y RAM, pero vuelve en milisegundos. Es lo que hace serverless el modelo.
 - **`-cpu-pct`** acota el uso de CPU con su propio cgroup (50% de un core por defecto).
 - **Reconciliación al arrancar**: el daemon compara su estado guardado con la realidad
   del host, readopta las microVMs que siguen vivas y limpia namespaces y cgroups
@@ -574,8 +563,7 @@ interrumpiendo lo de dentro y no la sesión. `kling exec` termina con el código
 comando remoto, separa stdout de stderr, acepta stdin con `-i` y con `-timeout` mata al
 grupo de procesos entero. Prepara una plantilla una
 vez (`kling run -allow-exec`, instala lo que haga falta, `kling save`) y cada sandbox
-creado con `-from` arranca en **~300 ms** con todo dentro — cinco en paralelo tardaron
-0,57 s en el laboratorio.
+creado con `-from` arranca con todo dentro, restaurado de un snapshot (tiempos: [`benchmarks.md`](benchmarks.md), en inglés).
 
 `-ttl` es su vida y `-on-ttl` lo que pasa cuando se acaba: `remove` (por defecto) lo
 destruye; `freeze` convierte el ttl en tiempo de inactividad, cada exec lo renueva, y el
@@ -1215,7 +1203,7 @@ Firecracker vuelca la memoria entera al congelar, pero casi todo son páginas a 
 kindling las perfora con `fallocate --dig-holes`: el kernel devuelve ceros al leer un
 agujero, que es exactamente lo que había, así que el restore ni se entera.
 
-**256 MB → 81 MB, y el `thaw` sigue siendo ~30 ms.**
+**256 MB → 81 MB, y el `thaw` sigue tardando milisegundos.**
 
 ### Qué determina ese coste
 
@@ -1291,7 +1279,7 @@ Medido instanciando de una en una y mirando la RAM del sistema:
 |---|---|---|
 | RAM total añadida | **+68 MiB** | +824 MiB |
 | Por máquina | **6,8 MiB** | 82 MiB |
-| Tiempo por máquina | ~40 ms | ~2,6 s hasta userspace |
+| Tiempo por máquina | una restauración (milisegundos) | un arranque completo (segundos) |
 
 **12x de densidad.** La prueba de que las páginas se comparten está en el hueco entre dos
 números: la suma de RSS de los diez procesos daba 258 MiB, pero la RAM del sistema solo
@@ -1347,8 +1335,8 @@ máquina nueva por falta de memoria.
 Tres palancas medidas, del trabajo de rendimiento de v0.3–v0.4:
 
 - **El hijo caliente** (por defecto, [ver commit](#snapshots-dorados)): el dorado se
-  congela con el runtime ya arrancado. El despertar baja de 4.350 ms a **175–202 ms**, y
-  una ráfaga de 20 llamadas concurrentes de 44 s a **4,66 s**.
+  congela con el runtime ya arrancado. El despertar y una ráfaga de llamadas
+  concurrentes salen mucho más baratos (cifras: [`benchmarks.md`](benchmarks.md)).
 - **El veredicto de integridad se recuerda.** Un dorado es inmutable desde que se
   congela; hashear su overlay de 512 MiB en cada instanciación era el 67% del despertar.
   Se verifica una vez por vida del daemon (y se re-verifica si cambian tamaño o fecha).
@@ -1636,7 +1624,7 @@ que elijas se detalla debajo.
                         │ 11 tools      │  doesn't run here
  ┌ host ────────────┐   └───────────────┘
  │ ssh://…2.60    − ├───┌ filesystem ───┐   ┌ fs-66e51d ────┐
- └──────────────────┘   │ 14 tools      ├───┤ 244f32b7      │  172.30.0.54 · thaw 30 ms
+ └──────────────────┘   │ 14 tools      ├───┤ 244f32b7      │  172.30.0.54 · thawed on demand
                         └───────────────┘   └───────────────┘
 ```
 

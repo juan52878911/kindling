@@ -19,6 +19,7 @@ de campo que evitan repetir horas de depuración.
 | [`firmas.md`](firmas.md) | La firma de cada release (`SHA256SUMS.minisig`, minisign/ed25519) y su atestación de procedencia: qué exige kling y desde cuándo, cómo generar, guardar y rotar la clave, y cómo verificar una release a mano | mantienes el proyecto o quieres comprobar de dónde salió un binario |
 | [`kubernetes.md`](kubernetes.md) | `kindling-operator`: sandboxes de `ext/sandbox` gestionados desde Kubernetes, con su CRD y su despliegue | quieres pedir sandboxes con `kubectl` |
 | [`postgres.md`](postgres.md) | Conectar tu base de datos: el proxy de credenciales de Postgres, recetas (Docker en el mismo host, LAN/VPC con TLS, Neon, Supabase, RDS), `-upstream`, `-upstream-tls disable` y `-tls-server-name`, el cliente del invitado y los límites | quieres que un agente use tu Postgres sin ver la contraseña |
+| [`quickstart-sandbox.md`](quickstart-sandbox.md) | Tu primer sandbox, en inglés: instalar, `kling up`, `kling sbx gateway`, token, la plantilla `python` y el primer sandbox con `curl`, el SDK de Python, el de TypeScript y el shim de E2B | vienes de otro servicio de sandboxes y quieres el camino más corto |
 | [`exec-sandbox.md`](exec-sandbox.md) | Sandboxes para agentes de código: `kling sandbox`, `kling exec` en streaming, `kling cp`, plantillas desde snapshot y la puerta `allow_exec` | quieres ejecutar código de un agente sin tocar tu máquina |
 | [`von.md`](von.md) | LLM pequeños (SmolLM2, Qwen2.5) servidos desde snapshots dorados con `kling ai model`: uso, diseño, semillas, cifras en Linux y macOS, y el plan de GPU | quieres servir un modelo pequeño con escala a cero |
 | [`despertar.md`](despertar.md) | De réplica dormida a primera respuesta, fase por fase: 152 → 27 ms congelada y 2,2 ms con el nivel pausada, cada palanca con su medida | quieres saber dónde se va el tiempo de un thaw o activar el nivel pausada |
@@ -53,6 +54,33 @@ de campo que evitan repetir horas de depuración.
 | [`CI-TRIAGE-EVAL.md`](CI-TRIAGE-EVAL.md) | El triaje de fallos de CI de `examples/ci-triage`: Chispa localiza las líneas que explican el fallo en LogChunks (CC BY 4.0) y lo categoriza, VON solo lee el trozo; líneas base, latencia, en proceso frente a microVM, y un dominio que no vio (GitHub Actions) | quieres usar Chispa sobre logs o ver la cascada con un LLM en una tarea nueva |
 | [`egress-sni.md`](egress-sni.md) | Diseño, sin implementar, de un modo de salida que filtra por el SNI de TLS sin descifrar (proxy passthrough en el host), para cerrar el límite de `-egress allowlist` con dominios en un CDN o un hosting compartido | te preocupa que `allowlist` filtre por IP y no por nombre |
 | [`hallazgos.md`](hallazgos.md) | Notas de campo acumuladas: overlays, ficheros dispersos, namespaces, cgroups, trampas de medición… cada una con su porqué | algo se comporta raro y sospechas que ya le pasó a alguien |
+
+## Más documentos
+
+Los que no entran en una sección de arriba:
+
+| Documento | Qué cubre |
+|---|---|
+| [`sandbox-api.md`](sandbox-api.md) | La API `/v1` del gateway de sandboxes: autenticación, inquilinos y claves, intérprete de código, entrada HTTP a puertos |
+| [`e2b.md`](e2b.md) | El shim compatible con E2B (`kling sbx e2b`): cómo apuntar el SDK y qué operaciones soporta |
+| [`observabilidad.md`](observabilidad.md) | Trazas y métricas OTLP del gateway de sandboxes y su registro de auditoría |
+| [`db.md`](db.md) · [`mysql.md`](mysql.md) | `kling db`: una base Postgres desechable por microVM, y MySQL/MariaDB con su proxy de credenciales |
+| [`s3-sigv4.md`](s3-sigv4.md) | S3 y compatibles con el proxy de credenciales (re-firma SigV4) |
+| [`grafos.md`](grafos.md) · [`grafos-diseno.md`](grafos-diseno.md) | Grafos de microVMs (app, base, caché con sus aristas) y su diseño |
+| [`snapshot-imagen.md`](snapshot-imagen.md) | `kling run -image` restaurando un snapshot de la imagen en lugar de arrancar el kernel |
+| [`linux-arm64.md`](linux-arm64.md) | kindling en Linux arm64 (Graviton .metal, Ampere, Raspberry Pi 5) |
+| [`imagenes-amd64.md`](imagenes-amd64.md) | Imágenes solo-amd64 en un anfitrión arm64 |
+| [`vz-mac-prototipo.md`](vz-mac-prototipo.md) · [`proxy-macos-separado.md`](proxy-macos-separado.md) | El prototipo de `vz` en Mac y el proxy de credenciales en un proceso aparte |
+| [`von-cpu.md`](von-cpu.md) | VON en CPU: qué lo hizo más rápido y qué no |
+| [`benchmarks.md`](benchmarks.md) | Cada cifra medida, con su hardware y el script que la reproduce, y la comparación con OpenSandbox con sus salvedades (en inglés) |
+| [`ai-gateway.md`](ai-gateway.md) | El gateway de IA (`kling ai`): muchos modelos listos, ninguno encendido 24/7 |
+| [`chispa-serverless.md`](chispa-serverless.md) | Chispa serverless: una tarea, un dorado, cero coste ocioso |
+| [`mejora-continua.md`](mejora-continua.md) | Mejora continua: que Chispa aprenda lo que otros resolvieron por él |
+| [`db-golden.md`](db-golden.md) · [`db-engines.md`](db-engines.md) · [`db-ask.md`](db-ask.md) · [`db-ci.md`](db-ci.md) | `kling db`: el Postgres dorado, Redis/SQLite/FerretDB, preguntas en lenguaje natural a una copia y una base desechable por PR |
+| [`cow.md`](cow.md) · [`cifrado.md`](cifrado.md) · [`compartir.md`](compartir.md) | Discos copy-on-write para `run -from`, cifrado en reposo y carpetas compartidas |
+| [`backend-vz.md`](backend-vz.md) · [`backend-hv.md`](backend-hv.md) | Los backends nativos de macOS: el contrato con `kling-vz` y `kling-hv` (Hypervisor.framework) |
+| [`consola.md`](consola.md) | La consola web del gateway |
+| [`demo-domotica.md`](demo-domotica.md) | La habitación de demo, manejada con órdenes de voz |
 
 ## Notas de release
 

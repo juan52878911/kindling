@@ -181,8 +181,8 @@ not in the repository; rerun them instead of quoting older numbers. Reproduce wi
 | create with a pool of 10, c50 (about 40 cold) | 394–432 ms | 6.4 s with 25/50 failed (k8s Pool) | 50 per burst | pool of 10, refilled while the burst runs |
 | create cold, serial | 76–91 ms | 0.91–1.11 s (k8s) · 524–543 ms (docker) | 15 | restored microVM vs. new container |
 | create cold, c50 | p50 603–633 ms, **p95 977–1072 ms** | 4.0–4.6 s with 19/50 failed (k8s) · 7.6–7.7 s (docker) | 50 per burst, 2 bursts per round | default gate (4); the p95 always goes with the p50 |
-| exec `echo` | 1.7–1.9 ms | 1003 ms | 30 | through the gateway, HTTP; OSB looks like a fixed 1 s poll |
-| pause → exec | 6.1–6.6 ms | 1027 ms (docker; includes the same ~1 s exec poll) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
+| exec `echo` | 1.7–1.9 ms | 1003 ms (unexplained; OSB documents ~203 ms) | 30 | through the gateway, HTTP; the cause of OSB's ~1 s has not been measured, so none is claimed until E3 |
+| pause → exec | 6.1–6.6 ms | 1027 ms (docker; includes the same unexplained ~1 s exec time) | 5 | OSB k8s pause not measured (`SIN_PAUSA`: it commits and pushes an image) |
 | freeze → exec | 92–106 ms | no equivalent | 5 | dumps memory to disk and releases it |
 | failures | 0 in ~1700 creations | 19/50 (k8s cold c50), 25/50 (k8s Pool c50) | | clean host |
 
@@ -205,7 +205,8 @@ Give the range between rounds, not one number. Memory per sandbox (~9 MiB) is in
 8. **Earlier failures (2–7 in 100)** came from orphaned VMMs left on the host by previous variants, not from
    kindling's create path. The hygiene check (`higiene.sh verificar`, protocol step 6) now aborts the bench
    if any are left.
-9. **Where OSB is ahead today**: isolated session with diff/commit, a credential vault in the API, diagnostics,
+9. **Where OSB is ahead today**: an isolated session (but its diff and commit endpoints are **stubs** today, so
+   those two are not an advantage to quote), a credential vault in the API, diagnostics,
    native Kubernetes CRDs and more SDKs. kindling's code interpreter (`/code`, contexts) is experimental. "Outperforms in everything" does not hold
    yet and must not be written.
 
