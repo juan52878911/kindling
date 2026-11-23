@@ -500,3 +500,32 @@ func TestApagadoSueltaLasAisladas(t *testing.T) {
 		t.Fatalf("quedan %d candado(s) de sesiones que ya no existen", n)
 	}
 }
+
+// R8-09: cerrar una sesión aislada (y soltarlas todas al apagar) avisa a
+// OnForget al momento, con g.mu suelto: no hay que esperar a la siguiente
+// vuelta del segador para que el gateway suelte sus conexiones hacia ella.
+func TestCerrarAisladaAvisaOnForget(t *testing.T) {
+	g, _ := conDaemonAislado(t)
+	o := &olvidosVistos{}
+	g.OnForget = o.gancho(g)
+	ctx := context.Background()
+	a, err := g.isolatedSession(ctx, "svc", "A", sinTenant, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := g.isolatedSession(ctx, "svc", "B", sinTenant, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.releaseIsolated(ctx, "A")
+	if got := o.lista(); len(got) != 1 || got[0] != "svc "+a.Addr(g.puertoDe(a)) {
+		t.Fatalf("OnForget tras cerrar A = %v", got)
+	}
+	g.soltarAisladas(ctx)
+	if got := o.lista(); len(got) != 2 || got[1] != "svc "+b.Addr(g.puertoDe(b)) {
+		t.Fatalf("OnForget tras soltar las aisladas = %v", got)
+	}
+	if o.conCerrojo != 0 {
+		t.Errorf("OnForget se llamó %d veces con g.mu tomado", o.conCerrojo)
+	}
+}
