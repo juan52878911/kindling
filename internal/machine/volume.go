@@ -271,9 +271,7 @@ func (m *Manager) volumeUsers() map[string]volumeUse {
 func (m *Manager) volumeUsersLocked() map[string]volumeUse {
 	out := map[string]volumeUse{}
 	for _, mc := range m.byID {
-		// Una tumba con PID es un rm cuyo VMM sobrevivió al SIGKILL: sigue
-		// escribiendo en sus volúmenes aunque figure stopped (borrado.go, M5).
-		if (mc.State == api.StateStopped || mc.State == api.StateFailed) && !(esTumba(mc) && mc.PID != 0) {
+		if !usaSusVolumenes(mc) {
 			continue
 		}
 		for _, v := range mc.Volumes {
@@ -288,12 +286,15 @@ func (m *Manager) volumeUsersLocked() map[string]volumeUse {
 	}
 
 	// Las reservas: una maquina a medio arrancar YA cuenta como usuaria. Las de
-	// quien ya llego a byID se saltan, o el mismo volumen aparecería dos veces y
-	// el mensaje de error nombraría a la misma maquina como dos escritores.
+	// quien ya se contó arriba se saltan, o el mismo volumen aparecería dos
+	// veces y el mensaje de error nombraría a la misma maquina como dos
+	// escritores. Las de una que está en byID sin contar (una failed que se
+	// descongela, ver readmitirVolumenes) sí cuentan: son lo único que la
+	// cubre mientras dura su thaw.
 	for nombre, rs := range m.volReservas {
 		u := out[nombre]
 		for _, r := range rs {
-			if _, ya := m.byID[r.maquina]; ya || r.sinUso {
+			if mc, ya := m.byID[r.maquina]; ya && usaSusVolumenes(mc) || r.sinUso {
 				continue
 			}
 			quien := r.nombre + " (starting)"
@@ -309,6 +310,13 @@ func (m *Manager) volumeUsersLocked() map[string]volumeUse {
 		out[nombre] = u
 	}
 	return out
+}
+
+// usaSusVolumenes dice si una máquina de byID cuenta como usuaria de sus
+// volúmenes. Una tumba con PID es un rm cuyo VMM sobrevivió al SIGKILL: sigue
+// escribiendo en sus volúmenes aunque figure stopped (borrado.go, M5).
+func usaSusVolumenes(mc *api.Machine) bool {
+	return !(mc.State == api.StateStopped || mc.State == api.StateFailed) || esTumba(mc) && mc.PID != 0
 }
 
 // reservarVolumenes comprueba Y reserva en la MISMA seccion critica.
@@ -380,6 +388,11 @@ func (m *Manager) soltarReservas(id string) {
 // se va a descongelar de su volcado, como reclamarParada los de una parada:
 // nadie más puede tenerlos en escritura (ni leerlos, si ella escribe), y
 // recuperan el dueño que les toca.
+//
+// La máquina sigue failed (y sin contar como usuaria) hasta que el thaw
+// acaba, así que comprobar no basta: deja una reserva a su nombre, en la
+// misma sección crítica, que el llamador suelta con soltarReservas al
+// terminar (con éxito ya cuenta como running; si no, vuelve a no contar).
 func (m *Manager) readmitirVolumenes(mc *api.Machine) error {
 	if len(mc.Volumes) == 0 {
 		return nil
@@ -390,7 +403,17 @@ func (m *Manager) readmitirVolumenes(mc *api.Machine) error {
 	if err != nil {
 		return err
 	}
-	return m.adjudicarVolumenesLocked(vols)
+	if err := m.adjudicarVolumenesLocked(vols); err != nil {
+		return err
+	}
+	if m.volReservas == nil {
+		m.volReservas = map[string][]reservaVolumen{}
+	}
+	for _, v := range vols {
+		m.volReservas[v.name] = append(m.volReservas[v.name],
+			reservaVolumen{maquina: mc.ID, nombre: mc.Name, soloLect: v.readOnly})
+	}
+	return nil
 }
 
 // nombresVolumenes son los nombres de unos volúmenes montados.

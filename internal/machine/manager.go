@@ -3878,6 +3878,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.readmitirVolumenes(mc); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
+		defer m.soltarReservas(mc.ID)
 	} else if mc.State != api.StateWarm {
 		return nil, estadoInvalido("only a warm, paused or failed machine can be thawed (it is %s)", mc.State)
 	}
