@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +30,17 @@ type contadorDaemon struct {
 	listados  atomic.Int64 // GET /snapshots
 	procstats atomic.Int64 // GET /procstats
 	maquinas  atomic.Int64 // POST /machines
+
+	snaps  atomic.Pointer[[]byte] // lo que contesta /snapshots; nil = "[]"
+	fallar atomic.Bool            // /snapshots contesta 503
+}
+
+func (c *contadorDaemon) ponerSnapshots(t testing.TB, ss []*api.Snapshot) {
+	b, err := json.Marshal(ss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.snaps.Store(&b)
 }
 
 // daemonRouterContado levanta un daemon falso con los enlaces dados que tarda
@@ -46,6 +58,14 @@ func daemonRouterContado(t testing.TB, links []*mcp.Link, retraso time.Duration)
 	mux.HandleFunc("/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		c.listados.Add(1)
 		time.Sleep(retraso)
+		if c.fallar.Load() {
+			http.Error(w, "daemon falso caído", http.StatusServiceUnavailable)
+			return
+		}
+		if b := c.snaps.Load(); b != nil {
+			_, _ = w.Write(*b)
+			return
+		}
 		_, _ = w.Write([]byte("[]"))
 	})
 	mux.HandleFunc("/store/mcp/links", func(w http.ResponseWriter, r *http.Request) {
@@ -184,5 +204,119 @@ func BenchmarkGatewayRoutes(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		_ = gw.routes()
+	}
+}
+
+// Tras el primer call_tool, los siguientes no preguntan a los daemons qué
+// servicios tienen: el mapa se recuerda unos segundos.
+func TestRouterCallToolNoListaEnCadaLlamada(t *testing.T) {
+	h, cs := routerTresHosts(t, 0)
+	sid := abrirAgregado(t, h)
+	cuerpo := callToolRouter("beta.hace")
+	if rec := pedir(t, h, "POST", "/mcp/_all", sid, cuerpo); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ok"`) {
+		t.Fatalf("call_tool: %d %s", rec.Code, rec.Body)
+	}
+	antes := sumar(cs, func(c *contadorDaemon) int64 { return c.listados.Load() })
+	for range 20 {
+		if rec := pedir(t, h, "POST", "/mcp/_all", sid, cuerpo); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ok"`) {
+			t.Fatalf("call_tool: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if n := sumar(cs, func(c *contadorDaemon) int64 { return c.listados.Load() }) - antes; n > 0 {
+		t.Fatalf("20 call_tool listaron los snapshots %d veces; quería 0", n)
+	}
+}
+
+// Un servicio importado en un host después de llenar el mapa se encuentra a
+// la primera: no encontrarlo relee el mapa.
+func TestRouterVeServicioRecienImportado(t *testing.T) {
+	ctx := t.Context()
+	s1, c1 := daemonRouterContado(t, nil, 0)
+	s2, _ := daemonRouterContado(t, nil, 0)
+	r := NewRouter([]RouterHost{
+		{Name: "uno", GW: New(api.NewClient(s1), 5*time.Minute, false, 0, "")},
+		{Name: "dos", GW: New(api.NewClient(s2), 5*time.Minute, false, 0, "")},
+	})
+	if got := r.hostsFor(ctx, "nuevo"); len(got) != 0 {
+		t.Fatalf("antes de importarlo: %v", got)
+	}
+	c1.ponerSnapshots(t, []*api.Snapshot{{Name: "nuevo", Labels: map[string]string{api.LabelService: "nuevo"}}})
+	time.Sleep(2 * pisoMapaHosts)
+	got := r.hostsFor(ctx, "nuevo")
+	if len(got) != 1 || got[0].Name != "uno" {
+		t.Fatalf("recién importado en uno: hostsFor = %v", got)
+	}
+	ra := r.agg
+	if hh, ok := ra.serviceHosts(ctx, false)["nuevo"]; !ok || hh.Name != "uno" {
+		t.Fatalf("serviceHosts no lo ve: %v %v", hh, ok)
+	}
+}
+
+// Un host que deja de contestar un momento conserva sus servicios: un fallo
+// pasajero no los esconde.
+func TestRouterHostQueFallaConservaSusServicios(t *testing.T) {
+	s1, c1 := daemonRouterContado(t, nil, 0)
+	c1.ponerSnapshots(t, []*api.Snapshot{{Name: "uno-svc", Labels: map[string]string{api.LabelService: "uno-svc"}}})
+	s2, _ := daemonRouterContado(t, nil, 0)
+	r := NewRouter([]RouterHost{
+		{Name: "uno", GW: New(api.NewClient(s1), 5*time.Minute, false, 0, "")},
+		{Name: "dos", GW: New(api.NewClient(s2), 5*time.Minute, false, 0, "")},
+	})
+	ctx := t.Context()
+	if got := r.hostsFor(ctx, "uno-svc"); len(got) != 1 {
+		t.Fatalf("hostsFor = %v", got)
+	}
+	c1.fallar.Store(true)
+	r.mapa.mu.Lock()
+	r.mapa.at = time.Time{} // caducado: la siguiente petición relee
+	r.mapa.mu.Unlock()
+	if got := r.hostsFor(ctx, "uno-svc"); len(got) != 1 || got[0].Name != "uno" {
+		t.Fatalf("con uno sin contestar un momento: hostsFor = %v", got)
+	}
+}
+
+// Ocho POST sin sesión a la vez con el mapa caducado hacen una sola relectura
+// por host.
+func TestRouterRelecturaUnaVezConcurrente(t *testing.T) {
+	s1, c1 := daemonRouterContado(t, nil, 5*time.Millisecond)
+	c1.ponerSnapshots(t, []*api.Snapshot{{Name: "x", Labels: map[string]string{api.LabelService: "x"}}})
+	r := NewRouter([]RouterHost{{Name: "uno", GW: New(api.NewClient(s1), 5*time.Minute, false, 0, "")}})
+	ctx := t.Context()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := r.hostsFor(ctx, "x"); len(got) != 1 {
+				t.Errorf("hostsFor = %v", got)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := c1.listados.Load(); n != 1 {
+		t.Fatalf("8 peticiones simultáneas listaron %d veces; quería 1", n)
+	}
+}
+
+// En un servicio que aísla cada sesión, el router no sondea con Ensure el
+// primer candidato: eso despertaba una instancia compartida que ese servicio
+// no debe tener. Solo queda el intento de la sesión aislada.
+func TestRouterNoSondeaServicioAislado(t *testing.T) {
+	b, _ := json.Marshal(mcp.IsolationSession)
+	iso := []*api.Snapshot{{Name: "iso", Labels: map[string]string{api.LabelService: "iso"},
+		Annotations: map[string]json.RawMessage{mcp.IsolationKey: b}}}
+	s1, c1 := daemonRouterContado(t, nil, 0)
+	s2, c2 := daemonRouterContado(t, nil, 0)
+	c1.ponerSnapshots(t, iso)
+	c2.ponerSnapshots(t, iso)
+	r := NewRouter([]RouterHost{
+		{Name: "uno", GW: New(api.NewClient(s1), 5*time.Minute, false, 0, "")},
+		{Name: "dos", GW: New(api.NewClient(s2), 5*time.Minute, false, 0, "")},
+	})
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	_ = pedir(t, r.Handler(""), "POST", "/mcp/iso", "", cuerpoInit)
+	if n := c1.maquinas.Load() + c2.maquinas.Load(); n != 1 {
+		t.Fatalf("POST /machines = %d; quería 1 (la sesión aislada, sin sonda compartida)", n)
 	}
 }
