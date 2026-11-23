@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -79,24 +78,24 @@ func TestRevJSAsincronoSuelto(t *testing.T) {
 		}
 	})
 
-	// R4-13: un fallo que no es de ninguna ejecución (aquí, un oyente de
-	// señal que se lanza cuando no corre nada) no se traga: el conductor
+	// R4-13: un fallo que no es de ninguna ejecución no se traga: el conductor
 	// termina y el contexto se da por perdido, en vez de seguir en un estado
-	// que nadie conoce.
+	// que nadie conoce. Aquí lo provoca un Buffer.concat cambiado (Buffer es
+	// del reino del conductor): la siguiente conexión lo llama desde el
+	// manejador del socket, fuera de toda ejecución, y lanza en un nextTick.
 	t.Run("fallo fuera de toda ejecución termina el conductor", func(t *testing.T) {
 		b := montarCodigo(t)
 		id := b.contextoDe(t, "javascript")
-		// El oyente se añade tarde, desde un temporizador: el vm con
-		// breakOnSigint rehace los de SIGINT al acabar la parte síncrona.
-		ejecutaOK(t, b.corre(t, id, "new Promise(r => setTimeout(() => { process.on('SIGINT', () => { throw new Error('fuera-de-todo'); }); r(1); }, 10))"))
-		resp := pide(t, b.srv, tokenAlice, "DELETE", b.base+"/code/contexts/"+id+"/execution", nil)
-		esperaCodigo(t, resp, 204)
-		resp.Body.Close()
-		time.Sleep(300 * time.Millisecond)
+		ejecutaOK(t, b.corre(t, id, "const o = Buffer.concat; Buffer.concat = function (...a) { Buffer.concat = o; "+
+			"process.nextTick(() => { throw new Error('fuera-de-todo'); }); return o.apply(this, a); }; 1"))
 		evs := b.corre(t, id, "1 + 1")
 		if f := final(t, evs); f.OK == nil || *f.OK || !hayError(evs, "ContextError") {
 			t.Fatalf("el conductor siguió vivo tras un fallo fuera de toda ejecución: %+v", evs)
 		}
+		// Y el gateway ya no lo da por vivo: su proceso no está.
+		resp := pide(t, b.srv, tokenAlice, "POST", b.base+"/code", map[string]any{"code": "1 + 1", "context_id": id})
+		esperaCodigo(t, resp, http.StatusNotFound)
+		resp.Body.Close()
 	})
 }
 
