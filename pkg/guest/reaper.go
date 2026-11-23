@@ -21,6 +21,7 @@ package guest
 // carrera. Gane quien gane el wait4, el estado no se pierde.
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -310,13 +311,21 @@ func WaitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 	// El envío va bufferizado y ocurre en la misma sección crítica que el wait4,
 	// así que llega enseguida; el plazo es una red de seguridad para no colgar el
 	// cierre si por lo que sea no llegara nunca.
+	//
+	// Vencido el plazo, el estado se perdió: es un error y no una salida limpia.
+	// Devolver nil haría que exec contestara exit 0 de un comando que pudo fallar.
 	select {
 	case ws := <-exitCh:
 		return waitStatusErr(ws)
 	case <-time.After(2 * time.Second):
-		return nil
+		return errEstadoPerdido
 	}
 }
+
+// errEstadoPerdido: el proceso ya terminó y lo recogió el cosechador, pero su
+// estado de salida no llegó. ExitCodeOf no le saca código: quien llama lo trata
+// como fallo.
+var errEstadoPerdido = errors.New("exit status lost: the process was reaped but its status never arrived")
 
 func isECHILD(err error) bool {
 	var errno syscall.Errno
