@@ -51,9 +51,10 @@ func (m *Manager) fondoDeRed() *knet.Fondo {
 		f := knet.NuevoFondo(tam, m.montarRanura, m.destruirRanura)
 		e.f.Store(f)
 		f.Bloquear = m.tryLock
+		f.Adaptar(knet.TamPoolMax())
 		f.IniciarRecogida(intervaloRecogida)
 		f.Reponer()
-		log.Printf("network: slot pool of %d prepared networks started", tam)
+		log.Printf("network: slot pool of %d prepared networks started (adaptive up to %d)", tam, max(tam, knet.TamPoolMax()))
 	})
 	return e.f.Load()
 }

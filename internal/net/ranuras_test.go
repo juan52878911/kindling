@@ -573,8 +573,9 @@ func TestFondoCreceConUnaRafagaYBajaEnReposo(t *testing.T) {
 	f.Reponer()
 	esperarListas(t, f, 4)
 	for range 30 {
-		f.Tomar()
-		reloj.Add(0)
+		if r := f.Tomar(); r != nil {
+			f.Entregar(r.ID) // en uso: Recoger no las toca
+		}
 	}
 	if got := f.Objetivo(); got != 12 {
 		t.Fatalf("objetivo tras la ráfaga = %d, quería 12", got)
@@ -634,7 +635,7 @@ func TestRetirarRegistroEsperaALaInstalacion(t *testing.T) {
 	var mu sync.Mutex
 	var orden []string
 	suelta := make(chan struct{})
-	ejecutarNft = func(ns string, args ...string) error {
+	ejecutarNft = func(ns, stdin string, args ...string) error {
 		if args[0] == "-f" {
 			<-suelta
 		}
