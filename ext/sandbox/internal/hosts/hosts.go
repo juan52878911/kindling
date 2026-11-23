@@ -59,7 +59,14 @@ type Registro struct {
 	// ráfagas de sandboxes eso serían miles de llamadas por minuto y la cifra
 	// apenas se mueve entre una y otra.
 	visto map[string]time.Time
+	// sondas son las sondas en curso por host (se cierra el canal al
+	// terminar): las lecturas sin forzar que llegan mientras tanto se suman a
+	// la que hay en vez de lanzar otra.
+	sondas map[string]chan struct{}
 }
+
+// plazoSonda es cuánto espera una sonda a un host antes de darlo por caído.
+const plazoSonda = 5 * time.Second
 
 // TTLEstado es cuánto vale una lectura de capacidad antes de repetirla.
 const TTLEstado = 3 * time.Second
@@ -83,7 +90,7 @@ func Nuevo(endpoints map[string]string, opts ...Opcion) *Registro {
 	for _, f := range opts {
 		f(&o)
 	}
-	r := &Registro{estado: map[string]Estado{}, visto: map[string]time.Time{}}
+	r := &Registro{estado: map[string]Estado{}, visto: map[string]time.Time{}, sondas: map[string]chan struct{}{}}
 	nombres := make([]string, 0, len(endpoints))
 	for n := range endpoints {
 		nombres = append(nombres, n)
@@ -133,16 +140,58 @@ func (r *Registro) Estados(ctx context.Context) []Estado {
 }
 
 // mirar pregunta a un host por su estado, con caché corta.
+//
+// Con forzar, sondea ahora y espera (lo usan Estados y quien necesita saber
+// si un host contesta en este momento). Sin forzar, una lectura caducada
+// devuelve la anterior y refresca en segundo plano, con una sola sonda por
+// host a la vez: un host que acepta y no contesta ya no mete el plazo de la
+// sonda en cada creación. Solo la primera lectura de un host, de la que no
+// hay nada anterior, espera a la sonda (o a que venza ctx).
 func (r *Registro) mirar(ctx context.Context, h *Host, forzar bool) Estado {
-	r.mu.RLock()
+	if forzar {
+		return r.sondear(ctx, h)
+	}
+	r.mu.Lock()
 	visto, hay := r.visto[h.Nombre]
 	previo := r.estado[h.Nombre]
-	r.mu.RUnlock()
-	if !forzar && hay && time.Since(visto) < TTLEstado {
+	if hay && time.Since(visto) < TTLEstado {
+		r.mu.Unlock()
 		return previo
 	}
+	fin, enCurso := r.sondas[h.Nombre]
+	if !enCurso {
+		fin = make(chan struct{})
+		r.sondas[h.Nombre] = fin
+		// La sonda no depende de la petición que la lanza: otras esperan su
+		// resultado, y cortarla con ella dejaría sin lectura a las demás.
+		sctx := context.WithoutCancel(ctx)
+		go func() {
+			defer func() {
+				r.mu.Lock()
+				delete(r.sondas, h.Nombre)
+				r.mu.Unlock()
+				close(fin)
+			}()
+			r.sondear(sctx, h)
+		}()
+	}
+	r.mu.Unlock()
+	if hay {
+		return previo
+	}
+	select {
+	case <-fin:
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		return r.estado[h.Nombre]
+	case <-ctx.Done():
+		return Estado{Nombre: h.Nombre, Endpoint: h.Endpoint, Error: ctx.Err().Error()}
+	}
+}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+// sondear pregunta a un host por su estado y lo guarda en la caché.
+func (r *Registro) sondear(ctx context.Context, h *Host) Estado {
+	ctx, cancel := context.WithTimeout(ctx, plazoSonda)
 	defer cancel()
 	e := Estado{Nombre: h.Nombre, Endpoint: h.Endpoint}
 	info, err := h.Cliente.Info(ctx)
@@ -169,16 +218,29 @@ func (r *Registro) Candidatos(ctx context.Context, sirve func(*Host) bool) []*Ho
 		h     *Host
 		libre int64
 	}
-	var pares []par
+	// En paralelo: la primera lectura de cada host espera a su sonda, y en
+	// serie cada host colgado sumaría su plazo.
+	var validos []*Host
 	for _, h := range r.Todos() {
-		if sirve != nil && !sirve(h) {
-			continue
+		if sirve == nil || sirve(h) {
+			validos = append(validos, h)
 		}
-		e := r.mirar(ctx, h, false)
-		if !e.Vivo {
-			continue
+	}
+	estados := make([]Estado, len(validos))
+	var wg sync.WaitGroup
+	for i, h := range validos {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			estados[i] = r.mirar(ctx, h, false)
+		}()
+	}
+	wg.Wait()
+	var pares []par
+	for i, h := range validos {
+		if estados[i].Vivo {
+			pares = append(pares, par{h, estados[i].DisponibleMB})
 		}
-		pares = append(pares, par{h, e.DisponibleMB})
 	}
 	sort.SliceStable(pares, func(i, j int) bool { return pares[i].libre > pares[j].libre })
 	out := make([]*Host, len(pares))
