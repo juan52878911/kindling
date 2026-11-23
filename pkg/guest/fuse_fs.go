@@ -94,11 +94,14 @@ type fuseFS struct {
 	evOnce sync.Once
 	// perdidos: se perdió algún aviso del host (cola llena aquí o en la
 	// sesión). Mientras, ttls da 1 s, y el notificador lo invalida todo.
-	perdidos  atomic.Bool
-	synthTID  atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
-	synMu     sync.Mutex
-	syn       synthOp
-	touchHost func(op synthOp, full string) // provoca el evento de inotify (Linux)
+	perdidos atomic.Bool
+	// huboSesion: ya se publicó alguna sesión (bajo smu). La siguiente es una
+	// reconexión y lo que el kernel tenga en caché puede estar viejo.
+	huboSesion bool
+	synthTID   atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
+	synMu      sync.Mutex
+	syn        synthOp
+	touchHost  func(op synthOp, full string) // provoca el evento de inotify (Linux)
 
 	// afterInit corre tras contestar INIT (setReadahead; nil en los tests).
 	afterInit func(mount string)
@@ -210,6 +213,8 @@ func (fs *fuseFS) attach(s *shareSession) {
 	fs.smu.Lock()
 	old := fs.sess
 	fs.sess = s
+	previa := fs.huboSesion
+	fs.huboSesion = true
 	select {
 	case <-fs.ready:
 	default:
@@ -218,6 +223,14 @@ func (fs *fuseFS) attach(s *shareSession) {
 	fs.smu.Unlock()
 	if old != nil {
 		old.close()
+	}
+	if previa {
+		// Sesión que vuelve (thaw, reinicio del daemon, corte): el vigilante del
+		// host es nuevo y lo que cambió sin sesión no llegó como aviso. Se trata
+		// como avisos perdidos: caché corta hasta que el notificador lo invalida
+		// todo. El aviso vacío de olvido lo despierta aunque no llegue ninguno.
+		fs.perdidos.Store(true)
+		fs.enqueue(pushEvent{ev: eventForget})
 	}
 	go func() {
 		<-s.done
