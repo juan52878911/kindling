@@ -3,6 +3,7 @@ package fc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -254,5 +255,28 @@ func TestLoadSnapshotRepoint(t *testing.T) {
 	}
 	if err := json.Unmarshal(*cuerpo, &d); err != nil || d.R == nil || d.R.Kernel != "/k" || d.R.Drives["rootfs"] != (RepointDrive{"/r", true}) {
 		t.Fatalf("cuerpo = %s (%v)", *cuerpo, err)
+	}
+}
+
+// Un 507 del VMM (kling-hv sin cupo en Hypervisor.framework: HV_NO_RESOURCES)
+// tiene que llegar al núcleo con su código, no solo como texto: es lo que deja
+// al daemon traducirlo a la falta de capacidad que el planificador trata
+// congelando ociosas. El texto, el de siempre.
+func TestUn507DelVMMLlegaConSuCodigo(t *testing.T) {
+	c, _, _ := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInsufficientStorage)
+		_, _ = w.Write([]byte(`{"fault_message":"creating the VM: this Mac has no room for another VM (HV_NO_RESOURCES)"}`))
+	})
+	err := c.Start(context.Background())
+	var fe *Error
+	if !errors.As(err, &fe) {
+		t.Fatalf("el error de un 507 no es un *fc.Error: %T %v", err, err)
+	}
+	if fe.Status != http.StatusInsufficientStorage {
+		t.Errorf("Status = %d, quiero 507", fe.Status)
+	}
+	quiero := "firecracker PUT /actions: 507 Insufficient Storage: creating the VM: this Mac has no room for another VM (HV_NO_RESOURCES)"
+	if err.Error() != quiero {
+		t.Errorf("el texto cambió:\n got %q\nwant %q", err.Error(), quiero)
 	}
 }
