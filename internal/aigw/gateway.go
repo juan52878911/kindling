@@ -143,6 +143,10 @@ type Gateway struct {
 	deploy      chispaDeployLookup
 	deployMu    sync.Mutex
 	deployCache map[string]deployCacheEntry
+
+	// backends expande un registro a sus backends HTTP: (*Config).Backends;
+	// los tests lo sustituyen.
+	backends func(*Config) []*Backend
 }
 
 // New crea el gateway. No habla con el daemon hasta Start o la primera
@@ -160,6 +164,7 @@ func New(o Options) (*Gateway, error) {
 		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), guests: newGuestPool(o.Idle, max(o.ProxyTimeout, o.VONTimeout)), auditSem: make(chan struct{}, 1),
 		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
 		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
+		backends: (*Config).Backends,
 	}
 	g.setConfig(cfg)
 	for _, n := range g.domainNotes(cfg) {
