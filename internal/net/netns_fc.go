@@ -94,6 +94,9 @@ func (n *Net) reglaDNAT() []string {
 // Sin conDNAT, el DNAT va en el iptables-restore de aplicarPropio (un proceso
 // menos en Setup) y la base no lleva ninguna regla de salida.
 func (n *Net) montarBase(tr *trazaSetup, owner int, conDNAT bool) error {
+	// Un borrado de conntrack pendiente de este mismo NSIP (la máquina
+	// anterior con este índice) no debe caer sobre los flujos de la nueva.
+	esperarConntrackHost(n.NSIP)
 	// Los 11 procesos de ip del enlace son 3: el netns y un `ip -batch`
 	// por cada lado. `ip netns add` va aparte: en batch, según la versión de
 	// iproute2, el resto de líneas acabaría dentro del netns nuevo.
@@ -308,23 +311,35 @@ func (n *Net) Teardown() {
 	stopGraph(n.NS)
 	stopCredProxy(n.NS)
 	cerrarIPSet(n.NS)
-	borrarEnlace(n.NS, n.HostIf)
-	n.cortarConntrackHost()
+	// El conntrack del host solo tiene algo que cortar si había enlace: en
+	// una alta nueva (Setup empieza siempre por Teardown) no se lanza nada, y
+	// cuando sí, lo hace un trabajador aparte, fuera del camino del llamante.
+	if borrarEnlace(n.NS, n.HostIf) {
+		encolarConntrackHost(n)
+	}
 }
 
 // borrarEnlace borra el netns y el veth del host, solo si están: Setup
 // empieza siempre por Teardown, y en el caso corriente (una máquina nueva) no
 // hay nada, así que eran dos procesos que fallaban. Mirarlo es un stat.
-func borrarEnlace(ns, hostIf string) {
-	if _, err := os.Stat("/var/run/netns/" + ns); err == nil {
+// Devuelve si había algo que borrar.
+func borrarEnlace(ns, hostIf string) bool {
+	borro := false
+	if existeRuta("/var/run/netns/" + ns) {
 		quiet("ip", "netns", "del", ns)
+		borro = true
 	}
 	// Después del netns: borrarlo se lleva el veth, pero el kernel lo hace en
 	// diferido y puede seguir ahí; `ip link del` lo quita en el acto.
-	if _, err := os.Stat("/sys/class/net/" + hostIf); err == nil {
+	if existeRuta("/sys/class/net/" + hostIf) {
 		quiet("ip", "link", "del", hostIf)
+		borro = true
 	}
+	return borro
 }
+
+// existeRuta es un stat; variable para los tests.
+var existeRuta = func(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // ipBatch ejecuta varias órdenes de ip en un solo proceso (`ip -batch -`),
 // dentro del netns ns si no está vacío. Para en la primera que falla.
