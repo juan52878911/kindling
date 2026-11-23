@@ -448,7 +448,7 @@ func (m *Manager) entregarMaquina(ctx context.Context, id string, ai *arranqueIm
 			return err
 		}
 		r.Header.Set("Content-Type", "application/json")
-		resp, err := listoClient.Do(r)
+		resp, err := clienteAgenteDe(ctx, listoClient).Do(r)
 		if err != nil {
 			ultimo = err
 			continue

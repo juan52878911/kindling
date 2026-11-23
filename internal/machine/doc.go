@@ -30,9 +30,11 @@
 //     reserveDir se cuentan: "snap:<nombre>" lo tienen a la vez el commit que
 //     lo escribe y cada runFrom que lo lee, y removeSnapshot se niega
 //     mientras haya alguna ajena.
-//   - stateMu protege la foto pendiente de state.json. persist() lo toma con
-//     m.mu ya tomado; writePending lo suelta antes de tomar escrituraMu y de
-//     escribir, así que escrituraMu nunca está dentro de m.mu.
+//   - stateMu protege la numeración de las fotos de state.json (pendGen,
+//     hasPend). persist() lo toma con m.mu ya tomado. El escritor
+//     (writePending) toma escrituraMu, luego m.mu en lectura para sacar la
+//     foto, y lo suelta antes de serializar y escribir: escrituraMu va siempre
+//     por fuera de m.mu, y nadie lo toma con m.mu tomado.
 //
 // metaMu (meta.json de snapshots), templateMu (plantilla de overlay) y el mutex
 // interno de cerrojos son hojas: no se toma ningún otro cerrojo dentro de ellos.
