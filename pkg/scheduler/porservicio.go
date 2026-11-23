@@ -278,8 +278,8 @@ func (g *Scheduler) encolarOlvidoLocked(service string, e *entry) {
 // avisarOlvidos llama a OnForget, con g.mu suelto, por cada instancia que
 // salió del mapa desde el último aviso. Cada una sale de la cola una sola vez,
 // así que no se avisa dos veces aunque dos goroutines avisen a la vez. Lo que
-// encole un camino que no avisa (las sesiones aisladas) sale en el siguiente
-// aviso, como tarde en la siguiente vuelta del segador.
+// encole un camino que no avisa sale en el siguiente aviso, como tarde en la
+// siguiente vuelta del segador.
 func (g *Scheduler) avisarOlvidos() {
 	if g.OnForget == nil {
 		return

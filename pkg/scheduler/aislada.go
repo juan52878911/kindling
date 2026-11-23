@@ -371,6 +371,7 @@ func (g *Scheduler) reservarAislada(ctx context.Context, service string) (libera
 		}
 		g.quitarAisladaLocked(v)
 		g.mu.Unlock()
+		g.avisarOlvidos()
 		g.destruirAislada(ctx, v, fmt.Sprintf("reclaimed after %s idle to make room",
 			time.Since(v.lastUse).Round(time.Second)))
 	}
@@ -395,7 +396,8 @@ func (g *Scheduler) aisladaReciclableLocked(service string) *aislada {
 }
 
 // quitarAisladaLocked olvida la sesión: su registro, su ruta y su instancia
-// despierta si la hay. La máquina la destruye quien llama, fuera del candado.
+// despierta si la hay. La máquina la destruye quien llama, fuera del candado,
+// y quien llama avisa a OnForget (avisarOlvidos) en cuanto suelta g.mu.
 func (g *Scheduler) quitarAisladaLocked(a *aislada) {
 	delete(g.aisladas, a.key)
 	delete(g.routes, a.key)
@@ -439,6 +441,7 @@ func (g *Scheduler) releaseIsolated(ctx context.Context, key string) bool {
 		g.quitarAisladaLocked(a)
 	}
 	g.mu.Unlock()
+	g.avisarOlvidos()
 	if a == nil {
 		return false
 	}
@@ -568,6 +571,7 @@ func (g *Scheduler) soltarAisladas(ctx context.Context) {
 		g.quitarAisladaLocked(a)
 	}
 	g.mu.Unlock()
+	g.avisarOlvidos()
 	for _, a := range todas {
 		if ctx.Err() != nil {
 			return
