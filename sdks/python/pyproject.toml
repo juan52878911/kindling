@@ -7,6 +7,9 @@ name = "kindling-sandbox"
 version = "0.1.0"
 description = "SDK de Python (solo biblioteca estándar) para la API /v1 del gateway de sandboxes de kindling"
 requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+classifiers = ["License :: OSI Approved :: Apache Software License"]
+readme = "README.md"
 dependencies = []
 
 [tool.setuptools]

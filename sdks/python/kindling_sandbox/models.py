@@ -253,3 +253,97 @@ class CreatedKey(_Base):
         return "CreatedKey(id=%r, prefix=%r, key=<oculta>)" % (self.id, self.prefix)
 
     __str__ = __repr__
+
+
+@dataclass
+class Endpoint(_Base):
+    url: str = ""
+    port: int = 0
+    token: str = ""
+    public: bool = False
+    expires_at: str = ""
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EgressPolicy(_Base):
+    egress: str = ""
+    allow_domains: List[str] = field(default_factory=list)
+    applied: str = ""
+    narrowed: bool = False
+    connections_closed: bool = False
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SearchResult(_Base):
+    path: str = ""
+    glob: str = ""
+    matches: List[str] = field(default_factory=list)
+    truncated: bool = False
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TarResult(_Base):
+    entries: int = 0
+    files: int = 0
+    bytes: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CodeContext(_Base):
+    id: str = ""
+    language: str = ""
+    pid: int = 0
+    cwd: str = ""
+    started_at: str = ""
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CodeEvent(_Base):
+    """Evento del flujo de `/code`. El último es siempre `type == "done"`."""
+    type: str = ""
+    text: str = ""
+    ename: str = ""
+    evalue: str = ""
+    traceback: List[str] = field(default_factory=list)
+    ok: Optional[bool] = None
+    duration_ms: int = 0
+    results: Dict[str, str] = field(default_factory=dict)
+    execution_count: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CodeResult:
+    """Resultado agregado de una ejecución de código (ver `Code.run_wait`)."""
+    ok: bool = False
+    stdout: str = ""
+    stderr: str = ""
+    result: Optional[CodeEvent] = None
+    error: Optional[CodeEvent] = None
+    events: List[CodeEvent] = field(default_factory=list)
+
+    @property
+    def results(self) -> Dict[str, str]:
+        return self.result.results if self.result else {}
+
+    @classmethod
+    def from_events(cls, eventos) -> "CodeResult":
+        r = cls()
+        for ev in eventos:
+            r.events.append(ev)
+            if ev.type == "stdout":
+                r.stdout += ev.text
+            elif ev.type == "stderr":
+                r.stderr += ev.text
+            elif ev.type == "result":
+                r.result = ev
+            elif ev.type == "error":
+                r.error = ev
+            elif ev.type == "done":
+                r.ok = bool(ev.ok)
+        return r

@@ -353,6 +353,10 @@ paths:
           $ref: "#/components/responses/Error"
         "501":
           $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
     get:
       tags: [sandboxes]
       summary: Lista los endpoints públicos vigentes
@@ -373,6 +377,10 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "501":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
           $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/endpoints/{port}:
     parameters:
@@ -987,13 +995,40 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/FileStat"
                   - $ref: "#/components/schemas/FileList"
+        "206":
+          description: |
+            Trozo pedido con `Range: bytes=a-b`; lleva `Content-Range`. No se
+            sirve más allá de los primeros 256 MiB del fichero.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
         "400":
           $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+        "416":
+          description: |
+            El rango empieza fuera del fichero o más allá de los 256 MiB
+            descargables; `Content-Range: bytes */tamaño`.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "502":
+          $ref: "#/components/responses/Error"
+        "504":
           $ref: "#/components/responses/Error"
     put:
       tags: [sandboxes]
@@ -1045,6 +1080,8 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
     delete:
       tags: [sandboxes]
       summary: Borra un fichero
@@ -1085,6 +1122,14 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "409":
+          description: El destino existe y la petición no trae `overwrite`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
           $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/files/mkdir:
     parameters:
@@ -1110,6 +1155,10 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
         "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
           $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/files/search:
     parameters:
@@ -1146,6 +1195,10 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
           $ref: "#/components/responses/Error"
   /v1/volumes:
     get:
@@ -1589,6 +1642,9 @@ components:
           type: string
         to:
           type: string
+        overwrite:
+          type: boolean
+          description: Pisa el destino si existe; sin él, un destino que existe es un 409
     MkdirPeticion:
       type: object
       required: [path]

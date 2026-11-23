@@ -52,6 +52,8 @@ type daemonReal struct {
 	// sinInterprete: el exec que busca ese intérprete contesta 127.
 	sinInterprete string
 	senales       []string
+	// dirsCodigo son los directorios de contexto que el daemon vio escribir.
+	dirsCodigo []string
 }
 
 func (d *daemonReal) vivo(pid int) bool {
@@ -85,6 +87,22 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		t.Skipf("no unix sockets here: %v", err)
 	}
 	d := &daemonReal{procs: map[int]chan struct{}{}, info: map[int]api.ProcessInfo{}}
+	// Cada contexto deja un directorio /tmp/.kindling-code-* en esta máquina
+	// (el daemon corre de verdad). Este Cleanup se registra antes que los que
+	// matan los procesos (se registran al arrancarlos), así que corre después.
+	t.Cleanup(func() {
+		d.mu.Lock()
+		dirs := append([]string(nil), d.dirsCodigo...)
+		d.mu.Unlock()
+		for _, dir := range dirs {
+			for i := 0; i < 20; i++ {
+				if os.RemoveAll(dir) == nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	})
 	detras := f.endpoint
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) { r.URL.Scheme, r.URL.Host = "http", "daemon" },
@@ -153,11 +171,46 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		code := c.ProcessState.ExitCode()
 		_ = enc.Encode(api.ExecEvent{Exit: &code})
 	})
+	// stat y lectura de verdad: los ficheros de estas pruebas viven en esta
+	// máquina (los escribe el PUT de abajo). Lo que no existe aquí (tar, listados,
+	// ficheros del falso) pasa al daemon falso de detrás.
+	m.HandleFunc("GET /machines/{ref}/files", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("list") != "" || q.Get("format") != "" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		fi, err := os.Stat(q.Get("path"))
+		if err != nil {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		if q.Get("stat") == "1" {
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: fi.Size(), Mode: "0755", IsDir: fi.IsDir()})
+			return
+		}
+		b, err := os.ReadFile(q.Get("path"))
+		if err != nil {
+			failDaemon(w, 500, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(b)
+	})
 	m.HandleFunc("PUT /machines/{ref}/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") == "tar" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
 		p := r.URL.Query().Get("path")
 		mode, _ := strconv.ParseUint(r.URL.Query().Get("mode"), 8, 32)
 		if mode == 0 {
 			mode = 0o644
+		}
+		if dir, ok := strings.CutPrefix(filepath.Dir(p), dirCodigo); ok && dir != "" {
+			d.mu.Lock()
+			d.dirsCodigo = append(d.dirsCodigo, filepath.Dir(p))
+			d.mu.Unlock()
 		}
 		b := new(bytes.Buffer)
 		_, _ = b.ReadFrom(r.Body)
@@ -252,7 +305,8 @@ func montarCodigo(t *testing.T) *bancoCodigo {
 	d := ponerReal(t, f)
 	srv, _ := montar(t, map[string]*falso{"a": f})
 	sb := crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
-	return &bancoCodigo{srv: srv, d: d, base: "/v1/sandboxes/" + sb.ID}
+	b := &bancoCodigo{srv: srv, d: d, base: "/v1/sandboxes/" + sb.ID}
+	return b
 }
 
 func (b *bancoCodigo) contexto(t *testing.T) string {

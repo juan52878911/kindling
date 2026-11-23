@@ -5,7 +5,9 @@ package frontal
 // mapa y respuestas guionizadas.
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -137,6 +139,11 @@ type falso struct {
 	execCorta bool
 	// ultimoTar son los parámetros del último PUT files?format=tar.
 	ultimoTar url.Values
+	// tamanoStat, si no es 0, es el tamaño que anuncia el stat de un fichero
+	// (para probar topes sin guardar cientos de MiB).
+	tamanoStat int64
+	// dirs son los directorios que el falso conoce (clave ref:ruta).
+	dirs map[string]bool
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -715,13 +722,31 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, lista)
 			return
 		}
+		if q.Get("format") == "tar" {
+			b, ok := f.empaquetarLocked(r.PathValue("ref"), q.Get("path"))
+			if !ok {
+				failDaemon(w, 404, fmt.Errorf("no such directory"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-tar")
+			_, _ = w.Write(b)
+			return
+		}
 		b, ok := f.ficheros[clave]
+		if !ok && f.dirs[clave] && q.Get("stat") == "1" {
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Mode: "0755", IsDir: true})
+			return
+		}
 		if !ok {
 			failDaemon(w, 404, fmt.Errorf("no such file"))
 			return
 		}
 		if q.Get("stat") == "1" {
-			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: int64(len(b)), Mode: "0644"})
+			size := int64(len(b))
+			if f.tamanoStat > 0 {
+				size = f.tamanoStat
+			}
+			writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: size, Mode: "0644"})
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -736,12 +761,17 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 			failDaemon(w, 413, fmt.Errorf("too big"))
 			return
 		}
-		f.ficheros[clave] = b
 		if q.Get("format") == "tar" {
 			f.ultimoTar = q
-			writeJSON(w, 200, api.TarResult{Entries: 1, Files: 1, Bytes: int64(len(b))})
+			res, err := f.extraerTarLocked(r.PathValue("ref"), q.Get("path"), q.Get("mkdir") == "1", b)
+			if err != nil {
+				failDaemon(w, 400, err)
+				return
+			}
+			writeJSON(w, 200, res)
 			return
 		}
+		f.ficheros[clave] = b
 		writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: int64(len(b)), Mode: q.Get("mode")})
 	case http.MethodDelete:
 		delete(f.ficheros, clave)
@@ -1077,4 +1107,73 @@ func (f *falso) tieneVolumen(n string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.volumenes[n] != nil
+}
+
+// extraerTarLocked extrae el tar dentro de path como lo haría el invitado:
+// los ficheros pasan a f.ficheros y los directorios a f.dirs. Con mkdir crea
+// también path. Rechaza entradas con ".." o absolutas.
+func (f *falso) extraerTarLocked(ref, path string, mkdir bool, b []byte) (*api.TarResult, error) {
+	if f.dirs == nil {
+		f.dirs = map[string]bool{}
+	}
+	if mkdir {
+		f.dirs[ref+":"+filepath.Clean(path)] = true
+	} else if !f.dirs[ref+":"+filepath.Clean(path)] {
+		return nil, fmt.Errorf("%s is not a directory", path)
+	}
+	res := &api.TarResult{}
+	tr := tar.NewReader(bytes.NewReader(b))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return res, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		nombre := filepath.Clean(h.Name)
+		if filepath.IsAbs(nombre) || nombre == ".." || strings.HasPrefix(nombre, "../") {
+			return nil, fmt.Errorf("unsafe entry %q", h.Name)
+		}
+		dest := ref + ":" + filepath.Join(path, nombre)
+		res.Entries++
+		switch h.Typeflag {
+		case tar.TypeDir:
+			f.dirs[dest] = true
+		default:
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, err
+			}
+			f.dirs[ref+":"+filepath.Dir(filepath.Join(path, nombre))] = true
+			f.ficheros[dest] = data
+			res.Files++
+			res.Bytes += int64(len(data))
+		}
+	}
+}
+
+// empaquetarLocked devuelve un tar con los ficheros bajo path (nombres
+// relativos a path).
+func (f *falso) empaquetarLocked(ref, path string) ([]byte, bool) {
+	raiz := ref + ":" + filepath.Clean(path)
+	if !f.dirs[raiz] {
+		return nil, false
+	}
+	var nombres []string
+	for k := range f.ficheros {
+		if rel, ok := strings.CutPrefix(k, raiz+"/"); ok {
+			nombres = append(nombres, rel)
+		}
+	}
+	sort.Strings(nombres)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, n := range nombres {
+		data := f.ficheros[raiz+"/"+n]
+		_ = tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(data))})
+		_, _ = tw.Write(data)
+	}
+	_ = tw.Close()
+	return buf.Bytes(), true
 }

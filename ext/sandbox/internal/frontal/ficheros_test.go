@@ -79,6 +79,32 @@ func TestSubidaTar(t *testing.T) {
 	if r.Entries != 1 || q.Get("format") != "tar" || q.Get("mkdir") != "1" || q.Get("path") != "/work" {
 		t.Fatalf("%+v %v", r, q)
 	}
+	// El efecto: el fichero está extraído dentro del directorio.
+	resp = pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/work/a.txt", nil)
+	esperaCodigo(t, resp, 200)
+	if b, _ := io.ReadAll(resp.Body); string(b) != "hi" {
+		t.Fatalf("a.txt extraído = %q", b)
+	}
+	resp.Body.Close()
+	// Y se baja como tar con ?tar=1.
+	resp = pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/work&tar=1", nil)
+	esperaCodigo(t, resp, 200)
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-tar" {
+		t.Errorf("Content-Type %q", ct)
+	}
+	tr := tar.NewReader(resp.Body)
+	h, err := tr.Next()
+	if err != nil || h.Name != "a.txt" {
+		t.Fatalf("tar bajado: %v %+v", err, h)
+	}
+	if b, _ := io.ReadAll(tr); string(b) != "hi" {
+		t.Errorf("contenido %q", b)
+	}
+	resp.Body.Close()
+	esperaCodigo(t, pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/nada&tar=1", nil), 404)
+	// Un tar que pasa del tope de subida: 413, sin llegar al daemon.
+	grande := bytes.Repeat([]byte{0}, int(api.FileMaxUpload)+1)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "PUT", "/v1/sandboxes/"+sb.ID+"/files?path=/work&tar=1", grande), 413)
 	// Ajeno: 404.
 	esperaCodigo(t, pide(t, srv, tokenBob, "PUT", "/v1/sandboxes/"+sb.ID+"/files?path=/work&tar=1", buf.Bytes()), 404)
 }
@@ -96,6 +122,12 @@ func TestMkdirDeFicheros(t *testing.T) {
 	f.mu.Unlock()
 	if q.Get("path") != "/work/x/y" || q.Get("mkdir") != "1" {
 		t.Fatalf("mkdir fue %v", q)
+	}
+	// El efecto: el directorio existe.
+	resp = pide(t, srv, tokenAlice, "GET", "/v1/sandboxes/"+sb.ID+"/files?path=/work/x/y&stat=1", nil)
+	esperaCodigo(t, resp, 200)
+	if st := decodifica[api.FileStat](t, resp); !st.IsDir {
+		t.Errorf("no es un directorio: %+v", st)
 	}
 	for _, malo := range []string{`{}`, `{"path":"rel/x"}`, `{"path":"/a","otro":1}`} {
 		esperaCodigo(t, pide(t, srv, tokenAlice, "POST", base, malo), 400)
@@ -134,6 +166,19 @@ func TestMoverYBuscarFicheros(t *testing.T) {
 	}
 	if _, err := os.Stat(mover["from"]); err == nil {
 		t.Fatal("el origen sigue ahí")
+	}
+	// Un destino que existe no se pisa sin pedirlo (409); con overwrite sí.
+	pisa := map[string]any{"from": filepath.Join(dir, "dos.log"), "to": filepath.Join(dir, "tres.txt")}
+	esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", pisa), 409)
+	if _, err := os.Stat(pisa["from"].(string)); err != nil {
+		t.Fatalf("el 409 movió el origen: %v", err)
+	}
+	pisa["overwrite"] = true
+	resp = pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", pisa)
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if _, err := os.Stat(pisa["from"].(string)); err == nil {
+		t.Fatal("con overwrite el origen sigue ahí")
 	}
 	// Origen que no existe: 404 con code, no un 200 ni un 502.
 	resp = pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", map[string]string{"from": filepath.Join(dir, "nada"), "to": filepath.Join(dir, "x")})

@@ -7,7 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from kindling_sandbox import (Admin, AsyncSandbox, Forbidden, Client, ConfigError, NotFound, RateLimited, Sandbox,
-                              TransportError, Unauthorized, ApiError, BadRequest)
+                              TransportError, Unauthorized, ApiError, BadRequest, Conflict, ServerError)
 
 from servidor_falso import TOKEN, TOKEN_USUARIO, ServidorFalso
 
@@ -369,6 +369,156 @@ class TestAdmin(Base):
     def test_sin_admin_es_forbidden(self):
         with self.assertRaises(Forbidden):
             Admin(url=self.srv.url, token=TOKEN_USUARIO).list_tenants()
+
+
+class TestSuperficieNueva(Base):
+    """Lo que el gateway añadió en la ronda 6: listado con filtros, create(env),
+    pause/resume/egress, endpoints, código, ficheros nuevos, reintentos."""
+
+    def test_list_con_filtros_y_cursor(self):
+        for i in range(3):
+            Sandbox.create(labels={"k": "v" if i < 2 else "w"}, **self.kw)
+        self.assertEqual(len(Sandbox.list(label={"k": "v"}, **self.kw)), 2)
+        self.assertEqual(self.srv.estado.peticiones[-1][2], {"label": "k=v"})
+        self.assertEqual(len(Sandbox.list(state="paused", **self.kw)), 0)
+        pag = Sandbox.list(limit=2, **self.kw)
+        self.assertEqual((len(pag), pag.next_cursor, pag.partial), (2, "h1/m-2", "h2: down"))
+        resto = Sandbox.list(limit=2, cursor=pag.next_cursor, **self.kw)
+        self.assertEqual((len(resto), resto.next_cursor), (1, None))
+
+    def test_create_con_env(self):
+        Sandbox.create(env={"A": "1"}, **self.kw)
+        self.assertEqual(self.srv.estado.env_de_creacion, {"A": "1"})
+
+    def test_pause_resume_egress(self):
+        sb = Sandbox.create(**self.kw)
+        self.assertEqual(sb.pause().state, "paused")
+        self.assertEqual(sb.info.state, "paused")
+        self.assertEqual(sb.resume().state, "running")
+        pol = sb.set_egress("allowlist", ["a.example.test"])
+        self.assertEqual((pol.egress, pol.allow_domains, pol.applied), ("allowlist", ["a.example.test"], "live"))
+        ult = self.srv.estado.peticiones[-1]
+        self.assertEqual((ult[0], ult[1]), ("PATCH", "/v1/sandboxes/h1/m-1/egress"))
+        self.assertEqual(json.loads(ult[4]), {"egress": "allowlist", "allow_domains": ["a.example.test"]})
+
+    def test_endpoints(self):
+        sb = Sandbox.create(**self.kw)
+        ep = sb.endpoints.create(8000, ttl=60)
+        self.assertEqual((ep.port, ep.token, ep.public), (8000, "tok-ep", False))
+        pub = sb.endpoints.create(9000, public=True)
+        self.assertEqual((pub.public, pub.token), (True, ""))
+        self.assertEqual([e.port for e in sb.endpoints.list()], [8000, 9000])
+        sb.endpoints.revoke(8000)
+        self.assertEqual([e.port for e in sb.endpoints.list()], [9000])
+        with self.assertRaises(NotFound):
+            sb.endpoints.revoke(8000)
+
+    def test_code_run_acaba_en_done(self):
+        sb = Sandbox.create(**self.kw)
+        evs = list(sb.code.run("1+1", language="python", timeout=5))
+        self.assertEqual([e.type for e in evs], ["stdout", "result", "done"])
+        self.assertEqual(evs[1].results, {"text/plain": "2"})
+        self.assertEqual(self.srv.estado.codigo_pedido,
+                         {"code": "1+1", "language": "python", "timeout_seconds": 5})
+        r = sb.code.run_wait("fallo()")
+        self.assertEqual((r.ok, r.stdout, r.error.ename), (False, "hola\n", "NameError"))
+        r = sb.code.run_wait("1+1")
+        self.assertEqual((r.ok, r.results["text/plain"]), (True, "2"))
+
+    def test_contextos_e_interrumpir(self):
+        sb = Sandbox.create(**self.kw)
+        c = sb.code.contexts.create(language="bash", cwd="/w")
+        self.assertEqual((c.language, c.cwd), ("bash", "/w"))
+        self.assertEqual([x.id for x in sb.code.contexts.list()], [c.id])
+        self.assertEqual(sb.code.contexts.get(c.id).id, c.id)
+        list(sb.code.run("x", context=c.id))
+        self.assertEqual(self.srv.estado.codigo_pedido["context_id"], c.id)
+        sb.code.interrupt(c.id)
+        self.assertEqual(self.srv.estado.interrumpidos, [(sb.id, c.id)])
+        sb.code.contexts.delete(c.id)
+        with self.assertRaises(NotFound):
+            sb.code.contexts.get(c.id)
+
+    def test_ficheros_nuevos(self):
+        sb = Sandbox.create(**self.kw)
+        sb.files.write("/d/a.log", "0123456789")
+        sb.files.write("/d/b.txt", "x")
+        self.assertEqual(sb.files.read("/d/a.log", range=(2, 5)), b"2345")
+        self.assertEqual(sb.files.read("/d/a.log", range=(7, None)), b"789")
+        self.assertEqual(sb.files.read("/d/a.log", range="bytes=-3"), b"789")
+        with self.assertRaises(ApiError) as cm:
+            sb.files.read("/d/a.log", range=(50, None))
+        self.assertEqual((cm.exception.status, cm.exception.code), (416, "requested_range_not_satisfiable"))
+        self.assertEqual(sb.files.search("/d", "*.log").matches, ["/d/a.log"])
+        sb.files.move("/d/b.txt", "/d/c.txt")
+        with self.assertRaises(NotFound):
+            sb.files.stat("/d/b.txt")
+        sb.files.write("/d/b.txt", "y")
+        with self.assertRaises(Conflict):
+            sb.files.move("/d/b.txt", "/d/c.txt")
+        sb.files.move("/d/b.txt", "/d/c.txt", overwrite=True)
+        self.assertEqual(sb.files.read_text("/d/c.txt"), "y")
+        self.assertTrue(sb.files.mkdir("/d/sub/x").is_dir)
+
+    def test_tar_de_subida_y_bajada(self):
+        import io
+        import tarfile
+        sb = Sandbox.create(**self.kw)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            ti = tarfile.TarInfo("a.txt")
+            ti.size = 2
+            tf.addfile(ti, io.BytesIO(b"hi"))
+        r = sb.files.upload_tar("/w", buf.getvalue(), mkdir=True)
+        self.assertEqual(r.entries, 1)
+        self.assertEqual(self.srv.estado.peticiones[-1][2], {"path": "/w", "tar": "1", "mkdir": "1"})
+        self.assertEqual(sb.files.read("/w/a.txt"), b"hi")
+        with tarfile.open(fileobj=io.BytesIO(sb.files.download_tar("/w"))) as tf:
+            self.assertEqual(tf.extractfile("a.txt").read(), b"hi")
+
+    def test_api_error_trae_code(self):
+        with self.assertRaises(NotFound) as cm:
+            Sandbox.connect("h1/nada", **self.kw)
+        self.assertEqual(cm.exception.code, "not_found")
+
+    def test_reintento_con_retry_after(self):
+        sb = Sandbox.create(**self.kw)
+        # Sin reintentos (por defecto) el 503 sube tal cual.
+        self.srv.estado.fallos_503 = 1
+        with self.assertRaises(ServerError) as cm:
+            sb.renew()
+        self.assertEqual((cm.exception.status, cm.exception.retry_after, cm.exception.code), (503, 2.0, "service_unavailable"))
+        # Con reintentos espera el Retry-After (2 s, sin dormir de verdad) y sale.
+        cliente = Client(url=self.srv.url, token=TOKEN, retries=2)
+        pausas = []
+        cliente._dormir = pausas.append
+        self.srv.estado.fallos_503 = 2
+        cliente.renew_sandbox(sb.id)
+        self.assertEqual(pausas, [2.0, 2.0])
+        # Agotados los reintentos, lanza.
+        self.srv.estado.fallos_503 = 5
+        with self.assertRaises(ServerError):
+            cliente.renew_sandbox(sb.id)
+        # Un 429 de cuota al crear también se reintenta.
+        self.srv.estado.rate_limit_en_create = 1
+        pausas.clear()
+        cliente.create_sandbox()
+        self.assertEqual(pausas, [7.0])
+
+    def test_url_por_defecto(self):
+        self.assertEqual(Client().url, "http://127.0.0.1:8090")
+
+    def test_async_superficie_nueva(self):
+        async def main():
+            async with await AsyncSandbox.create(**self.kw) as sb:
+                await sb.pause()
+                self.assertEqual((await sb.resume()).state, "running")
+                self.assertEqual((await sb.endpoints.create(80)).port, 80)
+                evs = [e async for e in await sb.code.run("1+1")]
+                self.assertEqual(evs[-1].type, "done")
+                await sb.files.mkdir("/z")
+                self.assertEqual((await sb.files.search("/", "*")).matches, [])
+        asyncio.run(main())
 
 
 class TestAsync(Base):

@@ -1,10 +1,10 @@
 // Transporte HTTP y rutas de la API /v1 (solo fetch nativo).
 
-import { ConfigError, TransportError, errorPara } from "./errors.js";
+import { ApiError, ConfigError, TransportError, errorPara } from "./errors.js";
 
 export const ENV_URL = "KLING_SANDBOX_URL";
 export const ENV_TOKEN = "KLING_SANDBOX_TOKEN";
-export const URL_POR_DEFECTO = "http://localhost:8088";
+export const URL_POR_DEFECTO = "http://127.0.0.1:8090";
 
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
 
@@ -20,10 +20,13 @@ export class Client {
   #token;
 
   /**
-   * @param {{url?: string, token?: string, timeout?: number|null, fetch?: typeof fetch}} [opts]
-   *   timeout en segundos (por defecto 60; null = sin plazo).
+   * @param {{url?: string, token?: string, timeout?: number|null, fetch?: typeof fetch,
+   *   retries?: number, maxRetryWait?: number}} [opts]
+   *   timeout en segundos (por defecto 60; null = sin plazo). `retries` > 0 reintenta
+   *   un 429 o 503 esperando su `Retry-After` (1 s si no lo trae; nunca más de
+   *   `maxRetryWait`, 30 s por defecto). Por defecto no reintenta nada.
    */
-  constructor({ url, token, timeout = 60, fetch: f } = {}) {
+  constructor({ url, token, timeout = 60, fetch: f, retries = 0, maxRetryWait = 30 } = {}) {
     const env = typeof process !== "undefined" ? process.env : {};
     const crudo = url || env[ENV_URL] || URL_POR_DEFECTO;
     let u;
@@ -32,6 +35,9 @@ export class Client {
     this.url = `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`; // sin credenciales ni query
     this.#token = token ?? env[ENV_TOKEN] ?? null;
     this.timeout = timeout;
+    this.retries = Math.max(0, Math.trunc(retries));
+    this.maxRetryWait = maxRetryWait;
+    this._dormir = (seg) => new Promise((r) => setTimeout(r, seg * 1000));
     this._fetch = f ?? globalThis.fetch;
     if (typeof this._fetch !== "function") throw new ConfigError("hace falta fetch (Node >= 18)");
   }
@@ -45,13 +51,25 @@ export class Client {
     return t && String(texto).includes(t) ? String(texto).split(t).join("<oculto>") : String(texto);
   }
 
-  /** Devuelve la Response ya validada (2xx); si no, lanza el error tipado. */
-  async _abrir(metodo, ruta, { query, body, contentType, timeout = this.timeout, auth = true } = {}) {
+  /** Devuelve la Response ya validada (2xx); si no, lanza el error tipado. Con `retries`, un 429/503 se reintenta. */
+  async _abrir(metodo, ruta, opts = {}) {
+    for (let intento = 0; ; intento++) {
+      try {
+        return await this._abrirUna(metodo, ruta, opts);
+      } catch (e) {
+        if (!(e instanceof ApiError) || (e.status !== 429 && e.status !== 503) || intento >= this.retries) throw e;
+        await this._dormir(Math.min(Math.max(e.retry_after ?? 1, 0), this.maxRetryWait));
+      }
+    }
+  }
+
+  async _abrirUna(metodo, ruta, { query, body, contentType, headers, timeout = this.timeout, auth = true } = {}) {
     const qs = query ? new URLSearchParams(query).toString() : "";
     const destino = this.url + ruta.split("/").map(encodeURIComponent).join("/") + (qs ? "?" + qs : "");
     const cab = { Accept: "application/json, application/x-ndjson, application/octet-stream" };
     if (auth && this.#token) cab.Authorization = "Bearer " + this.#token;
     if (contentType) cab["Content-Type"] = contentType;
+    if (headers) Object.assign(cab, headers);
     let resp;
     try {
       resp = await this._fetch(destino, {
@@ -117,21 +135,78 @@ export class Client {
     return { sandboxes: j.sandboxes ?? [], errors: j.errors ?? [] };
   }
   getSandbox(id) { return this._json("GET", "/v1/sandboxes/" + id); }
-  async listSandboxes() {
-    const resp = await this._abrir("GET", "/v1/sandboxes");
+  /**
+   * `{ sandboxes, partial, nextCursor }`: `partial` es X-Kindling-Partial y `nextCursor`
+   * el X-Kindling-Next-Cursor (null en la última página). `label` es un objeto
+   * `{clave: valor}` o un array de "clave=valor".
+   */
+  async listSandboxes({ state, label, limit, cursor } = {}) {
+    const query = [];
+    if (state) query.push(["state", state]);
+    if (label) {
+      for (const par of Array.isArray(label) ? label : Object.entries(label).map(([k, v]) => `${k}=${v}`)) query.push(["label", par]);
+    }
+    if (limit) query.push(["limit", String(Math.trunc(limit))]);
+    if (cursor) query.push(["cursor", cursor]);
+    const resp = await this._abrir("GET", "/v1/sandboxes", query.length ? { query } : {});
     const partial = resp.headers.get("x-kindling-partial");
+    const nextCursor = resp.headers.get("x-kindling-next-cursor");
     const crudo = await this._leer(resp, "/v1/sandboxes");
     let lista;
     try { lista = JSON.parse(new TextDecoder().decode(crudo) || "[]") ?? []; } catch {
       throw new TransportError("respuesta no JSON de /v1/sandboxes");
     }
-    return { sandboxes: lista, partial };
+    return { sandboxes: lista, partial, nextCursor };
   }
   async deleteSandbox(id) { await this._json("DELETE", "/v1/sandboxes/" + id); }
   renewSandbox(id, ttlSeconds) {
     return this._json("POST", `/v1/sandboxes/${id}/renew`,
       ttlSeconds != null ? { cuerpo: { ttl_seconds: ttlSeconds } } : {});
   }
+
+  pauseSandbox(id) { return this._json("POST", `/v1/sandboxes/${id}/pause`); }
+  resumeSandbox(id) { return this._json("POST", `/v1/sandboxes/${id}/resume`); }
+  /** Cambia la política de red; devuelve `{ egress, allow_domains, applied, ... }`. */
+  setEgress(id, { egress, allow_domains } = {}) {
+    const cuerpo = {};
+    if (egress !== undefined) cuerpo.egress = egress;
+    if (allow_domains !== undefined) cuerpo.allow_domains = [...allow_domains];
+    return this._json("PATCH", `/v1/sandboxes/${id}/egress`, { cuerpo });
+  }
+
+  // ---- endpoints
+  createEndpoint(id, { port, ttl_seconds, public: publico } = {}) {
+    const cuerpo = { port };
+    if (ttl_seconds != null) cuerpo.ttl_seconds = Math.trunc(ttl_seconds);
+    if (publico) cuerpo.public = true;
+    return this._json("POST", `/v1/sandboxes/${id}/endpoints`, { cuerpo });
+  }
+  async listEndpoints(id) { return (await this._json("GET", `/v1/sandboxes/${id}/endpoints`)) ?? []; }
+  async revokeEndpoint(id, port) { await this._json("DELETE", `/v1/sandboxes/${id}/endpoints/${Math.trunc(port)}`); }
+
+  // ---- código
+  /** Iterador asíncrono de eventos NDJSON crudos; el último es siempre `done`. */
+  async runCode(id, { code, language, context_id, timeout_seconds } = {}) {
+    const cuerpo = { code };
+    if (language) cuerpo.language = language;
+    if (context_id) cuerpo.context_id = context_id;
+    if (timeout_seconds) cuerpo.timeout_seconds = Math.trunc(timeout_seconds);
+    const ruta = `/v1/sandboxes/${id}/code`;
+    const resp = await this._abrir("POST", ruta, {
+      body: JSON.stringify(cuerpo), contentType: "application/json", timeout: (timeout_seconds || 60) + 30,
+    });
+    return this.#eventos(resp, ruta);
+  }
+  createCodeContext(id, { language, cwd } = {}) {
+    const cuerpo = {};
+    if (language) cuerpo.language = language;
+    if (cwd) cuerpo.cwd = cwd;
+    return this._json("POST", `/v1/sandboxes/${id}/code/contexts`, { cuerpo });
+  }
+  async listCodeContexts(id) { return (await this._json("GET", `/v1/sandboxes/${id}/code/contexts`)) ?? []; }
+  getCodeContext(id, cid) { return this._json("GET", `/v1/sandboxes/${id}/code/contexts/${cid}`); }
+  async deleteCodeContext(id, cid) { await this._json("DELETE", `/v1/sandboxes/${id}/code/contexts/${cid}`); }
+  async interruptCode(id, cid) { await this._json("DELETE", `/v1/sandboxes/${id}/code/contexts/${cid}/execution`); }
 
   // ---- exec
   // Sin tope de comando la lectura puede esperar indefinidamente.
@@ -209,9 +284,34 @@ export class Client {
   async deleteSession(id, sid) { await this._json("DELETE", `/v1/sandboxes/${id}/sessions/${sid}`); }
 
   // ---- ficheros
-  async readFile(id, path) {
+  /**
+   * `range`: `[inicio, fin]` inclusivos (`fin` null = hasta el final) o una cadena
+   * `bytes=a-b` / `bytes=-n`. El gateway contesta 206 y se devuelve solo el trozo.
+   */
+  async readFile(id, path, range) {
     const ruta = `/v1/sandboxes/${id}/files`;
-    return this._leer(await this._abrir("GET", ruta, { query: { path }, timeout: null }), ruta);
+    const headers = range == null ? undefined
+      : { Range: typeof range === "string" ? range : `bytes=${range[0]}-${range[1] ?? ""}` };
+    return this._leer(await this._abrir("GET", ruta, { query: { path }, timeout: null, headers }), ruta);
+  }
+  async moveFile(id, from, to, overwrite = false) {
+    await this._json("POST", `/v1/sandboxes/${id}/files/move`, { cuerpo: { from, to, ...(overwrite && { overwrite: true }) } });
+  }
+  mkdirFile(id, path) { return this._json("POST", `/v1/sandboxes/${id}/files/mkdir`, { cuerpo: { path } }); }
+  searchFiles(id, path, glob) {
+    return this._json("GET", `/v1/sandboxes/${id}/files/search`, { query: { path, glob } });
+  }
+  async uploadTar(id, path, datos, { mkdir = false } = {}) {
+    const ruta = `/v1/sandboxes/${id}/files`;
+    const resp = await this._abrir("PUT", ruta, {
+      query: { path, tar: "1", ...(mkdir && { mkdir: "1" }) }, body: datos, contentType: "application/x-tar", timeout: null,
+    });
+    const crudo = await this._leer(resp, ruta);
+    return crudo.length ? JSON.parse(new TextDecoder().decode(crudo)) : {};
+  }
+  async downloadTar(id, path) {
+    const ruta = `/v1/sandboxes/${id}/files`;
+    return this._leer(await this._abrir("GET", ruta, { query: { path, tar: "1" }, timeout: null }), ruta);
   }
   statFile(id, path) {
     return this._json("GET", `/v1/sandboxes/${id}/files`, { query: { path, stat: "1" }, timeout: null });
