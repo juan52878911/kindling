@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // holdRepoLock toma el cerrojo de kling db branch del repo de la prueba (lo
@@ -196,6 +198,42 @@ func TestPruneLeeLasRamasConElCerrojo(t *testing.T) {
 	}
 	if ta.f.find(nueva.ID) == nil {
 		t.Fatal("prune removed the copy of a branch created while it waited for the lock")
+	}
+}
+
+// thawColgado es un daemon cuyo thaw no contesta hasta que se cancela la
+// petición (o, como red de seguridad de la prueba, en 5 s).
+type thawColgado struct{ *fakeKling }
+
+func (k thawColgado) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("thaw never returned")
+	}
+}
+
+// -switch corre dentro del git checkout: con el daemon sin contestar, se rinde
+// en su plazo (KLING_DB_SWITCH_TIMEOUT) en vez de colgar el checkout.
+func TestSwitchTienePlazo(t *testing.T) {
+	ta, _ := branchTestApp(t)
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ta.f.Run(ctx, nil, "freeze", ta.copyOf(t, "main").ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KLING_DB_SWITCH_TIMEOUT", "200ms")
+	ta.app.k = thawColgado{ta.f}
+	start := time.Now()
+	err := ta.branchSwitch(ctx, "", defaultOwner, "", true)
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("-switch took %s with a 200ms limit (err %v)", took, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "did not finish within 200ms") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
