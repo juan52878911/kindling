@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -234,6 +235,15 @@ func TestSwitchTienePlazo(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "did not finish within 200ms") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSwitchPlazoDeLaVariable(t *testing.T) {
+	for v, want := range map[string]time.Duration{"": defaultSwitchTimeout, "5s": 5 * time.Second, "0": 0, "raro": defaultSwitchTimeout, "-1s": defaultSwitchTimeout} {
+		t.Setenv("KLING_DB_SWITCH_TIMEOUT", v)
+		if got := switchTimeout(io.Discard); got != want {
+			t.Errorf("%q: %s, want %s", v, got, want)
+		}
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -801,6 +802,47 @@ func (a *app) branchSwitch(ctx context.Context, host, owner, golden string, wait
 // del repo tomado: borrar el .env anterior, tener la copia de la rama, activarla
 // y escribir su conexión.
 func (a *app) switchActivate(ctx context.Context, owner, golden string) (*repoInfo, error) {
+	// El gancho corre dentro del git checkout: con un daemon que no contesta
+	// (thaw sin respuesta, cerrojo que no se suelta) colgaría el checkout. Con
+	// plazo, se rinde y el gancho avisa y sigue.
+	if d := switchTimeout(a.stderr); d > 0 {
+		parent := ctx
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(parent, d)
+		defer cancel()
+		ri, err := a.switchActivateCtx(ctx, owner, golden)
+		if err != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("-switch did not finish within %s (%s sets the limit; 0 = none): %w", d, switchTimeoutEnv, err)
+		}
+		return ri, err
+	}
+	return a.switchActivateCtx(ctx, owner, golden)
+}
+
+// switchTimeoutEnv es el plazo de la parte de -switch que espera el checkout
+// (una duración de Go; 0 = sin plazo). defaultSwitchTimeout cubre crear la
+// copia desde el golden, que tarda segundos.
+const switchTimeoutEnv = "KLING_DB_SWITCH_TIMEOUT"
+
+const defaultSwitchTimeout = 60 * time.Second
+
+func switchTimeout(stderr io.Writer) time.Duration {
+	v := os.Getenv(switchTimeoutEnv)
+	if v == "" {
+		return defaultSwitchTimeout
+	}
+	if v == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		fmt.Fprintf(stderr, "warning: %s=%q is not a duration; using %s\n", switchTimeoutEnv, v, defaultSwitchTimeout)
+		return defaultSwitchTimeout
+	}
+	return d
+}
+
+func (a *app) switchActivateCtx(ctx context.Context, owner, golden string) (*repoInfo, error) {
 	end := a.tr.span("phase resolve")
 	ri, branch, from, err := a.resolve(ctx, "", "")
 	end()
