@@ -1,7 +1,7 @@
 # Publica una release a partir de una etiqueta vX.Y.Z.
 #
 # Desde v0.13.0 una sola etiqueta publica TODO lo del repo: el núcleo (kling,
-# kling-guest, kling-chispa, kling-vz, kling-hv), las extensiones (kling-mcp y su puente,
+# kling-guest, kling-chispa, kling-vz, kling-hv, kling-unpack), las extensiones (kling-mcp y su puente,
 # kling-sandbox), el operador de Kubernetes y los tar de lo que
 # se instala en el host del daemon, con UN único SHA256SUMS. Antes cada repo
 # tenía su release y su SHA256SUMS y había que cruzar tablas de compatibilidad;
@@ -272,6 +272,91 @@ jobs:
             vz/dist/kling-credproxy-darwin-arm64
           if-no-files-found: error
 
+  # kling-unpack (rust/kling-unpack) descomprime las capas de las imágenes de
+  # Docker 1,7× más rápido que el camino de Go (C-10): se publica para las
+  # plataformas con daemon y install.sh lo deja donde lo busca el constructor
+  # ($KLING_LIB_DIR/kling-unpack). En Linux, estático con musl: corre en el
+  # host del daemon sea cual sea su libc. Cada pata en su arquitectura nativa,
+  # para comprobar el binario que se publica contra el camino de Go (mismos
+  # bytes, mismos fallos) antes de subirlo. Sin caché de cargo ni de Go: lo
+  # que sale de aquí entra en el SHA256SUMS que se firma.
+  unpack:
+    name: build kling-unpack ${{ matrix.plat }}
+    needs: [test, lint]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { plat: linux-amd64,  runner: ubuntu-latest,    target: x86_64-unknown-linux-musl }
+          - { plat: linux-arm64,  runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { plat: darwin-arm64, runner: macos-15,         target: aarch64-apple-darwin }
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+      # La toolchain de Rust fija, como la de Go: el binario no cambia con la
+      # que traiga el runner ese día.
+      RUST_TOOLCHAIN: '1.90.0'
+      # Como kling-vz: dyld no lo carga en un macOS anterior al que marca.
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # El token del job no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLAT: ${{ matrix.plat }}
+        run: |
+          set -euo pipefail
+          command -v rustup >/dev/null || { echo "this runner has no rustup" >&2; exit 1; }
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          if [ "${PLAT%%-*}" = linux ]; then
+            # El zstd de C (zstd-sys) contra las cabeceras de musl, no las de glibc.
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends musl-tools
+            cc_var="CC_$(printf '%s' "$TARGET" | tr - _)"
+            export "$cc_var=musl-gcc"
+          fi
+          cargo "+$RUST_TOOLCHAIN" build --release --locked --target "$TARGET" --manifest-path rust/kling-unpack/Cargo.toml
+          mkdir -p dist
+          out="dist/kling-unpack-$PLAT"
+          cp "rust/kling-unpack/target/$TARGET/release/kling-unpack" "$out"
+          chmod 755 "$out"
+          if [ "${PLAT%%-*}" = linux ]; then
+            file "$out"
+            file "$out" | grep -Eq 'statically linked|static-pie linked' \
+              || { echo "$out is not static" >&2; exit 1; }
+          else
+            # Solo libSystem, el macOS mínimo de kling-vz y la firma ad hoc del
+            # enlazador, que Apple Silicon exige para ejecutar nada.
+            otool -L "$out"
+            [ "$(otool -L "$out" | tail -n +2 | grep -vc '/usr/lib/libSystem.B.dylib')" = 0 ] \
+              || { echo "$out links more than libSystem" >&2; exit 1; }
+            otool -l "$out" | grep -A4 LC_BUILD_VERSION | grep -q "minos $MACOSX_DEPLOYMENT_TARGET\$" \
+              || { echo "$out is not built for macOS $MACOSX_DEPLOYMENT_TARGET" >&2; exit 1; }
+            codesign -v "$out"
+          fi
+      - name: el binario publicado contra el camino de Go
+        shell: bash
+        env:
+          PLAT: ${{ matrix.plat }}
+        run: |
+          set -euo pipefail
+          KLING_UNPACK_TEST="$PWD/dist/kling-unpack-$PLAT" go test -race -count=1 -run UnpackHelper -v ./internal/oci
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unpack-${{ matrix.plat }}
+          path: dist/kling-unpack-${{ matrix.plat }}
+          if-no-files-found: error
+
   # El kernel de invitado y la imagen min de las dos arquitecturas: un Mac sin
   # host Linux los baja con `kling up` (docs/mac.md) en vez de copiarlos de otro
   # daemon. El kernel es reproducible (scripts/builders/kernel, cruzado para
@@ -357,7 +442,7 @@ jobs:
 
   release:
     name: release
-    needs: [build, vz, imagenes, e2e, android]
+    needs: [build, vz, unpack, imagenes, e2e, android]
     runs-on: ubuntu-latest
     # El único job que escribe en el repo: crea la release y sube los assets.
     # Corre en el environment protegido `release`, el único con el secreto
@@ -428,6 +513,12 @@ jobs:
           pattern: vmm-darwin-arm64
           path: release
           merge-multiple: true
+      - name: download artifacts (unpack)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: unpack-*
+          path: release
+          merge-multiple: true
       - name: download artifacts (imagenes)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -485,7 +576,7 @@ jobs:
             done
           done
           for arch in amd64 arm64; do
-            want+=("kling-guest-linux-$arch" "kling-chispa-linux-$arch" "kindling-operator-linux-$arch")
+            want+=("kling-guest-linux-$arch" "kling-chispa-linux-$arch" "kindling-operator-linux-$arch" "kling-unpack-linux-$arch")
           done
           for arch in amd64 arm64; do
             want+=("vmlinux-$arch.zst" "min-$arch.ext4.zst")
@@ -496,7 +587,7 @@ jobs:
             k="$(TARGET_ARCH="$arch" bash scripts/builders/kernel/build.sh --print-name)-android"
             want+=("$k" "$k.sha256" "$k.config" "$k.buildinfo")
           done
-          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kling-credproxy-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
+          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kling-credproxy-darwin-arm64 kling-unpack-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt
           (cd release && ls -1) | sort > have.txt
           if ! diff -u want.txt have.txt; then
