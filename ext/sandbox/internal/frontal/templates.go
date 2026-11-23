@@ -14,6 +14,8 @@ package frontal
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -110,4 +112,102 @@ func (s *Servidor) handleTemplates(w http.ResponseWriter, r *http.Request) {
 		out = append(out, *ti)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// PoolHost es el fondo de una plantilla en un host.
+type PoolHost struct {
+	Host  string `json:"host"`
+	Size  int    `json:"size"`
+	Ready int    `json:"ready"`
+	// Error es lo que impidió fijar el fondo en este host.
+	Error string `json:"error,omitempty"`
+	// Stale y Error vienen del daemon (api.PoolInfo): el dorado no se puede
+	// restaurar con el VMM de ahora.
+	Stale string `json:"stale,omitempty"`
+}
+
+// PoolRespuesta es la respuesta de PUT /v1/templates/{name}/pool. Available
+// es la suma de copias despiertas y reclamables en todos los hosts.
+type PoolRespuesta struct {
+	Template  string     `json:"template"`
+	Size      int        `json:"size"`
+	Available int        `json:"available"`
+	Hosts     []PoolHost `json:"hosts"`
+}
+
+// handlePool sirve PUT /v1/templates/{name}/pool (solo admin): fija el tamaño
+// del fondo precalentado de la plantilla en CADA host que la tiene (size 0 lo
+// apaga). Es la ruta que usa el operador de Kubernetes para SandboxPool.
+//
+// Un host que no contesta no impide fijarlo en los demás: se informa en
+// hosts[].error, y solo si ninguno lo consigue la respuesta es un 502.
+func (s *Servidor) handlePool(w http.ResponseWriter, r *http.Request) {
+	if !tenantDe(r).Admin {
+		fail(w, http.StatusForbidden, errors.New("setting a template pool needs an admin token"))
+		return
+	}
+	nombre := r.PathValue("name")
+	var pet api.PoolRequest
+	if err := leerJSON(r, &pet); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if pet.Size < 0 || pet.Size > api.PoolMax {
+		fail(w, http.StatusBadRequest, fmt.Errorf("size must be between 0 and %d", api.PoolMax))
+		return
+	}
+	snap := "sbx-" + nombre
+	todos := s.reg.Todos()
+	res := make([]*PoolHost, len(todos))
+	var wg sync.WaitGroup
+	for i, h := range todos {
+		wg.Add(1)
+		go func(i int, h *hosts.Host) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			defer cancel()
+			snaps, err := h.Cliente.Snapshots(ctx)
+			if err != nil {
+				res[i] = &PoolHost{Host: h.Nombre, Error: deHost(h, err).Error()}
+				return
+			}
+			tiene := false
+			for _, sn := range snaps {
+				tiene = tiene || sn.Name == snap
+			}
+			if !tiene {
+				return
+			}
+			info, err := h.Cliente.SetSnapshotPool(ctx, snap, pet.Size)
+			if err != nil {
+				res[i] = &PoolHost{Host: h.Nombre, Error: deHost(h, err).Error()}
+				return
+			}
+			res[i] = &PoolHost{Host: h.Nombre, Size: info.Size, Ready: info.Ready, Stale: info.Stale}
+			if info.Error != "" {
+				res[i].Error = info.Error
+			}
+		}(i, h)
+	}
+	wg.Wait()
+	out := PoolRespuesta{Template: nombre, Size: pet.Size, Hosts: []PoolHost{}}
+	fallos := 0
+	for _, ph := range res {
+		if ph == nil {
+			continue
+		}
+		out.Hosts = append(out.Hosts, *ph)
+		out.Available += ph.Ready
+		if ph.Error != "" && ph.Size != pet.Size {
+			fallos++
+		}
+	}
+	switch {
+	case len(out.Hosts) == 0:
+		fail(w, http.StatusNotFound, fmt.Errorf("no host has the template %q", nombre))
+	case fallos == len(out.Hosts):
+		fail(w, http.StatusBadGateway, fmt.Errorf("could not set the pool of %q on any host: %s", nombre, out.Hosts[0].Error))
+	default:
+		writeJSON(w, http.StatusOK, out)
+	}
 }

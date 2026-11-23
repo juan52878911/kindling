@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/frontal"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // DefaultResync es cada cuánto se refresca el estado de cada sandbox desde el
@@ -474,6 +476,7 @@ func (c *Controller) reconcileCon(ctx context.Context, sb *Sandbox, v *vistaFron
 		cur.Status = SandboxStatus{
 			ID: out.ID, Host: out.Host, State: string(out.State),
 			ExpiresAt: out.ExpiresAt, ObservedGeneration: cur.Metadata.Generation,
+			Endpoint: c.Frontal.Endpoint(out.ID),
 		}
 		if updated, err := c.Kube.PatchStatus(ctx, ns, name, cur.Status); err != nil {
 			c.Log.Printf("operator: %s/%s: writing status after create: %v", ns, name, err)
@@ -515,16 +518,48 @@ func (c *Controller) reconcileCon(ctx context.Context, sb *Sandbox, v *vistaFron
 			cur.Status.Message = strPtr("")
 			changed = true
 		}
-		// Si spec cambió (hoy, solo ttlSeconds es mutable) se renueva.
-		if cur.Status.ObservedGeneration != cur.Metadata.Generation {
-			out, err := c.Frontal.Renew(ctx, cur.Status.ID, cur.Spec.TTLSeconds)
-			if err != nil {
-				c.Log.Printf("operator: %s/%s: renewing: %v", ns, name, err)
-				c.setMessage(ctx, &cur, err.Error())
-				return
-			}
+		if ep := c.Frontal.Endpoint(cur.Status.ID); ep != "" && cur.Status.Endpoint != ep {
+			cur.Status.Endpoint = ep
+			changed = true
+		}
+		// spec.paused: pausa un running; reanuda un paused solo cuando el
+		// cambio de spec es nuevo (un sandbox pausado a mano con la API no
+		// se despierta cada 30 s por no decir nada el objeto).
+		nuevoSpec := cur.Status.ObservedGeneration != cur.Metadata.Generation
+		var cambio *frontal.Sandbox
+		var errPausa error
+		switch {
+		case cur.Spec.Paused && out.State == api.StateRunning:
+			cambio, errPausa = c.Frontal.Pause(ctx, cur.Status.ID)
+		case !cur.Spec.Paused && nuevoSpec && out.State == api.StatePaused:
+			cambio, errPausa = c.Frontal.Resume(ctx, cur.Status.ID)
+		}
+		if errPausa != nil {
+			c.Log.Printf("operator: %s/%s: changing paused state: %v", ns, name, errPausa)
+			c.setMessage(ctx, &cur, errPausa.Error())
+			return
+		}
+		if cambio != nil {
+			out = cambio
 			cur.Status.State = string(out.State)
 			cur.Status.ExpiresAt = out.ExpiresAt
+			cur.Status.Message = strPtr("")
+			changed = true
+		}
+		// Si spec cambió, el único campo con efecto propio es ttlSeconds: se
+		// renueva (salvo que ya valga lo pedido: un cambio solo de paused no
+		// debe reiniciar el reloj del TTL).
+		if nuevoSpec {
+			if cur.Spec.TTLSeconds == 0 || cur.Spec.TTLSeconds != out.TTLSeconds {
+				ren, err := c.Frontal.Renew(ctx, cur.Status.ID, cur.Spec.TTLSeconds)
+				if err != nil {
+					c.Log.Printf("operator: %s/%s: renewing: %v", ns, name, err)
+					c.setMessage(ctx, &cur, err.Error())
+					return
+				}
+				cur.Status.State = string(ren.State)
+				cur.Status.ExpiresAt = ren.ExpiresAt
+			}
 			cur.Status.ObservedGeneration = cur.Metadata.Generation
 			cur.Status.Message = strPtr("")
 			changed = true
@@ -722,4 +757,127 @@ func nextBackoff(d time.Duration) time.Duration {
 	}
 	jitter := time.Duration(rand.Int63n(int64(d)/4 + 1))
 	return d + jitter
+}
+
+// ---- SandboxPool
+
+// PoolController concilia los SandboxPool: spec.size es el tamaño del fondo
+// precalentado de spec.template, y se fija en el frontal con
+// PUT /v1/templates/{name}/pool (que lo reparte a cada host con la plantilla).
+// status.available vuelve de esa respuesta.
+//
+// Un SandboxPool no lleva finalizer: borrarlo NO vacía el fondo (para eso,
+// size: 0 antes de borrar). El frontal es dueño del fondo, no el objeto.
+//
+// Cada relist (cada Resync) reconcilia todo y refresca status.available; entre
+// medias, el watch solo reacciona a cambios de spec (generation), no al eco de
+// los status que escribe el propio operador.
+type PoolController struct {
+	Kube    *KubeClient
+	Frontal *FrontalClient
+	Log     *log.Logger
+	// Resync es cada cuánto se relista; 0 usa DefaultResync.
+	Resync time.Duration
+	// BackoffBase: primer plazo de espera tras un fallo; 0 usa el por defecto.
+	BackoffBase time.Duration
+}
+
+// NewPoolController construye el controlador de SandboxPool.
+func NewPoolController(kube *KubeClient, frontal *FrontalClient, logger *log.Logger) *PoolController {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+	return &PoolController{Kube: kube, Frontal: frontal, Log: logger}
+}
+
+func (p *PoolController) resync() time.Duration {
+	if p.Resync > 0 {
+		return p.Resync
+	}
+	return DefaultResync
+}
+
+func (p *PoolController) backoffBase() time.Duration {
+	if p.BackoffBase > 0 {
+		return p.BackoffBase
+	}
+	return defaultBackoffBase
+}
+
+// Run bloquea hasta que ctx se cancele: list, reconciliar todo y watch hasta
+// que venza el resync (entonces relista) o el servidor pida relistar.
+func (p *PoolController) Run(ctx context.Context) error {
+	backoff := p.backoffBase()
+	for ctx.Err() == nil {
+		list, err := p.Kube.ListPools(ctx)
+		if err != nil {
+			p.Log.Printf("operator: sandboxpools: list: %v", err)
+			if !sleepCtx(ctx, backoff) {
+				break
+			}
+			backoff = nextBackoff(backoff)
+			continue
+		}
+		backoff = p.backoffBase()
+		for i := range list.Items {
+			p.reconcile(ctx, &list.Items[i])
+		}
+		wctx, cancel := context.WithTimeout(ctx, p.resync())
+		err = p.Kube.WatchPools(wctx, list.Metadata.ResourceVersion, func(kind string, o *Pool) {
+			if kind != "ADDED" && kind != "MODIFIED" {
+				return
+			}
+			// El eco del status propio (misma generation ya observada) no se
+			// reconcilia: sería un PUT por cada escrito del operador.
+			if o.Status.ObservedGeneration == o.Metadata.Generation && o.Status.Available != nil {
+				return
+			}
+			p.reconcile(wctx, o)
+		})
+		cancel()
+		if ctx.Err() != nil {
+			break
+		}
+		if err != nil && !errors.Is(err, errGone) && !errors.Is(err, context.DeadlineExceeded) {
+			p.Log.Printf("operator: sandboxpools: watch: %v", err)
+			if !sleepCtx(ctx, backoff) {
+				break
+			}
+			backoff = nextBackoff(backoff)
+		}
+	}
+	return ctx.Err()
+}
+
+func (p *PoolController) reconcile(ctx context.Context, o *Pool) {
+	ns, name := o.Metadata.Namespace, o.Metadata.Name
+	if o.Metadata.DeletionTimestamp != nil {
+		return
+	}
+	fallo := func(msg string) {
+		p.Log.Printf("operator: sandboxpool %s/%s: %s", ns, name, msg)
+		if o.Status.Message != nil && *o.Status.Message == msg {
+			return
+		}
+		if err := p.Kube.PatchPoolStatus(ctx, ns, name, PoolStatus{Message: strPtr(msg), ObservedGeneration: o.Metadata.Generation}); err != nil {
+			p.Log.Printf("operator: sandboxpool %s/%s: writing status: %v", ns, name, err)
+		}
+	}
+	if o.Spec.Size < 0 || o.Spec.Size > api.PoolMax {
+		fallo(fmt.Sprintf("spec.size must be between 0 and %d", api.PoolMax))
+		return
+	}
+	if !plantillaValida.MatchString(o.Spec.Template) {
+		fallo(fmt.Sprintf("invalid spec.template %q", o.Spec.Template))
+		return
+	}
+	out, err := p.Frontal.SetPool(ctx, o.Spec.Template, o.Spec.Size)
+	if err != nil {
+		fallo(err.Error())
+		return
+	}
+	st := PoolStatus{Available: &out.Available, Message: strPtr(""), ObservedGeneration: o.Metadata.Generation}
+	if err := p.Kube.PatchPoolStatus(ctx, ns, name, st); err != nil {
+		p.Log.Printf("operator: sandboxpool %s/%s: writing status: %v", ns, name, err)
+	}
 }

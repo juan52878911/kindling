@@ -359,3 +359,102 @@ func (k *KubeClient) PatchFinalizers(ctx context.Context, namespace, name string
 	url := k.itemURL(namespace, name)
 	return k.mergePatch(ctx, url, map[string]any{"metadata": map[string]any{"finalizers": finalizers}})
 }
+
+// ---- SandboxPool (segundo recurso)
+
+func (k *KubeClient) poolsURL() string {
+	return fmt.Sprintf("%s/apis/%s/%s/%s", k.base, Group, Version, PoolResource)
+}
+
+func (k *KubeClient) poolURL(namespace, name string) string {
+	return fmt.Sprintf("%s/apis/%s/%s/namespaces/%s/%s/%s", k.base, Group, Version, namespace, PoolResource, name)
+}
+
+// ListPools trae todos los SandboxPool del clúster y el resourceVersion para
+// el watch.
+func (k *KubeClient) ListPools(ctx context.Context) (*PoolList, error) {
+	req, err := k.newRequest(ctx, http.MethodGet, k.poolsURL(), "", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := k.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var list PoolList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decoding sandboxpool list: %w", err)
+	}
+	return &list, nil
+}
+
+// WatchPools es Watch para SandboxPool: mismas reglas (errGone pide relistar).
+func (k *KubeClient) WatchPools(ctx context.Context, resourceVersion string, handle func(kind string, p *Pool)) error {
+	url := fmt.Sprintf("%s?watch=1&allowWatchBookmarks=true&resourceVersion=%s", k.poolsURL(), resourceVersion)
+	req, err := k.newRequest(ctx, http.MethodGet, url, "", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := k.watchHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusGone {
+		return errGone
+	}
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev watchEvent
+		if err := dec.Decode(&ev); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if ev.Type == "ERROR" {
+			var st status
+			if json.Unmarshal(ev.Object, &st) == nil && st.Code == http.StatusGone {
+				return errGone
+			}
+			return fmt.Errorf("watch error event: %s", string(ev.Object))
+		}
+		var p Pool
+		if err := json.Unmarshal(ev.Object, &p); err != nil {
+			return fmt.Errorf("decoding watch object: %w", err)
+		}
+		handle(ev.Type, &p)
+	}
+}
+
+// PatchPoolStatus mezcla status.* de un SandboxPool por su subrecurso /status.
+func (k *KubeClient) PatchPoolStatus(ctx context.Context, namespace, name string, st PoolStatus) error {
+	body, err := json.Marshal(map[string]any{"status": st})
+	if err != nil {
+		return err
+	}
+	req, err := k.newRequest(ctx, http.MethodPatch, k.poolURL(namespace, name)+"/status", "application/merge-patch+json", body)
+	if err != nil {
+		return err
+	}
+	resp, err := k.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+	io.Copy(io.Discard, resp.Body)
+	return nil
+}
