@@ -28,12 +28,16 @@ in the repo: [`docs/`](docs/README.md), starting with the [full guide](docs/guid
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 kling up            # checks KVM, nftables, the kindling user and the images; prints what needs sudo
+sudo kling up -install   # writes the systemd unit; kling up then downloads the kernel and min
+kling try -- uname -a
 ```
 
 On arm64 (Graviton .metal, Ampere, Raspberry Pi 5 with the 4K kernel) see
 [`docs/linux-arm64.md`](docs/linux-arm64.md) for which hosts work and how to tune them.
 
-The daemon can also run as a systemd service on a remote host, deployed from a checkout:
+The release's `install.sh` is enough: `kling up` downloads the guest kernel and `min` from the
+release, and `sudo kling up -install` writes the unit (no checkout needed). The daemon can also
+run as a systemd service on a remote host, deployed from a checkout:
 `make deploy HOST=ssh://user@host`. The CLI then reaches it over SSH
 (`kling context add lab ssh://user@host`) — the daemon never listens on a network port.
 
@@ -41,18 +45,23 @@ The daemon can also run as a systemd service on a remote host, deployed from a c
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-brew install e2fsprogs
-kling up            # downloads the guest kernel and the `min` image from the release, verified
+kling try -- uname -a
 ```
 
+Nothing else to install (no Homebrew, no `minisign`, no checkout): the first `kling try` starts
+the daemon (it offers to install its launchd agent) and downloads the guest kernel and the
+`min` image from the release, verified against its `SHA256SUMS` (about 10 MB). `kling up` does
+the same step by step and prints what is missing; `kling up -uninstall` removes the agent.
+
 Or with Homebrew, from the [tap](https://github.com/juan52878911/homebrew-kindling) (latest
-stable release; it pulls in e2fsprogs and `brew services start kling` runs the daemon):
+stable release; `brew services start kling` runs the daemon):
 
 ```sh
 brew install juan52878911/kindling/kling
 ```
 
-The script verifies every binary against the release's `SHA256SUMS`, installs to
+The script verifies the signature of `SHA256SUMS` (with `minisign` if you have it, otherwise with the
+`kling` it just downloaded) and every binary against it, installs to
 `~/.local/bin` without sudo, and takes `--with mcp,sandbox`, `--tag vX.Y.Z` and
 `--prefix DIR`. To upgrade later: `kling upgrade` (`sudo` on Linux; `brew upgrade kling` if
 Homebrew installed it) swaps the binaries,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"net"
 	"net/http"
@@ -10,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/upgrade"
 )
 
 // Primer uso: lo que pasa entre `curl … | sh` y el primer `kling try`.
@@ -180,8 +183,7 @@ func TestTryConservaCodigosDeContrato(t *testing.T) {
 		for _, conJSON := range []bool{false, true} {
 			t.Run(c.nombre, func(t *testing.T) {
 				sinJSON(t)
-				d := &tryDaemon{}
-				m := d.mux()
+				m := http.NewServeMux()
 				m.HandleFunc("POST /sandboxes", func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(c.status)
 					_, _ = w.Write([]byte(c.cuerpo))
@@ -230,11 +232,12 @@ func TestStartMacDaemonSinAgenteFallaSiNoHayQuienConfirme(t *testing.T) {
 func TestStartMacDaemonInstalaElAgenteSiConfirman(t *testing.T) {
 	dir := t.TempDir()
 	a := agenteDaemon{label: "dev.kindling.test", plist: filepath.Join(dir, "x.plist"), log: filepath.Join(dir, "x.log")}
-	oldC, oldL := confirmarAgente, lanzarctl
+	oldC, oldL, oldE := confirmarAgente, lanzarctl, esperaDaemonMac
+	esperaDaemonMac = 200 * time.Millisecond
 	confirmarAgente = func(agenteDaemon) bool { return true }
 	var cmds []string
 	lanzarctl = func(args ...string) ([]byte, error) { cmds = append(cmds, strings.Join(args, " ")); return nil, nil }
-	t.Cleanup(func() { confirmarAgente, lanzarctl = oldC, oldL })
+	t.Cleanup(func() { confirmarAgente, lanzarctl, esperaDaemonMac = oldC, oldL, oldE })
 	// launchctl "funciona" pero el socket nunca contesta: error, no éxito.
 	err := startMacDaemon(a, "/tmp/kling-no-such.sock", dir)
 	if _, serr := os.Stat(a.plist); serr != nil {
@@ -351,6 +354,83 @@ func TestMkfsYaNoEsFatalEnMac(t *testing.T) {
 	for _, c := range checksMac(probeMac{arch: "arm64", macOS: "15.5", vmm: "/x/kling-vz", vmmVersion: "1", entitlement: true}) {
 		if c.label == "mkfs.ext4" && c.fatal {
 			t.Fatal("mkfs.ext4 only matters for -disk other than 512: it must be a warning")
+		}
+	}
+}
+
+// ── up -verify-sums (install.sh sin minisign) ─────────────────────────────────
+
+func TestVerificarSumas(t *testing.T) {
+	k, err := upgrade.GenerarClave(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	sums := filepath.Join(dir, "SHA256SUMS")
+	sigf := filepath.Join(dir, "SHA256SUMS.minisig")
+	datos := []byte("abc  kling-linux-amd64\n")
+	if err := os.WriteFile(sums, datos, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := upgrade.Firmar(k, datos, "timestamp:1\tfile:SHA256SUMS\ttag:v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sigf, sig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clave := k.Publica().String()
+	if err := verificarSumas(sums, sigf, "v1.0.0", clave); err != nil {
+		t.Fatalf("a valid signature: %v", err)
+	}
+	if err := verificarSumas(sums, sigf, "v0.9.0", clave); err == nil {
+		t.Fatal("a signature for another release must be refused")
+	}
+	otra, _ := upgrade.GenerarClave(rand.Reader)
+	if err := verificarSumas(sums, sigf, "v1.0.0", otra.Publica().String()); err == nil {
+		t.Fatal("a signature from an unknown key must be refused")
+	}
+	if err := os.WriteFile(sums, append(datos, 'x'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verificarSumas(sums, sigf, "v1.0.0", clave); err == nil {
+		t.Fatal("altered SHA256SUMS must be refused")
+	}
+}
+
+// La unidad que escribe `kling up -install` es la de packaging/kling.service
+// (la de make deploy) sin comentarios.
+func TestUnidadSystemdIgualQuePackaging(t *testing.T) {
+	b, err := os.ReadFile("../../packaging/kling.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") && !strings.HasPrefix(l, "Description=") {
+			want = append(want, l)
+		}
+	}
+	var got []string
+	for _, l := range strings.Split(textoUnidad("/usr/local/bin/kling"), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "Description=") {
+			got = append(got, l)
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("units differ:\n--- generated\n%s\n--- packaging\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// El kernel, min y el agente de invitado salen de la misma release.
+func TestImagenesMacIncluyeElAgenteDeInvitado(t *testing.T) {
+	var vistos []string
+	for _, im := range imagenesMac("arm64") {
+		vistos = append(vistos, im.asset+" -> "+filepath.Join(im.sub, im.destino))
+	}
+	for _, want := range []string{"vmlinux-arm64.zst -> vmlinux", "min-arm64.ext4.zst -> min.ext4", "kling-guest-linux-arm64 -> lib/kling-guest"} {
+		if !strings.Contains(strings.Join(vistos, "\n"), want) {
+			t.Fatalf("missing %q in %v", want, vistos)
 		}
 	}
 }

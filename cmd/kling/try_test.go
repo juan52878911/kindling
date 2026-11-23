@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -132,28 +133,24 @@ func imagesMux(nombres ...string) *http.ServeMux {
 }
 
 func TestTryImagenPorDefectoAusente(t *testing.T) {
-	err := imagenTryDisponible(context.Background(), fakeDaemon(t, imagesMux("min", "otra")))
-	if err == nil || !strings.Contains(err.Error(), `"toolchain"`) {
-		t.Fatalf("sin toolchain ha de fallar nombrándola: %v", err)
-	}
-	h := hintFor(err)
-	if !strings.Contains(h, "kling image toolchain") || !strings.Contains(h, "-image min") {
-		t.Fatalf("la pista ha de dar el comando que la construye y -image min: %q", h)
-	}
-
-	err = imagenTryDisponible(context.Background(), fakeDaemon(t, imagesMux("otra")))
-	if err == nil || strings.Contains(hintFor(err), "-image min") {
-		t.Fatalf("sin min no se sugiere -image min: %v / %q", err, hintFor(err))
+	old := bajarImagenesTry
+	bajarImagenesTry = func(context.Context, string) error { return errors.New("offline") }
+	t.Cleanup(func() { bajarImagenesTry = old })
+	_, err := elegirImagenTry(context.Background(), fakeDaemon(t, imagesMux("otra")), "")
+	if err == nil || !strings.Contains(hintFor(err), "kling up") {
+		t.Fatalf("sin imagen ni red ha de dar la orden que lo arregla: %v / %q", err, hintFor(err))
 	}
 }
 
 func TestTryImagenPorDefectoPresente(t *testing.T) {
-	if err := imagenTryDisponible(context.Background(), fakeDaemon(t, imagesMux("min", "toolchain"))); err != nil {
-		t.Fatal(err)
+	n, err := elegirImagenTry(context.Background(), fakeDaemon(t, imagesMux("min", "toolchain")), "")
+	if err != nil || n != tryDefaultImage {
+		t.Fatalf("n=%q err=%v", n, err)
 	}
 	// Un daemon que no sabe listar no bloquea: el daemon dirá lo suyo.
-	if err := imagenTryDisponible(context.Background(), fakeDaemon(t, http.NewServeMux())); err != nil {
-		t.Fatalf("sin GET /images se sigue: %v", err)
+	n, err = elegirImagenTry(context.Background(), fakeDaemon(t, http.NewServeMux()), "")
+	if err != nil || n != tryDefaultImage {
+		t.Fatalf("sin GET /images se sigue: %q %v", n, err)
 	}
 }
 
