@@ -2109,7 +2109,16 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	fases.marca(fcResume)
 	// Si el agente debía contestar y no lo hace, la copia no se entrega
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
-	resync, err := m.resyncCopia(ctx, id, snap, pid)
+	//
+	// Un snapshot por imagen habla dos veces con el agente (resync y start):
+	// por la misma conexión, que se cierra al acabar (clienteDeOperacion).
+	ctxAgente := ctx
+	if ai != nil {
+		var cerrar func()
+		ctxAgente, cerrar = clienteDeOperacion(ctx)
+		defer cerrar()
+	}
+	resync, err := m.resyncCopia(ctxAgente, id, snap, pid)
 	if err != nil {
 		// El diagnóstico (otra goroutine) necesita el VMM vivo.
 		esperarDiagnostico(resync.diag)
@@ -2125,7 +2134,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 			return m.descartarCopia(id, soltarCiclo, abortar,
 				fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
 		}
-		if err := m.entregarMaquina(ctx, id, ai); err != nil {
+		if err := m.entregarMaquina(ctxAgente, id, ai); err != nil {
 			return abortar(fmt.Errorf("image snapshot %s: %w", req.From, err))
 		}
 		fases.marca(fcStart)
