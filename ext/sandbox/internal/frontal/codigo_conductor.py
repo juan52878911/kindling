@@ -1,4 +1,4 @@
-# Conductor de contextos de código del gateway de kindling (EXPERIMENTAL).
+# Conductor de contextos de código del gateway de kindling (Python).
 #
 # Corre DENTRO del sandbox, con el usuario del inquilino, y solo usa la
 # biblioteca estándar de Python 3. Dos modos:
@@ -16,6 +16,7 @@
 # el código, y cierra su mitad de escritura. El conductor contesta con líneas
 # JSON {"type": ...} y cierra.
 import ast
+import base64
 import builtins
 import io
 import json
@@ -38,6 +39,48 @@ class Abortar(BaseException):
 class Plazo(BaseException):
     """Vencido el plazo de la ejecución. BaseException para que un
     `except Exception` del código del usuario no se lo trague."""
+
+
+class Cuenta:
+    """Contador de ejecuciones del contexto (execution_count)."""
+    n = 0
+    ejecutando = False
+
+
+def al_interrumpir(signum, frame):
+    """SIGINT (DELETE .../execution): KeyboardInterrupt en la ejecución en
+    curso; sin ninguna, se ignora."""
+    if Cuenta.ejecutando:
+        raise KeyboardInterrupt()
+
+
+def resultados(valor):
+    """Representaciones del valor por tipo MIME: text/plain siempre; text/html
+    e image/png si el valor sabe darlas (_repr_html_, _repr_png_) o es una
+    figura de matplotlib. Una representación que falla se omite."""
+    res = {"text/plain": repr(valor)}
+    try:
+        f = getattr(valor, "_repr_html_", None)
+        if callable(f):
+            h = f()
+            if isinstance(h, str):
+                res["text/html"] = h
+    except Exception:
+        pass
+    try:
+        png = None
+        f = getattr(valor, "_repr_png_", None)
+        if callable(f):
+            png = f()
+        elif "matplotlib.figure" in sys.modules and isinstance(valor, sys.modules["matplotlib.figure"].Figure):
+            b = io.BytesIO()
+            valor.savefig(b, format="png")
+            png = b.getvalue()
+        if isinstance(png, (bytes, bytearray)) and png:
+            res["image/png"] = base64.b64encode(bytes(png)).decode()
+    except Exception:
+        pass
+    return res
 
 
 class Emisor:
@@ -102,6 +145,8 @@ def ejecutar(globales, codigo, plazo, emisor):
     viejos = sys.stdout, sys.stderr, sys.stdin
     sys.stdout, sys.stderr, sys.stdin = out, err, io.StringIO("")
     ok = True
+    Cuenta.n += 1
+    Cuenta.ejecutando = True
     try:
         if plazo > 0:
             signal.setitimer(signal.ITIMER_REAL, plazo)
@@ -116,9 +161,11 @@ def ejecutar(globales, codigo, plazo, emisor):
                 if valor is not None:
                     globales["_"] = valor
                     out.flush()
-                    emisor.evento(type="result", text=repr(valor))
+                    emisor.evento(type="result", text=repr(valor), results=resultados(valor),
+                                  execution_count=Cuenta.n)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
+            Cuenta.ejecutando = False
     except Abortar:
         raise
     except Plazo:
@@ -157,6 +204,7 @@ def leer_peticion(conn):
 
 def servir(ruta):
     signal.signal(signal.SIGALRM, al_vencer)
+    signal.signal(signal.SIGINT, al_interrumpir)
     try:
         os.unlink(ruta)
     except FileNotFoundError:
@@ -179,7 +227,8 @@ def servir(ruta):
             t0 = time.monotonic()
             try:
                 ok = ejecutar(globales, codigo, plazo, emisor)
-                emisor.evento(type="done", ok=ok, duration_ms=int((time.monotonic() - t0) * 1000))
+                emisor.evento(type="done", ok=ok, duration_ms=int((time.monotonic() - t0) * 1000),
+                              execution_count=Cuenta.n)
             except Abortar:
                 pass
 
