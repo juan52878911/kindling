@@ -101,10 +101,10 @@ lo INVALID. Un contenedor Docker del host que llegara directo a los puertos de u
 deja de llegar; el camino soportado es `-p`, que **no sustituye** el acceso directo: solo
 ata `127.0.0.1` del host, así que un contenedor Docker o un Pod del mismo host pierde el acceso
 directo a los puertos de una máquina (`kling db`, `kling.ports`) y no lo recupera por `-p`
-(el contenedor ve su propio loopback, no el del host). Es una decisión consciente: abrir el
-FORWARD a los contenedores daría a su vez a cualquier contenedor del host el alcance de la
-máquina. Quien lo necesite llega por la red del host (el puerto publicado en una dirección
-que el operador elija a propósito) y no por la del netns. Estrechar el egress y `Teardown` borran además las
+(el contenedor ve su propio loopback, no el del host). Es el precio de que ningún contenedor
+del host alcance una máquina por la red del netns; quien lo necesite publica el puerto
+con `-p` y llega a él por la dirección del host que corresponda (p. ej. `host.docker.internal`
+solo si el puerto escucha ahí), sabiendo que `-p` solo ata `127.0.0.1`. Estrechar el egress y `Teardown` borran además las
 entradas de conntrack del host con el NSIP de origen o destino, para que un flujo abierto no se
 recoja de nuevo ni lo herede la máquina que reutilice el índice. Los nombres DNS bloqueados que
 se muestran al operador se limitan a `[a-z0-9._-]`.
@@ -1437,7 +1437,7 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
 - **Cuándo NO hay sandbox en Mac.** El perfil se aplica tras la carga del volcado y antes de crear
   la VM, y solo con `KLING_VZ_CONFINE_ROOT` puesta y sin `KLING_VZ_NO_SANDBOX=1`; si no, el
   VMM avisa en su log y corre sin él, con lo que el aislamiento entre máquinas de este apartado
-  no existe. `kling doctor` y el log del VMM son donde se ve. Por eso un `snap.file` no puede
+  no existe. Solo el log del VMM lo dice (`kling doctor` no lo comprueba). Por eso un `snap.file` no puede
   decidir qué abre el VMM aunque no haya sandbox (§11): el daemon reapunta kernel y discos.
   Y los dos VMM se firman con hardened runtime (`--options runtime`).
 - **El perfil de sandbox aísla a una máquina de las demás** (`vz/cmd/kling-vz/kling-vz.sb`,
