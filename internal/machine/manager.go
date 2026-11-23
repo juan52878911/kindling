@@ -3873,8 +3873,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.thawFallida(mc); err != nil {
 			return nil, err
 		}
-		// Una failed no cuenta como usuaria de sus volúmenes, y al fallar
-		// volvieron a root (ajustarDuenosLocked): su VMM los necesita otra vez.
+		// Una failed no cuenta en la cuota de su dueño ni como usuaria de sus
+		// volúmenes, y al fallar volvieron a root (ajustarDuenosLocked): su
+		// VMM los necesita otra vez.
 		if err := m.readmitirVolumenes(mc); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}

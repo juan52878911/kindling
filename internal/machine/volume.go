@@ -393,12 +393,20 @@ func (m *Manager) soltarReservas(id string) {
 // acaba, así que comprobar no basta: deja una reserva a su nombre, en la
 // misma sección crítica, que el llamador suelta con soltarReservas al
 // terminar (con éxito ya cuenta como running; si no, vuelve a no contar).
+//
+// Antes, la cuota del dueño: una failed no cuenta como máquina ni como
+// memoria (cuentaActiva), y descongelada vuelve a contar entera. Se decide
+// aquí, en la misma sección crítica, como en reclamarParada.
 func (m *Manager) readmitirVolumenes(mc *api.Machine) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.cuotaExcedidaLocked(mc.Labels[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(mc.MemMiB, mc.MemMaxMiB)}, mc.ID); err != nil {
+		return err
+	}
 	if len(mc.Volumes) == 0 {
 		return nil
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	vols, err := comprobarVolumenes(m, api.RunRequest{Volumes: mc.Volumes}, m.volumeUsersLocked())
 	if err != nil {
 		return err
