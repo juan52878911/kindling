@@ -113,7 +113,12 @@ type Publicador struct {
 
 	mu  sync.Mutex
 	por map[string]*maquina // id de máquina → sus puertos
-	ctx context.Context
+	// pendientes son los puertos publicados que no se pudieron abrir (tras
+	// reiniciar, o al no poder reabrir uno sustituido): siguen en
+	// publish.json y el barrido los reintenta. Un fallo pasajero (otro
+	// proceso con el puerto un momento) no borra la publicación.
+	pendientes map[string]*pendiente
+	ctx        context.Context
 	// aviso despierta al barrido dormido cuando se publica algo: sin
 	// publicaciones no hay nada que barrer ni que congelar.
 	aviso chan struct{}
@@ -129,6 +134,50 @@ type maquina struct {
 	ultima  atomic.Int64
 	// despertando evita dos Thaw a la vez de la misma máquina.
 	despertando sync.Mutex
+}
+
+type pendiente struct {
+	nombre  string
+	puertos []api.PortPublish
+}
+
+// mismoPuerto dice si a y b son el mismo puerto del host.
+func mismoPuerto(a, b api.PortPublish) bool {
+	return a.Host == b.Host && a.ProtoOr() == b.ProtoOr()
+}
+
+// quitarPendiente quita q de los pendientes de id. Con p.mu.
+func (p *Publicador) quitarPendiente(id string, q api.PortPublish) bool {
+	pe := p.pendientes[id]
+	if pe == nil {
+		return false
+	}
+	n := len(pe.puertos)
+	pe.puertos = slices.DeleteFunc(pe.puertos, func(o api.PortPublish) bool { return mismoPuerto(o, q) })
+	if len(pe.puertos) == 0 {
+		delete(p.pendientes, id)
+	}
+	return len(pe.puertos) != n
+}
+
+// dejarPendiente apunta q como pendiente de mc. Con p.mu.
+func (p *Publicador) dejarPendiente(id, nombre string, q api.PortPublish) {
+	pe := p.pendientes[id]
+	if pe == nil {
+		pe = &pendiente{nombre: nombre}
+		p.pendientes[id] = pe
+	}
+	if !slices.ContainsFunc(pe.puertos, func(o api.PortPublish) bool { return mismoPuerto(o, q) }) {
+		pe.puertos = append(pe.puertos, q)
+	}
+}
+
+// avisar despierta al barrido si duerme.
+func (p *Publicador) avisar() {
+	select {
+	case p.aviso <- struct{}{}:
+	default: // ya había un aviso pendiente
+	}
 }
 
 type puerto struct {
@@ -158,9 +207,10 @@ func New(m Maquinas, ruta string, logf func(string, ...any)) *Publicador {
 		ahora:       time.Now,
 		plazoMarcar: plazoMarcar, barrido: barrido,
 		topeTCP: topeConexiones, topeUDP: topeFlujosUDP,
-		por:   map[string]*maquina{},
-		ctx:   context.Background(),
-		aviso: make(chan struct{}, 1),
+		por:        map[string]*maquina{},
+		pendientes: map[string]*pendiente{},
+		ctx:        context.Background(),
+		aviso:      make(chan struct{}, 1),
 	}
 }
 
@@ -188,15 +238,21 @@ func (p *Publicador) Arrancar(ctx context.Context, ocioso func() time.Duration) 
 	p.mu.Lock()
 	p.ctx = ctx
 	p.mu.Unlock()
+	// Todo lo guardado empieza pendiente y se abre puerto a puerto: uno que
+	// no se pueda abrir ahora no cierra los demás de la máquina ni se borra
+	// del fichero, se reintenta en el barrido.
 	for _, pub := range p.leer() {
 		mc, ok := p.m.Get(pub.Machine)
 		if !ok {
 			continue
 		}
-		if _, err := p.Publicar(mc, pub.Ports); err != nil {
-			p.logf("publish: %s: can't publish again after the restart: %v", mc.Name, err)
+		p.mu.Lock()
+		for _, q := range pub.Ports {
+			p.dejarPendiente(mc.ID, mc.Name, q)
 		}
+		p.mu.Unlock()
 	}
+	p.reintentar(true)
 	p.guardar()
 	go func() {
 		// Sin publicaciones el barrido duerme hasta que Publicar avisa: un
@@ -222,6 +278,7 @@ func (p *Publicador) Arrancar(ctx context.Context, ocioso func() time.Duration) 
 			}
 			t.Reset(p.barrido)
 			p.barrer()
+			p.reintentar(false)
 			if ocioso != nil {
 				if d := ocioso(); d > 0 {
 					p.congelarOciosas(ctx, d)
@@ -300,15 +357,27 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 			for _, a := range abiertos {
 				a.cerrar()
 			}
-			// Los sustituidos vuelven a escuchar (mejor esfuerzo).
+			// Los sustituidos vuelven a escuchar; el que no pueda queda
+			// pendiente (en el fichero, y el barrido lo reintenta) en vez
+			// de seguir listado sin escuchar.
 			for _, o := range quitados {
 				if pt2, err2 := p.abrir(mq, o.PortPublish); err2 == nil {
 					quedan = append(quedan, pt2)
+				} else {
+					p.dejarPendiente(mc.ID, mc.Name, o.PortPublish)
+					p.avisar()
 				}
 			}
 			mq.puertos = quedan
-			if len(mq.puertos) > 0 && nueva {
+			switch {
+			case len(mq.puertos) > 0 && nueva:
 				p.por[mc.ID] = mq
+			case len(mq.puertos) == 0 && !nueva:
+				// Sin puertos no queda publicada (el barrido dormiría).
+				delete(p.por, mc.ID)
+			}
+			if len(quitados) > 0 {
+				p.guardarFondo()
 			}
 			return nil, err
 		}
@@ -316,12 +385,18 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 	}
 	mq.puertos = append(quedan, abiertos...)
 	sort.Slice(mq.puertos, func(i, j int) bool { return mq.puertos[i].Host < mq.puertos[j].Host })
+	// Un puerto del host recién abierto deja de estar pendiente, sea de esta
+	// máquina o de otra (que lo pierde: ahora es de esta).
+	for _, a := range abiertos {
+		for id, pe := range p.pendientes {
+			if p.quitarPendiente(id, a.PortPublish) && id != mc.ID {
+				p.logf("publish: %s: host port %d is now published for %s; no longer retrying it", pe.nombre, a.Host, mc.Name)
+			}
+		}
+	}
 	if len(mq.puertos) > 0 {
 		p.por[mc.ID] = mq
-		select {
-		case p.aviso <- struct{}{}:
-		default: // ya había un aviso pendiente
-		}
+		p.avisar()
 	}
 	p.guardarFondo()
 	return pubDe(mq), nil
@@ -331,7 +406,75 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 func (p *Publicador) hayPublicaciones() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.por) > 0
+	return len(p.por) > 0 || len(p.pendientes) > 0
+}
+
+// reintentar intenta abrir, uno a uno, los puertos pendientes. Los de
+// máquinas que ya no existen, los que ahora publica otra máquina y los que
+// la petición ya no permite se olvidan; los demás siguen pendientes. Con
+// primera (al arrancar) se apunta en el log cada uno que no se abre.
+func (p *Publicador) reintentar(primera bool) {
+	type intento struct {
+		id, nombre string
+		q          api.PortPublish
+	}
+	p.mu.Lock()
+	var cola []intento
+	for id, pe := range p.pendientes {
+		for _, q := range pe.puertos {
+			cola = append(cola, intento{id, pe.nombre, q})
+		}
+	}
+	p.mu.Unlock()
+	cambio := false
+	olvidar := func(it intento, por string) {
+		p.mu.Lock()
+		cambio = p.quitarPendiente(it.id, it.q) || cambio
+		p.mu.Unlock()
+		p.logf("publish: %s: host port %d is no longer published: %s", it.nombre, it.q.Host, por)
+	}
+	for _, it := range cola {
+		mc, ok := p.m.Get(it.id)
+		if !ok {
+			olvidar(it, "the machine is gone")
+			continue
+		}
+		p.mu.Lock()
+		if pe := p.pendientes[it.id]; pe == nil || !slices.ContainsFunc(pe.puertos, func(o api.PortPublish) bool { return mismoPuerto(o, it.q) }) {
+			p.mu.Unlock()
+			continue // lo quitó Quitar entretanto
+		}
+		dueño := ""
+		if it.q.Host != 0 {
+			for id, otra := range p.por {
+				if id != it.id && slices.ContainsFunc(otra.puertos, func(o *puerto) bool { return mismoPuerto(o.PortPublish, it.q) }) {
+					dueño = otra.nombre
+				}
+			}
+		}
+		p.mu.Unlock()
+		if dueño != "" {
+			olvidar(it, "it is published for "+dueño)
+			continue
+		}
+		_, err := p.Publicar(mc, []api.PortPublish{it.q})
+		switch {
+		case err == nil:
+			p.mu.Lock()
+			p.quitarPendiente(it.id, it.q) // Host 0: Publicar no lo reconoce por el puerto
+			p.mu.Unlock()
+			if !primera {
+				p.logf("publish: %s: host port %d published again", mc.Name, it.q.Host)
+			}
+		case errors.Is(err, ErrPeticion) || errors.Is(err, ErrNoSoportado):
+			olvidar(it, err.Error())
+		case primera:
+			p.logf("publish: %s: can't publish host port %d again after the restart (%v); retrying", mc.Name, it.q.Host, err)
+		}
+	}
+	if cambio {
+		p.guardarFondo()
+	}
 }
 
 // Comprobar dice, sin publicar nada, si ps se podrían publicar para una
@@ -415,13 +558,25 @@ func (p *Publicador) abrir(mq *maquina, q api.PortPublish) (*puerto, error) {
 // (ninguno: todos). Devuelve si había algo.
 func (p *Publicador) Quitar(id string, hosts ...int) bool {
 	p.mu.Lock()
+	// Los pendientes también: quitar una publicación que no se pudo reabrir
+	// es dejar de reintentarla.
+	algo := false
+	if pe := p.pendientes[id]; pe != nil {
+		for _, q := range slices.Clone(pe.puertos) {
+			if len(hosts) == 0 || slices.Contains(hosts, q.Host) {
+				algo = p.quitarPendiente(id, q) || algo
+			}
+		}
+	}
 	mq := p.por[id]
 	if mq == nil {
 		p.mu.Unlock()
-		return false
+		if algo {
+			p.guardar()
+		}
+		return algo
 	}
 	var quedan []*puerto
-	algo := false
 	for _, pt := range mq.puertos {
 		if len(hosts) == 0 || slices.Contains(hosts, pt.Host) {
 			pt.cerrar()
@@ -463,6 +618,31 @@ func (p *Publicador) Lista() []api.Publication {
 	return out
 }
 
+// paraGuardar es Lista más los puertos pendientes: lo que va a publish.json.
+func (p *Publicador) paraGuardar() []api.Publication {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	por := map[string]*api.Publication{}
+	for id, mq := range p.por {
+		por[id] = pubDe(mq)
+	}
+	for id, pe := range p.pendientes {
+		pub := por[id]
+		if pub == nil {
+			pub = &api.Publication{Machine: id, Name: pe.nombre}
+			por[id] = pub
+		}
+		pub.Ports = append(pub.Ports, pe.puertos...)
+	}
+	out := make([]api.Publication, 0, len(por))
+	for _, pub := range por {
+		sort.Slice(pub.Ports, func(i, j int) bool { return pub.Ports[i].Host < pub.Ports[j].Host })
+		out = append(out, *pub)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 func pubDe(mq *maquina) *api.Publication {
 	pub := &api.Publication{Machine: mq.id, Name: mq.nombre}
 	for _, pt := range mq.puertos {
@@ -478,6 +658,13 @@ func (p *Publicador) barrer() {
 	for id := range p.por {
 		if _, ok := p.m.Get(id); !ok {
 			idos = append(idos, id)
+		}
+	}
+	for id := range p.pendientes {
+		if _, ok := p.por[id]; !ok {
+			if _, ok := p.m.Get(id); !ok {
+				idos = append(idos, id)
+			}
 		}
 	}
 	p.mu.Unlock()
@@ -946,7 +1133,7 @@ func (p *Publicador) guardar() {
 	if p.intocable {
 		return
 	}
-	b, err := json.MarshalIndent(ficheroPublicar{esquema.Cabecera{Schema: versionPublicar}, p.Lista()}, "", "  ")
+	b, err := json.MarshalIndent(ficheroPublicar{esquema.Cabecera{Schema: versionPublicar}, p.paraGuardar()}, "", "  ")
 	if err != nil {
 		return
 	}
