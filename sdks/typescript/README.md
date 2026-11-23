@@ -3,8 +3,8 @@
 Client for the `/v1` API of the kindling sandbox gateway. Native `fetch`, **no dependencies**.
 The package name is provisional. License: Apache-2.0.
 
-Node >= 22.18 (`engines`): the tests are TypeScript files run with Node's built-in type
-stripping, with no build step. The SDK itself is plain ES-module JavaScript with JSDoc, and the
+The package runs on Node >= 18; `npm test` needs Node >= 22.18, because the tests are TypeScript
+files run with Node's built-in type stripping, with no build step. The SDK itself is plain ES-module JavaScript with JSDoc, and the
 types are hand-written in `src/index.d.ts`.
 
 ## Install
@@ -60,7 +60,9 @@ try {
 ## Retries
 
 `new Client({ retries: 3 })` retries a 429 or 503 after the server's `Retry-After` (1 s if
-absent, never longer than `maxRetryWait`, 30 s). The default is no retries.
+absent, never longer than `maxRetryWait`, 30 s). The default is no retries. `retries` also
+repeats `POST /v1/sandboxes` on a 503; if the 503 came after the host created the sandbox you
+can end up with two.
 
 ## Tenants and keys
 

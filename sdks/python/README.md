@@ -63,7 +63,8 @@ with Sandbox.create(template="python", ttl=600, env={"MODE": "demo"}) as sb:  # 
 
 `Client(retries=3)` (or `Sandbox.create(client=Client(retries=3))`) retries a 429 or 503 after
 the server's `Retry-After` (1 s if absent, never longer than `max_retry_wait`, 30 s). The default
-is no retries.
+is no retries. `retries` also repeats `POST /v1/sandboxes` on a 503; if the 503 came after the
+host created the sandbox you can end up with two.
 
 ## Tenants and keys
 
