@@ -173,6 +173,10 @@ func (m *montaje) lookup(t *testing.T, parent uint64, name string) (uint32, uint
 	if e != 0 {
 		return e, 0, fattr{}
 	}
+	if le.Uint64(out[0:]) == 0 {
+		// Entrada negativa: para el kernel, el nombre no existe.
+		return share.ENOENT, 0, fattr{}
+	}
 	return 0, le.Uint64(out[0:]), leerAttr(out[40:])
 }
 

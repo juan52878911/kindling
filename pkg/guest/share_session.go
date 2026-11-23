@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	share "github.com/juan52878911/kindling/internal/shareproto"
@@ -46,6 +47,9 @@ type shareSession struct {
 	// caps son las capacidades que anunció el daemon en OpHello
 	// (share.Cap*); 0 con uno anterior. Como maxIO.
 	caps uint32
+	// watching dice que el daemon acepta OpWatch: avisa de los cambios del
+	// host, y las cachés del kernel pueden ser largas (fuseFS.ttls).
+	watching atomic.Bool
 
 	// events son los avisos de cambios del host (OpWatch). El lector nunca
 	// espera por ellos: si el consumidor se atasca, se pierden (son pistas; las
@@ -102,6 +106,7 @@ func (s *shareSession) watch() bool {
 	t := time.AfterFunc(helloTimeout, s.close)
 	defer t.Stop()
 	errno, _ := s.call(share.OpWatch, nil)
+	s.watching.Store(errno == 0)
 	return errno == 0
 }
 

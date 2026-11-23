@@ -69,7 +69,14 @@ func montarTCP(t *testing.T, dir string, ro, watch bool) *banco {
 		t.Fatal("the host does not watch")
 	}
 	fs.attach(s)
-	t.Cleanup(func() { cancel(); c.Close(); ln.Close(); <-done; close(dev.in); srv.Close() })
+	t.Cleanup(func() {
+		cancel()
+		c.Close()
+		ln.Close()
+		<-done
+		close(dev.in)
+		srv.Close()
+	})
 	e, out := dev.pedir(t, opInit, 0, u32s(7, 38, 1<<20, 0xffffffff))
 	if e != 0 {
 		t.Fatalf("init: %d", e)
