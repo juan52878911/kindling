@@ -93,16 +93,28 @@ type dormida struct {
 // con ok=false si no se pudo pausar ni congelar: es cuando el segador suelta
 // la marca y el candado con que la apartó (ver reapOnce).
 func (g *Scheduler) dormir(ctx context.Context, victims []dormida, hecho func(v dormida, ok bool)) {
+	g.dormirApartando(ctx, victims, nil, hecho)
+}
+
+// dormirApartando es dormir con un paso previo por víctima: apartar (si no es
+// nil) se llama justo antes de pausarla o congelarla, y si devuelve false la
+// víctima se salta sin llamar a hecho. Apartar víctima a víctima, y no todas
+// antes de empezar, es lo que evita que una petición a la última espere
+// detrás de los freezes de las demás (B-02).
+func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apartar func(v dormida) bool, hecho func(v dormida, ok bool)) {
 	if hecho == nil {
 		hecho = func(dormida, bool) {}
 	}
+	if apartar == nil {
+		apartar = func(dormida) bool { return true }
+	}
 	pausar := g.pauseFn
 	if pausar == nil {
-		pausar = func(id string) error { _, err := g.client.Pause(ctx, id); return err }
+		pausar = func(id string) error { return g.pausarConPlazo(ctx, id) }
 	}
 	congelar := g.freezeFn
 	if congelar == nil {
-		congelar = func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
+		congelar = func(id string) error { return g.congelarConPlazo(ctx, id) }
 	}
 	var paused []dormida
 	presupuesto := 0
@@ -132,7 +144,12 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida, hecho func(v 
 		g.mu.Unlock()
 	}
 	elegida := map[string]bool{}
+	saltada := map[string]bool{}
 	for _, v := range paused {
+		if !apartar(v) {
+			saltada[v.id] = true
+			continue
+		}
 		if err := pausar(v.id); err != nil {
 			log.Printf("reap %s: pause: %v (freezing instead)", v.service, err)
 			continue
@@ -148,7 +165,11 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida, hecho func(v 
 		log.Printf("%s: paused due to inactivity", v.service)
 	}
 	for _, v := range victims {
-		if elegida[v.id] {
+		if elegida[v.id] || saltada[v.id] {
+			continue
+		}
+		// La que falló al pausar ya está apartada: no se vuelve a apartar.
+		if !pausadaFallida(paused, v.id) && !apartar(v) {
 			continue
 		}
 		if err := congelar(v.id); err != nil {
@@ -159,6 +180,32 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida, hecho func(v 
 		hecho(v, true)
 		log.Printf("%s: frozen due to inactivity", v.service)
 	}
+}
+
+// pausadaFallida dice si id estaba entre las elegidas para pausar: si llega al
+// bucle de congelar sin estar en elegida, es que su pause falló.
+func pausadaFallida(paused []dormida, id string) bool {
+	for _, v := range paused {
+		if v.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+// congelarConPlazo y pausarConPlazo son Freeze y Pause acotados por plazoDormir.
+func (g *Scheduler) congelarConPlazo(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, plazoDormir)
+	defer cancel()
+	_, err := g.client.Freeze(ctx, id)
+	return err
+}
+
+func (g *Scheduler) pausarConPlazo(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, plazoDormir)
+	defer cancel()
+	_, err := g.client.Pause(ctx, id)
+	return err
 }
 
 // Presupuesto automático (PausedMiB < 0).
@@ -374,7 +421,7 @@ func (g *Scheduler) tomarPausada(id string, p pausada, vale func(pausada) bool) 
 func (g *Scheduler) congelarPausada(ctx context.Context, id string) bool {
 	congelar := g.freezeFn
 	if congelar == nil {
-		congelar = func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
+		congelar = func(id string) error { return g.congelarConPlazo(ctx, id) }
 	}
 	if err := congelar(id); err != nil {
 		log.Printf("freeze paused %s: %v", short(id), err)
