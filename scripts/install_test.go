@@ -1,6 +1,7 @@
 package scripts
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/internal/upgrade"
 )
 
 // install.sh es lo primero que corre quien instala kling y nadie lo ejecutaba
@@ -35,6 +38,12 @@ type releaseFalsa struct {
 	conWget      bool   // sin curl en el PATH: baja con un wget falso
 	plat         string // si no vacío, la plataforma que dice un uname falso (darwin-arm64)
 	sinGuest     bool   // la release no publica kling-guest-linux-<arch>
+	klingReal    string // si no vacío, ruta de un kling de verdad que sirve como binario de la release
+	// firmaMinisig y firmaSSH, si no nil, dan el contenido de SHA256SUMS.minisig
+	// y SHA256SUMS.sshsig a partir del SHA256SUMS firmado y la etiqueta.
+	firmaMinisig func(sums, tag string) []byte
+	firmaSSH     func(sums, tag string) []byte
+	env          []string // variables extra para install.sh
 }
 
 type resultadoInstall struct {
@@ -100,6 +109,13 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 			binarios["kling-guest-linux-arm64"] = "#!/bin/sh\nexit 0\n"
 		}
 	}
+	if r.klingReal != "" {
+		b, err := os.ReadFile(r.klingReal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binarios["kling-"+plat] = string(b)
+	}
 	var sums strings.Builder
 	for n, c := range binarios {
 		fmt.Fprintf(&sums, "%s  %s\n", sha256Hex([]byte(c)), n)
@@ -122,7 +138,13 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 		escribir(t, filepath.Join(dirTag, n), c, 0o755)
 	}
 	escribir(t, filepath.Join(dirTag, "SHA256SUMS"), sumsFinal, 0o644)
-	if !r.sinFirma {
+	if r.firmaMinisig != nil {
+		escribir(t, filepath.Join(dirTag, "SHA256SUMS.minisig"), string(r.firmaMinisig(firmado, tagRel)), 0o644)
+	}
+	if r.firmaSSH != nil {
+		escribir(t, filepath.Join(dirTag, "SHA256SUMS.sshsig"), string(r.firmaSSH(firmado, tagRel)), 0o644)
+	}
+	if !r.sinFirma && r.firmaMinisig == nil {
 		tag := r.tagFirmado
 		if tag == "" {
 			tag = tagRel
@@ -220,7 +242,7 @@ esac
 	}
 	todos = append(append(todos, "--prefix", res.prefijo, "--plugin-dir", res.plugins, "--no-rc"), args...)
 	cmd := exec.Command("/bin/sh", todos...)
-	cmd.Env = []string{"HOME=" + home, "PATH=" + falsos + ":" + sistema, "LC_ALL=C"}
+	cmd.Env = append([]string{"HOME=" + home, "PATH=" + falsos + ":" + sistema, "LC_ALL=C"}, r.env...)
 	out, err := cmd.CombinedOutput()
 	res.salida = string(out)
 	res.ok = err == nil
@@ -447,8 +469,8 @@ func TestInstallFirmadaSinMinisignEnElPATH(t *testing.T) {
 	if strings.Contains(r.salida, "brew install minisign") {
 		t.Fatalf("it must not send the user to install minisign:\n%s", r.salida)
 	}
-	if !strings.Contains(r.salida, "SHA256SUMS signature") {
-		t.Fatalf("it should say the signature was checked:\n%s", r.salida)
+	if !strings.Contains(r.salida, "sha256 + self-check") || strings.Contains(r.salida, "SHA256SUMS signature") {
+		t.Fatalf("it should say sha256 + self-check, not that a signature was checked:\n%s", r.salida)
 	}
 }
 
@@ -502,5 +524,110 @@ func TestInstallSalidaEnInglesYRecomiendaTry(t *testing.T) {
 		if strings.Contains(r.salida, es) {
 			t.Fatalf("Spanish %q in the output:\n%s", es, r.salida)
 		}
+	}
+}
+
+// claveSSH genera una clave ed25519 de usar y tirar y devuelve el allowed_signers
+// que la nombra y una función que firma «tag:<etiqueta>\n<sums>» con ella.
+func claveSSH(t *testing.T) (signers string, firmar func(sums, tag string) []byte) {
+	t.Helper()
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("no ssh-keygen")
+	}
+	dir := t.TempDir()
+	key := filepath.Join(dir, "k")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).CombinedOutput(); err != nil {
+		t.Skipf("ssh-keygen cannot make a key: %v %s", err, out)
+	}
+	pub, err := os.ReadFile(key + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	campos := strings.Fields(string(pub))
+	signers = "kling-release " + campos[0] + " " + campos[1]
+	n := 0
+	return signers, func(sums, tag string) []byte {
+		n++
+		msg := filepath.Join(dir, fmt.Sprintf("msg%d", n))
+		escribir(t, msg, "tag:"+tag+"\n"+sums, 0o644)
+		if out, err := exec.Command("ssh-keygen", "-Y", "sign", "-q", "-f", key, "-n", "kling-release", msg).CombinedOutput(); err != nil {
+			t.Fatalf("ssh-keygen -Y sign: %v %s", err, out)
+		}
+		b, err := os.ReadFile(msg + ".sig")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+}
+
+// R20: sin minisign, una release con SHA256SUMS.sshsig se comprueba con
+// ssh-keygen (independiente del binario que se instala); una firma de otra
+// etiqueta o de otra clave no vale.
+func TestInstallSinMinisignUsaSSHKeygen(t *testing.T) {
+	signers, firmar := claveSSH(t)
+	_, otraFirma := claveSSH(t)
+	casos := []struct {
+		nombre string
+		rel    releaseFalsa
+		ok     bool
+		motivo string
+	}{
+		{"firma buena", releaseFalsa{firmaSSH: firmar}, true, "SHA256SUMS signature (ssh-keygen)"},
+		{"firma de otra etiqueta", releaseFalsa{firmaSSH: func(s, _ string) []byte { return firmar(s, "v0.9.0") }}, false, "not valid"},
+		{"firma de otra clave", releaseFalsa{firmaSSH: otraFirma}, false, "not valid"},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			c.rel.sinMinisign = true
+			c.rel.sinFirma = true
+			c.rel.env = []string{"KLING_RELEASE_SSH_SIGNERS=" + signers}
+			r := correrInstall(t, c.rel)
+			if r.ok != c.ok || existe(filepath.Join(r.prefijo, "kling")) != c.ok {
+				t.Fatalf("ok=%v, esperaba %v:\n%s", r.ok, c.ok, r.salida)
+			}
+			if !strings.Contains(r.salida, c.motivo) {
+				t.Fatalf("la salida no dice %q:\n%s", c.motivo, r.salida)
+			}
+		})
+	}
+}
+
+// Un test une install.sh con el kling de verdad (no el falso en shell): lo
+// compila, firma SHA256SUMS con una clave de pruebas y comprueba que el
+// verificador de Go acepta la buena, rechaza la de otra etiqueta y que el
+// mensaje no la hace pasar por una firma independiente.
+func TestInstallConKlingRealSinMinisign(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compila kling")
+	}
+	bin := filepath.Join(t.TempDir(), "kling")
+	if out, err := exec.Command("go", "build", "-o", bin, "../cmd/kling").CombinedOutput(); err != nil {
+		t.Skipf("cannot build kling here: %v\n%s", err, out)
+	}
+	k, err := upgrade.GenerarClave(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := k.Publica().String()
+	firmar := func(otraTag string) func(string, string) []byte {
+		return func(sums, tag string) []byte {
+			if otraTag != "" {
+				tag = otraTag
+			}
+			b, err := upgrade.Firmar(k, []byte(sums), "timestamp:1\tfile:SHA256SUMS\ttag:"+tag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}
+	}
+	buena := correrInstall(t, releaseFalsa{sinMinisign: true, klingReal: bin, firmaMinisig: firmar(""), env: []string{"KLING_RELEASE_PUBKEYS=" + pub}})
+	if !buena.ok || !strings.Contains(buena.salida, "sha256 + self-check") {
+		t.Fatalf("a release signed with the test key must install through the real kling:\n%s", buena.salida)
+	}
+	mala := correrInstall(t, releaseFalsa{sinMinisign: true, klingReal: bin, firmaMinisig: firmar("v0.9.0"), env: []string{"KLING_RELEASE_PUBKEYS=" + pub}})
+	if mala.ok || existe(filepath.Join(mala.prefijo, "kling")) {
+		t.Fatalf("a signature for another tag must be refused by the real kling:\n%s", mala.salida)
 	}
 }

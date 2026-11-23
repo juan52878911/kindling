@@ -13,11 +13,13 @@
 #   - Verifica SHA256 contra SHA256SUMS publicado en la misma release, ANTES de
 #     mover nada a su sitio. Si la release trae SHA256SUMS.minisig y hay
 #     `minisign`, comprueba antes la firma de SHA256SUMS con las claves de
-#     KLING_RELEASE_PUBKEYS (docs/firmas.md). Sin minisign la comprueba el propio
-#     kling recién bajado (`kling up -verify-sums`, Go puro): no hace falta
-#     instalar nada. Una 0.x sin firma se instala con aviso (solo sha256);
-#     desde v1.0.0 (un -rc incluido) la firma es obligatoria, salvo
-#     KLING_INSECURE_NO_MINISIGN=1.
+#     KLING_RELEASE_PUBKEYS (docs/firmas.md). Sin minisign, y si la release trae
+#     SHA256SUMS.sshsig, con `ssh-keygen -Y verify`. Sin ninguno de los dos la
+#     comprueba el propio kling recién bajado (`kling up -verify-sums`), y se
+#     dice «sha256 + self-check»: no es una firma independiente. Una 0.x sin
+#     firma solo se instala pidiéndola (--tag o KLING_VERSION), con aviso; como
+#     «latest» se rechaza. Desde v1.0.0 (un -rc incluido) la firma es
+#     obligatoria, salvo KLING_INSECURE_NO_MINISIGN=1.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
 #   - --with mcp,sandbox baja además esas extensiones de LA MISMA
@@ -77,7 +79,8 @@ REPO="${KLING_REPO:-juan52878911/kindling}"
 PREFIX="${KLING_PREFIX:-${HOME}/.local/bin}"
 TAG=""
 # TAG_LATEST=1 cuando la etiqueta sale de /releases/latest y no de --tag o
-# KLING_VERSION: entonces la firma se exige aunque sea una 0.x.
+# KLING_VERSION: entonces una 0.x sin firma se rechaza (con la orden con
+# KLING_VERSION) en vez de instalarse con aviso.
 TAG_LATEST=0
 DRY_RUN=0
 WITH="${KLING_WITH:-}"
@@ -90,7 +93,12 @@ FORCE=0
 # Claves públicas con las que se firman las releases (minisign, separadas por
 # espacios): las mismas que clavesRelease de internal/upgrade/firma.go, lo
 # comprueba un test (docs/firmas.md).
-KLING_RELEASE_PUBKEYS="RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN"
+KLING_RELEASE_PUBKEYS="${KLING_RELEASE_PUBKEYS:-RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN}"
+# Firmantes de SHA256SUMS.sshsig, en el formato de allowed_signers de ssh
+# (principal "kling-release", namespace kling-release). Vacío mientras no haya
+# clave de firma ssh publicada (docs/firmas.md): sin ella el segundo verificador
+# no se usa.
+KLING_RELEASE_SSH_SIGNERS="${KLING_RELEASE_SSH_SIGNERS:-}"
 # Desde esta versión mayor una release sin firma se rechaza:
 # upgrade.FirmaObligatoriaDesde (v1.0.0). Una 0.x sin firma solo se instala
 # pidiéndola con --tag (o KLING_VERSION): nunca por llegar como «latest».
@@ -354,14 +362,19 @@ get() {
     ok "$1 verified"
 }
 
-# verify_sums_signature: comprueba SHA256SUMS.minisig contra
-# KLING_RELEASE_PUBKEYS con minisign, y que se firmó para esta etiqueta (el
-# tag: del comentario de confianza; si no, el SHA256SUMS firmado de otra
-# release valdría para colar sus binarios). Sin firma: error desde
-# SIGNED_FROM_MAJOR; antes, aviso solo si la 0.x se pidió con --tag (una que
-# llega como «latest» o una etiqueta que no se entiende exigen la firma).
-# Sin minisign, igual: error desde SIGNED_FROM_MAJOR (como `kling upgrade`,
-# que no instala sin firma comprobada), salvo KLING_INSECURE_NO_MINISIGN=1; antes, aviso y solo sha256.
+# verify_sums_signature: comprueba la firma de SHA256SUMS y que se firmó para
+# esta etiqueta (si no, el SHA256SUMS firmado de otra release valdría para colar
+# sus binarios). Por orden, el primer verificador independiente del binario que
+# se instala:
+#   1. minisign contra KLING_RELEASE_PUBKEYS (SHA256SUMS.minisig; la etiqueta va
+#      en el tag: del comentario de confianza);
+#   2. ssh-keygen -Y verify contra KLING_RELEASE_SSH_SIGNERS (SHA256SUMS.sshsig;
+#      lo firmado es «tag:<etiqueta>» + salto de línea + SHA256SUMS);
+#   3. el propio kling recién bajado (up -verify-sums). NO es independiente: la
+#      firma la comprobaría el binario juzgado, y quien controla la release
+#      controla el binario. Se dice como «sha256 + self-check», no como firma.
+# Sin firma: error desde SIGNED_FROM_MAJOR; una 0.x solo se instala sin firma
+# pidiéndola (--tag o KLING_VERSION), nunca como «latest».
 verify_sums_signature() {
     TAG_MAJOR="$(printf '%s' "${TAG#v}" | cut -d. -f1)"
     REQUIRED=0
@@ -369,21 +382,28 @@ verify_sums_signature() {
         ''|*[!0-9]*) REQUIRED=1 ;;
         *) [ "$TAG_MAJOR" -ge "$SIGNED_FROM_MAJOR" ] && REQUIRED=1 ;;
     esac
-    # Una 0.x como «latest» sin firma se instala con aviso: las 0.x nunca se
-    # firmaron, y es lo que resuelve el one-liner del README mientras la 1.x no
-    # sea la «latest». Exigirla lo rompía.
+    HAVE_MINISIG=1
     if ! fetch "$BASE/SHA256SUMS.minisig" "$WORK/SHA256SUMS.minisig" 2>/dev/null; then
         rm -f "$WORK/SHA256SUMS.minisig"
+        HAVE_MINISIG=0
+    fi
+    HAVE_SSHSIG=1
+    if ! fetch "$BASE/SHA256SUMS.sshsig" "$WORK/SHA256SUMS.sshsig" 2>/dev/null; then
+        rm -f "$WORK/SHA256SUMS.sshsig"
+        HAVE_SSHSIG=0
+    fi
+    if [ "$HAVE_MINISIG" = "0" ] && [ "$HAVE_SSHSIG" = "0" ]; then
         [ "$REQUIRED" = "1" ] && fail "release $TAG has no SHA256SUMS.minisig: releases are signed from v${SIGNED_FROM_MAJOR}.0.0 on (docs/firmas.md)"
+        [ "$TAG_LATEST" = "1" ] && fail "the latest release ($TAG) is not signed, and an unsigned release is only installed when you ask for it by version: KLING_VERSION=$TAG sh install.sh (or --tag $TAG)"
         warn "release $TAG has no SHA256SUMS.minisig: checking with sha256 only (docs/firmas.md)"
         return 0
     fi
-    if [ -z "$KLING_RELEASE_PUBKEYS" ]; then
+    if [ "$HAVE_MINISIG" = "1" ] && [ -z "$KLING_RELEASE_PUBKEYS" ]; then
         [ "$REQUIRED" = "1" ] && fail "this install.sh has no release public keys: use the one from that release"
         warn "this install.sh has no release public key: checking with sha256 only"
         return 0
     fi
-    if command -v minisign >/dev/null 2>&1; then
+    if [ "$HAVE_MINISIG" = "1" ] && command -v minisign >/dev/null 2>&1; then
         for K in $KLING_RELEASE_PUBKEYS; do
             if OUT="$(minisign -V -P "$K" -m "$WORK/SHA256SUMS" -x "$WORK/SHA256SUMS.minisig" 2>&1)"; then
                 printf '%s\n' "$OUT" | tr '\t' '\n' | grep -qx "tag:${TAG}" \
@@ -394,21 +414,33 @@ verify_sums_signature() {
         done
         fail "the SHA256SUMS signature is not valid with any release key: installing nothing"
     fi
+    if [ "$HAVE_SSHSIG" = "1" ] && [ -n "$KLING_RELEASE_SSH_SIGNERS" ] && command -v ssh-keygen >/dev/null 2>&1; then
+        printf '%s\n' "$KLING_RELEASE_SSH_SIGNERS" > "$WORK/allowed_signers"
+        if { printf 'tag:%s\n' "$TAG"; cat "$WORK/SHA256SUMS"; } \
+            | ssh-keygen -Y verify -f "$WORK/allowed_signers" -I kling-release -n kling-release -s "$WORK/SHA256SUMS.sshsig" >/dev/null 2>&1; then
+            ok "SHA256SUMS signature (ssh-keygen)"
+            return 0
+        fi
+        fail "the SHA256SUMS.sshsig signature is not valid for $TAG with the release key: installing nothing"
+    fi
     if [ "${KLING_INSECURE_NO_MINISIGN:-0}" = "1" ]; then
         warn "skipping the signature check (KLING_INSECURE_NO_MINISIGN=1): sha256 only"
         return 0
     fi
-    # Sin minisign: el propio kling que se acaba de bajar (ya comprobado contra
-    # SHA256SUMS) lleva el verificador en Go y las mismas claves que este script
-    # le pasa. No es independiente del binario que se instala, como sí lo es
-    # minisign; es lo que hay sin pedirle nada más a quien instala.
-    info "checking the SHA256SUMS signature with the kling just downloaded (no minisign needed)"
+    if [ "$HAVE_MINISIG" = "0" ]; then
+        [ "$REQUIRED" = "1" ] && fail "cannot check the signature of $TAG: install minisign or ssh-keygen (brew install minisign / apt install minisign)"
+        warn "cannot check the SHA256SUMS.sshsig signature (no ssh-keygen or no key): sha256 only"
+        return 0
+    fi
+    # El propio kling que se acaba de bajar (ya comprobado contra SHA256SUMS)
+    # lleva el verificador en Go y las mismas claves que este script le pasa.
+    info "no minisign or ssh-keygen verifier: checking with the kling just downloaded"
     get "$BIN_NAME"
     chmod +x "$WORK/$BIN_NAME"
     OUT="$("$WORK/$BIN_NAME" up -verify-sums "$WORK/SHA256SUMS" -sig "$WORK/SHA256SUMS.minisig" -tag "$TAG" -key "$KLING_RELEASE_PUBKEYS" 2>&1)"
     RC=$?
     if [ "$RC" = "0" ]; then
-        ok "SHA256SUMS signature (checked by kling)"
+        ok "SHA256SUMS: sha256 + self-check (the downloaded kling checked its own release; not an independent signature check: install minisign or ssh-keygen for one)"
         return 0
     fi
     if [ "$RC" != "2" ]; then
