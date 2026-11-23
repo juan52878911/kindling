@@ -132,6 +132,11 @@ func configurarRed(v string, emisor func(dev string, msg []byte) error, indice f
 	if err != nil {
 		return err
 	}
+	// lo va antes de buscar eth0: sin NIC (o si eth0 tarda y se agota la
+	// espera) localhost tiene que funcionar igual, como con ip= del kernel.
+	if err := emisor("lo", mensajeEnlaceArriba(1, lo)); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return fmt.Errorf("network lo: %w", err)
+	}
 	eth, err := indice("eth0")
 	if err != nil {
 		return err
@@ -140,7 +145,6 @@ func configurarRed(v string, emisor func(dev string, msg []byte) error, indice f
 		dev string
 		msg []byte
 	}{
-		{"lo", mensajeEnlaceArriba(1, lo)},
 		{"eth0", mensajeEnlaceArriba(2, eth)},
 		{"eth0", mensajeDireccion(3, eth, c.IP, c.Prefijo)},
 		{"eth0", mensajeRutaDefecto(4, c.GW, eth)},

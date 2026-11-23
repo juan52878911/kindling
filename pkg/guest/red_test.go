@@ -86,3 +86,21 @@ func TestConfigurarRedOrden(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Sin eth0 (máquina sin NIC, o la espera se agota) lo queda arriba igual.
+func TestConfigurarRedSinEth0LevantaLo(t *testing.T) {
+	var devs []string
+	em := func(dev string, msg []byte) error { devs = append(devs, dev); return nil }
+	sinEth := func(dev string) (int32, error) {
+		if dev == "eth0" {
+			return 0, errors.New("no eth0")
+		}
+		return 1, nil
+	}
+	if err := configurarRed("172.16.0.2/30,172.16.0.1", em, sinEth); err == nil {
+		t.Fatal("sin eth0 debía devolver error")
+	}
+	if len(devs) != 1 || devs[0] != "lo" {
+		t.Fatalf("mensajes = %v, quería solo lo", devs)
+	}
+}

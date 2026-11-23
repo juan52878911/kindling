@@ -2562,7 +2562,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if comando != nil && n == nil {
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
 	}
-	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack, m.redDelAgente(id)) + envBootArg(len(env) > 0) +
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack, n != nil && m.redDelAgente(id)) + envBootArg(len(env) > 0) +
 		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait) +
 		imgSnapBootArg(m.esPrepImagen(id))
 	anidada := m.anidadaDe(id)
