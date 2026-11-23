@@ -40,6 +40,9 @@ type BusquedaFicheros struct {
 type MoverPeticion struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+	// Overwrite pide pisar el destino si existe; sin él, un destino que existe
+	// es un 409.
+	Overwrite bool `json:"overwrite,omitempty"`
 }
 
 // MkdirPeticion es el cuerpo de POST .../files/mkdir.
@@ -103,10 +106,23 @@ func (s *Servidor) handleMover(w http.ResponseWriter, r *http.Request, id string
 		fail(w, codigoBuscar(err), err)
 		return
 	}
+	cmd := []string{"mv", "--", req.From, req.To}
+	if !req.Overwrite {
+		// Un destino que existe no se pisa sin pedirlo; "-n" cubre la carrera
+		// entre la comprobación y el mv.
+		if _, err := h.Cliente.StatFile(r.Context(), mc.ID, req.To); err == nil {
+			fail(w, http.StatusConflict, fmt.Errorf("%s already exists: pass overwrite to replace it", req.To))
+			return
+		} else if !esNoEncontrado(err) {
+			fail(w, codigoExec(err), deHost(h, err))
+			return
+		}
+		cmd = []string{"mv", "-n", "--", req.From, req.To}
+	}
 	// Las rutas son absolutas, así que ninguna parece una opción; "--" lo
 	// asegura igualmente.
 	res, err := h.Cliente.Exec(r.Context(), mc.ID, api.ExecRequest{
-		Cmd: []string{"mv", "--", req.From, req.To}, TimeoutSeconds: 30, MaxOutputBytes: 64 << 10,
+		Cmd: cmd, TimeoutSeconds: 30, MaxOutputBytes: 64 << 10,
 	}, nil)
 	if err != nil {
 		fail(w, codigoExec(err), deHost(h, err))
@@ -122,6 +138,12 @@ func (s *Servidor) handleMover(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	writeJSON(w, http.StatusOK, req)
+}
+
+// esNoEncontrado dice si el daemon contestó 404.
+func esNoEncontrado(err error) bool {
+	var se *api.StatusError
+	return errors.As(err, &se) && se.Code == http.StatusNotFound
 }
 
 // tarVacio es un tar sin entradas: extraerlo con mkdir=1 crea el directorio.
@@ -181,6 +203,16 @@ func (s *Servidor) handleBuscar(w http.ResponseWriter, r *http.Request, id strin
 	h, mc, err := s.buscarEjecutable(r.Context(), tenantDe(r), id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
+		return
+	}
+	// find sale con 1 si la raíz no existe, igual que con un acceso denegado
+	// a medias: se comprueba antes para dar el 404.
+	if _, err := h.Cliente.StatFile(r.Context(), mc.ID, raiz); err != nil {
+		if esNoEncontrado(err) {
+			fail(w, http.StatusNotFound, fmt.Errorf("search failed: %s does not exist", raiz))
+		} else {
+			fail(w, codigoExec(err), deHost(h, err))
+		}
 		return
 	}
 	out, err := buscarFicheros(r.Context(), h, mc.ID, raiz, glob)
@@ -260,6 +292,9 @@ func (s *Servidor) descargaConRango(w http.ResponseWriter, r *http.Request, h *h
 		return true
 	}
 	size := st.Size
+	// El daemon no sirve más de FileMaxDownload: ni se anuncia más ni se
+	// intenta empezar más allá.
+	tope := min(size, api.FileMaxDownload)
 	var a, b int64
 	switch {
 	case ini == "" && fin != "": // últimos n bytes
@@ -270,7 +305,7 @@ func (s *Servidor) descargaConRango(w http.ResponseWriter, r *http.Request, h *h
 		if n == 0 {
 			return rangoNoSatisfecho(w, size)
 		}
-		a, b = max(size-n, 0), size-1
+		a, b = max(size-n, 0), size-1 // el tope se aplica abajo
 	case ini != "":
 		var err1, err2 error
 		a, err1 = strconv.ParseInt(ini, 10, 64)
@@ -285,9 +320,10 @@ func (s *Servidor) descargaConRango(w http.ResponseWriter, r *http.Request, h *h
 	default:
 		return false
 	}
-	if a >= size {
+	if a >= tope {
 		return rangoNoSatisfecho(w, size)
 	}
+	b = min(b, tope-1)
 	rc, err := h.Cliente.ReadFile(r.Context(), ref, ruta)
 	if err != nil {
 		fail(w, http.StatusBadGateway, deHost(h, err))

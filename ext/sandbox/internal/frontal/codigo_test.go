@@ -52,6 +52,8 @@ type daemonReal struct {
 	// sinInterprete: el exec que busca ese intérprete contesta 127.
 	sinInterprete string
 	senales       []string
+	// dirsCodigo son los directorios de contexto que el daemon vio escribir.
+	dirsCodigo []string
 }
 
 func (d *daemonReal) vivo(pid int) bool {
@@ -172,6 +174,11 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 		if mode == 0 {
 			mode = 0o644
 		}
+		if dir, ok := strings.CutPrefix(filepath.Dir(p), dirCodigo); ok && dir != "" {
+			d.mu.Lock()
+			d.dirsCodigo = append(d.dirsCodigo, filepath.Dir(p))
+			d.mu.Unlock()
+		}
 		b := new(bytes.Buffer)
 		_, _ = b.ReadFrom(r.Body)
 		if err := os.WriteFile(p, b.Bytes(), os.FileMode(mode)); err != nil {
@@ -265,7 +272,24 @@ func montarCodigo(t *testing.T) *bancoCodigo {
 	d := ponerReal(t, f)
 	srv, _ := montar(t, map[string]*falso{"a": f})
 	sb := crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
-	return &bancoCodigo{srv: srv, d: d, base: "/v1/sandboxes/" + sb.ID}
+	b := &bancoCodigo{srv: srv, d: d, base: "/v1/sandboxes/" + sb.ID}
+	// Cada contexto deja un directorio /tmp/.kindling-code-* en esta máquina
+	// (el daemon falso corre de verdad). Este Cleanup se registró antes que
+	// los que matan los procesos, así que corre después de ellos.
+	t.Cleanup(func() {
+		d.mu.Lock()
+		dirs := append([]string(nil), d.dirsCodigo...)
+		d.mu.Unlock()
+		for _, dir := range dirs {
+			for i := 0; i < 20; i++ {
+				if os.RemoveAll(dir) == nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	})
+	return b
 }
 
 func (b *bancoCodigo) contexto(t *testing.T) string {

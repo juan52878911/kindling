@@ -16,6 +16,7 @@ const net = require('net');
 const vm = require('vm');
 const fs = require('fs');
 const util = require('util');
+const { AsyncLocalStorage } = require('async_hooks');
 
 const ESPERA_LECTURA = 10000; // un cliente que conecta y calla no bloquea
 
@@ -44,6 +45,11 @@ function resultados(valor) {
 function servir(ruta) {
   let cuenta = 0;
   let actual = null; // la conexión de la ejecución en curso
+  let fichaActual = null; // la ficha de esa ejecución
+  // Cada ejecución lleva una ficha en su contexto asíncrono: lo que escriben
+  // sus temporizadores y promesas tardíos se le atribuye a ella, y si ya
+  // cerró se descarta en vez de colarse en la ejecución siguiente.
+  const almacen = new AsyncLocalStorage();
   let ejecutando = false;
   let interrumpir = null;
   const fmt = (...a) => util.format(...a) + '\n';
@@ -55,8 +61,18 @@ function servir(ruta) {
     warn: (...a) => salida('stderr', fmt(...a)),
   };
   function salida(flujo, texto) {
-    if (actual) evento(actual, { type: flujo, text: texto });
+    const ficha = almacen.getStore();
+    if (actual && ficha && ficha === fichaActual) evento(actual, { type: flujo, text: texto });
   }
+  // Un rechazo sin manejar o un throw fuera de la ejecución no matan el
+  // conductor (el contexto perdería su estado): salen como stderr de la
+  // ejecución que los causó, o se descartan si ya cerró.
+  const suelto = (e) => {
+    const err = e && typeof e === 'object' && 'message' in e ? e : new Error(util.inspect(e));
+    salida('stderr', String(err.stack || err.message) + '\n');
+  };
+  process.on('unhandledRejection', suelto);
+  process.on('uncaughtException', suelto);
   const proceso = Object.create(process);
   for (const [nombre, flujo] of [['stdout', 'stdout'], ['stderr', 'stderr']]) {
     Object.defineProperty(proceso, nombre, {
@@ -98,24 +114,10 @@ function servir(ruta) {
     ejecutando = true;
     cuenta++;
     const n = cuenta;
+    const ficha = { n };
+    fichaActual = ficha;
     try {
-      let valor = vm.runInContext(codigo, ctx, {
-        filename: '<codigo>', timeout: plazo > 0 ? Math.ceil(plazo * 1000) : undefined,
-        breakOnSigint: true,
-      });
-      if (valor && typeof valor.then === 'function') {
-        // Una promesa se espera, con el mismo plazo y la misma interrupción.
-        let temporizador;
-        const carreras = [valor, new Promise((_, rechaza) => {
-          interrumpir = () => rechaza(Object.assign(new Error('Script execution was interrupted by SIGINT'), { code: 'ERR_SCRIPT_EXECUTION_INTERRUPTED' }));
-        })];
-        if (plazo > 0) {
-          carreras.push(new Promise((_, rechaza) => {
-            temporizador = setTimeout(() => rechaza(Object.assign(new Error('timeout'), { code: 'ERR_SCRIPT_EXECUTION_TIMEOUT' })), plazo * 1000);
-          }));
-        }
-        try { valor = await Promise.race(carreras); } finally { clearTimeout(temporizador); }
-      }
+      const valor = await almacen.run(ficha, async () => ejecutarCodigo(codigo, plazo));
       if (valor !== undefined) {
         evento(conn, { type: 'result', text: util.inspect(valor), results: resultados(valor), execution_count: n });
       }
@@ -137,9 +139,32 @@ function servir(ruta) {
       ejecutando = false;
       interrumpir = null;
       actual = null;
+      fichaActual = null;
     }
     evento(conn, { type: 'done', ok, duration_ms: Date.now() - t0, execution_count: n });
     conn.end();
+  }
+  // ejecutarCodigo corre el bloque y, si devuelve una promesa, la espera con
+  // el mismo plazo y la misma interrupción. Devuelve el valor final.
+  async function ejecutarCodigo(codigo, plazo) {
+    let valor = vm.runInContext(codigo, ctx, {
+      filename: '<codigo>', timeout: plazo > 0 ? Math.ceil(plazo * 1000) : undefined,
+      breakOnSigint: true,
+    });
+    if (valor && typeof valor.then === 'function') {
+      // Una promesa se espera, con el mismo plazo y la misma interrupción.
+      let temporizador;
+      const carreras = [valor, new Promise((_, rechaza) => {
+        interrumpir = () => rechaza(Object.assign(new Error('Script execution was interrupted by SIGINT'), { code: 'ERR_SCRIPT_EXECUTION_INTERRUPTED' }));
+      })];
+      if (plazo > 0) {
+        carreras.push(new Promise((_, rechaza) => {
+          temporizador = setTimeout(() => rechaza(Object.assign(new Error('timeout'), { code: 'ERR_SCRIPT_EXECUTION_TIMEOUT' })), plazo * 1000);
+        }));
+      }
+      try { valor = await Promise.race(carreras); } finally { clearTimeout(temporizador); }
+    }
+    return valor;
   }
   try { fs.unlinkSync(ruta); } catch (e) { /* no existía */ }
   process.umask(0o077);
