@@ -436,6 +436,10 @@ func (a *app) roleLogin(ctx context.Context, ref, owner, name string) error {
 	if lastLine(super) == "t" {
 		return fmt.Errorf("role %s is a superuser (or replication role): it only gets in through the local socket, never from the host", name)
 	}
+	prev, err := a.roleLoginBefore(ctx, mc.ID, name)
+	if err != nil {
+		return err
+	}
 	pw, err := generatePassword()
 	if err != nil {
 		return err
@@ -447,9 +451,21 @@ func (a *app) roleLogin(ctx context.Context, ref, owner, name string) error {
 	if err := dbstate.WriteRolePassword(mc.ID, name, pw); err != nil {
 		return fmt.Errorf("storing the password of role %s: %w", name, err)
 	}
-	undo := func(cause error) error {
-		_ = a.hba(context.Background(), mc.ID, db, name, false)
+	if err := dbstate.WriteRoleLogin(mc.ID, name, prev); err != nil {
 		_ = dbstate.RemoveRolePassword(mc.ID, name)
+		return fmt.Errorf("storing the state of role %s: %w", name, err)
+	}
+	// Deshacer devuelve el rol a como estaba (el ALTER pudo aplicarse aunque
+	// la orden fallase): quitar solo la línea de hba y la clave del host lo
+	// dejaba con LOGIN y el verificador nuevo. Con su propio contexto: un
+	// Ctrl-C no debe dejarlo a medias.
+	undo := func(cause error) error {
+		uctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := a.revokeLogin(uctx, mc.ID, db, name, &prev); err != nil {
+			return fmt.Errorf("role %s: %w; and it could not be undone (%v): the role may still log in with the new password, retry with kling db role %s -login -name %s -rm",
+				name, cause, err, mc.Name, name)
+		}
 		return fmt.Errorf("role %s: %w", name, cause)
 	}
 	res, err := a.sqlSuper(ctx, mc.ID, fmt.Sprintf("ALTER ROLE %s LOGIN PASSWORD '%s';\nSELECT rolpassword = '%s' FROM pg_authid WHERE rolname = '%s';\n",
@@ -478,22 +494,87 @@ func (a *app) roleLogin(ctx context.Context, ref, owner, name string) error {
 	return nil
 }
 
-// roleLoginRemove deshace -login: fuera la línea de pg_hba.conf y la clave
-// del host. El rol se queda (es de las migraciones).
+// roleLoginRemove deshace -login: fuera la línea de pg_hba.conf, el rol vuelve
+// a como estaba (revokeLogin), se cortan las sesiones que abrió la clave y
+// esta se borra del host. El rol se queda (es de las migraciones).
 func (a *app) roleLoginRemove(ctx context.Context, ref, owner, name string) error {
 	mc, _, db, err := a.roleTarget(ctx, ref, owner, name)
 	if err != nil {
 		return err
 	}
-	if err := a.hba(ctx, mc.ID, db, name, false); err != nil {
+	var prev *dbstate.RoleLogin
+	if st, err := dbstate.ReadRoleLogin(mc.ID, name); err == nil {
+		prev = &st
+	} else if !dbstate.IsNotExist(err) {
 		return err
 	}
-	if _, err := a.sqlSuper(ctx, mc.ID, "SELECT pg_reload_conf();\n", "reloading pg_hba.conf"); err != nil {
-		return err
-	}
-	if err := dbstate.RemoveRolePassword(mc.ID, name); err != nil {
+	if err := a.revokeLogin(ctx, mc.ID, db, name, prev); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "%s  role %s no longer logs in from this host (the role stays)\n", mc.Name, name)
 	return nil
+}
+
+// sincePattern es la hora del invitado tal como la guarda -login: en UTC e
+// ISO 8601, que ::timestamptz lee igual sea cual sea el DateStyle.
+var sincePattern = lazyre.New(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$`)
+
+// roleLoginBefore lee cómo está el rol antes de -login: si tiene LOGIN, y la
+// hora del invitado (desde la que contar las sesiones de la clave nueva).
+func (a *app) roleLoginBefore(ctx context.Context, id, name string) (dbstate.RoleLogin, error) {
+	var st dbstate.RoleLogin
+	out, err := a.sqlSuper(ctx, id, fmt.Sprintf(
+		"SELECT CASE WHEN rolcanlogin THEN 't' ELSE 'f' END || '|' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM pg_authid WHERE rolname = '%s';\n", name),
+		"reading the role")
+	if err != nil {
+		return st, err
+	}
+	login, since, ok := strings.Cut(lastLine(out), "|")
+	if !ok || (login != "t" && login != "f") || !sincePattern.MatchString(since) {
+		return st, errors.New("reading the role: unexpected answer")
+	}
+	return dbstate.RoleLogin{CanLogin: login == "t", Since: since}, nil
+}
+
+// revokeLogin quita lo que dio -login: la línea de pg_hba.conf (y recarga),
+// la clave del rol (PASSWORD NULL) y su LOGIN si antes no lo tenía, y corta
+// las sesiones abiertas por red desde -login, que son las de esa clave. Sin
+// prev (un -login de una versión anterior) se quita la clave, el LOGIN se
+// deja y se cortan todas sus sesiones por red. Lo intenta todo aunque algo
+// falle; la clave y el estado del host solo se borran si todo fue bien, para
+// poder repetirlo.
+func (a *app) revokeLogin(ctx context.Context, id, db, name string, prev *dbstate.RoleLogin) error {
+	var errs []error
+	if err := a.hba(ctx, id, db, name, false); err != nil {
+		errs = append(errs, err)
+	} else if _, err := a.sqlSuper(ctx, id, "SELECT pg_reload_conf();\n", "reloading pg_hba.conf"); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := a.sqlSuper(ctx, id, revokeLoginSQL(name, prev), "restoring the role"); err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if err := dbstate.RemoveRolePassword(id, name); err != nil {
+		return err
+	}
+	return dbstate.RemoveRoleLogin(id, name)
+}
+
+// revokeLoginSQL es lo que revokeLogin manda al rol. name pasó
+// roleNamePattern y prev.Since sincePattern: nada que escapar.
+func revokeLoginSQL(name string, prev *dbstate.RoleLogin) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ALTER ROLE %s", qIdent(name))
+	if prev != nil {
+		b.WriteString(map[bool]string{true: " LOGIN", false: " NOLOGIN"}[prev.CanLogin])
+	}
+	b.WriteString(" PASSWORD NULL;\n")
+	fmt.Fprintf(&b, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = '%s' AND client_addr IS NOT NULL", name)
+	if prev != nil && sincePattern.MatchString(prev.Since) {
+		fmt.Fprintf(&b, " AND backend_start >= '%s'::timestamptz", prev.Since)
+	}
+	b.WriteString(";\n")
+	return b.String()
 }

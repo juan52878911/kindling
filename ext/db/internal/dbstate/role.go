@@ -5,6 +5,7 @@ package dbstate
 // mismas exigencias (0600, normal, de este usuario, escrito y renombrado).
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -103,6 +104,76 @@ func ReadRolePassword(id, role string) (string, error) {
 // RemoveRolePassword borra la contraseña del rol. No existir no es un error.
 func RemoveRolePassword(id, role string) error {
 	p, err := RolePasswordPath(id, role)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// RoleLogin es cómo estaba un rol antes de que `kling db role -login` le
+// diera LOGIN y una clave de este host: lo que hay que devolverle al quitarlo
+// (o si -login falla a medias). Since es la hora del invitado al darle la
+// clave: las sesiones abiertas desde entonces por red son las de esa clave.
+type RoleLogin struct {
+	CanLogin bool   `json:"can_login"`
+	Since    string `json:"since"`
+}
+
+// RoleLoginPath es el fichero del estado previo del rol: <rol>.login.
+func RoleLoginPath(id, role string) (string, error) {
+	p, err := RolePasswordPath(id, role)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(p, ".password") + ".login", nil
+}
+
+// WriteRoleLogin guarda el estado previo del rol (0600, como su clave).
+func WriteRoleLogin(id, role string, st RoleLogin) error {
+	p, err := RoleLoginPath(id, role)
+	if err != nil {
+		return err
+	}
+	root, _ := Dir()
+	for _, d := range []string{root, filepath.Join(root, CopiesDir), filepath.Dir(p)} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(d, 0o700); err != nil {
+			return err
+		}
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return WritePrivate(p, b)
+}
+
+// ReadRoleLogin lee el estado previo del rol; fs.ErrNotExist si no hay (un
+// -login de una versión anterior no lo guardaba).
+func ReadRoleLogin(id, role string) (RoleLogin, error) {
+	var st RoleLogin
+	p, err := RoleLoginPath(id, role)
+	if err != nil {
+		return st, err
+	}
+	b, err := ReadPrivate(p, 16<<10)
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return st, fmt.Errorf("%s: %w", p, err)
+	}
+	return st, nil
+}
+
+// RemoveRoleLogin borra el estado previo del rol. No existir no es un error.
+func RemoveRoleLogin(id, role string) error {
+	p, err := RoleLoginPath(id, role)
 	if err != nil {
 		return err
 	}

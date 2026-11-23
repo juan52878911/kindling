@@ -39,7 +39,7 @@ func (k *loginKling) Run(ctx context.Context, stdin io.Reader, args ...string) (
 	case strings.Contains(sql, "rolsuper OR rolreplication"):
 		return []byte("f\n"), nil
 	case strings.Contains(sql, "rolcanlogin"):
-		out := map[bool]string{true: "t", false: "f"}[k.login[name]] + "|2026-11-23 10:00:00.5+00"
+		out := map[bool]string{true: "t", false: "f"}[k.login[name]] + "|2026-11-23T10:00:00.500000Z"
 		if strings.Contains(sql, "coalesce(rolpassword") {
 			out += "|" + k.verifier[name]
 		}
