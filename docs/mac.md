@@ -104,7 +104,10 @@ firma de la release; sin él usa `ssh-keygen -Y verify` si la release trae
 `SHA256SUMS.sshsig`, y si no, solo puede comprobar el sha256 y pedirle al `kling`
 recién bajado que se compruebe a sí mismo, que no es una firma independiente
 (lo dice al instalar). Mientras la última estable sea una 0.x sin firma, el
-one-liner fija `KLING_VERSION`.
+one-liner fija `KLING_VERSION`, y tiene que ser una versión desde
+`PRIMER_USO_DESDE` (la primera cuyo `kling` sabe comprobarse): una anterior sin
+`minisign` no se puede verificar y `install.sh` se niega. Lo vigila
+`scripts/readme_test.go`, y `scripts/release.sh` no etiqueta si el README fija otra.
 
 `kling-vz` vive en este repositorio, en `vz/`, como **módulo Go aparte**
 (`github.com/juan52878911/kindling/vz`): necesita cgo y dependencias que el

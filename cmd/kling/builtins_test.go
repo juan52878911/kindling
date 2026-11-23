@@ -115,7 +115,7 @@ func TestTree(t *testing.T) {
 	for in, want := range map[string]string{
 		"run -h": "run", "run --help": "run", "run -help": "run", "template rm -h": "template rm",
 		"ai model -h": "ai model", "ai model add -h": "ai model add", "ai model zzz -h": "ai model",
-		"exec box -h": "exec", "exec box ls -h": "exec", "run -name x -h": "run", "nope -h": "nope",
+		"exec box -h": "exec", "exec box ls -h": "", "run -name x -h": "run", "nope -h": "nope",
 		"ai zzz -h": "ai", "status -v -h": "status",
 		"commit -h": "save", "-h": "",
 		"help": "", "exec box -- ls -h": "", "run": "", "ps -a": "",
@@ -207,5 +207,24 @@ func TestAIUpURLAndBanner(t *testing.T) {
 	printAIUpBanner(&buf, "/c/ai.json", aiUpListen, "/c/ai.token", true)
 	if !strings.Contains(buf.String(), "$KLING_AI_TOKEN") {
 		t.Errorf("banner with env token:\n%s", buf.String())
+	}
+}
+
+// Los ejemplos de la ayuda tienen que poder teclearse: `-chispa-mem` es un
+// entero en MiB, no un tamaño con sufijo.
+func TestChispaMemEjemploEsEntero(t *testing.T) {
+	for _, c := range builtinExtensions()[0].Manifest.Commands {
+		i := strings.Index(c.Usage, "-chispa-mem ")
+		if i < 0 {
+			continue
+		}
+		v := strings.Fields(c.Usage[i+len("-chispa-mem "):])[0]
+		v = strings.TrimRight(v, "]")
+		for _, r := range v {
+			if r < '0' || r > '9' {
+				t.Errorf("%s: el ejemplo «-chispa-mem %s» no es un entero en MiB", c.Name, v)
+				break
+			}
+		}
 	}
 }

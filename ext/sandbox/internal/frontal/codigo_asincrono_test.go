@@ -57,6 +57,46 @@ func TestRevJSAsincronoSuelto(t *testing.T) {
 			t.Fatalf("salida de la ejecución anterior en esta: %+v", evs)
 		}
 	})
+
+	// R4-13: al cerrar una ejecución se limpian sus temporizadores; un
+	// setInterval no sigue corriendo (con la salida tirada) hasta borrar el
+	// contexto.
+	t.Run("setInterval no sigue vivo tras done", func(t *testing.T) {
+		b := montarCodigo(t)
+		id := b.contextoDe(t, "javascript")
+		ejecutaOK(t, b.corre(t, id, "var k = 0; setInterval(() => { k++; }, 10); 1"))
+		evs := b.corre(t, id, "(async () => { const a = k; await new Promise(r => setTimeout(r, 200)); return k - a; })()")
+		ejecutaOK(t, evs)
+		if texto(evs, "result") != "0" {
+			t.Fatalf("el setInterval de la ejecución anterior sigue corriendo: %+v", evs)
+		}
+		// Los temporizadores de la ejecución en curso sí corren mientras dura.
+		evs = b.corre(t, id, "(async () => { let j = 0; const h = setInterval(() => { j++; }, 10); await new Promise(r => setTimeout(r, 200)); clearInterval(h); return j > 3; })()")
+		ejecutaOK(t, evs)
+		if texto(evs, "result") != "true" {
+			t.Fatalf("el setInterval de la ejecución en curso no corrió: %+v", evs)
+		}
+	})
+
+	// R4-13: un fallo que no es de ninguna ejecución no se traga: el conductor
+	// termina y el contexto se da por perdido, en vez de seguir en un estado
+	// que nadie conoce. Aquí lo provoca un Buffer.concat cambiado (Buffer es
+	// del reino del conductor): la siguiente conexión lo llama desde el
+	// manejador del socket, fuera de toda ejecución, y lanza en un nextTick.
+	t.Run("fallo fuera de toda ejecución termina el conductor", func(t *testing.T) {
+		b := montarCodigo(t)
+		id := b.contextoDe(t, "javascript")
+		ejecutaOK(t, b.corre(t, id, "const o = Buffer.concat; Buffer.concat = function (...a) { Buffer.concat = o; "+
+			"process.nextTick(() => { throw new Error('fuera-de-todo'); }); return o.apply(this, a); }; 1"))
+		evs := b.corre(t, id, "1 + 1")
+		if f := final(t, evs); f.OK == nil || *f.OK || !hayError(evs, "ContextError") {
+			t.Fatalf("el conductor siguió vivo tras un fallo fuera de toda ejecución: %+v", evs)
+		}
+		// Y el gateway ya no lo da por vivo: su proceso no está.
+		resp := pide(t, b.srv, tokenAlice, "POST", b.base+"/code", map[string]any{"code": "1 + 1", "context_id": id})
+		esperaCodigo(t, resp, http.StatusNotFound)
+		resp.Body.Close()
+	})
 }
 
 // R17: buscar en una raíz que no existe es 404, no un 200 vacío.

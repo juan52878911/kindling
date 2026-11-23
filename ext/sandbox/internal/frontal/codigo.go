@@ -241,7 +241,7 @@ func lenguajeDeProceso(interprete, conductor string) (lenguaje, bool) {
 
 // crearContexto monta el directorio, sube el conductor y lo arranca como
 // proceso de fondo. Devuelve *errSinInterprete si la imagen no tiene el intérprete.
-func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd string, l lenguaje) (*Contexto, error) {
+func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd, sesion string, l lenguaje) (*Contexto, error) {
 	cs, err := contextosDe(ctx, h, ref)
 	if err != nil {
 		return nil, err
@@ -275,10 +275,18 @@ func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd st
 		limpiar()
 		return nil, err
 	}
-	p, err := h.Cliente.StartProcess(ctx, ref, api.ProcessStartRequest{
-		Cmd: []string{l.interprete, dir + "/" + l.conductor, "serve", dir + "/s.sock"},
-		Dir: cwd,
-	})
+	// El intérprete nace con el entorno de la sesión del env de la creación (si
+	// la hay): es el que ven luego todas las ejecuciones del contexto.
+	arranque := api.ProcessStartRequest{
+		Cmd:     []string{l.interprete, dir + "/" + l.conductor, "serve", dir + "/s.sock"},
+		Dir:     cwd,
+		Session: sesion,
+	}
+	p, err := h.Cliente.StartProcess(ctx, ref, arranque)
+	if err != nil && sesion != "" && esSesionPerdida(err) {
+		arranque.Session = ""
+		p, err = h.Cliente.StartProcess(ctx, ref, arranque)
+	}
 	if err != nil {
 		limpiar()
 		return nil, err
@@ -331,7 +339,7 @@ func (s *Servidor) handleContextoNuevo(w http.ResponseWriter, r *http.Request, i
 		fail(w, codigoBuscar(err), err)
 		return
 	}
-	c, err := s.crearContexto(r.Context(), h, mc.ID, req.Cwd, l)
+	c, err := s.crearContexto(r.Context(), h, mc.ID, req.Cwd, sesionPorDefecto(mc), l)
 	if err != nil {
 		s.errContexto(w, h, err)
 		return
@@ -497,7 +505,7 @@ func (s *Servidor) handleCodigo(w http.ResponseWriter, r *http.Request, id strin
 			return
 		}
 	} else {
-		if c, err = s.crearContexto(r.Context(), h, mc.ID, "", l); err != nil {
+		if c, err = s.crearContexto(r.Context(), h, mc.ID, "", sesionPorDefecto(mc), l); err != nil {
 			s.errContexto(w, h, err)
 			return
 		}

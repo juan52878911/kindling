@@ -3,8 +3,8 @@
 Client for the `/v1` API of the kindling sandbox gateway. Native `fetch`, **no dependencies**.
 The package name is provisional. License: Apache-2.0.
 
-Node >= 22.18 (`engines`): the tests are TypeScript files run with Node's built-in type
-stripping, with no build step. The SDK itself is plain ES-module JavaScript with JSDoc, and the
+The package runs on Node >= 18; `npm test` needs Node >= 22.18, because the tests are TypeScript
+files run with Node's built-in type stripping, with no build step. The SDK itself is plain ES-module JavaScript with JSDoc, and the
 types are hand-written in `src/index.d.ts`.
 
 ## Install
@@ -42,7 +42,14 @@ try {
 
 - `Sandbox.list({ state, label: { k: "v" }, limit, cursor })`: with `limit` it returns a page and
   `.nextCursor` (`X-Kindling-Next-Cursor`); `.partial` is `X-Kindling-Partial`.
-- `Sandbox.create({ env })` stores the variables as the sandbox's `default` session.
+- `Sandbox.create({ env })` stores the variables as the sandbox's `default` session, which
+  `exec`, background processes, `code` and `shell` use when they don't ask for another one
+  (each use renews it; it expires after 24 h without use, and the sandbox keeps working without it).
+- `sb.setMetadata({ labels: { k: "v" }, remove: ["old"] })` patches your labels (reserved ones are a
+  `BadRequest`); `sb.fork({ count: 2, ttl: 300 })` branches the live sandbox into copies that count
+  against your quota; `sb.metrics()` gives `memory_mib` and, if the daemon measures it, `cpu_seconds`.
+- `files.chmod(path, 0o755, { recursive })` and `files.replace(path, old, new, { all })`
+  (without `all`, `old` must appear exactly once, else `Conflict`).
 - `files.uploadTar(path, bytes, { mkdir })` / `downloadTar(path)` move whole directories.
   `files.move(from, to)` refuses to replace an existing target (`Conflict`) unless `overwrite: true`.
 - `await using` calls `[Symbol.asyncDispose]()`, which deletes the sandbox and ignores a 404.
@@ -53,7 +60,9 @@ try {
 ## Retries
 
 `new Client({ retries: 3 })` retries a 429 or 503 after the server's `Retry-After` (1 s if
-absent, never longer than `maxRetryWait`, 30 s). The default is no retries.
+absent, never longer than `maxRetryWait`, 30 s). The default is no retries. `retries` also
+repeats `POST /v1/sandboxes` on a 503; if the 503 came after the host created the sandbox you
+can end up with two.
 
 ## Tenants and keys
 
@@ -90,6 +99,7 @@ nor an explicit exclusion (today only `shell`). Refresh with `KLING_UPDATE_READM
 | `GET /v1/hosts` | `Client.hosts()` |
 | `GET /v1/metrics` | `Client.metrics()` |
 | `GET /v1/templates` | `Client.templates()` |
+| `PUT /v1/templates/{name}/pool` | not covered: admin-only operator route (the Kubernetes SandboxPool controller uses it) |
 | `GET /v1/sandboxes` | `Sandbox.list()` |
 | `POST /v1/sandboxes` | `Sandbox.create()` |
 | `GET /v1/sandboxes/{id}` | `Sandbox.connect()` |
@@ -123,6 +133,11 @@ nor an explicit exclusion (today only `shell`). Refresh with `KLING_UPDATE_READM
 | `PUT /v1/sandboxes/{id}/files` | `Files.write()` |
 | `DELETE /v1/sandboxes/{id}/files` | `Files.delete()` |
 | `POST /v1/sandboxes/{id}/files/move` | `Files.move()` |
+| `PATCH /v1/sandboxes/{id}/metadata` | `Sandbox.setMetadata()` |
+| `POST /v1/sandboxes/{id}/fork` | `Sandbox.fork()` |
+| `GET /v1/sandboxes/{id}/metrics` | `Sandbox.metrics()` |
+| `POST /v1/sandboxes/{id}/files/chmod` | `Files.chmod()` |
+| `POST /v1/sandboxes/{id}/files/replace` | `Files.replace()` |
 | `POST /v1/sandboxes/{id}/files/mkdir` | `Files.mkdir()` |
 | `GET /v1/sandboxes/{id}/files/search` | `Files.search()` |
 | `GET /v1/volumes` | `Client.listVolumes()` |

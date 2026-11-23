@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -187,4 +188,147 @@ func TestMoverYBuscarFicheros(t *testing.T) {
 	// Un nombre que parece opción no se interpreta como tal.
 	esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", map[string]string{"from": "-rf", "to": "/x"}), 400)
 	esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", `{"from":"/a"}`), 400)
+}
+
+// R4-9: un destino que aparece entre la comprobación y el mv (mv -n sale con 0
+// sin mover) no es un 200; y overwrite sobre un directorio no mete el origen
+// dentro.
+func TestMoverCarreraYDirectorios(t *testing.T) {
+	b := montarCodigo(t)
+	dir := t.TempDir()
+	escribe := func(n string) string {
+		p := filepath.Join(dir, n)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mueve := func(m map[string]any) *http.Response {
+		return pide(t, b.srv, tokenAlice, "POST", b.base+"/files/move", m)
+	}
+
+	// Carrera: el destino aparece justo antes del mv.
+	origen, destino := escribe("a.txt"), filepath.Join(dir, "b.txt")
+	b.d.mu.Lock()
+	b.d.antesMv = func(api.ExecRequest) { _ = os.WriteFile(destino, []byte("otro"), 0o644) }
+	b.d.mu.Unlock()
+	resp := mueve(map[string]any{"from": origen, "to": destino})
+	esperaCodigo(t, resp, 409)
+	resp.Body.Close()
+	b.d.mu.Lock()
+	b.d.antesMv = nil
+	b.d.mu.Unlock()
+	if got, _ := os.ReadFile(destino); string(got) != "otro" {
+		t.Errorf("el destino que apareció se pisó: %q", got)
+	}
+
+	if runtime.GOOS == "darwin" {
+		t.Skip("el mv de BSD no tiene -T: la parte de directorios es del invitado Linux")
+	}
+	// overwrite con un fichero sobre un directorio: 409, y nada dentro.
+	f := escribe("f.txt")
+	d := filepath.Join(dir, "d")
+	_ = os.MkdirAll(d, 0o755)
+	resp = mueve(map[string]any{"from": f, "to": d, "overwrite": true})
+	esperaCodigo(t, resp, 409)
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(d, "f.txt")); err == nil {
+		t.Errorf("overwrite metió el origen dentro del directorio destino")
+	}
+	// overwrite con un directorio sobre un directorio vacío: lo sustituye.
+	orig := filepath.Join(dir, "o")
+	escribe("o/x.txt")
+	resp = mueve(map[string]any{"from": orig, "to": d, "overwrite": true})
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(d, "x.txt")); err != nil {
+		t.Errorf("el directorio no sustituyó al destino: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d, "o")); err == nil {
+		t.Errorf("el origen quedó anidado dentro del destino")
+	}
+}
+
+// chmod corre de verdad (chmod de esta máquina) por el daemon real del banco.
+func TestChmodDeVerdad(t *testing.T) {
+	b := montarCodigo(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "run.sh")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "d")
+	_ = os.MkdirAll(sub, 0o755)
+	_ = os.WriteFile(filepath.Join(sub, "z"), []byte("z"), 0o644)
+	url := b.base + "/files/chmod"
+	resp := pide(t, b.srv, tokenAlice, "POST", url, ChmodPeticion{Path: p, Mode: "755"})
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o755 {
+		t.Errorf("modo = %v, quería 0755", fi.Mode().Perm())
+	}
+	resp = pide(t, b.srv, tokenAlice, "POST", url, ChmodPeticion{Path: sub, Mode: "0700", Recursive: true})
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if fi, _ := os.Stat(filepath.Join(sub, "z")); fi.Mode().Perm() != 0o700 {
+		t.Errorf("recursivo: %v", fi.Mode().Perm())
+	}
+	resp = pide(t, b.srv, tokenAlice, "POST", url, ChmodPeticion{Path: filepath.Join(dir, "nada"), Mode: "644"})
+	esperaCodigo(t, resp, 404)
+	resp.Body.Close()
+	for _, malo := range []ChmodPeticion{{Path: p, Mode: "u+x"}, {Path: p, Mode: "-R"}, {Path: p, Mode: "8888"}, {Path: p, Mode: "77"}, {Path: "rel", Mode: "755"}, {Mode: "755"}} {
+		esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", url, malo), 400)
+	}
+	esperaCodigo(t, pide(t, b.srv, tokenBob, "POST", url, ChmodPeticion{Path: p, Mode: "777"}), 404)
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o755 {
+		t.Errorf("Bob cambió el modo: %v", fi.Mode().Perm())
+	}
+}
+
+func TestReemplazarEnFichero(t *testing.T) {
+	f := nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	sb := crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
+	ref := sb.ID[len("a/"):]
+	url := "/v1/sandboxes/" + sb.ID + "/files/replace"
+	f.mu.Lock()
+	f.ficheros[ref+":/etc/app.conf"] = []byte("host=a\nport=1\nport=1\n")
+	f.mu.Unlock()
+	leer := func() string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return string(f.ficheros[ref+":/etc/app.conf"])
+	}
+	// Una aparición: se sustituye.
+	resp := pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "host=a", New: "host=b"})
+	esperaCodigo(t, resp, 200)
+	r := decodifica[ReemplazarRespuesta](t, resp)
+	if r.Replacements != 1 || leer() != "host=b\nport=1\nport=1\n" {
+		t.Errorf("tras reemplazar: %+v %q", r, leer())
+	}
+	// Dos apariciones sin all: 409 y el fichero no cambia.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "port=1", New: "port=2"}), 409)
+	if leer() != "host=b\nport=1\nport=1\n" {
+		t.Errorf("el 409 cambió el fichero: %q", leer())
+	}
+	resp = pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "port=1", New: "port=2", All: true})
+	esperaCodigo(t, resp, 200)
+	if r := decodifica[ReemplazarRespuesta](t, resp); r.Replacements != 2 || leer() != "host=b\nport=2\nport=2\n" {
+		t.Errorf("con all: %+v %q", r, leer())
+	}
+	// No está, no existe, vacío, relativo, ajeno.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "zzz", New: "y"}), 409)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/nada", Old: "a", New: "b"}), 404)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "", New: "b"}), 400)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "etc/app.conf", Old: "a", New: "b"}), 400)
+	esperaCodigo(t, pide(t, srv, tokenBob, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "host=b", New: "x"}), 404)
+	// Tope: un fichero que pasa del tope de subida no se lee entero.
+	f.mu.Lock()
+	f.tamanoStat = api.FileMaxUpload + 1
+	f.mu.Unlock()
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "host", New: "x"}), 413)
+	f.mu.Lock()
+	f.tamanoStat = 0
+	f.mu.Unlock()
 }

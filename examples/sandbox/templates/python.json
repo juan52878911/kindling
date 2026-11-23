@@ -1,0 +1,2 @@
+{"name":"python","image":"toolchain","build_egress":"internet","mem_mib":512,
+ "steps":[{"cmd":["python3","--version"]}],"pool":1}

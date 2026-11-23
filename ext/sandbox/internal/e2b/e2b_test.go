@@ -33,6 +33,9 @@ type gateway struct {
 	fondo    *fondoFalso   // si no es nil, el gateway tiene procesos de fondo
 	sinList  bool          // files?list=1 responde 404 (gateway antiguo)
 	listados int           // peticiones files?list=1 recibidas
+	estado   string        // estado del sandbox (running por defecto)
+	acciones []string      // pause, resume y egress recibidos, en orden
+	red      []map[string]any
 }
 
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +59,11 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(st)
 		json.NewEncoder(w).Encode(v)
 	}
-	sb := map[string]any{"id": "sbx1", "template": "base", "state": "running", "vcpus": 2, "mem_mib": 512,
+	estado := g.estado
+	if estado == "" {
+		estado = "running"
+	}
+	sb := map[string]any{"id": "sbx1", "template": "base", "state": estado, "vcpus": 2, "mem_mib": 512,
 		"created_at": "2026-01-02T03:04:05Z", "expires_at": "2026-01-02T03:09:05Z", "ttl_seconds": 300,
 		"labels": map[string]string{"app": "t"}}
 	p := r.URL.Path
@@ -80,6 +87,17 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&req)
 		g.renews = append(g.renews, req.TTL)
 		j(200, sb)
+	case p == "/v1/sandboxes/sbx1/pause" || p == "/v1/sandboxes/sbx1/resume":
+		g.acciones = append(g.acciones, strings.TrimPrefix(p, "/v1/sandboxes/sbx1/"))
+		g.estado = map[bool]string{true: "paused", false: "running"}[strings.HasSuffix(p, "pause")]
+		sb["state"] = g.estado
+		j(200, sb)
+	case p == "/v1/sandboxes/sbx1/egress" && r.Method == "PATCH":
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		g.acciones = append(g.acciones, "egress")
+		g.red = append(g.red, req)
+		j(200, map[string]any{"applied": "live"})
 	case p == "/v1/sandboxes/sbx1/exec":
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
@@ -361,9 +379,8 @@ func TestNoImplementado(t *testing.T) {
 	b := nuevoBanco(t)
 	api := map[string]string{"X-API-Key": clave, "Content-Type": "application/json"}
 	for _, c := range []struct{ m, p string }{
-		{"POST", "/sandboxes/onrhqmi/pause"}, {"POST", "/sandboxes/onrhqmi/resume"}, {"GET", "/sandboxes/onrhqmi/metrics"},
+		{"GET", "/sandboxes/onrhqmi/metrics"},
 		{"POST", "/sandboxes/onrhqmi/snapshots"}, {"GET", "/v2/sandboxes/onrhqmi/logs"}, {"POST", "/v3/templates"},
-		{"PUT", "/sandboxes/onrhqmi/network"},
 	} {
 		resp := b.peticion(t, c.m, c.p, "", api, strings.NewReader(`{}`))
 		got := leer(t, resp)
@@ -659,5 +676,55 @@ func TestListDirRespaldoFind(t *testing.T) {
 	json.Unmarshal(leer(t, resp), &m)
 	if len(m.Entries) != 2 || b.gw.listados != 1 || !strings.HasPrefix(fmt.Sprint(b.gw.execs[len(b.gw.execs)-1]["cmd"]), "[find") {
 		t.Fatalf("respaldo: %v listados=%d execs=%v", m.Entries, b.gw.listados, b.gw.execs)
+	}
+}
+
+// TestPausaReanudaRed: pausa, reanudación y red van a las rutas del gateway en
+// vez de contestar 501 (C6).
+func TestPausaReanudaRed(t *testing.T) {
+	b := nuevoBanco(t)
+	api := map[string]string{"X-API-Key": clave, "Content-Type": "application/json"}
+	pedir := func(m, p, cuerpo string) (int, []byte) {
+		resp := b.peticion(t, m, p, "", api, strings.NewReader(cuerpo))
+		return resp.StatusCode, leer(t, resp)
+	}
+	if st, got := pedir("POST", "/sandboxes/onrhqmi/pause", ""); st != 204 {
+		t.Fatalf("pause: %d %s", st, got)
+	}
+	if st, got := pedir("GET", "/sandboxes/onrhqmi", ""); st != 200 || !strings.Contains(string(got), `"state":"paused"`) {
+		t.Fatalf("tras pausar: %d %s", st, got)
+	}
+	// connect de un pausado lo reanuda y contesta 201; resume (obsoleto) también.
+	if st, got := pedir("POST", "/sandboxes/onrhqmi/connect", `{"timeout":30}`); st != 201 || !strings.Contains(string(got), `"sandboxID":"onrhqmi"`) {
+		t.Fatalf("connect pausado: %d %s", st, got)
+	}
+	if st, _ := pedir("POST", "/sandboxes/onrhqmi/connect", `{}`); st != 200 {
+		t.Fatalf("connect vivo: %d", st)
+	}
+	pedir("POST", "/sandboxes/onrhqmi/pause", "")
+	if st, got := pedir("POST", "/sandboxes/onrhqmi/resume", `{"timeout":60}`); st != 201 || !strings.Contains(string(got), "envdAccessToken") {
+		t.Fatalf("resume: %d %s", st, got)
+	}
+	if fmt.Sprint(b.gw.acciones) != "[pause resume pause resume]" || fmt.Sprint(b.gw.renews) != "[30 60]" {
+		t.Fatalf("acciones: %v renews: %v", b.gw.acciones, b.gw.renews)
+	}
+	for _, c := range []struct{ cuerpo, egress string }{
+		{`{"allowOut":["pypi.org","*.github.com"]}`, "allowlist [pypi.org *.github.com]"},
+		{`{"denyOut":["0.0.0.0/0"]}`, "none <nil>"},
+		{`{"allow_internet_access":false}`, "none <nil>"},
+		{`{}`, "internet <nil>"},
+	} {
+		if st, got := pedir("PUT", "/sandboxes/onrhqmi/network", c.cuerpo); st != 204 {
+			t.Fatalf("network %s: %d %s", c.cuerpo, st, got)
+		}
+		req := b.gw.red[len(b.gw.red)-1]
+		if got := strings.TrimSpace(fmt.Sprintln(req["egress"], req["allow_domains"])); got != c.egress {
+			t.Errorf("network %s -> %s, quería %s", c.cuerpo, got, c.egress)
+		}
+	}
+	for _, c := range []string{`{"allowOut":["8.8.8.8"]}`, `{"denyOut":["10.0.0.0/8"]}`, `{"rules":{"a.com":[{}]}}`} {
+		if st, got := pedir("PUT", "/sandboxes/onrhqmi/network", c); st != 501 || !strings.Contains(string(got), `"code":501`) {
+			t.Errorf("network %s: %d %s", c, st, got)
+		}
 	}
 }

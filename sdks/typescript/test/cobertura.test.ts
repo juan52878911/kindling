@@ -14,6 +14,7 @@ const README = fileURLToPath(new URL("../README.md", import.meta.url));
 /** Operaciones que el SDK no cubre a propósito, con el motivo. */
 const EXCLUIDAS: Record<string, string> = {
   "POST /v1/sandboxes/{id}/shell": "interactive shell: upgrade to binary frames (kling-shell/1), out of scope",
+  "PUT /v1/templates/{name}/pool": "admin-only operator route (the Kubernetes SandboxPool controller uses it)",
 };
 
 /** operación -> "Clase.método" del SDK de TypeScript. */
@@ -55,6 +56,11 @@ const METODOS: Record<string, string> = {
   "DELETE /v1/sandboxes/{id}/files": "Files.delete",
   "POST /v1/sandboxes/{id}/files/move": "Files.move",
   "POST /v1/sandboxes/{id}/files/mkdir": "Files.mkdir",
+  "POST /v1/sandboxes/{id}/files/chmod": "Files.chmod",
+  "POST /v1/sandboxes/{id}/files/replace": "Files.replace",
+  "PATCH /v1/sandboxes/{id}/metadata": "Sandbox.setMetadata",
+  "POST /v1/sandboxes/{id}/fork": "Sandbox.fork",
+  "GET /v1/sandboxes/{id}/metrics": "Sandbox.metrics",
   "GET /v1/sandboxes/{id}/files/search": "Files.search",
   "GET /v1/volumes": "Client.listVolumes",
   "POST /v1/volumes": "Client.createVolume",

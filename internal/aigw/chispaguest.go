@@ -394,7 +394,7 @@ func (g *Gateway) askChispaGuest(ctx context.Context, snap string, in chispa.Inp
 		return a, fmt.Errorf("replica answer larger than %d bytes", maxChispaGuestAnswerBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return a, fmt.Errorf("replica answered %d: %s", resp.StatusCode, truncUTF8(string(b), 200))
+		return a, fmt.Errorf("replica answered %d: %q", resp.StatusCode, truncUTF8(string(b), 200))
 	}
 	var gr chispaGuestResponse
 	if err := json.Unmarshal(b, &gr); err != nil {

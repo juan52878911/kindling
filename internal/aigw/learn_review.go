@@ -104,9 +104,14 @@ func buildCases(caps []CaptureRecord, fb []FeedbackRecord, predict func(text str
 		}
 	}
 	for _, f := range fb {
+		// El sha256 del texto tal como llegó; los registros de antes no lo
+		// traen y valen con el del texto guardado.
+		k := f.TextSHA256
+		if k == "" && f.Text != "" {
+			k = textKey(f.Text)
+		}
 		c := byID[f.ID]
 		if c == nil && f.Text != "" {
-			k := textKey(f.Text)
 			if c = byText[k]; c == nil {
 				id := f.ID
 				if id == "" {
@@ -123,8 +128,11 @@ func buildCases(caps []CaptureRecord, fb []FeedbackRecord, predict func(text str
 		if c == nil {
 			continue // un id que no se capturó y sin texto: nada que aprender
 		}
-		if c.Text == "" && f.Text != "" {
-			// Captura en modo hash: la persona trae el texto.
+		if c.Text == "" && f.Text != "" && (c.TextSHA == "" || c.TextSHA == k) {
+			// Captura en modo hash: la persona trae el texto. Solo si es el
+			// que se capturó (mismo sha256): los ids son secuenciales, y sin
+			// cotejo cualquiera con un token fijaba lo que se entrena de un
+			// caso ajeno.
 			c.Text, c.Fields = f.Text, f.Fields
 		}
 		switch f.Source {

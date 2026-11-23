@@ -288,6 +288,11 @@ type fakeFrontal struct {
 	// getsCaido), como el frontal cuando ese host no contesta.
 	hostCaido string
 	getsCaido int
+	// ultimaCrear es el cuerpo del último POST /v1/sandboxes; pausas y
+	// reanudaciones cuentan las llamadas a pause y resume.
+	ultimaCrear frontal.CrearPeticion
+	pausas      int
+	reanudadas  int
 }
 
 func (f *fakeFrontal) setDown(v bool) {
@@ -312,6 +317,8 @@ func newFakeFrontal(t *testing.T) *fakeFrontal {
 	mux.HandleFunc("GET /v1/sandboxes/{host}/{ref}", f.get)
 	mux.HandleFunc("DELETE /v1/sandboxes/{host}/{ref}", f.del)
 	mux.HandleFunc("POST /v1/sandboxes/{host}/{ref}/renew", f.renew)
+	mux.HandleFunc("POST /v1/sandboxes/{host}/{ref}/pause", f.cambiaEstado(api.StatePaused))
+	mux.HandleFunc("POST /v1/sandboxes/{host}/{ref}/resume", f.cambiaEstado(api.StateRunning))
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -331,6 +338,7 @@ func (f *fakeFrontal) create(w http.ResponseWriter, r *http.Request) {
 	var pet frontal.CrearPeticion
 	_ = json.NewDecoder(r.Body).Decode(&pet)
 	f.mu.Lock()
+	f.ultimaCrear = pet
 	f.seq++
 	id := fmt.Sprintf("host1/sbx-%d", f.seq)
 	f.creates++
@@ -428,6 +436,35 @@ func (f *fakeFrontal) renew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeTestJSON(w, http.StatusOK, sb)
+}
+
+// cambiaEstado hace de pause (a) y resume (running) del frontal.
+func (f *fakeFrontal) cambiaEstado(a api.State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := idDe(r)
+		f.mu.Lock()
+		sb, ok := f.sandboxes[id]
+		if ok {
+			sb.State = a
+			if a == api.StatePaused {
+				f.pausas++
+			} else {
+				f.reanudadas++
+			}
+		}
+		f.mu.Unlock()
+		if !ok {
+			writeTestJSON(w, http.StatusNotFound, api.Error{Message: "no sandbox " + id})
+			return
+		}
+		writeTestJSON(w, http.StatusOK, sb)
+	}
+}
+
+func (f *fakeFrontal) contadores() (pausas, reanudadas int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pausas, f.reanudadas
 }
 
 // idDe es el id compuesto de la ruta.
@@ -757,4 +794,117 @@ func TestReconcile_MessageClearsAfterFrontalRecovers(t *testing.T) {
 		got, ok := k8s.get("default/eight")
 		return ok && got.Status.ObservedGeneration == 2 && !hasMessage(got.Status.Message)
 	})
+}
+
+// ---- campos de spec nuevos: egress, vcpus, labels, env, volúmenes, paused ----
+
+func TestReconcile_CreateForwardsSpecFields(t *testing.T) {
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	sb := newTestSandbox("default", "campos")
+	sb.Metadata.UID = "uid-campos"
+	sb.Spec.Egress = "allowlist"
+	sb.Spec.AllowDomains = []string{"pypi.org", "files.pythonhosted.org"}
+	sb.Spec.VCPUs = 2
+	sb.Spec.Labels = map[string]string{"team": "demo", LabelK8sUID: "intento-de-pisarlo"}
+	sb.Spec.Env = map[string]string{"MODE": "test"}
+	sb.Spec.Volumes = []VolumeSpec{{Name: "datos", MountPath: "/data", ReadOnly: true}}
+	k8s.seed(sb)
+
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
+	waitFor(t, "status.id", func() bool { s, ok := k8s.get("default/campos"); return ok && s.Status.ID != "" })
+
+	fr.mu.Lock()
+	got := fr.ultimaCrear
+	fr.mu.Unlock()
+	if got.Egress != "allowlist" || len(got.AllowDomains) != 2 || got.AllowDomains[0] != "pypi.org" {
+		t.Errorf("egress/allowDomains: %+v", got)
+	}
+	if got.VCPUs != 2 || got.Env["MODE"] != "test" {
+		t.Errorf("vcpus/env: %+v", got)
+	}
+	if got.Labels["team"] != "demo" || got.Labels[LabelK8sUID] != "uid-campos" {
+		t.Errorf("labels (el UID del objeto no se puede pisar): %v", got.Labels)
+	}
+	if len(got.Volumes) != 1 || got.Volumes[0].Name != "datos" || got.Volumes[0].Mount != "/data" || !got.Volumes[0].ReadOnly {
+		t.Errorf("volumes: %+v", got.Volumes)
+	}
+}
+
+func TestReconcile_StatusEndpoint(t *testing.T) {
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	k8s.seed(newTestSandbox("default", "ep"))
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
+	waitFor(t, "status.endpoint", func() bool { s, ok := k8s.get("default/ep"); return ok && s.Status.Endpoint != "" })
+	s, _ := k8s.get("default/ep")
+	if want := fr.srv.URL + "/v1/sandboxes/" + s.Status.ID; s.Status.Endpoint != want {
+		t.Errorf("endpoint %q, quiero %q", s.Status.Endpoint, want)
+	}
+}
+
+func TestReconcile_PausedPausesAndResumes(t *testing.T) {
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := newTestSandbox("default", "pausa")
+	sb.Metadata.Finalizers = []string{CleanupFinalizer}
+	sb.Spec.Paused = true
+	sb.Status = SandboxStatus{ID: created.ID, Host: created.Host, State: string(created.State), ObservedGeneration: 1}
+	k8s.seed(sb)
+
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	shrinkBackoff(ctrl)
+	ctrl.Resync = 20 * time.Millisecond
+	runController(t, ctrl)
+
+	waitFor(t, "status.state=paused", func() bool { s, ok := k8s.get("default/pausa"); return ok && s.Status.State == "paused" })
+	time.Sleep(100 * time.Millisecond) // varios resyncs: pausar es idempotente
+	if p, _ := fr.contadores(); p != 1 {
+		t.Fatalf("pause llamado %d veces, quiero 1", p)
+	}
+
+	// paused: false (generation 2) la reanuda.
+	k8s.mu.Lock()
+	o := k8s.objs["default/pausa"]
+	o.Spec.Paused = false
+	o.Metadata.Generation = 2
+	k8s.rv++
+	o.Metadata.ResourceVersion = strconv.Itoa(k8s.rv)
+	cp := *o
+	k8s.mu.Unlock()
+	k8s.broadcast("MODIFIED", cp)
+	waitFor(t, "status.state=running", func() bool { s, ok := k8s.get("default/pausa"); return ok && s.Status.State == "running" })
+	if _, r := fr.contadores(); r != 1 {
+		t.Fatalf("resume llamado %d veces, quiero 1", r)
+	}
+}
+
+func TestReconcile_UnpausedLeavesFrozenAlone(t *testing.T) {
+	// Un sandbox congelado por su propio TTL (frozen) no se despierta solo
+	// porque spec.paused sea false: congelar es cosa del frontal.
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	created, _ := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300}, "")
+	fr.mu.Lock()
+	fr.sandboxes[created.ID].State = api.StateWarm
+	fr.mu.Unlock()
+	sb := newTestSandbox("default", "frio")
+	sb.Metadata.Finalizers = []string{CleanupFinalizer}
+	sb.Status = SandboxStatus{ID: created.ID, Host: created.Host, State: "running", ObservedGeneration: 1}
+	k8s.seed(sb)
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
+	waitFor(t, "status.state=frozen", func() bool { s, ok := k8s.get("default/frio"); return ok && s.Status.State == "frozen" })
+	if p, r := fr.contadores(); p != 0 || r != 0 {
+		t.Fatalf("pausas=%d reanudadas=%d, quiero 0", p, r)
+	}
 }

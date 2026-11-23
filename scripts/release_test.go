@@ -60,6 +60,8 @@ type escenario struct {
 	statusHV  string // "" sin commit status e2e-mac/kling-hv
 	changelog string
 	env       []string
+	readme    string // el README.md del repo; vacío, uno sin pin de versión
+	version   string // la etiqueta que se pide; vacía, v1.0.0
 }
 
 // correrRelease monta el repo, corre release.sh -n v1.0.0 y devuelve la
@@ -95,6 +97,11 @@ func correrRelease(t *testing.T, e escenario) (string, bool) {
 		cl = changelogListo
 	}
 	escribir(t, filepath.Join(repo, "CHANGELOG.md"), cl, 0o644)
+	rd := e.readme
+	if rd == "" {
+		rd = "# kindling\n\n## Install\n\n```sh\ncurl -fsSL https://example.invalid/install.sh | sudo sh\n```\n"
+	}
+	escribir(t, filepath.Join(repo, "README.md"), rd, 0o644)
 
 	// go falso: `firmar check` no es lo que se prueba aquí.
 	escribir(t, filepath.Join(falsos, "go"), "#!/bin/sh\nexit 0\n", 0o755)
@@ -136,7 +143,11 @@ cat "$f"
 	git(repo, "remote", "add", "origin", origin)
 	git(repo, "push", "-q", "origin", "main")
 
-	cmd := exec.Command("sh", "scripts/release.sh", "-n", "v1.0.0")
+	version := e.version
+	if version == "" {
+		version = "v1.0.0"
+	}
+	cmd := exec.Command("sh", "scripts/release.sh", "-n", version)
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(), "PATH="+falsos+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"DATOS="+datos, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "KLING_E2E_HV=", "VERSION=")
@@ -464,5 +475,33 @@ func TestE2EMacWorkflowPartsSinPruebasFalla(t *testing.T) {
 	// Los pasos 92 y 95 usan el mismo valor por defecto que el paso parts.
 	if strings.Count(s, "inputs.parts || 'e2e upgrade'") != 3 {
 		t.Error("el valor por defecto de parts no es el mismo en el paso parts y en 92/95")
+	}
+}
+
+// release.sh se niega a etiquetar vX si el README fija otra versión, y una
+// estable (que pasa a ser «latest») no puede dejar ningún pin.
+func TestReleaseSeNiegaConElPinDelREADMEDistinto(t *testing.T) {
+	pin := func(v string) string {
+		return "# kindling\n\n## Install\n\n```sh\ncurl -fsSL https://example.invalid/install.sh | sudo sh -s -- --tag " + v + "\n```\n"
+	}
+	for _, c := range []struct {
+		nombre, version, readme string
+		ok                      bool
+	}{
+		{"prerelease con otro pin", "v1.0.0-rc.3", pin("v1.0.0-rc.2"), false},
+		{"prerelease con su pin", "v1.0.0-rc.3", pin("v1.0.0-rc.3"), true},
+		{"estable que sigue fijando", "v1.0.0", pin("v1.0.0-rc.3"), false},
+		{"estable sin pin", "v1.0.0", "", true},
+	} {
+		t.Run(c.nombre, func(t *testing.T) {
+			cl := strings.Replace(changelogListo, "## [1.0.0] -", "## ["+strings.TrimPrefix(c.version, "v")+"] -", 1)
+			out, ok := correrRelease(t, escenario{runs: runsVerdes(), statusHV: "success", readme: c.readme, version: c.version, changelog: cl})
+			if ok != c.ok {
+				t.Fatalf("ok=%v, quería %v:\n%s", ok, c.ok, out)
+			}
+			if !c.ok && !strings.Contains(out, "README") {
+				t.Errorf("el rechazo no nombra el README:\n%s", out)
+			}
+		})
 	}
 }

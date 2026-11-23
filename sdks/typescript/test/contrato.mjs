@@ -3,8 +3,9 @@
 // el invitado de prueba (un daemon que ejecuta de verdad) deja ficheros. Imprime "CONTRATO OK"
 // al final; cualquier fallo termina con código 1 diciendo en qué paso.
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
-import { ApiError, Client, Conflict, NotFound, Sandbox } from "../src/index.js";
+import { ApiError, BadRequest, Client, Conflict, NotFound, Sandbox } from "../src/index.js";
 
 const [url, token, base, dominio] = process.argv.slice(2);
 let paso = "inicio";
@@ -90,6 +91,26 @@ try {
   const baja = Buffer.from(await sb.files.downloadTar("/paquete"));
   assert.equal(baja.subarray(0, 5).toString(), "a.txt");
   assert.equal(baja.subarray(512, 514).toString(), "hi");
+
+  p("ficheros: chmod y replace");
+  const conf = path.join(base, "app.conf");
+  await sb.files.write(conf, "host=a\nport=1\nport=1\n");
+  await sb.files.chmod(conf, 0o600);
+  assert.equal((fs.statSync(conf).mode & 0o777).toString(8), "600");
+  assert.equal((await sb.files.replace(conf, "host=a", "host=b")).replacements, 1);
+  await falla(sb.files.replace(conf, "port=1", "port=2"), Conflict, "un old repetido sin all tenía que dar 409");
+  assert.equal((await sb.files.replace(conf, "port=1", "port=2", { all: true })).replacements, 2);
+  assert.equal(await sb.files.readText(conf), "host=b\nport=2\nport=2\n");
+
+  p("metadata, metrics y fork");
+  assert.deepEqual((await sb.setMetadata({ labels: { fase: "dos" }, remove: ["suite"] })).labels, { fase: "dos" });
+  assert.deepEqual((await Sandbox.connect(sb.id, kw)).info.labels, { fase: "dos" });
+  await falla(sb.setMetadata({ labels: { tenant: "otro" } }), BadRequest, "una etiqueta reservada tenía que dar 400");
+  assert.equal((await sb.metrics()).id, sb.id);
+  const copias = await sb.fork({ count: 2, ttl: 120 });
+  assert.equal(copias.length, 2);
+  assert.equal(copias[0].info.labels.fase, "dos");
+  for (const c of copias) await c.delete();
 
   p("code: contextos, run, runWait, interrupt");
   const ctx = await sb.code.contexts.create({ language: "python" });

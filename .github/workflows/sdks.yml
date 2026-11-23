@@ -1,7 +1,8 @@
 # Tests de los SDK de sandbox (sdks/python y sdks/typescript). Corren contra sus servidores
 # falsos y comprueban que cada operación de ext/sandbox/api/openapi.yaml tiene método en el
 # SDK. El recorrido de los dos SDK contra el frontal real lo hace TestContratoSDKs, dentro
-# del job de ext/sandbox de ci.yml.
+# del job de ext/sandbox de ci.yml. El job osb corre el SDK real de OpenSandbox (versión fijada)
+# contra `kling sbx osb` delante del frontal real (TestContratoOSB, docs/opensandbox.md).
 name: sdks
 
 on:
@@ -10,11 +11,17 @@ on:
     paths:
       - 'sdks/**'
       - 'ext/sandbox/api/openapi.yaml'
+      - 'ext/sandbox/internal/osb/**'
+      - 'ext/sandbox/internal/frontal/**'
+      - 'scripts/osb-sdk-real/**'
       - '.github/workflows/sdks.yml'
   pull_request:
     paths:
       - 'sdks/**'
       - 'ext/sandbox/api/openapi.yaml'
+      - 'ext/sandbox/internal/osb/**'
+      - 'ext/sandbox/internal/frontal/**'
+      - 'scripts/osb-sdk-real/**'
       - '.github/workflows/sdks.yml'
   workflow_dispatch:
 
@@ -32,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Sin SHA fijado: no se pudo resolver sin red; fijarlo como el resto al integrar.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
       - name: unittest
@@ -48,9 +55,35 @@ jobs:
         node: ['22', '24']
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
       - name: npm test
         working-directory: sdks/typescript
         run: npm test
+
+  osb:
+    name: opensandbox sdk
+    runs-on: ubuntu-latest
+    env:
+      # La versión del SDK de OSB que fija docs/opensandbox.md; subirla es un cambio de compatibilidad.
+      OSB_SDK_VERSION: '1.2.1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+      # Sin SHA fijado: no se pudo resolver sin red; fijarlo como el resto al integrar.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: SDK de OpenSandbox
+        run: |
+          python3 -m venv "$RUNNER_TEMP/osb"
+          "$RUNNER_TEMP/osb/bin/pip" install "opensandbox==${OSB_SDK_VERSION}"
+      - name: TestContratoOSB
+        working-directory: ext/sandbox
+        env:
+          KLING_OSB_PYTHON: ${{ runner.temp }}/osb/bin/python
+          KLING_OSB_REQUIRED: '1'
+        run: go test -race -count=1 -run 'TestContratoOSB' -v ./internal/frontal/

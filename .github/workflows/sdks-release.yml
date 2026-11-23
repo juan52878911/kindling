@@ -1,0 +1,124 @@
+# Publicación de los SDK de sandbox (sdks/python en PyPI, sdks/typescript en npm).
+#
+# NO PUBLICA NADA hasta que Juan lo configure: solo arranca a mano (workflow_dispatch),
+# sus jobs de publicación están en el environment `sdks-release` (con revisores
+# obligatorios, si los pone), y publica solo si el paquete ya está dado de alta en el
+# registro. Pendiente de Juan, que son sus cuentas y sus nombres:
+#   - PyPI: crear el proyecto `kindling-sandbox` y añadir un «trusted publisher»
+#     (repositorio juan52878911/kindling, workflow sdks-release.yml, environment
+#     sdks-release). Sin tokens guardados: el job pide un token de vida corta a PyPI
+#     con el OIDC de GitHub (lo mismo que hace pypa/gh-action-pypi-publish).
+#   - npm: reservar `@kindling/sandbox` y guardar un token de automatización como
+#     secreto NPM_TOKEN del environment sdks-release. `--provenance` firma la procedencia
+#     con el OIDC de GitHub; el token sigue haciendo falta para autenticar.
+# Sin acciones de terceros salvo checkout (fijada por SHA): lo que hace falta ya viene en
+# el runner. Si se prefiere pypa/gh-action-pypi-publish, resolver su SHA antes de usarla.
+name: sdks-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión a publicar: tiene que ser la de sdks/python/pyproject.toml y la de sdks/typescript/package.json'
+        required: true
+        type: string
+      destino:
+        description: 'Dónde publicar'
+        required: true
+        type: choice
+        options: [ninguno, pypi, npm, ambos]
+        default: ninguno
+
+permissions:
+  contents: read
+
+jobs:
+  paquetes:
+    name: construir y comprobar los paquetes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: la versión pedida es la de los dos paquetes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          py=$(sed -n 's/^version = "\(.*\)"$/\1/p' sdks/python/pyproject.toml | head -1)
+          js=$(node -p 'require("./sdks/typescript/package.json").version')
+          echo "pyproject: $py · package.json: $js · pedida: $VERSION"
+          [ "$py" = "$VERSION" ] && [ "$js" = "$VERSION" ]
+      - name: python -m build
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet build twine
+          .venv/bin/python -m build sdks/python --outdir dist-py
+          .venv/bin/twine check dist-py/*
+          # El contenido: el paquete, la licencia y nada de tests.
+          for f in dist-py/*.whl; do
+            python3 -m zipfile -l "$f" | awk 'NR>1 {print $1}' > /tmp/py-contenido
+            grep -q '^kindling_sandbox/__init__.py$' /tmp/py-contenido
+            grep -q 'LICENSE$' /tmp/py-contenido
+            ! grep -q '^tests/' /tmp/py-contenido
+          done
+      - name: npm pack
+        working-directory: sdks/typescript
+        run: |
+          npm pack --dry-run --json > /tmp/npm-pack.json
+          node -e '
+            const [p] = JSON.parse(require("fs").readFileSync("/tmp/npm-pack.json", "utf8"));
+            const f = p.files.map((x) => x.path);
+            for (const w of ["package.json", "README.md", "src/index.js", "src/index.d.ts"])
+              if (!f.includes(w)) { console.error("falta en el paquete:", w); process.exit(1); }
+            if (f.some((x) => x.startsWith("test/"))) { console.error("los tests no van en el paquete"); process.exit(1); }
+            console.log(p.id, f.length, "ficheros");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdks-paquetes
+          path: dist-py/
+          if-no-files-found: error
+
+  pypi:
+    name: publicar en PyPI (trusted publishing)
+    needs: paquetes
+    if: inputs.destino == 'pypi' || inputs.destino == 'ambos'
+    runs-on: ubuntu-latest
+    environment: sdks-release
+    permissions:
+      contents: read
+      id-token: write   # el OIDC de GitHub que PyPI cambia por un token de vida corta
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sdks-paquetes
+          path: dist-py
+      - name: token de PyPI por OIDC y subida
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet twine
+          jwt=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                  "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=pypi" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          token=$(curl -fsS -X POST https://pypi.org/_/oidc/mint-token \
+                  -H 'Content-Type: application/json' -d "{\"token\": \"$jwt\"}" \
+                  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          echo "::add-mask::$token"
+          TWINE_USERNAME=__token__ TWINE_PASSWORD=$token .venv/bin/twine upload --non-interactive dist-py/*
+
+  npm:
+    name: publicar en npm (con procedencia)
+    needs: paquetes
+    if: inputs.destino == 'npm' || inputs.destino == 'ambos'
+    runs-on: ubuntu-latest
+    environment: sdks-release
+    permissions:
+      contents: read
+      id-token: write   # para --provenance
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: npm publish --provenance
+        working-directory: sdks/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN" || { echo "falta el secreto NPM_TOKEN en el environment sdks-release" >&2; exit 1; }
+          printf '%s\n' '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}' > "$RUNNER_TEMP/npmrc"
+          npm publish --provenance --access public --userconfig "$RUNNER_TEMP/npmrc"

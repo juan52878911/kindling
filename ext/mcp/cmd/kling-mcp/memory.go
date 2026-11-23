@@ -138,6 +138,10 @@ func memoryEnable(args []string) error {
 	fmt.Printf("Then link it and enable it:\n")
 	fmt.Printf("  kling mcp link %s http://%s:%s/mcp\n", *service, ip, portOf(*listen))
 	fmt.Printf("  kling mcp memory enable\n")
+	// Fuera de una microVM el puente solo acepta Host de loopback: para
+	// enlazarlo por la IP de la LAN hay que permitirla (ver kling-bridge).
+	fmt.Printf("\nThe bridge only accepts loopback Host headers outside a microVM: start it with\n")
+	fmt.Printf("KLING_BRIDGE_ALLOWED_HOSTS=%s to link it by that address.\n", ip)
 	return nil
 }
 

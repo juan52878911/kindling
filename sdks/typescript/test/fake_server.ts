@@ -326,6 +326,53 @@ export class FakeGateway {
         s.files.delete(req.from); s.files.set(req.to, f);
         return this.json(r, 200, req);
       }
+      if (sub === "files" && p[4] === "chmod" && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString());
+        this.lastBody = req;
+        const f = s.files.get(req.path);
+        if (!f) return this.err(r, 404, "chmod failed: No such file", "not_found");
+        if (!/^[0-7]{3,4}$/.test(req.mode)) return this.err(r, 400, "mode must be octal", "bad_request");
+        return this.json(r, 200, { path: req.path, size: f.length, mode: req.mode.padStart(4, "0"), is_dir: false, mod_time: "2026-01-01T00:00:00Z" });
+      }
+      if (sub === "files" && p[4] === "replace" && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString());
+        this.lastBody = req;
+        const f = s.files.get(req.path);
+        if (!f) return this.err(r, 404, "no such file", "not_found");
+        const texto = f.toString();
+        const n = texto.split(req.old).length - 1;
+        if (n === 0 || (n > 1 && !req.all)) return this.err(r, 409, `old appears ${n} times`, "conflict");
+        const nuevo = texto.split(req.old).join(req.new);
+        s.files.set(req.path, Buffer.from(nuevo));
+        return this.json(r, 200, { path: req.path, replacements: n, size: nuevo.length });
+      }
+      if (sub === "metadata" && q.method === "PATCH") {
+        const req = JSON.parse((await this.body(q)).toString());
+        this.lastBody = req;
+        const labels = { ...((s.info as any).labels ?? {}) };
+        for (const k of req.remove ?? []) delete labels[k];
+        for (const [k, v] of Object.entries(req.labels ?? {})) {
+          if (k === "tenant" || k === "kind" || k.startsWith("kling.")) return this.err(r, 400, `label "${k}" is reserved`, "bad_request");
+          labels[k] = v;
+        }
+        s.info = { ...s.info, labels };
+        return this.json(r, 200, s.info);
+      }
+      if (sub === "fork" && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString() || "{}");
+        this.lastBody = req;
+        const copias: unknown[] = [];
+        for (let i = 0; i < (req.count ?? 1); i++) {
+          const id = `sbx-${++this.n}`;
+          const info = { ...s.info, id, ttl_seconds: req.ttl_seconds ?? (s.info as any).ttl_seconds };
+          this.sandboxes.set(id, { id, files: new Map(s.files), info, procs: new Map(), sessions: new Map() });
+          copias.push(info);
+        }
+        return this.json(r, 201, { sandboxes: copias });
+      }
+      if (sub === "metrics" && q.method === "GET") {
+        return this.json(r, 200, { id: s.id, state: (s.info as any).state, memory_mib: 123, memory_kind: "pss", cpu_seconds: 4.5, mem_limit_mib: 256 });
+      }
       if (sub === "files" && p[4] === "mkdir" && q.method === "POST") {
         const req = JSON.parse((await this.body(q)).toString());
         return this.json(r, 201, { path: req.path, size: 0, mode: "0755", is_dir: true, mod_time: "2026-01-01T00:00:00Z" });

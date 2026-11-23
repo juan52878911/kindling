@@ -6,6 +6,11 @@ export interface SandboxInfo {
   [extra: string]: unknown;
 }
 export interface FileStat { path: string; size: number; mode: string; is_dir: boolean; mod_time: string; [extra: string]: unknown }
+export interface ReplaceResult { path: string; replacements: number; size: number; [extra: string]: unknown }
+export interface SandboxMetrics {
+  id: string; state: string; memory_mib?: number; memory_kind?: string; cpu_seconds?: number; mem_limit_mib?: number;
+  [extra: string]: unknown;
+}
 export interface FileEntry { name: string; type: string; size: number; mode: string; mod_time: string; target?: string; [extra: string]: unknown }
 export interface FileList { path: string; entries: FileEntry[]; truncated?: boolean; [extra: string]: unknown }
 export interface Graph { id: string; host: string; template: string; state: string; claimed_at: string; nodes: Record<string, unknown>; [extra: string]: unknown }
@@ -128,6 +133,11 @@ export class Client {
   deleteCodeContext(id: string, cid: string): Promise<void>;
   interruptCode(id: string, cid: string): Promise<void>;
   moveFile(id: string, from: string, to: string, overwrite?: boolean): Promise<void>;
+  chmodFile(id: string, path: string, mode: string, recursive?: boolean): Promise<FileStat>;
+  replaceInFile(id: string, path: string, old: string, nuevo: string, all?: boolean): Promise<ReplaceResult>;
+  patchMetadata(id: string, o?: { labels?: Record<string, string>; remove?: string[] }): Promise<SandboxInfo>;
+  forkSandbox(id: string, o?: { count?: number; ttl_seconds?: number }): Promise<SandboxInfo[]>;
+  sandboxMetrics(id: string): Promise<SandboxMetrics>;
   mkdirFile(id: string, path: string): Promise<FileStat>;
   searchFiles(id: string, path: string, glob: string): Promise<SearchResult>;
   uploadTar(id: string, path: string, datos: Uint8Array, o?: { mkdir?: boolean }): Promise<TarResult>;
@@ -166,6 +176,8 @@ export class Files {
   readText(path: string, o?: { range?: ByteRange }): Promise<string>;
   move(from: string, to: string, o?: { overwrite?: boolean }): Promise<void>;
   mkdir(path: string): Promise<FileStat>;
+  chmod(path: string, mode: number | string, o?: { recursive?: boolean }): Promise<FileStat>;
+  replace(path: string, old: string, nuevo: string, o?: { all?: boolean }): Promise<ReplaceResult>;
   search(path: string, glob: string): Promise<SearchResult>;
   uploadTar(path: string, data: Uint8Array, o?: { mkdir?: boolean }): Promise<TarResult>;
   downloadTar(path: string): Promise<Uint8Array>;
@@ -235,6 +247,9 @@ export class Sandbox implements AsyncDisposable {
   resume(): Promise<SandboxInfo>;
   setEgress(egress?: string, allowDomains?: string[]): Promise<EgressPolicy>;
   set_egress(egress?: string, allowDomains?: string[]): Promise<EgressPolicy>;
+  setMetadata(o?: { labels?: Record<string, string>; remove?: string[] }): Promise<SandboxInfo>;
+  fork(o?: { count?: number; ttl?: number }): Promise<Sandbox[]>;
+  metrics(): Promise<SandboxMetrics>;
   delete(): Promise<void>;
   kill(): Promise<void>;
   exec(cmd: string | string[], opts?: ExecOptions): Promise<ExecResult>;

@@ -11,8 +11,8 @@ from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 from .errors import ApiError, ConfigError, TransportError, error_para
-from .models import (CodeContext, CodeEvent, EgressPolicy, Endpoint, SearchResult, TarResult, ExecEvent, ExecResult, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, SandboxInfo,
-                     Session, Volume)
+from .models import (CodeContext, CodeEvent, EgressPolicy, Endpoint, SearchResult, TarResult, ExecEvent, ExecResult, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, ReplaceResult,
+                     SandboxInfo, SandboxMetrics, Session, Volume)
 
 ENV_URL = "KLING_SANDBOX_URL"
 ENV_TOKEN = "KLING_SANDBOX_TOKEN"
@@ -235,6 +235,28 @@ class Client:
             cuerpo["allow_domains"] = list(allow_domains)
         return EgressPolicy.from_json(self._json("PATCH", "/v1/sandboxes/%s/egress" % id, cuerpo=cuerpo))
 
+    def patch_metadata(self, id: str, labels: Optional[Dict[str, str]] = None,
+                       remove: Optional[List[str]] = None) -> SandboxInfo:
+        cuerpo: Dict[str, Any] = {}
+        if labels:
+            cuerpo["labels"] = dict(labels)
+        if remove:
+            cuerpo["remove"] = list(remove)
+        return SandboxInfo.from_json(self._json("PATCH", "/v1/sandboxes/%s/metadata" % id, cuerpo=cuerpo))
+
+    def fork_sandbox(self, id: str, count: Optional[int] = None,
+                     ttl_seconds: Optional[int] = None) -> List[SandboxInfo]:
+        cuerpo: Dict[str, Any] = {}
+        if count is not None:
+            cuerpo["count"] = int(count)
+        if ttl_seconds is not None:
+            cuerpo["ttl_seconds"] = int(ttl_seconds)
+        r = self._json("POST", "/v1/sandboxes/%s/fork" % id, cuerpo=cuerpo) or {}
+        return [SandboxInfo.from_json(x) for x in r.get("sandboxes") or []]
+
+    def sandbox_metrics(self, id: str) -> SandboxMetrics:
+        return SandboxMetrics.from_json(self._json("GET", "/v1/sandboxes/%s/metrics" % id))
+
     # ---- endpoints
 
     def create_endpoint(self, id: str, port: int, ttl_seconds: Optional[int] = None,
@@ -399,6 +421,18 @@ class Client:
 
     def mkdir_file(self, id: str, path: str) -> FileStat:
         return FileStat.from_json(self._json("POST", "/v1/sandboxes/%s/files/mkdir" % id, cuerpo={"path": path}))
+
+    def chmod_file(self, id: str, path: str, mode: str, recursive: bool = False) -> FileStat:
+        cuerpo: Dict[str, Any] = {"path": path, "mode": mode}
+        if recursive:
+            cuerpo["recursive"] = True
+        return FileStat.from_json(self._json("POST", "/v1/sandboxes/%s/files/chmod" % id, cuerpo=cuerpo))
+
+    def replace_in_file(self, id: str, path: str, old: str, new: str, all: bool = False) -> ReplaceResult:
+        cuerpo: Dict[str, Any] = {"path": path, "old": old, "new": new}
+        if all:
+            cuerpo["all"] = True
+        return ReplaceResult.from_json(self._json("POST", "/v1/sandboxes/%s/files/replace" % id, cuerpo=cuerpo))
 
     def search_files(self, id: str, path: str, glob: str) -> SearchResult:
         return SearchResult.from_json(self._json(

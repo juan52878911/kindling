@@ -52,7 +52,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Printf("kindling-operator: watching %s/%s %s against %s", operator.Group, operator.Version, operator.Resource, frontalURL)
+	// El segundo recurso (SandboxPool) va en su propio bucle: si su CRD no está
+	// aplicado (un clúster que solo tiene el CRD viejo), solo se queja en el
+	// log, y los Sandbox siguen funcionando.
+	pools := operator.NewPoolController(kube, frontal, logger)
+	go pools.Run(ctx)
+
+	logger.Printf("kindling-operator: watching %s/%s %s and %s against %s", operator.Group, operator.Version, operator.Resource, operator.PoolResource, frontalURL)
 	if err := ctrl.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.Fatalf("kindling-operator: %v", err)
 	}

@@ -61,6 +61,10 @@ type falso struct {
 	// frontal no acumula el flujo.
 	execLibera chan struct{}
 	ultimoExec api.ExecRequest
+	// ultimoShell es el cuerpo del último POST shell; sesionesEstrictas hace
+	// que un exec con una sesión que el daemon no tiene conteste 404, como el real.
+	ultimoShell       api.ShellRequest
+	sesionesEstrictas bool
 	// procs es el estado del daemon falso para procesos y sesiones.
 	procs procsFalsos
 	// shellIlegal: la shell falsa manda al cliente una trama que no le toca.
@@ -106,6 +110,13 @@ type falso struct {
 	sandboxesUnaVez   sync.Once
 	sandboxesColgarN  int
 	sandboxesLlamadas int
+	// sandboxesFoto hace que el GET /sandboxes retenido conteste con lo que
+	// había al RECIBIRLO y no al soltarlo: un listado lento cuyo contenido ya
+	// es viejo cuando llega.
+	sandboxesFoto bool
+	// etiquetasDemora retrasa cada PUT labels antes de aplicarlo: ensancha la
+	// ventana entre leer y escribir de dos réplicas del frontal.
+	etiquetasDemora time.Duration
 	// snapLista y snapUno cuentan GET /snapshots y GET /snapshots/{name};
 	// snapUnoViejo hace que la segunda ruta no exista (un daemon anterior).
 	snapLista, snapUno int
@@ -144,6 +155,20 @@ type falso struct {
 	tamanoStat int64
 	// dirs son los directorios que el falso conoce (clave ref:ruta).
 	dirs map[string]bool
+
+	// forks guarda lo pedido a POST /sandboxes/{ref}/fork; forkEspera, si no es
+	// nil, retiene el fork hasta que se cierre (antes cierra forkEmpezado);
+	// forkCodigo hace que el fork falle con ese estado; forkHereda hace que las
+	// copias hereden también las etiquetas del original (como un snapshot).
+	forks        []api.ForkRequest
+	forkEspera   chan struct{}
+	forkEmpezado chan struct{}
+	forkCodigo   int
+	forkHereda   bool
+	// procMaquinas es lo que GET /procstats dice de cada máquina.
+	procMaquinas []api.ProcStat
+	procKind     string
+	procLlamadas int
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -194,8 +219,13 @@ func (f *falso) rutas() http.Handler {
 	})
 	m.HandleFunc("POST /sandboxes/claim", f.reclamar)
 	m.HandleFunc("GET /procstats", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, api.ProcStats{AvailableMiB: f.libreMiB})
+		f.mu.Lock()
+		f.procLlamadas++
+		out := api.ProcStats{AvailableMiB: f.libreMiB, Machines: append([]api.ProcStat(nil), f.procMaquinas...), MemoryKind: f.procKind}
+		f.mu.Unlock()
+		writeJSON(w, 200, out)
 	})
+	m.HandleFunc("POST /sandboxes/{ref}/fork", f.fork)
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.snapLista++
@@ -367,6 +397,19 @@ func (f *falso) rutas() http.Handler {
 			failDaemon(w, 500, fmt.Errorf("listing timed out"))
 			return
 		}
+		var foto []*api.Machine
+		if colgar && f.sandboxesFoto {
+			f.mu.Lock()
+			foto = []*api.Machine{}
+			for _, mc := range f.maquinas {
+				if mc.Labels[api.LabelKind] == api.KindSandbox {
+					c := *mc
+					c.Labels = api.MergeLabels(nil, mc.Labels)
+					foto = append(foto, &c)
+				}
+			}
+			f.mu.Unlock()
+		}
 		if colgar {
 			f.sandboxesUnaVez.Do(func() { close(f.sandboxesEmpezado) })
 			select {
@@ -374,6 +417,10 @@ func (f *falso) rutas() http.Handler {
 			case <-r.Context().Done():
 				return
 			}
+		}
+		if foto != nil {
+			writeJSON(w, 200, foto)
+			return
 		}
 		f.mu.Lock()
 		out := []*api.Machine{}
@@ -452,6 +499,9 @@ func (f *falso) rutas() http.Handler {
 			if primera {
 				<-f.etiquetasEspera
 			}
+		}
+		if f.etiquetasDemora > 0 {
+			time.Sleep(f.etiquetasDemora)
 		}
 		if _, conTenant := labels[LabelTenant]; conTenant && f.etiquetasLentas > 0 {
 			time.Sleep(f.etiquetasLentas)
@@ -664,7 +714,17 @@ func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.ultimoExec = req
 	libera := f.execLibera
+	estricto := f.sesionesEstrictas
 	f.mu.Unlock()
+	if estricto && req.Session != "" {
+		f.procs.mu.Lock()
+		_, hay := f.procs.sesiones[req.Session]
+		f.procs.mu.Unlock()
+		if !hay {
+			failDaemon(w, 404, fmt.Errorf("no session %q (expired or never created)", req.Session))
+			return
+		}
+	}
 
 	salida := []byte("hola\n")
 	if f.execCorta {
@@ -794,6 +854,9 @@ func (f *falso) shell(w http.ResponseWriter, r *http.Request) {
 	// bytes se leerían como tramas.
 	var req api.ShellRequest
 	_ = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req)
+	f.mu.Lock()
+	f.ultimoShell = req
+	f.mu.Unlock()
 	conn, brw, err := w.(http.Hijacker).Hijack()
 	if err != nil {
 		return
@@ -1176,4 +1239,61 @@ func (f *falso) empaquetarLocked(ref, path string) ([]byte, bool) {
 	}
 	_ = tw.Close()
 	return buf.Bytes(), true
+}
+
+// fork hace de daemon: crea Count copias del original con las etiquetas
+// pedidas más kind=sandbox y kling.fork-of.
+func (f *falso) fork(w http.ResponseWriter, r *http.Request) {
+	var req api.ForkRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	f.mu.Lock()
+	f.forks = append(f.forks, req)
+	espera, empezado, codigo, hereda := f.forkEspera, f.forkEmpezado, f.forkCodigo, f.forkHereda
+	f.mu.Unlock()
+	if empezado != nil {
+		select {
+		case <-empezado:
+		default:
+			close(empezado)
+		}
+	}
+	if espera != nil {
+		select {
+		case <-espera:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if codigo != 0 {
+		failDaemon(w, codigo, fmt.Errorf("fork refused"))
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	src, ok := f.maquinas[r.PathValue("ref")]
+	if !ok {
+		failDaemon(w, 404, fmt.Errorf("no sandbox"))
+		return
+	}
+	n := max(req.Count, 1)
+	res := api.ForkResult{Snapshot: "fork-tmp"}
+	for i := 0; i < n; i++ {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		c := &api.Machine{ID: hex.EncodeToString(b), State: api.StateRunning, Image: src.Image, MemMiB: src.MemMiB,
+			TTLSeconds: src.TTLSeconds, CreatedAt: time.Now(),
+			Labels: api.MergeLabels(nil, req.Labels)}
+		if req.TTLSeconds > 0 {
+			c.TTLSeconds = req.TTLSeconds
+		}
+		if hereda {
+			c.Labels = api.MergeLabels(src.Labels, c.Labels)
+			c.Labels[LabelPublico] = src.Labels[LabelPublico]
+		}
+		c.Labels = api.MergeLabels(c.Labels, map[string]string{api.LabelForkOf: src.ID, api.LabelKind: api.KindSandbox})
+		f.maquinas[c.ID] = c
+		cc := *c
+		res.Sandboxes = append(res.Sandboxes, &cc)
+	}
+	writeJSON(w, 201, res)
 }

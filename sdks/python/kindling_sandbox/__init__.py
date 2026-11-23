@@ -6,7 +6,7 @@ from .client import Client
 from .errors import (ApiError, BadRequest, Conflict, ConfigError, Forbidden, NotFound,
                      PayloadTooLarge, RateLimited, SandboxError, ServerError, TransportError,
                      Unauthorized)
-from .models import (CodeContext, CodeEvent, CodeResult, CreatedKey, EgressPolicy, Endpoint, SearchResult, TarResult, ExecEvent, ExecResult, FileEntry, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, SandboxInfo,
+from .models import (CodeContext, CodeEvent, CodeResult, CreatedKey, EgressPolicy, Endpoint, SearchResult, TarResult, ExecEvent, ExecResult, FileEntry, FileList, FileStat, Graph, ProcessEvent, ProcessInfo, ReplaceResult, SandboxInfo, SandboxMetrics,
                      Session, Tenant, TenantKey, Volume)
 from .sandbox import Code, CodeContexts, Endpoints, Files, Processes, Sandbox, Sessions, SandboxBatch, SandboxList
 

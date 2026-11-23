@@ -77,11 +77,25 @@ corre.
   Sin ellos devuelve la lista entera. Con `limit` la respuesta es una página por id y, si hay más,
   `X-Kindling-Next-Cursor` trae el `cursor` de la siguiente (el último id devuelto).
 - `POST /v1/sandboxes` acepta `env: {"CLAVE": "valor"}` (hasta 64 variables, 32 KiB): se guarda
-  como la sesión `default` del sandbox. **Solo la ven** los `exec` y procesos de fondo con
-  `"session":"default"`: un `exec` sin `session`, `/code` y `/shell` no las tienen (pásalas en el
-  `env` de cada petición, o crea la sesión y úsala). La sesión caduca tras 24 h sin usarse
-  (cada uso de `default` renueva el plazo); caducada, las variables se pierden y se recrea con
-  `POST …/sessions` (`id: "default"`). Cuenta para `max_sessions`. No va junto con `count`.
+  como la sesión `default` del sandbox, y **valen para todo**: `exec` y procesos de fondo sin
+  `session` (que usan `default`, con su `cwd`: un `cd` dentro de un `exec` sin sesión también
+  se recuerda), `/code` (el intérprete nace con ellas) y `/shell` (se leen al abrir; lo que
+  pida la petición va encima). Quien pide otra `session` usa la suya. Cada uso de `default`
+  renueva su plazo de 24 h; si el sandbox pasa 24 h sin que nada la use, caduca, las variables
+  se pierden y el sandbox sigue sirviendo sin ellas (se recrea con `POST …/sessions`,
+  `id: "default"`). Cuenta para `max_sessions`. No va junto con `count`.
+- `PATCH /v1/sandboxes/{id}/metadata` `{"labels": {...}, "remove": [...]}` añade, cambia y quita
+  etiquetas propias (valor no vacío; las reservadas —`kind`, `tenant`, `template`, `kling.*`—
+  dan 400; hasta 32 en total). El daemon solo fusiona etiquetas, así que una quitada queda vacía
+  allí y la API no la muestra.
+- `POST /v1/sandboxes/{id}/fork` `{"count": 1, "ttl_seconds": N}` ramifica un sandbox vivo en
+  `count` copias (memoria, procesos y disco tal como están; hasta el tope de lote del tenant y
+  64). Las copias son sandboxes del mismo tenant y **cuentan para la cuota** (todas a la vez o
+  `429`), con el `env` y las etiquetas del original pero sin sus puertos públicos. Pausa el
+  original un instante.
+- `GET /v1/sandboxes/{id}/metrics` da `memory_mib` (PSS en Linux, `footprint` en macOS:
+  `memory_kind`), `cpu_seconds` si el daemon la mide, y `mem_limit_mib`; sin lectura (parado)
+  esos campos faltan.
 - `POST /v1/volumes` `{name, size_mib?, clone_from?, host?}` crea uno vacío o clon de otro
   propio (en su host); `GET /v1/volumes`, `GET /v1/volumes/{name}` y
   `DELETE /v1/volumes/{name}` (409 si está montado). Nombres `[a-z0-9_-]`, hasta 41.
@@ -179,7 +193,16 @@ cuerpo es un tar que se extrae dentro de `path`) y DELETE borra.
 - **`Range`** en la descarga: `Range: bytes=a-b` (también `a-` y `-n`, un solo rango) da `206` con
   `Content-Range`; fuera del fichero, `416`. El invitado no sabe saltar: el gateway lee y descarta
   lo anterior, así que el coste es el del desplazamiento.
-- `POST …/files/move` `{"from","to"}` mueve o renombra (`mv`), `POST …/files/mkdir` `{"path"}`
+- `POST …/files/move` `{"from","to"}` mueve o renombra (`mv -T`: el destino es el nombre final,
+  nunca un directorio donde meter el origen). `409` si el destino existe y no hay `overwrite`,
+  si apareció mientras se movía (no se movió nada: el gateway lo comprueba mirando que el origen
+  ya no esté) o si `overwrite` cae sobre un directorio que no se puede sustituir.
+- `POST …/files/chmod` `{"path","mode":"755","recursive"}` cambia permisos (modo octal de 3 o 4
+  cifras; devuelve el `FileStat`), y `POST …/files/replace` `{"path","old","new","all"}` lee el
+  fichero, sustituye `old` por `new` y lo reescribe con su modo (sin `all`, `old` debe aparecer
+  una vez: `409`; fichero y resultado hasta 64 MiB: `413`; no es atómico frente a un proceso
+  del invitado que escriba el mismo fichero).
+- `POST …/files/mkdir` `{"path"}`
   crea el directorio y los que falten (`201`, con su `FileStat`), y
   `GET …/files/search?path=/dir&glob=*.log` busca por nombre (un `find` dentro del sandbox con
   plazo de 20 s, 1 MiB de salida y 1000 resultados; `truncated` avisa de un corte).
@@ -216,8 +239,14 @@ emitidos hasta ese momento (una lista de revocaciones por sandbox en una etiquet
 `autorizar` comprueba; los tokens nuevos valen) y quita el puerto de los públicos. Con
 `"public": true` no hay token: cualquiera con la URL entra hasta que caduque o se revoque.
 Revocar también **corta las conexiones ya abiertas** por ese puerto (WebSocket, SSE, descargas
-largas), y borrar el sandbox corta todas las suyas: un 204 significa que nadie entra ya. Las
-revocaciones concurrentes se serializan por sandbox. Si la lista de revocaciones pasa de 2 KiB
+largas), y borrar el sandbox corta todas las suyas. Un 204 es verdad en el gateway que lo
+atendió: la petición que estaba resolviendo el sandbox en ese momento tampoco entra (401) y la
+caché no se rellena con lo de antes. **Con varias réplicas** del gateway (`gateway.replicas > 1`)
+no hay cerrojo ni registro de conexiones compartidos: las revocaciones se repiten hasta ver su
+marca escrita (hasta 8 intentos, si no 409), una conexión abierta en otra réplica se corta en
+**5 s como mucho** (cada réplica vuelve a autorizar cada 5 s lo que tiene abierto) y una petición
+nueva que llegue a otra réplica puede ver las etiquetas viejas hasta 3 s (la caché). Es una cota,
+no «nadie entra ya». Las revocaciones concurrentes de un mismo gateway se serializan por sandbox. Si la lista de revocaciones pasa de 2 KiB
 se compacta a una marca que revoca todo lo emitido hasta ese momento, de cualquier puerto
 (los tokens emitidos después valen). `GET …/endpoints` lista los públicos vigentes; los de token no se listan (no hay estado).
 

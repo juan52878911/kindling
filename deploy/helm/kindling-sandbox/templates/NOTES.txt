@@ -10,6 +10,12 @@ Operador: {{ include "kindling-sandbox.operatorName" . }}  ->  {{ include "kindl
 
 Gateway: servicio {{ include "kindling-sandbox.gatewayName" . }}:{{ .Values.gateway.service.port }} · hosts: {{ keys .Values.gateway.hosts | sortAlpha | join ", " }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kindling-sandbox.gatewayName" . }} {{ .Values.gateway.service.port }}:{{ .Values.gateway.service.port }}
+{{- if gt (int .Values.gateway.replicas) 1 }}
+
+NOTA: con {{ .Values.gateway.replicas }} réplicas, revocar un endpoint (DELETE .../endpoints/{puerto}) corta las
+conexiones abiertas en otra réplica en 5 s como mucho, no al instante, y una petición nueva
+puede ver las etiquetas viejas hasta 3 s. En la réplica que atiende el DELETE, un 204 es inmediato.
+{{- end }}
 {{- if not (include "kindling-sandbox.gatewayTLS" .) }}
 
 AVISO: el gateway sirve HTTP plano (insecureListen): los tokens viajan en claro.

@@ -28,7 +28,7 @@ var aiCommands = []plugin.Command{
 `},
 	{Name: "serve", Group: "GATEWAY", Summary: "serves classify, decide, generate and an OpenAI API", Usage: `  ai serve [-config ai.json] [-socket S]           serves /v1/classify, /v1/decide,
       [-listen ADDR] [-idle 2m] [-max-replicas 2]  /v1/generate and an OpenAI API;
-      [-keepwarm N] [-chispa-mem 64M]              replicas wake per request and
+      [-keepwarm N] [-chispa-mem 64]               replicas wake per request and
                                                    freeze when idle
 `},
 	{Name: "ls", Group: "GATEWAY", Summary: "models, tasks, cascades, samples", Usage: `  ai ls [-json]                                    models, tasks, cascades, samples

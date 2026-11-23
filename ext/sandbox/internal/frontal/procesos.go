@@ -96,6 +96,10 @@ func (s *Servidor) handleProcesoNuevo(w http.ResponseWriter, r *http.Request, id
 		fail(w, codigoBuscar(err), err)
 		return
 	}
+	porDefecto := req.Session == "" && sesionPorDefecto(mc) != ""
+	if porDefecto {
+		req.Session = idSesionPorDefecto
+	}
 	// Tope de procesos vivos por sandbox. Se cuenta preguntando al daemon:
 	// los que ya terminaron no gastan cuota.
 	tope := topeONumero(t.MaxProcesos, maxProcesosPorDefecto)
@@ -116,6 +120,10 @@ func (s *Servidor) handleProcesoNuevo(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	p, err := h.Cliente.StartProcess(r.Context(), mc.ID, req)
+	if err != nil && porDefecto && esSesionPerdida(err) {
+		req.Session = ""
+		p, err = h.Cliente.StartProcess(r.Context(), mc.ID, req)
+	}
 	if err != nil {
 		fail(w, codigoExec(err), deHost(h, err))
 		return

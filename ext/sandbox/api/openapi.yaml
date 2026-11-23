@@ -76,6 +76,58 @@ paths:
                   $ref: "#/components/schemas/TemplateInfo"
         "401":
           $ref: "#/components/responses/Error"
+  /v1/templates/{name}/pool:
+    put:
+      tags: [ops]
+      summary: Fija el fondo precalentado de una plantilla en cada host que la tiene (solo admin)
+      description: |
+        `size` 0 lo apaga. Un host que no contesta no impide fijarlo en los
+        demás: su fallo va en `hosts[].error`, y solo si ninguno lo consigue
+        la respuesta es 502. Es la ruta que usa el operador de Kubernetes para
+        `SandboxPool`.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [size]
+              properties:
+                size: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: Fondo fijado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  template: {type: string}
+                  size: {type: integer}
+                  available: {type: integer, description: Copias despiertas y reclamables en todos los hosts}
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host: {type: string}
+                        size: {type: integer}
+                        ready: {type: integer}
+                        error: {type: string}
+                        stale: {type: string}
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes:
     get:
       tags: [sandboxes]
@@ -396,7 +448,12 @@ paths:
       description: |
         Quita el puerto de los públicos y revoca los tokens de endpoint de ese
         puerto emitidos hasta ahora (una lista de revocaciones por sandbox, en
-        una etiqueta interna). Los tokens que se emitan después valen.
+        una etiqueta interna). Los tokens que se emitan después valen. Un 204
+        es verdad en esa réplica del gateway al momento: ni las peticiones en
+        curso ni las conexiones abiertas (WebSocket) siguen pasando. Con varias
+        réplicas, las demás cortan lo abierto en 5 s como mucho (repaso
+        periódico), y una petición nueva que llegue a otra réplica puede ver
+        las etiquetas viejas hasta 3 s.
       responses:
         "204":
           description: Revocado
@@ -1122,7 +1179,11 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "409":
-          description: El destino existe y la petición no trae `overwrite`
+          description: |
+            El destino existe y la petición no trae `overwrite`; el destino
+            apareció mientras se movía (no se movió nada); o `overwrite` sobre
+            un directorio que no se puede sustituir (el origen nunca se mete
+            dentro)
           content:
             application/json:
               schema:
@@ -1130,6 +1191,161 @@ paths:
         "502":
           $ref: "#/components/responses/Error"
         "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/metadata:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    patch:
+      tags: [sandboxes]
+      summary: Añade, cambia y quita etiquetas propias
+      description: |
+        `labels` añade o cambia (valor no vacío, hasta 256 bytes) y `remove`
+        quita. Las reservadas (`kind`, `tenant`, `template` y todo `kling.*`)
+        dan 400, y hasta 32 etiquetas propias en total.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MetadatosPeticion"
+      responses:
+        "200":
+          description: El sandbox con sus etiquetas nuevas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/fork:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Ramifica un sandbox vivo en copias
+      description: |
+        Cada copia nace con la memoria, los procesos y el disco que tiene el
+        original ahora y diverge sola. Son sandboxes del mismo inquilino y
+        gastan cuota (`count` de golpe: o caben todas o ninguna, 429). No
+        heredan los puertos públicos. `count` por defecto 1, hasta el tope de
+        lote del inquilino (y 64).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForkPeticion"
+      responses:
+        "201":
+          description: Las copias, listas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForkRespuesta"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/metrics:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [sandboxes]
+      summary: Memoria y CPU del sandbox
+      responses:
+        "200":
+          description: Lo que el daemon mide (los campos faltan si no lo sabe)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metricas"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/files/chmod:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Cambia los permisos de un fichero o directorio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChmodPeticion"
+      responses:
+        "200":
+          description: El fichero con su modo nuevo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileStat"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "504":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/files/replace:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Sustituye texto dentro de un fichero
+      description: |
+        Lee el fichero, sustituye `old` por `new` y lo escribe con el mismo
+        modo. Sin `all`, `old` tiene que aparecer una sola vez (409). El
+        fichero y el resultado no pasan de 64 MiB (413). No es atómico frente
+        a procesos del invitado que escriban el mismo fichero.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReemplazarPeticion"
+      responses:
+        "200":
+          description: Cuántas veces se sustituyó
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReemplazarRespuesta"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "502":
           $ref: "#/components/responses/Error"
   /v1/sandboxes/{id}/files/mkdir:
     parameters:
@@ -1645,6 +1861,80 @@ components:
         overwrite:
           type: boolean
           description: Pisa el destino si existe; sin él, un destino que existe es un 409
+    MetadatosPeticion:
+      type: object
+      properties:
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        remove:
+          type: array
+          items:
+            type: string
+    ForkPeticion:
+      type: object
+      properties:
+        count:
+          type: integer
+        ttl_seconds:
+          type: integer
+    ForkRespuesta:
+      type: object
+      required: [sandboxes]
+      properties:
+        sandboxes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sandbox"
+    Metricas:
+      type: object
+      properties:
+        id:
+          type: string
+        state:
+          type: string
+        memory_mib:
+          type: integer
+        memory_kind:
+          type: string
+          description: "`pss` (Linux) o `footprint` (macOS)"
+        cpu_seconds:
+          type: number
+        mem_limit_mib:
+          type: integer
+    ChmodPeticion:
+      type: object
+      required: [path, mode]
+      properties:
+        path:
+          type: string
+        mode:
+          type: string
+          description: Octal de 3 o 4 cifras (`755`, `0644`)
+        recursive:
+          type: boolean
+    ReemplazarPeticion:
+      type: object
+      required: [path, old, new]
+      properties:
+        path:
+          type: string
+        old:
+          type: string
+        new:
+          type: string
+        all:
+          type: boolean
+    ReemplazarRespuesta:
+      type: object
+      properties:
+        path:
+          type: string
+        replacements:
+          type: integer
+        size:
+          type: integer
     MkdirPeticion:
       type: object
       required: [path]
@@ -1810,9 +2100,11 @@ components:
           additionalProperties:
             type: string
           description: |
-            Variables de entorno (hasta 64, 32 KiB). Se guardan como la sesión
-            `default` del sandbox (caduca a las 24 h de inactividad): un exec con
-            `session: default` las ve. No admitido junto con `count`.
+            Variables de entorno (hasta 64, 32 KiB). Valen para todo lo que se
+            ejecute en el sandbox sin sesión propia: `exec`, procesos de fondo,
+            `/code` y `/shell`. Se guardan como la sesión `default`, que cada uso
+            renueva (caduca tras 24 h sin uso; si caduca, el sandbox sigue
+            sirviendo, ya sin ellas). No admitido junto con `count`.
         count:
           type: integer
           minimum: 1
