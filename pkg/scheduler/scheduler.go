@@ -106,13 +106,19 @@ func waitReadyAddr(ctx context.Context, addr string, timeout time.Duration) erro
 // pregunta al daemon con probe_only, que mira dentro del invitado. En Linux,
 // el dial directo de siempre, que es submilisegundo.
 func (g *Scheduler) esperarListo(ctx context.Context, mc *api.Machine, timeout time.Duration) error {
+	return g.esperarListoEn(ctx, mc, g.port(), timeout)
+}
+
+// esperarListoEn es esperarListo sobre el puerto port del invitado (el de
+// PortFor para el servicio).
+func (g *Scheduler) esperarListoEn(ctx context.Context, mc *api.Machine, port int, timeout time.Duration) error {
 	if len(mc.Forwards) > 0 && g.client != nil {
 		_, err := g.client.Guest(ctx, mc.ID, api.GuestRequest{
-			Port: g.port(), ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
+			Port: port, ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
 		})
 		return err
 	}
-	return waitReadyAddr(ctx, mc.Addr(g.port()), timeout)
+	return waitReadyAddr(ctx, mc.Addr(port), timeout)
 }
 
 // Scheduler mantiene instancias calientes por servicio: las despierta al llegar
@@ -226,6 +232,9 @@ type Scheduler struct {
 	// segador las renueva en su vuelta siguiente sin esperar al umbral (ver
 	// renovarTTL). Se toca con mu.
 	sinRenovar map[string]bool
+	// olvidos son las instancias que salieron del mapa y aún no se han
+	// avisado a OnForget (ver avisarOlvidos). Se toca con g.mu.
+	olvidos []olvido
 	// tenantCreando cuenta, por tenant, las instancias que se están
 	// creando/despertando pero aún no están registradas en g.services/g.extra:
 	// sin esto, dos buildEntry concurrentes de SERVICIOS DISTINTOS del mismo
@@ -385,6 +394,17 @@ type entry struct {
 	// memMiB es la memoria configurada de la máquina: el coste de pausarla.
 	memMiB int
 
+	// port es el puerto del invitado de su servicio (PortFor) con que se
+	// sondeó y al que apunta proxy; 0 = g.port() (ver puertoDe).
+	port int
+
+	// porTrabajo: la instancia se reparte por trabajo (MaxInflightFor del
+	// servicio) y no por sesiones. Entonces Begin convierte una reserva en
+	// petición en vuelo (y End ya no suelta reservas), para que la carga que
+	// se compara con el tope, inflight + reservas, no cuente dos veces una
+	// petición (R8-07). Se toca con g.mu.
+	porTrabajo bool
+
 	// aislada es la clave de la sesión dueña de esta instancia cuando es la
 	// microVM propia de una sesión aislada (ver aislada.go); vacía en el resto.
 	// Una instancia aislada vive en g.extra para que el segador, el desalojo,
@@ -422,6 +442,9 @@ func (g *Scheduler) begin(e *entry) {
 	g.mu.Lock()
 	e = e.vigenteLocked()
 	e.inflight++
+	if e.porTrabajo && len(e.reservas) > 0 {
+		e.reservas = e.reservas[1:]
+	}
 	e.lastUse = time.Now()
 	g.mu.Unlock()
 }
@@ -435,7 +458,7 @@ func (g *Scheduler) end(e *entry) {
 	// La petición que acaba puede no ser la que reservó (no llevan nombre),
 	// pero soltar antes de tiempo solo deja pasar a otra al puente, que la
 	// rechaza y el gateway escala: lo de antes, nunca una fuga.
-	if len(e.reservas) > 0 {
+	if !e.porTrabajo && len(e.reservas) > 0 {
 		e.reservas = e.reservas[1:]
 	}
 	e.lastUse = time.Now()
@@ -593,10 +616,18 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	if _, err := g.ensure(ctx, service); err != nil {
 		return nil, err
 	}
+	// Con MaxInflightFor el servicio se reparte por trabajo (R8-07). El
+	// gancho se consulta antes de tomar g.mu.
+	tope := g.maxInflightPropio(service)
 	// La elegida se reserva con el mismo candado con que se eligió: soltarlo
 	// antes dejaba a N initialize concurrentes leer el mismo hueco.
 	g.mu.Lock()
-	elegida, libre := elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	var elegida, libre *entry
+	if tope > 0 {
+		elegida, libre = elegirPorTrabajo(g.entriesLocked(service), tope)
+	} else {
+		elegida, libre = elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	}
 	if elegida != nil {
 		elegida.reservarLocked()
 		g.mu.Unlock()
@@ -868,7 +899,7 @@ func (g *Scheduler) bind(sid, guestSID, service string, e *entry) error {
 		service: service, guestSID: guestSID, machineID: e.machineID, ip: e.ip, fwd: e.fwd,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
-	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(g.port()))
+	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(g.puertoDe(e)))
 	return nil
 }
 
@@ -966,6 +997,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (_ *entry, err e
 		muerta, vieja = e.machineID, e
 	}
 	g.mu.Unlock()
+	g.avisarOlvidos()
 
 	// A partir de aquí se DESPIERTA/CREA la instancia primaria del servicio.
 	e, err := g.buildEntry(ctx, service, tnt, false)
@@ -1139,8 +1171,25 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 	// sondeo sería una vuelta más (0,2 ms de 2) para nada. Si por lo que sea
 	// no contestara, la primera petición falla al conectar y postGuest/el
 	// proxy ya reintentan con otra.
+	//
+	// Con ReadyFor, tras restaurar o adoptar no basta con que el puerto
+	// acepte: un servidor que lo abre antes de cargar pasaría el dial y la
+	// primera petición recibiría el error (R8-08). El plazo de la sonda acota
+	// las dos esperas; al adoptar, con el candado del servicio tomado, se
+	// recorta a adoptReadyTimeout.
+	port := g.portFor(service)
 	if how != "resume" {
-		if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
+		sonda := g.readyFor(service)
+		if how != "restore" && how != "adopt" {
+			sonda = nil
+		}
+		espera := plazoListo(sonda, how)
+		hasta := time.Now().Add(espera)
+		err := g.esperarListoEn(ctx, mc, port, espera)
+		if err == nil && sonda != nil {
+			err = esperarSonda(ctx, mc.Addr(port), sonda, hasta)
+		}
+		if err != nil {
 			g.soltarSinEscuchar(ctx, service, mc.ID, how)
 			return nil, fmt.Errorf("tool did not start listening: %w", err)
 		}
@@ -1162,7 +1211,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		g.OnWake(service, tr)
 	}
 
-	target, _ := url.Parse("http://" + mc.Addr(g.port()))
+	target, _ := url.Parse("http://" + mc.Addr(port))
 	e := &entry{
 		machineID:   mc.ID,
 		ip:          mc.IP,
@@ -1173,6 +1222,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		tenant:      tnt.name,   // quien la despertó es su dueño para cuota y fairness
 		maxSessions: gwMaxSessions(mc.MemMiB),
 		memMiB:      mc.MemMiB,
+		port:        port,
 		proxy:       proxyInvitado(target),
 	}
 	e.wake.Store(tr)
@@ -1204,7 +1254,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
 		// reintentar: la respuesta distingue dos situaciones muy distintas —el
 		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
-		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(g.port()), 3*time.Second) == nil
+		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(g.puertoDe(e)), 3*time.Second) == nil
 
 		if vivo && !retried(r) && r.GetBody != nil {
 			body, berr := r.GetBody()
@@ -1320,8 +1370,9 @@ func (g *Scheduler) sessionCountLocked(machineID string) int {
 // Es removeEntryLocked para quien no lo tiene.
 func (g *Scheduler) olvidarInstancia(service, machineID string) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.removeEntryLocked(service, machineID)
+	g.mu.Unlock()
+	g.avisarOlvidos()
 }
 
 // transporteInvitado es el transporte del proxy de una instancia. Las
@@ -1359,6 +1410,7 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 		delete(g.services, service)
 		e.cerrarConexiones()
 		e.cortarStreamsLocked()
+		g.encolarOlvidoLocked(service, e)
 		return
 	}
 	es := g.extra[service]
@@ -1366,6 +1418,7 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 		if e.machineID == machineID {
 			e.cerrarConexiones()
 			e.cortarStreamsLocked()
+			g.encolarOlvidoLocked(service, e)
 			g.extra[service] = append(es[:i], es[i+1:]...)
 			if len(g.extra[service]) == 0 {
 				delete(g.extra, service)
@@ -1409,6 +1462,7 @@ func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *te
 	// cada una creaba la suya (max_replicas 2 y 8 réplicas bajo un conjunto de
 	// CI). Las que están naciendo cuentan como si ya existieran.
 	tope := g.topeReplicas(service) // fuera de g.mu: MaxReplicasFor es del producto
+	enVuelo := g.maxInflightPropio(service)
 	g.mu.Lock()
 	if unirse {
 		if n := g.unirseANacienteLocked(service); n != nil {
@@ -1429,7 +1483,13 @@ func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *te
 	if g.nacientes == nil {
 		g.nacientes = map[string][]*naciente{}
 	}
-	n := &naciente{capacidad: g.capacidadNacienteLocked(service), pendientes: 1, listo: make(chan struct{}),
+	capacidad := g.capacidadNacienteLocked(service)
+	if enVuelo > 0 {
+		// Repartida por trabajo, en la réplica nueva caben enVuelo peticiones,
+		// no las sesiones que diga su memoria.
+		capacidad = enVuelo
+	}
+	n := &naciente{capacidad: capacidad, pendientes: 1, listo: make(chan struct{}),
 		inquilino: nombreInquilino(tnt)}
 	g.nacientes[service] = append(g.nacientes[service], n)
 	g.mu.Unlock()
@@ -1466,6 +1526,9 @@ func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *te
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
 	g.soltarCuotaLocked(e)
+	if enVuelo > 0 {
+		e.porTrabajo = true
+	}
 	// Nace para la sesión que la pidió y para las que se le apuntaron mientras
 	// arrancaba (ver pickInstance): un hueco reservado por cada una.
 	for i := 0; i < n.pendientes; i++ {
@@ -1596,6 +1659,7 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		}
 		return m, "adopt", nil
 	}
+	politica := g.idleFor(service)
 	// 2) alguna pausada: ~1 ms, solo reanudarla (ver pausa.go).
 	//
 	// Sale del registro de pausadas solo si el thaw sale bien: si falla, sigue
@@ -1639,14 +1703,27 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		go g.renovarTTL(context.WithoutCancel(ctx), m.ID)
 		return th, "resume", nil
 	}
-	// 3) alguna congelada: ~30 ms. También para el scale-out: una réplica que
+	// 3) alguna congelada: ~30 ms. Salvo con IdlePause o IdleRemove: una
+	// réplica descongelada no comparte la memoria del dorado (R8-01), así
+	// que se restaura y las congeladas que queden (de otra política, de otro
+	// gateway) se borran aparte, sin retrasar esta petición.
+	if sinCongelar(politica) {
+		var congeladas []string
+		for m := pick(api.StateWarm); m != nil; m = pick(api.StateWarm) {
+			congeladas = append(congeladas, m.ID)
+		}
+		if len(congeladas) > 0 {
+			go g.borrarCongeladas(context.WithoutCancel(ctx), service, congeladas)
+		}
+	}
+	// También para el scale-out: una réplica que
 	// el segador congeló vuelve mucho más barata que una restauración nueva,
 	// y sin esto cada ráfaga dejaba otra máquina congelada en disco para
 	// siempre (cada una con su fichero de memoria entero en macOS). El TTL se
 	// renueva ANTES de despertarla: una vuelta del vigilante del daemon entre
 	// el thaw y la renovación la volvería a congelar, y una congelada también
 	// se puede renovar.
-	for {
+	for !sinCongelar(politica) {
 		m := pick(api.StateWarm)
 		if m == nil {
 			break
@@ -2290,6 +2367,9 @@ type apartada struct {
 }
 
 func (g *Scheduler) reapOnce(ctx context.Context) {
+	// Lo que este pase saque del mapa (TTL vencido, dormidas, aisladas
+	// caducadas) se avisa a OnForget al acabar, con g.mu suelto.
+	defer g.avisarOlvidos()
 	type victim = dormida
 	var victims []victim
 
@@ -2470,7 +2550,7 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		apartadas[v.id] = apartada{service: v.service, e: e, l: l}
 		// La dirección se resuelve antes de quitarla del mapa: después ya no
 		// queda la entrada de la que sacarla.
-		addr := e.Addr(g.port())
+		addr := e.Addr(g.puertoDe(e))
 		g.removeEntryLocked(v.service, v.id)
 		g.mu.Unlock()
 		// Antes de dormirla, con el invitado aún corriendo: así el cierre de
@@ -2542,7 +2622,7 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// congelarlo solo cuesta que su próximo despertar sea un thaw.
 	// Se aparta con el candado de quien la despertaría (ver tomarPausada).
 	if id, p, soltar := g.tomarPausadaMasVieja(); soltar != nil {
-		congelada := g.congelarPausada(ctx, id)
+		congelada := g.congelarPausada(ctx, id, p)
 		// Si el freeze falló, soltar la repone en vez de perderla del
 		// registro reteniendo RAM sin dueño (G-04); se sigue con el camino
 		// normal de desalojo por si hay algo despierto que sacrificar.
@@ -2644,14 +2724,20 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			g.adquiriendo = map[string]bool{}
 		}
 		g.adquiriendo[id] = true
-		addr := victima.Addr(g.port())
+		addr := victima.Addr(g.puertoDe(victima))
 		g.removeEntryLocked(elegido, id)
 		g.mu.Unlock()
+		g.avisarOlvidos()
 
 		if g.OnSleep != nil {
 			g.OnSleep(elegido, addr)
 		}
-		err := freeze(id)
+		// Una aislada guarda la sesión en su máquina: se congela siempre.
+		dormirla := freeze
+		if victima.aislada == "" && sinCongelar(g.idleFor(elegido)) {
+			dormirla = func(id string) error { return g.borrarConPlazo(ctx, id) }
+		}
+		err := dormirla(id)
 		g.mu.Lock()
 		delete(g.adquiriendo, id)
 		// Si NO se congeló, dejarla fuera es peor que no haberla tocado: el
