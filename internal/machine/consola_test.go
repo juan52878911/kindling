@@ -174,7 +174,11 @@ func TestRotarConsolasSoloDeLasVivas(t *testing.T) {
 		if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		m.addForTest(id).State = st
+		mc := m.addForTest(id)
+		// Con m.mu: el escritor de state.json copia la flota en segundo plano.
+		m.mu.Lock()
+		mc.State = st
+		m.mu.Unlock()
 		if err := os.WriteFile(filepath.Join(m.dir(id), "firecracker.log"), grande, 0o644); err != nil {
 			t.Fatal(err)
 		}
