@@ -119,11 +119,13 @@ se rechazan.
 | `DELETE /sandboxes/{id}` | Soportada | `DELETE /v1/sandboxes/{id}`. |
 | `POST /sandboxes/{id}/timeout` | Soportada | `POST …/renew` con `ttl_seconds`. |
 | `POST /sandboxes/{id}/refreshes` | Soportada | `POST …/renew` (60 s si no hay `duration`). |
-| `POST /sandboxes/{id}/connect`, `/v2/…` | Soportada | Devuelve el sandbox vivo; con `timeout`, lo renueva. No reanuda nada: no hay pausa. |
+| `POST /sandboxes/{id}/connect`, `/v2/…` | Soportada | Devuelve el sandbox; si está en pausa lo reanuda (`POST …/resume`) y contesta 201, si no 200. Con `timeout`, lo renueva. |
+| `POST /sandboxes/{id}/pause` | Soportada | `POST …/pause` del gateway, 204. La memoria se queda en el host: no es un snapshot persistente como el de E2B. |
+| `POST /sandboxes/{id}/resume` | Soportada | `POST …/resume` del gateway (y `timeout` → `renew`), 201 con el sandbox. |
+| `PUT /sandboxes/{id}/network` | Soportada (parcial) | `PATCH …/egress`: dominios en `allowOut` → `allowlist`; `allow_internet_access:false` o `denyOut:["0.0.0.0/0"]` → `none`; nada → `internet`. IPs o CIDRs en `allowOut`, otro `denyOut`, `rules` y `egressProxy` son **501**. |
 | `GET /health` | Soportada | 200 (control) o 204 (envd). |
-| `…/pause`, `…/resume`, `…/fork`, `…/snapshots`, `/snapshots` | **501** | El gateway no pausa ni snapshotea sandboxes de inquilino. |
+| `…/fork`, `…/snapshots`, `/snapshots` | **501** | El gateway no snapshotea sandboxes de inquilino. |
 | `…/metrics`, `/sandboxes/metrics`, `…/logs`, `/teams/…` | **501** | El gateway no expone métricas ni logs por sandbox (solo `/v1/metrics` global). |
-| `PUT …/network` | **501** | La red se fija al crear (`egress`); el gateway no la cambia en caliente. |
 | `/templates`, `/v2/templates`, `/v3/templates`, builds, tags | **501** | Las plantillas se gestionan con `kling sbx template`, no con el flujo de builds de E2B. |
 | `/nodes`, `/admin/…`, `/unstable/…` | **501** | Administración de la plataforma E2B; no aplica. |
 
@@ -156,6 +158,8 @@ Todo lo no listado responde `404`; lo listado como **501** devuelve el error de 
   el usuario por defecto del sandbox.
 - El `endAt` y el estado salen del gateway; `paused` solo aparece si el gateway lo informa.
 - Los `Keepalive-Ping-Interval` del cliente no se atienden: el shim no emite eventos `keepalive`.
+
+El mismo gateway habla también el protocolo de OpenSandbox: [opensandbox.md](opensandbox.md).
 
 Ver también: [sandbox-api.md](sandbox-api.md) (la API nativa `/v1`, con más funciones: lotes,
 volúmenes, inquilinos), los SDKs nativos ([Python](../sdks/python/README.md),
