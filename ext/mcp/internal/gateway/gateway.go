@@ -25,13 +25,16 @@ import (
 	"net/http/httputil"
 	"net/http/pprof"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/panico"
@@ -95,12 +98,89 @@ type Gateway struct {
 	linkAt    time.Time
 }
 
-// PoolOwnerDe da el id estable (mismo valor tras un reinicio) con que un
-// gateway marca las máquinas de su fondo: sale de su dirección de escucha y del
-// socket del daemon, así que dos gateways sobre un daemon no se barren.
+// PoolOwnerDe da un id derivado de la dirección de escucha y del socket del
+// daemon. Es el de antes de PoolOwnerGuardado, y solo queda de reserva para
+// cuando el directorio de estado no se puede escribir: cambia con -listen, y
+// con él las máquinas del fondo anterior se quedan sin dueño que las barra.
 func PoolOwnerDe(listen string, c *api.Client) string {
 	h := sha256.Sum256([]byte(listen + "\x00" + c.Endpoint()))
 	return hex.EncodeToString(h[:8])
+}
+
+// poolOwnerFile es el fichero del directorio de estado del gateway que guarda
+// el id de su fondo.
+const poolOwnerFile = "pool-owner"
+
+// ErrPoolOwnerInvalido es el error de PoolOwnerGuardado cuando el fichero
+// existe y no guarda un id válido: no se arregla solo.
+var ErrPoolOwnerInvalido = errors.New("the stored pool owner is not valid; fix or remove the file, or pass -pool-owner")
+
+var poolOwnerRE = lazyre.New(`^[A-Za-z0-9._-]{1,63}$`)
+
+// ValidarPoolOwner dice si v sirve de valor de la etiqueta kling.pool.owner
+// (-pool-owner o el fichero): letras, dígitos, . _ - y hasta 63.
+func ValidarPoolOwner(v string) error {
+	if !poolOwnerRE.MatchString(v) {
+		return fmt.Errorf("invalid pool owner %q: 1-63 letters, digits, '.', '_' or '-'", v)
+	}
+	return nil
+}
+
+// PoolOwnerGuardado da el id con que un gateway marca las máquinas de su fondo
+// (scheduler.LabelPoolOwner): se genera una vez, se guarda en dir/pool-owner
+// (0600) y se lee en cada arranque. No depende de -listen ni del socket del
+// daemon, así que reiniciar o cambiar de puerto no deja huérfano el fondo
+// anterior. Dos gateways sobre el mismo daemon necesitan directorios de estado
+// distintos, o -pool-owner.
+//
+// Un fichero que no contiene un id válido es un error y no se pisa: otro id
+// dejaría sin dueño las máquinas que lleven el anterior.
+func PoolOwnerGuardado(dir string) (string, error) {
+	p := filepath.Join(dir, poolOwnerFile)
+	leer := func() (string, error) {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		v := strings.TrimSpace(string(b))
+		if err := ValidarPoolOwner(v); err != nil {
+			return "", fmt.Errorf("%s: %w (%w)", p, err, ErrPoolOwnerInvalido)
+		}
+		return v, nil
+	}
+	if v, err := leer(); !errors.Is(err, os.ErrNotExist) {
+		return v, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(b[:])
+	// Escrito aparte y enlazado: dos gateways que arrancan a la vez no ven
+	// nunca un fichero a medias, y el que llega segundo se queda con el id del
+	// primero.
+	tmp, err := os.CreateTemp(dir, ".pool-owner-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(id + "\n"); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Link(tmp.Name(), p); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	return leer()
 }
 
 func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, memService string) *Gateway {
@@ -231,7 +311,9 @@ func logging(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		h.ServeHTTP(w, r)
-		log.Printf("%s %s (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+		// %q: la ruta ya decodificada es del cliente (aún sin autenticar) y
+		// puede traer saltos de línea o secuencias de terminal.
+		log.Printf("%s %q (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 	})
 }
 

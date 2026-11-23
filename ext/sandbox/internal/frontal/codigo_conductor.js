@@ -64,11 +64,19 @@ function servir(ruta) {
     const ficha = almacen.getStore();
     if (actual && ficha && ficha === fichaActual) evento(actual, { type: flujo, text: texto });
   }
-  // Un rechazo sin manejar o un throw fuera de la ejecución no matan el
+  // Un rechazo sin manejar o un throw asíncrono de una ejecución no matan el
   // conductor (el contexto perdería su estado): salen como stderr de la
-  // ejecución que los causó, o se descartan si ya cerró.
+  // ejecución que los causó, o se descartan si ya cerró. Uno que no es de
+  // ninguna ejecución (sin ficha) es del propio conductor, o de algo que se
+  // escapó de su contexto: seguir sería seguir en un estado que nadie
+  // conoce, así que el conductor termina y el contexto se da por perdido (el
+  // cliente lo ve como ContextError).
   const suelto = (e) => {
     const err = e && typeof e === 'object' && 'message' in e ? e : new Error(util.inspect(e));
+    if (!almacen.getStore()) {
+      try { fs.writeSync(2, `conductor: failure outside any execution: ${err.stack || err.message}\n`); } catch (_) { /* sin stderr */ }
+      process.exit(70);
+    }
     salida('stderr', String(err.stack || err.message) + '\n');
   };
   process.on('unhandledRejection', suelto);
@@ -79,9 +87,30 @@ function servir(ruta) {
       value: { write: (t) => { salida(flujo, String(t)); return true; }, isTTY: false },
     });
   }
+  // Temporizadores con dueño: los que pide una ejecución se apuntan en su
+  // ficha y se limpian al cerrarla (ejecutar). Sin esto un setInterval seguía
+  // corriendo, con la salida tirada, hasta borrar el contexto. Los de
+  // require('timers') no pasan por aquí.
+  const conDueno = (poner, quitar, unaVez) => (fn, ...resto) => {
+    const ficha = almacen.getStore();
+    if (!ficha || typeof fn !== 'function') return poner(fn, ...resto);
+    const h = poner(function (...a) {
+      if (unaVez) ficha.temporizadores.delete(h);
+      return fn.apply(this, a);
+    }, ...resto);
+    ficha.temporizadores.set(h, quitar);
+    return h;
+  };
+  const quitarCon = (quitar) => (h) => {
+    const ficha = almacen.getStore();
+    if (ficha) ficha.temporizadores.delete(h);
+    return quitar(h);
+  };
   const ctx = vm.createContext({
     console: consola, process: proceso, require, Buffer, URL, TextEncoder, TextDecoder,
-    setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, clearImmediate,
+    setTimeout: conDueno(setTimeout, clearTimeout, true), clearTimeout: quitarCon(clearTimeout),
+    setInterval: conDueno(setInterval, clearInterval, false), clearInterval: quitarCon(clearInterval),
+    setImmediate: conDueno(setImmediate, clearImmediate, true), clearImmediate: quitarCon(clearImmediate),
     queueMicrotask, structuredClone,
   });
 
@@ -114,7 +143,7 @@ function servir(ruta) {
     ejecutando = true;
     cuenta++;
     const n = cuenta;
-    const ficha = { n };
+    const ficha = { n, temporizadores: new Map() };
     fichaActual = ficha;
     try {
       const valor = await almacen.run(ficha, async () => ejecutarCodigo(codigo, plazo));
@@ -140,6 +169,8 @@ function servir(ruta) {
       interrumpir = null;
       actual = null;
       fichaActual = null;
+      for (const [h, quitar] of ficha.temporizadores) quitar(h);
+      ficha.temporizadores.clear();
     }
     evento(conn, { type: 'done', ok, duration_ms: Date.now() - t0, execution_count: n });
     conn.end();

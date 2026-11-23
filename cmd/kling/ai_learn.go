@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/juan52878911/kindling/internal/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -67,11 +68,11 @@ func aiReview(args []string) error {
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "\nID\tCHISPA\tTEACHERS\tPROPOSED\tWHY\tTEXT")
 		for _, k := range rv.Cases {
-			why := k.Reason
+			why := limpio(k.Reason)
 			if k.RareClass {
 				why += " (rare class)"
 			}
-			fmt.Fprintf(tw, "%s\t%s %.2f\t%s\t%s\t%s\t%s\n", k.ID, k.Chispa.Label, k.Chispa.Prob, votesText(k.Teachers), k.Proposed, why, oneLine(k.Text, 60))
+			fmt.Fprintf(tw, "%s\t%s %.2f\t%s\t%s\t%s\t%s\n", limpio(k.ID), limpio(k.Chispa.Label), k.Chispa.Prob, votesText(k.Teachers), limpio(k.Proposed), why, oneLine(k.Text, 60))
 		}
 		_ = tw.Flush()
 		fmt.Printf("\nconfirm or correct with: kling ai review %s -i   (or kling ai feedback %s -id <id> -label <label>)\n", task, task)
@@ -80,7 +81,7 @@ func aiReview(args []string) error {
 	in := bufio.NewReader(os.Stdin)
 	done := 0
 	for i, k := range rv.Cases {
-		fmt.Printf("\n[%d/%d] %s  %s\n", i+1, len(rv.Cases), k.ID, k.Reason)
+		fmt.Printf("\n[%d/%d] %s  %s\n", i+1, len(rv.Cases), limpio(k.ID), limpio(k.Reason))
 		fmt.Printf("  text:     %s\n", oneLine(k.Text, 400))
 		if len(k.Fields) > 0 {
 			b, _ := json.Marshal(k.Fields)
@@ -88,11 +89,11 @@ func aiReview(args []string) error {
 		}
 		var top []string
 		for _, cp := range k.Chispa.Top {
-			top = append(top, fmt.Sprintf("%s %.2f", cp.Label, cp.Prob))
+			top = append(top, fmt.Sprintf("%s %.2f", limpio(cp.Label), cp.Prob))
 		}
 		fmt.Printf("  chispa:   %s\n", strings.Join(top, ", "))
 		fmt.Printf("  teachers: %s\n", votesText(k.Teachers))
-		fmt.Printf("label [enter = %s, d = discard, s = skip, q = quit]: ", k.Proposed)
+		fmt.Printf("label [enter = %s, d = discard, s = skip, q = quit]: ", limpio(k.Proposed))
 		line, err := in.ReadString('\n')
 		if err != nil && line == "" {
 			break
@@ -127,17 +128,30 @@ func votesText(vs []aigw.TeacherVote) string {
 	}
 	var s []string
 	for _, v := range vs {
-		s = append(s, v.Name+"="+v.Label)
+		s = append(s, limpio(v.Name)+"="+limpio(v.Label))
 	}
 	return strings.Join(s, " ")
 }
 
 func oneLine(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = limpio(strings.Join(strings.Fields(s), " "))
 	if r := []rune(s); len(r) > n {
 		return string(r[:n-1]) + "…"
 	}
 	return s
+}
+
+// limpio quita de un texto que viene del gateway (de quien mandó la petición
+// o el voto) los caracteres de control, ESC incluido, y los que invierten la
+// dirección del texto: en la terminal de quien revisa no pueden mover el
+// cursor, borrar líneas ni disfrazar una etiqueta de otra.
+func limpio(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func printTeachers(ts []aigw.TeacherTrust) {
@@ -151,7 +165,7 @@ func printTeachers(ts []aigw.TeacherTrust) {
 		if t.Validated {
 			st = "validated (" + t.Source + ")"
 		}
-		fmt.Printf("  %-20s %s: %s\n", t.Name, st, t.Reason)
+		fmt.Printf("  %-20s %s: %s\n", limpio(t.Name), limpio(st), limpio(t.Reason))
 	}
 }
 

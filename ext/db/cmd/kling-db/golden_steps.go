@@ -407,7 +407,7 @@ func (a *app) startAgent(ctx context.Context, o stepOpts, cp *api.Machine, say f
 
 // prepareSuperSteps sube -workdir y -env-file a la copia, para los
 // -super-step: en /tmp/kdb-work y /tmp/kdb-step.env, del usuario postgres, y
-// finishCopy los borra antes de congelar (todo /tmp/kdb-*).
+// finishCopy los borra antes de congelar (todo /tmp/kdb-*, limpiezaCongelar).
 func (a *app) prepareSuperSteps(ctx context.Context, cp *api.Machine, o stepOpts) error {
 	if _, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", "rm -rf /tmp/kdb-work && install -d -o postgres -g postgres -m 700 /tmp/kdb-work"); err != nil {
 		return err
@@ -548,9 +548,21 @@ func (a *app) finishCopy(ctx context.Context, cp *api.Machine, db string) error 
 	if _, err := psql("postgres", "CHECKPOINT;"); err != nil {
 		return err
 	}
-	_, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", "rm -f /tmp/kdb-*; : > /var/log/postgresql/pg.log; sync")
+	_, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", limpiezaCongelar+": > /var/log/postgresql/pg.log; sync")
 	return err
 }
+
+// limpiezaCongelar borra de la copia lo que subieron los -super-step
+// (/tmp/kdb-work con el árbol de -workdir, /tmp/kdb-step.env, el .tgz) antes
+// de congelar, y falla si algo sigue ahí: lo que quede va en el golden y en
+// todas sus copias, legible para quien tenga exec en una. Antes era
+// `rm -f /tmp/kdb-*`, que no borra directorios: el árbol entero (con su .env)
+// se quedaba dentro.
+const limpiezaCongelar = `rm -rf /tmp/kdb-work /tmp/kdb-work.tgz /tmp/kdb-step.env /tmp/kdb-*
+for p in /tmp/kdb-*; do
+  if [ -e "$p" ] || [ -L "$p" ]; then echo "kling-db: $p is still in the copy; not freezing" >&2; exit 1; fi
+done
+`
 
 // writeGoldenState escribe la contraseña y el conn.env del golden name (como
 // los deja db-golden.sh), con la IP del invitado del de base.
