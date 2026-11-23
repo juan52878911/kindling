@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Fases del banco en la EC2, una por sistema para que no compitan entre sí.
-# Uso: fases.sh kindling|k8s|osbk8s|docker   (como root). Resultados en $KB/res/ (KB=/opt/kbench).
+# Uso: fases.sh kindling|k8s|osbk8s|docker|ia   (como root; ia la corre remoto/ia.sh medir). Resultados en $KB/res/ (KB=/opt/kbench).
 set -uo pipefail
 F=$1; KB=${KB:-/opt/kbench}; export KB; RUNS=${RUNS:-3}; export CONC=${CONC:-10,20,50,50}
-mkdir -p $KB/res; cd "$KB"
+mkdir -p $KB/res; cd "$KB" || exit 1
 exec > >(tee -a $KB/res/fase-$F.log) 2>&1
 paso(){ echo "== $(date +%T) $*"; }
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -47,7 +47,7 @@ kindling)
     export KLING_HOST=unix:///run/kt-bench/kling.sock KLING_CONFIG=/srv/kt-bench/config.json
     /srv/kt-bench/bin/kling image ls 2>/dev/null | grep -q toolchain || /srv/kt-bench/bin/kling image toolchain
     CUOTAS=$([ "$cu" = - ] && echo "" || echo "$cu") POOL=${POOL:-10} bash "$KB/remoto/gw-up.sh"
-    export KTOK=$(cat "$KB/run/ktok"); sleep 20   # que se llene el pool
+    KTOK=$(cat "$KB/run/ktok"); export KTOK; sleep 20   # que se llene el pool
     for r in $(seq 1 $RUNS); do for m in k kpool; do
       paso "$m $r $etq"; timeout 1800 python3 -I "$KB/bench.py" $m > "$KB/res/kindling-$etq-$m-$r.log" 2>&1; sleep 15
     done; done
@@ -105,5 +105,8 @@ docker)
   done
   systemctl stop osb docker docker.socket
   resumen $KB/res/docker-osb-*.log ;;
+ia)
+  # Banco de IA (ronda 8): dorados, P1/P2/P3 con su plazo cada una y el resumen de ia.py.
+  bash "$KB/remoto/ia.sh" medir ;;
 esac
 paso fin $F
