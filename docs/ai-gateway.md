@@ -74,16 +74,188 @@ curl -H "Authorization: Bearer $(cat ~/.config/kling/ai.token)" -H 'Content-Type
 | `-socket` | `~/.config/kling/ai.sock` | socket Unix 0600 (sin token: solo el propio usuario puede abrirlo) |
 | `-listen` | — | TCP en vez del socket; exige token (`$KLING_AI_TOKEN` o `-token-file`) |
 | `-no-auth` | — | TCP sin token, solo en loopback (desarrollo) |
-| `-idle` | 2m | sin peticiones antes de congelar una réplica |
+| `-idle` | 2m | sin peticiones antes de dormir una réplica (borrarla, pausarla o congelarla, según el `idle` de su modelo) |
 | `-max-replicas` | 2 | réplicas por modelo (`max_replicas` del registro manda) |
 | `-max-inflight` | 1 | peticiones por réplica antes de pedir otra (`llama-server` atiende una a la vez con `-parallel 1`) |
 | `-keepwarm` | 0 | N modelos más usados siempre despiertos (0 = escala a cero pura) |
 | `-chispa-mem` | 256 | MiB de modelos Chispa cargados (LRU) |
 | `-von-timeout` | 60s | plazo de una escalada |
+| `-proxy-timeout` | 5m | plazo de una petición reenviada a un modelo (rutas OpenAI y `/v1/m/…`) |
+| `-max-body` | 1 MiB | bytes del cuerpo de una petición |
+| `-drain` | 30s | con `SIGTERM`, lo que tienen las peticiones en vuelo para acabar antes de cortarlas |
 | `-id` | `default` | etiqueta `ai.gateway=<id>` de sus máquinas |
 
 `SIGHUP` o `kling ai reload` releen el registro sin cortar nada, y dicen qué
-cascadas quedan activas, forzadas o rechazadas.
+cascadas quedan activas, forzadas o rechazadas. La recarga trae también los
+modelos y los inquilinos: un token quitado de `tenants` deja de valer en la
+siguiente petición y uno añadido entra sin reiniciar (con tokens, el fichero
+sigue teniendo que ser 0600; si no lo es, la recarga se rechaza y se queda el
+registro anterior). Un gateway que arrancó en el socket **sin token** conserva
+ese modo para el dueño del socket aunque una recarga traiga inquilinos: sin
+`Authorization` entra como el token principal; con un token, se comprueba contra
+los inquilinos (uno desconocido es 401). En TCP no hay esa excepción.
+
+Al recibir `SIGTERM` el gateway deja de aceptar, espera hasta `-drain` a que
+acabe lo que está en vuelo y luego duerme sus réplicas: borra las de un modelo
+con `idle: remove` y congela las demás. Una réplica que aún tiene una petición
+dentro no se toca; la recoge el siguiente arranque, que además borra las
+réplicas de modelos que ya no están en el registro.
+
+### Modelos HTTP: `kind http`
+
+Además de los atajos (`chispa`, `von`, `embed`), un modelo puede ser **cualquier
+servidor HTTP**: un dorado que el gateway despierta y escala igual que a un VON,
+o una URL fija (`upstream`) que kindling no arranca. Los atajos son un `kind
+http` con los campos ya puestos (`von` = contrato `openai` en el puerto 8000,
+`embed` = `openai-embeddings`).
+
+```json
+{
+  "models": {
+    "decide": {"kind": "http", "snapshot": "decide-v3", "port": 8090,
+               "contract": "chispa-decide", "health": {"path": "/healthz"},
+               "max_replicas": 4, "tenants": ["acme"]},
+    "qwen3-gpu": {"kind": "http", "upstream": "http://10.0.0.20:8000",
+                  "contract": "openai", "upstream_model": "Qwen/Qwen3-4B",
+                  "auth": {"header": "Authorization", "scheme": "Bearer", "file": "vllm.key"},
+                  "limits": {"max_tokens": 1024, "n": 1},
+                  "health": {"path": "/health", "every": "10s"}}
+  }
+}
+```
+
+| Campo | Qué es |
+|---|---|
+| `snapshot` / `upstream` | exactamente uno: el dorado del que salen las réplicas, o una URL `http(s)://host[:puerto][/prefijo]` sin credenciales, query ni fragmento |
+| `contract` | `openai` (`/v1/chat/completions`, `/v1/completions`), `openai-embeddings` (`/v1/embeddings`), `chispa-decide` (`/v1/decide` de chispa-server) o `raw` (solo las `routes` declaradas) |
+| `port` | puerto del servidor dentro de la réplica (8000 por defecto); no con `upstream` (va en la URL) |
+| `routes` | `"MÉTODO /ruta"` que se reenvían; vacío = las del contrato; obligatorio con `raw` (hasta 64) |
+| `health` | `{path, expect, timeout, every}`: la sonda tras cada restore (por defecto `/health` en `openai*`, `/healthz` en `chispa-decide`, y en `raw` el dial TCP); `every` es el periodo de sondeo de un `upstream` (1 s a 1 h) |
+| `max_inflight`, `max_replicas` | peticiones por réplica y tope de réplicas; 0 = los del gateway |
+| `idle` | `remove`, `pause` o `freeze` (abajo); no con `upstream` |
+| `upstream_model` | lo que se escribe en `"model"` al reenviar (el nombre que espera un vLLM) |
+| `auth` | `{header, scheme, file}`: la credencial que **añade el gateway**, leída del fichero (0600, relativo al `ai.json`) en cada petición, así que rotarla no pide recargar; la del cliente no llega nunca al backend |
+| `limits` | `{max_tokens, n}` del contrato `openai`: `max_tokens`, `max_completion_tokens` y `n_predict` se recortan al tope (y si no viene ninguno se pone `max_tokens`); un `n` o `best_of` mayor es 400 |
+| `tenants` | inquilinos que pueden usar el modelo; vacío = todos. Otro recibe 403 (el token principal siempre entra) |
+
+`von` y `embed` admiten `health`, `max_inflight`, `idle` y `tenants` (y `von`,
+`limits`); un campo que un atajo no usa es un error al cargar, no algo que se
+ignora en silencio.
+
+**Rutas.** Los contratos `openai*` se sirven en sus rutas de OpenAI
+(`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`), por el
+`model` del cuerpo: ahí el gateway aplica topes, semilla y nombre. El resto
+(`chispa-decide`, `raw`) va bajo **`/v1/m/{modelo}/{ruta}`**, por ejemplo `POST
+/v1/m/decide/v1/decide`: el cuerpo pasa byte a byte, con streaming en los dos
+sentidos, y solo se aceptan las rutas declaradas (404 las demás). Así el
+`/v1/decide` del gateway (`{task, text}`) y el de chispa-server (`{state,
+questions}`) conviven sin pisarse. Del backend al cliente pasan el código, el
+cuerpo (acotado) y un `Content-Type` de una lista blanca; ni cookies ni
+cabeceras propias.
+
+**Upstream con circuito.** Un `upstream` no tiene réplicas: el gateway le pone
+un semáforo de `max_inflight` con cola acotada (4 por hueco; llena = 503) y un
+cortacircuitos: tres fallos seguidos (sondas o peticiones sin respuesta) lo
+abren y desde ahí cada petición recibe 503 con `Retry-After` al instante hasta
+que una sonda pase. Las sondas van a remolque del tráfico (una petición que
+encuentra la última sonda más vieja que `health.every` lanza otra en segundo
+plano), así que un upstream sin tráfico no cuesta nada.
+
+**`idle`: qué se hace con una réplica ociosa.**
+
+| Valor | Qué hace | Por defecto en |
+|---|---|---|
+| `remove` | la borra; la siguiente petición restaura otra del dorado | `von`, `embed`, `kind http` con snapshot |
+| `pause` | la pausa dentro del presupuesto de `-paused-mib`; si no cabe o pasa `-paused-for`, la borra. Nunca congela | — |
+| `freeze` | la congela (lo de antes de esta versión); la siguiente la descongela | `chispa` con backend microvm |
+
+`remove` es el defecto de los modelos grandes porque una réplica congelada y
+descongelada deja de compartir la memoria del dorado con las demás (en Linux
+cada thaw trae su propia copia de las páginas); restaurar del dorado cuesta poco
+más y todas las réplicas vivas comparten el `mem.file`. Para volver a lo de
+antes, `"idle": "freeze"` en el modelo. Una réplica de Chispa (128 MiB, thaw de
+~2 ms) sigue congelando.
+
+### Desplegar cualquier servidor: `kling ai model deploy` y `roll`
+
+```sh
+kling ai model deploy decide -image chispa-server -contract chispa-decide \
+    -port 8090 -health /healthz -warmup warmup.jsonl -cpus 2 -mem 1G
+# hace el dorado versionado decide-v1 y escribe su bloque kind http en ai.json
+kling ai reload
+
+kling ai model deploy decide -image chispa-server:nuevo -contract chispa-decide -port 8090
+# el modelo ya existe: hace decide-v2 y no toca ai.json
+kling ai model roll decide            # sirve decide-v2 y borra las réplicas de v1 al vaciarse
+kling ai model roll decide -to 1      # vuelta atrás: el dorado viejo se queda
+```
+
+`deploy` arranca la imagen (ya construida o importada en el daemon, con los
+ficheros dentro), espera a la sonda, manda las peticiones de `-warmup` (JSONL de
+`{"method","path","body"}`, cada una tiene que dar 2xx) y congela el dorado
+`<modelo>-v<n>`. El dorado se hace con el fabricante genérico
+(`internal/dorado`), el mismo que usan `kling ai model add` y `kling ai chispa
+deploy`: sin carpetas compartidas, sin secretos en `-e` (un nombre con pinta de
+credencial se rechaza salvo `-allow-env`; la credencial la pone el gateway con
+`auth`) y con `cpu_pct` = 100 por vCPU grabado en el dorado (`-cpu-pct` para
+otro). `roll` apunta el bloque al dorado elegido, pide al gateway que relea
+(`-no-reload` para solo reescribir `ai.json`) y borra las réplicas del dorado
+viejo cuando dejan de trabajar, como mucho tras `-drain` (30 s).
+
+### Alojar la Chispa nueva (chispa-server) y otros modelos
+
+**chispa-server** (el Chispa de capas, repo `chispa`) es un binario HTTP con
+`POST /v1/decide` y `GET /healthz`: contrato `chispa-decide`. Su modo CPU (kNN +
+e5) es el caso ideal para un dorado: todo el coste de abrir las sesiones ONNX se
+paga una vez al hacerlo, y cada réplica nace con él ya cargado. La imagen tiene
+que llevar el binario, el ONNX, los bancos y la configuración, y arrancarlo
+escuchando fuera de loopback (`-addr 0.0.0.0:8090`); el gateway es quien pone
+el token hacia fuera.
+
+```json
+{
+  "models": {
+    "decide": {"kind": "http", "snapshot": "decide-v1", "port": 8090,
+               "contract": "chispa-decide", "health": {"path": "/healthz"},
+               "max_inflight": 4}
+  }
+}
+```
+
+```sh
+curl --unix-socket ~/.config/kling/ai.sock -H 'Content-Type: application/json' \
+     -d '{"state":{…},"questions":[…]}' http://ai/v1/m/decide/v1/decide
+```
+
+**Un llama-server o un vLLM OpenAI-compatibles.** En una microVM, con su
+dorado, es un `kind http` con contrato `openai` (si es un llama-server con un
+GGUF del catálogo, `kling ai model add` ya hace el atajo `von`). Uno con GPU
+no cabe en una microVM (Firecracker no da GPU): va como `upstream`, con su
+credencial en un fichero 0600 y topes de generación:
+
+```json
+{
+  "models": {
+    "llama":     {"kind": "http", "snapshot": "llama-v1", "port": 8080, "contract": "openai"},
+    "qwen3-gpu": {"kind": "http", "upstream": "https://gpu.interna:8000", "contract": "openai",
+                  "upstream_model": "Qwen/Qwen3-4B",
+                  "auth": {"header": "Authorization", "scheme": "Bearer", "file": "vllm.key"},
+                  "limits": {"max_tokens": 1024}, "max_inflight": 16}
+  }
+}
+```
+
+Los dos se piden por `/v1/chat/completions` con `"model": "llama"` o
+`"model": "qwen3-gpu"`, y salen en `GET /v1/models`.
+
+### Servicio systemd
+
+`packaging/kling-ai.service` arranca `kling ai serve` después del daemon
+(`kling.service`) y se para antes que él, para que el apagado aún pueda dormir
+las réplicas. Las opciones van en `/etc/default/kling-ai`
+(`KLING_AI_ARGS=-listen 127.0.0.1:8080 -config /etc/kling/ai.json -token-file
+/etc/kling/ai.token`); `systemctl reload kling-ai` manda `SIGHUP`. Si subes
+`-drain`, sube `TimeoutStopSec` con él (al menos `-drain` + 15 s).
 
 ### Prefijos precalculados: `kling ai prime`
 
@@ -238,8 +410,10 @@ validación, la orden escala como una duda con `reason: "chispa_error"` y
 | `POST /v1/classify` | `{task, text, fields?, mode?, explain?}` → `{label, prob, escalate, source, latency_ms, evidence, chispa, von, degraded}` |
 | `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny`. En una tarea de intención, la intención con sus huecos (arriba) |
 | `POST /v1/generate` | `{task, input, vars?, max_tokens?, temperature?, seed?}` → `{output, model, finish_reason, usage, latency_ms}` |
-| `POST /v1/chat/completions`, `POST /v1/completions` | API de OpenAI hacia una réplica del modelo que nombra `model` (nombre del registro o del dorado), con streaming |
-| `GET /v1/models` | los modelos VON del registro, sin despertar nada |
+| `POST /v1/chat/completions`, `POST /v1/completions` | API de OpenAI hacia el modelo de contrato `openai` que nombra `model` (nombre del registro o del dorado; una réplica o un `upstream`), con streaming |
+| `POST /v1/embeddings` | API de OpenAI hacia un modelo `openai-embeddings` (`embed` o `kind http`) |
+| `POST`/`GET /v1/m/{modelo}/{ruta}` | las rutas declaradas de un modelo `chispa-decide` o `raw`, sin tocar el cuerpo |
+| `GET /v1/models` | los modelos de contrato `openai` y `openai-embeddings` del registro (VON, codificadores, `kind http`), sin despertar nada; un inquilino ve solo los que puede usar. Los de `/v1/m/` no salen: no son modelos de OpenAI |
 | `GET /v1/tasks` | tareas, su clase, el estado de su cascada, umbrales efectivos (si el modelo está cargado) y muestras |
 | `POST /v1/admin/eval` | la evaluación de `kling ai eval` (cuerpo de hasta 64 MiB); solo el token principal |
 | `POST /v1/admin/calibrate` | recalibración (`kling ai calibrate`); solo el token principal |
@@ -248,6 +422,11 @@ validación, la orden escala como una duda con `reason: "chispa_error"` y
 | `POST /v1/admin/review`, `/retrain`, `/promote`, `/rollback` | la mejora continua: cola de revisión, reentreno con puerta, promoción de una versión microvm y vuelta atrás |
 | `GET /metrics` | Prometheus; solo el token principal (un token de inquilino recibe 403) |
 | `GET /healthz` | sin token |
+
+Cuando un modelo no está disponible (no hay réplica, el circuito está abierto)
+el cliente recibe 503 con `Retry-After`; cuando no contestó, 502. Ninguno de los
+dos lleva el error interno (direcciones, mensajes del daemon): eso va al log
+del gateway.
 
 Una clasificación en la que Chispa duda, sin cascada:
 
@@ -282,7 +461,9 @@ true`) o `von` (la cascada, o una generación); `kling_ai_chispa_coverage{task}`
 `kling_ai_von_replicas{model,state}` (running/frozen, preguntando al daemon como
 mucho cada 5 s), `kling_ai_von_errors_total{model,reason}`,
 `kling_ai_von_unknown_total`, `kling_ai_degraded_total`, `kling_ai_audits_total`,
-`kling_ai_samples`, `kling_ai_proxy_requests_total{model,code}` y las de la caché
+`kling_ai_samples`, `kling_ai_proxy_requests_total{model,code}` (con `code` por
+clase: `2xx`, `3xx`, `4xx`, `5xx`; el código lo elige el backend y no puede abrir
+series nuevas) y las de la caché
 de Chispa (`kling_ai_chispa_models_loaded`, `_bytes`, `_loads_total`, `_evictions_total`).
 Las etiquetas salen del registro: un cliente no crea series nuevas con nombres
 inventados.
@@ -295,8 +476,8 @@ VON. La primera petición a un modelo despierta una réplica: descongela una suy
 si la hay (`thaw`) o restaura una nueva del dorado (`restore`); las siguientes la
 reutilizan; si todas tienen `-max-inflight` peticiones en vuelo, pide otra hasta
 el tope del modelo (y si no cabe, la cola la hace `llama-server` en la menos
-cargada); el segador congela las que llevan `-idle` sin peticiones **y sin nada
-en vuelo**. Un 507 del daemon (no cabe) hace que el planificador congele lo
+cargada); el segador duerme (según su `idle`: borra, pausa o congela) las que
+llevan `-idle` sin peticiones **y sin nada en vuelo**. Un 507 del daemon (no cabe) hace que el planificador congele lo
 ocioso y reintente; si aun así no cabe, una generación contesta 503 con
 `Retry-After`, y una escalada, Chispa marcado `degraded` (o 503). Los modelos Chispa
 cuestan 1–5 MB y no se congelan: se cargan la primera vez que se usan y salen por
@@ -304,8 +485,13 @@ LRU al pasar de `-chispa-mem`.
 
 Cambios que hicieron falta en `pkg/scheduler` (sirven también al gateway MCP):
 
-- `Port`: el puerto del invitado (8000 para VON; 8080, el del puente MCP, por
-  defecto).
+- `Port`: el puerto del invitado (8080, el del puente MCP, por defecto). El
+  gateway de IA no lo usa: cada dorado da el suyo con `PortFor` (el `port` de su
+  bloque), y con `MaxInflightFor`, `IdleFor` y `ReadyFor` su tope por réplica,
+  su política de ociosidad y su sonda HTTP (`/health` en `von` y `embed`).
+  `OnForget` avisa de cada réplica que sale del planificador (borrada,
+  congelada, caída, TTL vencido, sesión cerrada) para que el gateway suelte sus
+  conexiones hacia ella.
 - `MachineLabels` + `NamePrefix`: las máquinas del gateway llevan
   `ai.gateway=<id>` y se llaman `gw-<dorado>-<azar>`, y **solo adopta las que
   llevan su etiqueta**: una réplica que alguien lanzó con `kling run -from`, o las
