@@ -51,7 +51,9 @@ paths:
     get:
       tags: [ops]
       summary: Métricas en formato texto de Prometheus
-      description: Un admin ve las series de todos los inquilinos; los demás, las suyas.
+      description: |
+        Un admin ve las series de todos los inquilinos y las del operador
+        (creaciones, fondo precalentado, hosts); los demás, solo las suyas.
       responses:
         "200":
           description: Exposición de Prometheus 0.0.4

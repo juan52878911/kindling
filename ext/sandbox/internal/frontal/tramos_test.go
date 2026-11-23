@@ -72,9 +72,10 @@ func TestSnapshotsDePideUno(t *testing.T) {
 func TestMetricasTramosDeCreacion(t *testing.T) {
 	f := nuevoFalso(t)
 	f.snapshots = []string{"sbx-node"}
-	srv, _ := montar(t, map[string]*falso{"a": f})
+	// Los tramos son series del operador: solo las ve un admin.
+	srv, _ := montar(t, map[string]*falso{"a": f}, tenantsConAdmin()...)
 	crea(t, srv, tokenAlice, CrearPeticion{Template: "node"})
-	resp := pide(t, srv, tokenAlice, "GET", "/v1/metrics", nil)
+	resp := pide(t, srv, tokenAdmin, "GET", "/v1/metrics", nil)
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	out := string(b)
