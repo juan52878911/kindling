@@ -42,6 +42,12 @@ el operador lo crea, lo mantiene y lo borra hablando con el frontal por HTTP.
   borrar tolera el 404) pero sí duplican trabajo; no lo despliegues con
   `replicas` > 1.
 
+Eso es del operador. El gateway del chart (`gateway.replicas`) sí admite más de una
+réplica, con una cota en las revocaciones de endpoints: una conexión abierta en otra
+réplica se corta en 5 s como mucho tras un `DELETE …/endpoints/{port}`, y una petición
+nueva que llegue a otra réplica puede ver las etiquetas viejas hasta 3 s (ver
+`docs/sandbox-api.md`).
+
 ## Instalación
 
 Requiere un frontal de kindling-sandbox ya desplegado (ver el README de este
