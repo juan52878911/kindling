@@ -95,6 +95,14 @@ Cada máquina vive en su propio namespace de red. La política por defecto es **
 Un valor de egress desconocido es un **error**, no una caída al modo más permisivo, y la
 política viaja con el snapshot del servicio: reimportar o curar un servicio la conserva.
 
+Hacia la microVM solo entran flujos nuevos que origina el host con su `HostIP` (daemon, CLI,
+proxies, publicación `-p`): el FORWARD del netns descarta lo NEW por el veth con otro origen y
+lo INVALID. Un contenedor Docker del host que llegara directo a los puertos de una microVM
+deja de llegar; el camino soportado es `-p`. Estrechar el egress y `Teardown` borran además las
+entradas de conntrack del host con el NSIP de origen o destino, para que un flujo abierto no se
+recoja de nuevo ni lo herede la máquina que reutilice el índice. Los nombres DNS bloqueados que
+se muestran al operador se limitan a `[a-z0-9._-]`.
+
 El resolver de `allowlist` está acotado (en Linux; en macOS, desde §22, también el DNS de
 `kling-vz`, en todos los modos): como máximo 32 consultas a la vez y ~200/s (ráfaga
 400) por microVM; por encima de eso responde SERVFAIL en el sitio, sin abrir un socket al

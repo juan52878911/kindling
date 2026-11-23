@@ -427,3 +427,18 @@ func TestTeardownBorraConntrackDelHost(t *testing.T) {
 		t.Fatalf("cmds=%v", f.cmds)
 	}
 }
+
+// B1: las ranuras heredan las dos reglas del veth, antes del ESTABLISHED.
+func TestReglasBaseRanuraLlevanLasReglasDelVeth(t *testing.T) {
+	n := redDePrueba()
+	var ls []string
+	for _, r := range n.reglasBaseRanura() {
+		ls = append(ls, strings.Join(r, " "))
+	}
+	nueva := slices.Index(ls, "-A FORWARD -i "+n.NSIf+" -m conntrack --ctstate NEW ! -s "+n.HostIP+" -j DROP")
+	inval := slices.Index(ls, "-A FORWARD -i "+n.NSIf+" -m conntrack --ctstate INVALID -j DROP")
+	estab := slices.IndexFunc(ls, func(s string) bool { return strings.Contains(s, "ESTABLISHED,RELATED") })
+	if nueva < 0 || inval < 0 || estab < 0 || nueva > estab || inval > estab {
+		t.Fatalf("nueva=%d invalida=%d established=%d", nueva, inval, estab)
+	}
+}

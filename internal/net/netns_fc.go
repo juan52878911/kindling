@@ -309,6 +309,7 @@ func (n *Net) Teardown() {
 	stopCredProxy(n.NS)
 	cerrarIPSet(n.NS)
 	borrarEnlace(n.NS, n.HostIf)
+	n.cortarConntrackHost()
 }
 
 // borrarEnlace borra el netns y el veth del host, solo si están: Setup

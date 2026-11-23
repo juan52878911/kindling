@@ -14,15 +14,15 @@ import (
 func TestEgressRulesOrden(t *testing.T) {
 	n := Plan(1, "abcdef0123")
 	none := n.egressRules(EgressNone)
-	if len(none) != 5 || strings.Join(none[0], " ") != "-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP" ||
-		!strings.Contains(strings.Join(none[1], " "), "ESTABLISHED,RELATED -j ACCEPT") ||
-		strings.Join(none[2], " ") != "-A FORWARD -i tap0 -j DROP" ||
-		strings.Join(none[3], " ") != strings.Join(topeTotalNuevas(), " ") ||
-		strings.Join(none[4], " ") != strings.Join(topeConexiones(), " ") {
+	if len(none) != 7 || strings.Join(none[2], " ") != "-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP" ||
+		!strings.Contains(strings.Join(none[3], " "), "ESTABLISHED,RELATED -j ACCEPT") ||
+		strings.Join(none[4], " ") != "-A FORWARD -i tap0 -j DROP" ||
+		strings.Join(none[5], " ") != strings.Join(topeTotalNuevas(), " ") ||
+		strings.Join(none[6], " ") != strings.Join(topeConexiones(), " ") {
 		t.Fatalf("none = %v", none)
 	}
 	inet := n.egressRules(EgressInternet)
-	if len(inet) != 6+len(blocked) {
+	if len(inet) != 8+len(blocked) {
 		t.Fatalf("internet: %d reglas", len(inet))
 	}
 	if strings.Join(inet[len(inet)-4], " ") != strings.Join(topeNuevas(), " ") {
@@ -36,7 +36,7 @@ func TestEgressRulesOrden(t *testing.T) {
 		t.Errorf("las últimas de internet deben ser el tope total y el de conexiones: %v", inet[len(inet)-2:])
 	}
 	for i, cidr := range blocked {
-		if got := strings.Join(inet[2+i], " "); got != "-A FORWARD -i tap0 -d "+cidr+" -j DROP" {
+		if got := strings.Join(inet[4+i], " "); got != "-A FORWARD -i tap0 -d "+cidr+" -j DROP" {
 			t.Errorf("regla %d = %q", i, got)
 		}
 	}
@@ -271,7 +271,7 @@ func TestApplyEgressYRestorePonenLoMismo(t *testing.T) {
 	// Y en la entrada de iptables-restore, el filter de none abre con el DROP
 	// de INVALID y cierra con el DROP sin ctstate.
 	in := restoreInput(n.egressRules(EgressNone))
-	if !strings.HasPrefix(in, "*filter\n-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP\n") ||
+	if !strings.HasPrefix(in, "*filter\n-A FORWARD -i vg-abcdef01 -m conntrack --ctstate NEW ! -s "+n.HostIP+" -j DROP\n-A FORWARD -i vg-abcdef01 -m conntrack --ctstate INVALID -j DROP\n-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP\n") ||
 		!strings.Contains(in, "\n-A FORWARD -i tap0 -j DROP\nCOMMIT\n") {
 		t.Errorf("entrada de iptables-restore de none:\n%s", in)
 	}
@@ -465,10 +465,9 @@ func TestAvisoConntrack(t *testing.T) {
 // que entra por el veth con otro origen y lo INVALID se descartan, y van antes
 // de cualquier ACCEPT de ESTABLISHED.
 func TestForwardBaseDescartaNuevasAjenasPorElVeth(t *testing.T) {
-	n := redDePrueba()
+	n := Plan(1, "abcdef0123")
 	for nombre, reglas := range map[string][][]string{
 		"forwardBase": n.forwardBase(),
-		"ranura":      n.reglasBaseRanura(),
 		"none":        n.egressRules(EgressNone),
 	} {
 		nueva, invalida, estab := -1, -1, -1

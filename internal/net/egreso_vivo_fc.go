@@ -295,7 +295,28 @@ func (n *Net) cortarConexiones() bool {
 	if !hayConntrack() {
 		return false
 	}
-	err := ejecutar("ip", "netns", "exec", n.NS, "conntrack", "-D", "--orig-src", GuestIP)
-	// conntrack sale con 1 si no había nada que borrar: tampoco es un fallo.
+	// Las del netns (lo que el invitado originó) y las del host con el NSIP
+	// de origen o destino: sin ellas el siguiente paquete del remoto
+	// recogería el flujo de nuevo y seguiría vivo. Las dos mitades deben ir
+	// bien para prometer el corte.
+	ok := conntrackBorrado(ejecutar("ip", "netns", "exec", n.NS, "conntrack", "-D", "--orig-src", GuestIP))
+	return n.cortarConntrackHost() && ok
+}
+
+// cortarConntrackHost borra del conntrack del HOST las entradas con el NSIP
+// de origen o de destino. Teardown lo usa también: la máquina que reutilice el
+// índice no hereda flujos UDP vivos de la anterior.
+func (n *Net) cortarConntrackHost() bool {
+	if !hayConntrack() {
+		return false
+	}
+	a := conntrackBorrado(ejecutar("conntrack", "-D", "--orig-dst", n.NSIP))
+	b := conntrackBorrado(ejecutar("conntrack", "-D", "--orig-src", n.NSIP))
+	return a && b
+}
+
+// conntrackBorrado: conntrack sale con 1 si no había nada que borrar, y eso
+// tampoco es un fallo.
+func conntrackBorrado(err error) bool {
 	return err == nil || strings.Contains(err.Error(), "exit status 1")
 }
