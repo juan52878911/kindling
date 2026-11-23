@@ -312,12 +312,22 @@ func (fs *fuseFS) call(op byte, build func(*share.Enc)) (uint32, *share.Dec) {
 // solo vale en ella). Si la operación no llegó a salir porque la sesión acababa
 // de morir, espera a la siguiente y la repite.
 func (fs *fuseFS) callS(op byte, build func(*share.Enc)) (uint32, *share.Dec, *shareSession) {
+	repetida := false
 	for retries := 0; retries < maxRetries; retries++ {
 		s := fs.session()
 		if s == nil {
 			return share.EIO, nil, nil
 		}
-		e, d := s.call(op, build)
+		e, d := s.callRepetible(op, build)
+		if e == errnoRepetir {
+			// Salió y la sesión se cortó; es de solo lectura: una vez más.
+			if repetida {
+				return share.EIO, nil, nil
+			}
+			repetida = true
+			fs.dropSession(s)
+			continue
+		}
 		if e == errnoRetry {
 			fs.dropSession(s)
 			continue
@@ -1321,7 +1331,7 @@ func (fs *fuseFS) dropFile(fh uint64) *fileHandle {
 // daemon no lo conoce, se reabre por ruta y se reintenta una vez.
 func (fs *fuseFS) handleCall(h *fileHandle, op byte, args func(*share.Enc)) (uint32, *share.Dec) {
 	return fs.handleCallRaw(h, func(s *shareSession, dh uint64) (uint32, *share.Dec) {
-		return s.call(op, func(e *share.Enc) {
+		return s.callRepetible(op, func(e *share.Enc) {
 			e.U64(dh)
 			if args != nil {
 				args(e)
@@ -1331,6 +1341,7 @@ func (fs *fuseFS) handleCall(h *fileHandle, op byte, args func(*share.Enc)) (uin
 }
 
 func (fs *fuseFS) handleCallRaw(h *fileHandle, do func(*shareSession, uint64) (uint32, *share.Dec)) (uint32, *share.Dec) {
+	repetida := false
 	for attempt, retries := 0, 0; attempt < 2 && retries < maxRetries; retries++ {
 		s := fs.session()
 		if s == nil {
@@ -1350,6 +1361,15 @@ func (fs *fuseFS) handleCallRaw(h *fileHandle, do func(*shareSession, uint64) (u
 		dh := h.dh
 		h.mu.Unlock()
 		errno, d := do(s, dh)
+		if errno == errnoRepetir {
+			// Como en callS: una lectura que se cortó en vuelo, una vez más.
+			if repetida {
+				return share.EIO, nil
+			}
+			repetida = true
+			fs.dropSession(s)
+			continue
+		}
 		if errno == errnoRetry {
 			// No salió: la sesión acababa de morir. Con la siguiente, y sin
 			// gastar intento.

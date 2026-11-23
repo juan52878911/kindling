@@ -34,7 +34,10 @@ type shareSession struct {
 	mu      sync.Mutex
 	next    uint64
 	pending map[uint64]chan callResult
-	done    chan struct{}
+	// repetibles son los ids pendientes que se pueden repetir si la sesión se
+	// corta con ellos ya enviados (callRepetible).
+	repetibles map[uint64]bool
+	done       chan struct{}
 	closed  bool
 	// retired: llegó share.Bye. Lo que quede pendiente al cerrar recibe
 	// errnoRetry y no EIO: el daemon dijo que no lo ejecutó.
@@ -75,7 +78,8 @@ type pushEvent struct {
 const maxPendingEvents = 1024
 
 func newShareSession(rw io.ReadWriteCloser) *shareSession {
-	s := &shareSession{rw: rw, pending: map[uint64]chan callResult{}, done: make(chan struct{}), maxIO: share.BaseIO,
+	s := &shareSession{rw: rw, pending: map[uint64]chan callResult{}, repetibles: map[uint64]bool{},
+		done: make(chan struct{}), maxIO: share.BaseIO,
 		events: make(chan pushEvent, maxPendingEvents)}
 	go s.readLoop()
 	return s
@@ -158,6 +162,7 @@ func (s *shareSession) readLoop() {
 		s.mu.Lock()
 		ch := s.pending[id]
 		delete(s.pending, id)
+		delete(s.repetibles, id)
 		s.mu.Unlock()
 		if ch != nil {
 			ch <- callResult{errno: errno, body: d.B}
@@ -192,8 +197,8 @@ func (s *shareSession) close() {
 		return
 	}
 	s.closed = true
-	pend := s.pending
-	s.pending = map[uint64]chan callResult{}
+	pend, rep := s.pending, s.repetibles
+	s.pending, s.repetibles = map[uint64]chan callResult{}, map[uint64]bool{}
 	close(s.done)
 	errno := share.EIO
 	if s.retired {
@@ -201,8 +206,13 @@ func (s *shareSession) close() {
 	}
 	s.mu.Unlock()
 	_ = s.rw.Close()
-	for _, ch := range pend {
-		ch <- callResult{errno: errno}
+	for id, ch := range pend {
+		e := errno
+		if e == share.EIO && rep[id] {
+			// Ya salió, pero repetirla no cambia nada: con la sesión siguiente.
+			e = errnoRepetir
+		}
+		ch <- callResult{errno: e}
 	}
 }
 
@@ -221,10 +231,38 @@ func (s *shareSession) alive() bool {
 // sesión siguiente sin riesgo de hacerla dos veces. Nunca llega al kernel.
 const errnoRetry = share.ERetry
 
+// errnoRepetir es la respuesta de callRepetible cuando la sesión se cortó con
+// la operación ya enviada: no se sabe si el daemon la hizo, pero es de solo
+// lectura y repetirla es inocuo. A diferencia de errnoRetry, se repite una sola
+// vez (una petición que tumba al daemon no puede tumbarlo en bucle). Tampoco
+// llega nunca al kernel.
+const errnoRepetir = share.ERetry - 1
+
+// repetible dice si una operación del protocolo es de solo lectura.
+func repetible(op byte) bool {
+	switch op {
+	case share.OpStat, share.OpFstat, share.OpList, share.OpListPlus, share.OpRead,
+		share.OpReadlink, share.OpStatfs:
+		return true
+	}
+	return false
+}
+
 // call manda una operación y espera su respuesta. build escribe los argumentos.
 // Si la sesión se corta con la operación ya enviada, EIO: no se sabe si el
 // daemon la hizo, y repetir un rename o un write a ciegas no es seguro.
 func (s *shareSession) call(op byte, build func(*share.Enc)) (uint32, *share.Dec) {
+	return s.callRep(op, build, false)
+}
+
+// callRepetible es call, pero si la operación es de solo lectura y la sesión
+// se corta con ella enviada devuelve errnoRepetir y no EIO. Solo para quien
+// sabe repetir (fuseFS.callS, handleCallRaw).
+func (s *shareSession) callRepetible(op byte, build func(*share.Enc)) (uint32, *share.Dec) {
+	return s.callRep(op, build, repetible(op))
+}
+
+func (s *shareSession) callRep(op byte, build func(*share.Enc), rep bool) (uint32, *share.Dec) {
 	ch := make(chan callResult, 1)
 	s.mu.Lock()
 	if s.closed {
@@ -234,6 +272,9 @@ func (s *shareSession) call(op byte, build func(*share.Enc)) (uint32, *share.Dec
 	s.next++
 	id := s.next
 	s.pending[id] = ch
+	if rep {
+		s.repetibles[id] = true
+	}
 	s.mu.Unlock()
 
 	e := share.Request(id, op)
@@ -246,6 +287,7 @@ func (s *shareSession) call(op byte, build func(*share.Enc)) (uint32, *share.Dec
 	if err != nil {
 		s.mu.Lock()
 		delete(s.pending, id)
+		delete(s.repetibles, id)
 		s.mu.Unlock()
 		s.close()
 		return errnoRetry, nil
