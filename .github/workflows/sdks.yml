@@ -1,0 +1,56 @@
+# Tests de los SDK de sandbox (sdks/python y sdks/typescript). Corren contra sus servidores
+# falsos y comprueban que cada operación de ext/sandbox/api/openapi.yaml tiene método en el
+# SDK. El recorrido de los dos SDK contra el frontal real lo hace TestContratoSDKs, dentro
+# del job de ext/sandbox de ci.yml.
+name: sdks
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'sdks/**'
+      - 'ext/sandbox/api/openapi.yaml'
+      - '.github/workflows/sdks.yml'
+  pull_request:
+    paths:
+      - 'sdks/**'
+      - 'ext/sandbox/api/openapi.yaml'
+      - '.github/workflows/sdks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.13']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Sin SHA fijado: no se pudo resolver sin red; fijarlo como el resto al integrar.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: unittest
+        run: python3 -m unittest discover -s sdks/python/tests -v
+
+  typescript:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json pide node >= 22.18 (los tests son .ts y corren con type stripping).
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: npm test
+        working-directory: sdks/typescript
+        run: npm test
