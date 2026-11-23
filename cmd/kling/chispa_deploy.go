@@ -19,6 +19,7 @@ import (
 	"github.com/juan52878911/kindling/internal/aigw"
 	"github.com/juan52878911/kindling/internal/chispa"
 	"github.com/juan52878911/kindling/internal/chispa/slots"
+	"github.com/juan52878911/kindling/internal/dorado"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/units"
 )
@@ -267,9 +268,9 @@ func cmdChispaRm(args []string) error {
 	return errors.Join(errs...)
 }
 
-// chispaGoldenOptions es von.GoldenOptions recortado a lo que un dorado de Chispa
-// necesita: sin prefijos ni Kind de VON, con el puerto y la ruta de salud de
-// kling-chispa en vez de las de llama-server.
+// chispaGoldenOptions es lo que un dorado de Chispa necesita del fabricante
+// (internal/dorado): el puerto, la sonda y el calentamiento son los de
+// kling-chispa y no se eligen.
 type chispaGoldenOptions struct {
 	Image, Snapshot    string
 	VCPUs, MemMiB      int
@@ -288,97 +289,24 @@ type chispaGoldenResult struct {
 // makeChispaGolden arranca una microVM de la imagen, espera a que kling-chispa
 // conteste /healthz, la calienta con una clasificación de verdad (toca las
 // páginas del modelo y del binario antes de congelar) y la congela como
-// dorado. Es el mismo patrón que von.MakeGolden, pero sin nada de llama.cpp:
-// Chispa no necesita gramática, caché de prompts ni prefijos, así que
-// reescribirlo aquí, más corto, es más claro que forzarlo dentro de
-// von.GoldenOptions.
+// dorado. Es el fabricante genérico (internal/dorado) con el puerto, la sonda y
+// el calentamiento de kling-chispa; como él, graba cpu_pct = 100 por vCPU
+// (antes heredaba el 50 % del daemon, R8-10).
 func makeChispaGolden(ctx context.Context, c *api.Client, o chispaGoldenOptions) (*chispaGoldenResult, error) {
-	logf := o.Log
-	if logf == nil {
-		logf = func(string, ...any) {}
-	}
 	if o.Wait == 0 {
 		o.Wait = 2 * time.Minute
 	}
-	name := fmt.Sprintf("%s-golden-%s", o.Snapshot, strconv.FormatInt(time.Now().UnixNano()%1_000_000, 36))
-	mc, err := c.Run(ctx, api.RunRequest{
-		Name: name, Image: o.Image, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
-		Egress: "none", Labels: chispaLabels(o.Snapshot, nil), AllowExec: o.AllowExec,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("booting %s: %w", o.Image, err)
-	}
-	res := &chispaGoldenResult{BootMS: mc.BootMS}
-	defer func() {
-		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		_ = c.Remove(rc, mc.ID)
-	}()
-	logf("booted %s in %d ms; waiting for kling-chispa...", mc.Name, mc.BootMS)
-
-	t0 := time.Now()
-	if err := waitChispaHealthy(ctx, c, mc.ID, o.Wait); err != nil {
-		return nil, fmt.Errorf("%w\nsee the service log with:  kling exec %s -- tail -50 /var/log/service.log", err, mc.Name)
-	}
-	res.LoadMS = time.Since(t0).Milliseconds()
-	logf("kling-chispa ready in %s; warming up...", time.Since(t0).Round(time.Millisecond))
-
 	body, _ := json.Marshal(map[string]any{"text": o.WarmText})
-	resp, err := c.Guest(ctx, mc.ID, api.GuestRequest{
-		Port: chispa.GuestPort, Path: "/v1/classify", Method: http.MethodPost, Body: string(body),
+	g, err := dorado.Make(ctx, c, dorado.Options{
+		Image: o.Image, Snapshot: o.Snapshot, Port: chispa.GuestPort,
+		VCPUs: o.VCPUs, MemMiB: o.MemMiB,
+		Health:    dorado.Probe{Path: "/healthz"},
+		Warmup:    []dorado.Request{{Method: http.MethodPost, Path: "/v1/classify", Body: body}},
+		Labels:    chispaLabels(o.Snapshot, nil),
+		AllowExec: o.AllowExec, Replace: o.Replace, Wait: o.Wait, Log: o.Log,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("warm-up: %w", err)
+		return nil, err
 	}
-	if resp.Status != http.StatusOK {
-		return nil, fmt.Errorf("warm-up: kling-chispa answered %d: %s", resp.Status, resp.Body)
-	}
-	logf("warm-up answered %s", truncate(resp.Body, 200))
-
-	if sq, err := c.Squeeze(ctx, mc.ID); err == nil {
-		logf("returned %d MiB of free memory to the host before freezing", sq.ReclaimedMiB)
-	}
-	snap, err := c.Commit(ctx, mc.ID, o.Snapshot, o.Replace)
-	if err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	res.Snapshot = snap
-	return res, nil
-}
-
-// waitChispaHealthy espera a que el puerto de kling-chispa abra y luego a que
-// /healthz conteste 200: igual que von.WaitReady, pero contra el agente de
-// Chispa en vez de llama-server.
-func waitChispaHealthy(ctx context.Context, c *api.Client, ref string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	if _, err := c.Guest(ctx, ref, api.GuestRequest{
-		Port: chispa.GuestPort, WaitMS: int(timeout / time.Millisecond), ProbeOnly: true,
-	}); err != nil {
-		return fmt.Errorf("kling-chispa did not open port %d: %w", chispa.GuestPort, err)
-	}
-	var last error
-	for time.Now().Before(deadline) {
-		resp, err := c.Guest(ctx, ref, api.GuestRequest{Port: chispa.GuestPort, Path: "/healthz", Method: http.MethodGet})
-		switch {
-		case err != nil:
-			last = err
-		case resp.Status != http.StatusOK:
-			last = fmt.Errorf("/healthz answered %d", resp.Status)
-		default:
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-	return fmt.Errorf("kling-chispa not ready after %s: %w", timeout, last)
-}
-
-func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "..."
-	}
-	return s
+	return &chispaGoldenResult{Snapshot: g.Snapshot, BootMS: g.BootMS, LoadMS: g.LoadTime.Milliseconds()}, nil
 }
