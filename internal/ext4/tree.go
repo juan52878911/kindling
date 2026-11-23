@@ -19,6 +19,7 @@
 package ext4
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path"
@@ -86,6 +87,10 @@ type StreamKey struct {
 type Extents struct {
 	r    io.ReaderAt
 	runs []run
+	// ctx es el de ReadContext: leer los datos (abrirlos, escribirlos en otra
+	// imagen) falla con su error en cuanto vence. Un fichero disperso válido
+	// puede declarar TiB de hueco, que se leen como ceros.
+	ctx context.Context
 }
 
 type run struct {
@@ -352,7 +357,14 @@ func (x *extentReader) ReadAt(p []byte, off int64) (int, error) {
 		p = p[:x.size-off]
 	}
 	n := 0
-	for n < len(p) {
+	for i := 0; n < len(p); i++ {
+		// El contexto se mira en cada llamada y cada 256 bloques dentro de
+		// una grande: lo que cuesta de verdad es el número de bloques.
+		if x.e.ctx != nil && i%256 == 0 {
+			if err := x.e.ctx.Err(); err != nil {
+				return n, err
+			}
+		}
 		pos := off + int64(n)
 		blk := uint64(pos / blockSize)
 		in := pos % blockSize
