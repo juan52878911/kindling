@@ -1191,6 +1191,16 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 	if err != nil {
 		return err
 	}
+	if !dry {
+		un, err := a.lockRepo(ctx, ri)
+		if err != nil {
+			return err
+		}
+		defer un()
+	}
+	// Las ramas, con el cerrojo ya tomado y a la vez que las copias: leídas
+	// antes, un checkout -b que tuviera el cerrojo dejaría una copia cuya rama
+	// no está en la lista, y se borraría.
 	branches, err := a.localBranches(ctx)
 	if err != nil {
 		return err
@@ -1199,13 +1209,6 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 	// fallo de lectura, y las copias no se recuperan.
 	if len(branches) == 0 {
 		return errors.New("git reports no local branches: refusing to prune")
-	}
-	if !dry {
-		un, err := a.lockRepo(ctx, ri)
-		if err != nil {
-			return err
-		}
-		defer un()
 	}
 	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {
