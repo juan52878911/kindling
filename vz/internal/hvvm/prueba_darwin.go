@@ -127,6 +127,19 @@ func sincsDisco() uint64 { return uint64(C.vblk_prueba_sincs()) }
 // fullSincsDisco: de ellas, las F_FULLFSYNC (vacían la caché del SSD del Mac).
 func fullSincsDisco() uint64 { return uint64(C.vblk_prueba_fullsincs()) }
 
+// fullDebeDisco: al disco de pruebas le falta un F_FULLFSYNC por la cuota.
+func fullDebeDisco() bool { return bool(C.vblk_prueba_full_debe(0)) }
+
+// diferidoDisco deja correr al hilo del disco de pruebas hasta ms ms para que
+// haga el F_FULLFSYNC pendiente; dice si ya no falta.
+func diferidoDisco(ms int) bool { return bool(C.vblk_prueba_diferido(0, C.int(ms))) }
+
+// La cuota de F_FULLFSYNC de virtio.c.
+const (
+	fullPorS   = int(C.KHV_FULL_POR_S)
+	fullRafaga = int(C.KHV_FULL_RAFAGA)
+)
+
 // Los modos de sincronización de khv.h, para las pruebas.
 const (
 	sincFull    = int(C.KHV_SINC_FULL)

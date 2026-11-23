@@ -366,6 +366,10 @@ void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
 uint64_t vblk_prueba_sincs(void);                    // sincronizaciones de los FLUSH (pruebas)
 uint64_t vblk_prueba_fullsincs(void);                // de ellas, F_FULLFSYNC (pruebas)
+bool vblk_prueba_full_debe(int idx);                 // falta un F_FULLFSYNC por la cuota (pruebas)
+bool vblk_prueba_diferido(int idx, int ms);          // deja al hilo hacerlo; si ya no falta (pruebas)
+#define KHV_FULL_POR_S 32   // cuota de F_FULLFSYNC por disco y segundo (virtio.c)
+#define KHV_FULL_RAFAGA 32  // y la ráfaga que admite
 int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del disco (pruebas)
 // Bytes de datos por tanda del hilo de un disco, y por petición IN/OUT (ver
 // b_procesar). Variable solo para que las pruebas lo bajen.
