@@ -36,6 +36,7 @@ var knownBootParams = map[string]bool{
 	api.ImageSnapshotBootParam: true,
 	"kling.layer":              true,
 	vsockBootParam:             true,
+	netBootParam:               true,
 }
 
 // bootParams es lo que se leyó de /proc/cmdline: los kling.* conocidos con su

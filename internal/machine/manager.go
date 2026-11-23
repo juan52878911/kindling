@@ -68,8 +68,8 @@ func archBootArg() string {
 // monolíticas, que siguen arrancando con la línea de siempre.
 //
 // ipv6Stack: la receta de la imagen pide el módulo IPv6 cargado (knet.BootArg).
-func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6Stack bool) string {
-	return bootArgsBase + archBootArg() + " " + knet.BootArg(ipv6Stack) + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
+func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6Stack bool, redAgente ...bool) string {
+	return bootArgsBase + archBootArg() + " " + knet.BootArg(ipv6Stack, len(redAgente) > 0 && redAgente[0]) + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -2562,7 +2562,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if comando != nil && n == nil {
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
 	}
-	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack, m.redDelAgente(id)) + envBootArg(len(env) > 0) +
 		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait) +
 		imgSnapBootArg(m.esPrepImagen(id))
 	anidada := m.anidadaDe(id)

@@ -54,6 +54,10 @@ const (
 // bootArgs y sigue con IPv6 tal como estaba entonces. La barrera del namespace
 // (applyIPv6Barrier en firewall.go) no depende de esto y cubre ese caso.
 //
+// redAgente (la imagen anuncia api.GuestCapNet): la red la pone el agente con
+// kling.net= y no hay ip=, que cuesta ~24 ms de ip_auto_config. Sin ella, la
+// línea de siempre.
+//
 // ipv6Stack (la imagen lo pide en su receta, api.ImageRecipe.GuestIPv6Stack)
 // cambia ipv6.disable=1 por ipv6.disable_ipv6=1: el módulo carga, así que hay
 // sockets AF_INET6 (un servidor que escucha en [::] con v4 mapeado, como adbd
@@ -61,10 +65,13 @@ const (
 // IPv6, ni link-local. El invitado, como root, puede encenderlo en una
 // interfaz suya; lo que sale de ella lo cierra la otra capa (applyIPv6Barrier
 // en Linux, egress.IsBlockedIP en macOS), que no depende de esto.
-func BootArg(ipv6Stack bool) string {
+func BootArg(ipv6Stack, redAgente bool) string {
 	v6 := "ipv6.disable=1"
 	if ipv6Stack {
 		v6 = "ipv6.disable_ipv6=1"
+	}
+	if redAgente {
+		return fmt.Sprintf("kling.net=%s/30,%s %s", GuestIP, GuestGW, v6)
 	}
 	return fmt.Sprintf("ip=%s::%s:%s::eth0:off %s", GuestIP, GuestGW, GuestNM, v6)
 }
