@@ -8,6 +8,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- kling-sandbox gateway: `/code` also runs bash and javascript, returns MIME `results` and `execution_count`, can be interrupted (`DELETE …/code/contexts/{cid}/execution`) and always ends in `done`; `GET /v1/sandboxes` filters by `state` and `label` and paginates (`limit`, `cursor`); `POST /v1/sandboxes` accepts `env`; endpoints can be listed and revoked; files support `Range`, `move`, `mkdir`, `search` and tar upload.
+
 - kling-sandbox gateway: experimental Python interpreter, `POST /v1/sandboxes/{id}/code` and `/code/contexts` (stateful contexts as background processes in the sandbox, NDJSON events, 8 contexts per sandbox, 422 without `python3`).
 - `KLING_COW_QUOTA=require` keeps instances out of the copy-on-write store (they get a full copy of their overlay) when no per-instance disk quota can be applied; `KLING_FORWARD_CHAIN=1` adds an opt-in `KINDLING-FWD` chain for hosts whose FORWARD policy is DROP (Docker).
 - Resync: the guest agent reports its critical-path and origin-check times in the `/resync` reply; `KLING_RESYNC_TRACE=1` logs the split and `/metrics` exposes `kling_resync_guest_seconds` and `kling_resync_wake_seconds`.
@@ -54,6 +56,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- kling-sandbox gateway: every error response carries `code`, 404/405 are JSON, and `POST …/exec` rejects unknown body fields.
+- First use: `install.sh` verifies the release signature with the downloaded `kling` (no `minisign` needed) and installs `kling-guest` on macOS; `kling try` starts the daemon and picks or downloads an image; `kling up` fails when the daemon does not start, writes the overlay template without e2fsprogs, downloads the kernel and `min` on Linux, and gains `-uninstall`; the launchd agent throttles restarts and rotates its log.
+
 - Network slots come with the `none` egress rules installed, so a `none` sandbox skips its `iptables-restore`; other modes apply only the difference in one transaction. The daemon warns at startup when `ipset` is missing (the egress allowlist needs it).
 - `POST /sandboxes/claim` requires a `kling.sandbox.claim` or `kling.owner` label in `labels`.
 - docs/benchmarks.md: kindling vs OpenSandbox 1.2.1 on EC2, with its caveats; the bench records KVM counters, the network pool and pause on fresh vs idle sandboxes.
@@ -73,6 +78,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox gateway: per-stage creation latency histogram (`kling_sandbox_create_stage_seconds{stage}`); cold creations from templates without a pool no longer list sandboxes, and the template snapshot is fetched by name instead of listing every snapshot.
 
 ### Fixed
+
+- Restart reconcile collects `created` machines whose VMM is gone (network and CPU cgroup released), resumes a cut commit's VMM on its own overlay instead of killing it, forgets MMDS secrets on delete, and tears networks down outside the lock.
+- Guest agent: a second resync phase that outlives its deadline no longer cuts newer execs; large session environments no longer hang execs; execs fork outside the reaper lock; the origin check sees addresses added after boot. Orphaned `pool=true` machines are swept after a gateway restart.
 - A restored copy whose guest never answers no longer holds the creation for 12 s: it is discarded and restored again once (`kling_restore_dead_copies_total`), and the failure diagnostics use the real VMM pid.
 - Unexpected deaths of jailed VMMs log the `firecracker.log` tail, the last console line and the cgroup `oom_kill` count, and the launch gate backs off to half (minimum 2), recovering one step per minute.
 - Daemon shutdown destroys the pooled network slots and stops their collector; expired slots are collected under the machine lifecycle lock.
@@ -234,6 +242,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The 256 MiB/s network floor for machines with live shared folders no longer overrides a lower `daemon.net_mibps` (or `KLING_NET_MIBPS`) set on purpose.
 
 ### Security
+
+- Machines only accept new flows originated by the host on their veth; narrowing egress and teardown also clear the host's conntrack entries; the allowlist is rechecked before seeding the ipset; blocked DNS names shown to the operator are restricted to `[a-z0-9._-]`.
+- Responses that originate in a guest agent are size-capped end to end: the daemon's process and session forwarding returns 502 above 1 MiB and `api.Client` fails with `ErrResponseTooLarge` (16 MiB generic, 1 MiB process and session lists, 8 MiB file listings).
 
 - Network setup retries interrupted netlink address dumps and never assigns a /30 subnet when the dump fails, so two machines can no longer end up sharing a subnet (and one machine's exec, resync or credentials reaching another's agent).
 - The launch gate no longer backs off for VMM deaths of already-delivered machines or for repeated dead copies from a single origin, so a guest that reboots itself in a loop cannot hold the gate down for everyone.
