@@ -85,6 +85,9 @@ type CrearPeticion struct {
 	MemMiB       int               `json:"mem_mib,omitempty"`
 	VCPUs        int               `json:"vcpus,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
+	// Env son variables de entorno que se guardan como la sesión "default" del
+	// sandbox: los exec con session=default las ven.
+	Env map[string]string `json:"env,omitempty"`
 
 	// Count crea un lote de Count sandboxes iguales (ver lote.go). Ausente es
 	// uno solo y la respuesta es el sandbox; presente, aunque sea 1, la

@@ -507,3 +507,45 @@ func TestIngresoApagadoYHostRaro(t *testing.T) {
 		t.Fatalf("health = %d", resp.StatusCode)
 	}
 }
+
+// C14: listar y revocar endpoints.
+func TestIngresoListarYRevocarEndpoints(t *testing.T) {
+	b := montarIngreso(t, nil)
+	base := "/v1/sandboxes/" + b.id + "/endpoints"
+	_, pub := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 3000, Public: true, TTLSeconds: 600})
+	_, tok := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 3000, TTLSeconds: 600})
+	_, otro := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 4000, TTLSeconds: 600})
+	if resp, _ := b.get(t, 3000, "/", map[string]string{cabeceraEndpoint: tok.Token}); resp.StatusCode != 200 {
+		t.Fatalf("token antes de revocar = %d", resp.StatusCode)
+	}
+
+	resp := pide(t, b.srv, tokenAlice, "GET", base, nil)
+	esperaCodigo(t, resp, 200)
+	lista := decodifica[[]Endpoint](t, resp)
+	if len(lista) != 1 || lista[0].Port != 3000 || !lista[0].Public || lista[0].URL != pub.URL || lista[0].Token != "" {
+		t.Fatalf("lista: %+v", lista)
+	}
+	esperaCodigo(t, pide(t, b.srv, tokenBob, "GET", base, nil), 404)
+	esperaCodigo(t, pide(t, b.srv, tokenBob, "DELETE", base+"/3000", nil), 404)
+	esperaCodigo(t, pide(t, b.srv, tokenAlice, "DELETE", base+"/abc", nil), 400)
+
+	esperaCodigo(t, pide(t, b.srv, tokenAlice, "DELETE", base+"/3000", nil), 204)
+	if resp, _ := b.get(t, 3000, "/", nil); resp.StatusCode != 401 {
+		t.Fatalf("público tras revocar = %d, quería 401", resp.StatusCode)
+	}
+	if resp, _ := b.get(t, 3000, "/", map[string]string{cabeceraEndpoint: tok.Token}); resp.StatusCode != 401 {
+		t.Fatalf("token tras revocar = %d, quería 401", resp.StatusCode)
+	}
+	// Otro puerto, intacto; y un token NUEVO del puerto revocado vale.
+	if resp, _ := b.get(t, 4000, "/", map[string]string{cabeceraEndpoint: otro.Token}); resp.StatusCode == 401 {
+		t.Fatalf("el token de otro puerto también se revocó")
+	}
+	_, nuevo := b.endpoint(t, tokenAlice, EndpointPeticion{Port: 3000, TTLSeconds: 600})
+	if resp, _ := b.get(t, 3000, "/", map[string]string{cabeceraEndpoint: nuevo.Token}); resp.StatusCode != 200 {
+		t.Fatalf("token nuevo = %d, quería 200", resp.StatusCode)
+	}
+	resp = pide(t, b.srv, tokenAlice, "GET", base, nil)
+	if l := decodifica[[]Endpoint](t, resp); len(l) != 0 {
+		t.Fatalf("lista tras revocar: %+v", l)
+	}
+}
