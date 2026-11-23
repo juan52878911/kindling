@@ -173,7 +173,9 @@ func New(o Options) (*Gateway, error) {
 	}
 
 	s := scheduler.New(o.Client, o.Idle, false, 0)
-	s.Port = von.Port
+	// Sin s.Port: todo dorado del gateway es un backend y su puerto sale de
+	// PortFor; cada réplica guarda el suyo, y OnSleep/OnForget reciben la
+	// dirección en ese puerto.
 	s.MachineLabels = map[string]string{LabelGateway: o.ID}
 	s.NamePrefix = o.NamePrefix
 	// Sin TTL de red de seguridad hasta saber si el daemon sabe renovarlo
