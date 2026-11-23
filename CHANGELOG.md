@@ -8,6 +8,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- SDKs: the Python and TypeScript SDKs cover every operation of the gateway's OpenAPI spec except `shell`, are tested against the real gateway in a new `sdks.yml` workflow (Python 3.9/3.13, Node 22/24) and are Apache-2.0.
+
 - kling-sandbox gateway: `/code` also runs bash and javascript, returns MIME `results` and `execution_count`, can be interrupted (`DELETE …/code/contexts/{cid}/execution`) and always ends in `done`; `GET /v1/sandboxes` filters by `state` and `label` and paginates (`limit`, `cursor`); `POST /v1/sandboxes` accepts `env`; endpoints can be listed and revoked; files support `Range`, `move`, `mkdir`, `search` and tar upload.
 
 - kling-sandbox gateway: experimental Python interpreter, `POST /v1/sandboxes/{id}/code` and `/code/contexts` (stateful contexts as background processes in the sandbox, NDJSON events, 8 contexts per sandbox, 422 without `python3`).
@@ -56,6 +58,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Create path: the fast state write before spawning the VMM no longer fsyncs, the host firewall check runs in parallel and is awaited before the guest resumes, `waitSocket` honours cancellation, memory reservation no longer stats every live machine, abandoned creations give their network slot back, and creations go ahead of slot replenishers.
+- Shared folders: `ls -l`, `find` and module resolution no longer cost one host round trip per entry (READDIRPLUS, negative entries, long kernel caches with host watching); copy mode keeps file dates.
+
 - kling-sandbox gateway: every error response carries `code`, 404/405 are JSON, and `POST …/exec` rejects unknown body fields.
 - First use: `install.sh` verifies the release signature with the downloaded `kling` (no `minisign` needed) and installs `kling-guest` on macOS; `kling try` starts the daemon and picks or downloads an image; `kling up` fails when the daemon does not start, writes the overlay template without e2fsprogs, downloads the kernel and `min` on Linux, and gains `-uninstall`; the launchd agent throttles restarts and rotates its log.
 
@@ -78,6 +83,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox gateway: per-stage creation latency histogram (`kling_sandbox_create_stage_seconds{stage}`); cold creations from templates without a pool no longer list sandboxes, and the template snapshot is fetched by name instead of listing every snapshot.
 
 ### Fixed
+
+- Guest response caps follow the API contract (`Client.Guest` up to the daemon's body cap); a straggling resync second phase is marked per generation; pool machines carry their gateway's owner label and are swept only by it; a cut commit's template gets its volumes back.
+- kling-sandbox gateway: JS code contexts survive unhandled rejections; `search` on a missing root is 404; `Range` past the cap is 416; `files/move` does not replace a target unless asked.
 
 - Restart reconcile collects `created` machines whose VMM is gone (network and CPU cgroup released), resumes a cut commit's VMM on its own overlay instead of killing it, forgets MMDS secrets on delete, and tears networks down outside the lock.
 - Guest agent: a second resync phase that outlives its deadline no longer cuts newer execs; large session environments no longer hang execs; execs fork outside the reaper lock; the origin check sees addresses added after boot. Orphaned `pool=true` machines are swept after a gateway restart.
@@ -242,6 +250,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The 256 MiB/s network floor for machines with live shared folders no longer overrides a lower `daemon.net_mibps` (or `KLING_NET_MIBPS`) set on purpose.
 
 ### Security
+
+- `install.sh` refuses an unsigned 0.x resolved as "latest" (pin it with `KLING_VERSION`), verifies `SHA256SUMS.sshsig` with `ssh-keygen` when `minisign` is missing, and says plainly when only a sha256 and self-check were possible; `kling up -install` refuses a binary that non-root users can write.
+- kling-sandbox gateway: revoking an endpoint is atomic and closes connections already open through it (WebSocket included); `clone_from` counts against the volume quota; volumes use an 8-byte tenant prefix; guest `Set-Cookie` loses its `Domain`.
+- Mac: the daemon hands the VMM its files by descriptor opened with `O_NOFOLLOW`; `kling-vz` and `kling-hv` are signed with hardened runtime and `kling-hv` is built with a stack protector.
+- Machines' DNS allowlist check and ipset seeding happen under the same lock; narrowing egress cuts only flows the guest originated; host conntrack cleanup runs only when a link existed.
 
 - Machines only accept new flows originated by the host on their veth; narrowing egress and teardown also clear the host's conntrack entries; the allowlist is rechecked before seeding the ipset; blocked DNS names shown to the operator are restricted to `[a-z0-9._-]`.
 - Responses that originate in a guest agent are size-capped end to end: the daemon's process and session forwarding returns 502 above 1 MiB and `api.Client` fails with `ErrResponseTooLarge` (16 MiB generic, 1 MiB process and session lists, 8 MiB file listings).
