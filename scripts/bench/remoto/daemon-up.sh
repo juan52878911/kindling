@@ -27,4 +27,7 @@ systemctl is-active --quiet $UNIT || systemd-run --unit "$UNIT" --collect -p Kil
   -E "KLING_LIB_DIR=$LIB" -E "KLING_BUILDERS_DIR=$BASE/builders" -E "KLING_SOCKET_USER=root" -E "KLING_MIN_FREE_DISK_MIB=1024" \
   "${EXTRA[@]}" "$BASE/bin/kling" daemon -root "$ROOT" -socket "$SOCK" >/dev/null
 for _ in $(seq 1 60); do KLING_HOST=unix://$SOCK KLING_CONFIG=$BASE/config.json "$BASE/bin/kling" ps >/dev/null 2>&1 && break; sleep 0.5; done
-KLING_HOST=unix://$SOCK KLING_CONFIG=$BASE/config.json "$BASE/bin/kling" status -v 2>&1 | head -12
+# Toda la salida primero y luego las 12 líneas: con `| head -12` y pipefail, kling se llevaba un
+# SIGPIPE al cerrar head y el guion salía con error justo después de un arranque bueno.
+estado=$(KLING_HOST=unix://$SOCK KLING_CONFIG=$BASE/config.json "$BASE/bin/kling" status -v 2>&1)
+sed -n '1,12p' <<<"$estado"

@@ -64,7 +64,7 @@ medir() {
   else
     [ "$(id -u)" = 0 ] || { echo "sin USAR_DAEMON=1, medir levanta kt-bench y va como root" >&2; exit 2; }
     bash "$KB/remoto/higiene.sh" inicio
-    bash "$KB/remoto/daemon-up.sh" || exit 1
+    bash "$KB/remoto/daemon-up.sh" || { echo "daemon-up.sh falló (rc=$?)" >&2; exit 1; }
     export KLING_HOST=unix:///run/kt-bench/kling.sock KLING_CONFIG=/srv/kt-bench/config.json
     K=/srv/kt-bench/bin/kling; HIG=1
   fi
