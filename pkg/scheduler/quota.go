@@ -379,3 +379,27 @@ func (g *Scheduler) TenantInflight() map[string]int {
 	}
 	return out
 }
+
+// InflightByMachine devuelve, por id de máquina, las peticiones en vuelo ahora
+// sobre cada instancia (primarias y réplicas; los streams no cuentan, como en
+// el segador). Solo aparecen las que tienen alguna. Lo usa el gateway de IA al cerrar para no
+// dormir una réplica debajo de una petición (R8-03).
+func (g *Scheduler) InflightByMachine() map[string]int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := map[string]int{}
+	cuenta := func(e *entry) {
+		if e.inflight > 0 {
+			out[e.machineID] += e.inflight
+		}
+	}
+	for _, e := range g.services {
+		cuenta(e)
+	}
+	for _, es := range g.extra {
+		for _, e := range es {
+			cuenta(e)
+		}
+	}
+	return out
+}
