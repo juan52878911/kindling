@@ -3,6 +3,7 @@ package oci_test
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -114,6 +115,64 @@ func TestCredentialKey(t *testing.T) {
 	for _, bad := range []string{"", "a b", "user@host", "host:port:x", "https://"} {
 		if _, err := oci.CredentialKey(bad); err == nil {
 			t.Errorf("CredentialKey(%q) accepted", bad)
+		}
+	}
+}
+
+// Las credenciales de un registro van a su servicio de tokens solo si es el
+// mismo host o uno de los conocidos (registry-1.docker.io → auth.docker.io):
+// en un sufijo compartido (*.azurecr.io), el realm de otro inquilino no las
+// recibe aunque comparta dominio. Todo se sirve desde un TLS local: el
+// transporte manda cualquier host a él.
+func TestRealmDeOtroInquilinoSinCredenciales(t *testing.T) {
+	const pass = "s3cr3t-tenant-pass"
+	for _, c := range []struct {
+		reg, realm string
+		manda      bool
+	}{
+		{"mio.azurecr.io", "otro.azurecr.io", false},
+		{"mio.jfrog.io", "otro.jfrog.io", false},
+		{"registry.example.co.uk", "evil.co.uk", false},
+		{"registry.example.com", "auth.example.com", false},
+		{"mio.azurecr.io", "mio.azurecr.io", true},
+		{"registry-1.docker.io", "auth.docker.io", true},
+		{"registry.gitlab.com", "gitlab.com", true},
+	} {
+		var mu sync.Mutex
+		var auths []string
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if strings.HasPrefix(req.URL.Path, "/token") {
+				mu.Lock()
+				auths = append(auths, req.Host+" "+req.Header.Get("Authorization"))
+				mu.Unlock()
+				http.Error(w, "no", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Www-Authenticate", `Bearer realm="https://`+c.realm+`/token",service="x"`)
+			http.Error(w, "auth", http.StatusUnauthorized)
+		}))
+		tr := srv.Client().Transport.(*http.Transport).Clone()
+		tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+		}
+		tr.TLSClientConfig.InsecureSkipVerify = true
+		key, _ := oci.CredentialKey(c.reg)
+		cl := &oci.Client{Cache: t.TempDir(), HTTP: &http.Client{Transport: tr},
+			Auth: map[string]oci.Credential{key: {Username: "juan", Password: pass}}}
+		_, err := cl.Pull(context.Background(), c.reg+"/app/x", "sha256:"+strings.Repeat("0", 64), "amd64")
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%s: el Pull pasó", c.reg)
+		}
+		mandó := false
+		for _, a := range auths {
+			if strings.HasSuffix(a, " ") {
+				continue
+			}
+			mandó = true
+		}
+		if mandó != c.manda {
+			t.Errorf("%s → realm %s: credenciales mandadas = %v, quiero %v (%q; %v)", c.reg, c.realm, mandó, c.manda, auths, err)
 		}
 	}
 }

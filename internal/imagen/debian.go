@@ -328,9 +328,34 @@ type Base struct {
 	arch     string
 }
 
+// maxBaseBytes es el tope de lo comprimido de la imagen de la base si quien
+// llama no da uno (oci.Client.MaxBytes): con él, lo descomprimido tampoco
+// puede pasar de 8 veces eso. La de Debian ronda los 30 MiB.
+const maxBaseBytes = 512 << 20
+
 // PrepareBase arma la base: la imagen de lock (para arch) con los .deb pins
 // encima, ajustada (Ajustar). Lo que falta para escribirla lo pone Write.
+//
+// Las capas se descomprimen una sola vez (oci.Client.Unpack), comprobando su
+// diff_id, en un directorio temporal propio junto a la caché de c (el Unpack
+// de c, si trae uno, es para sus otros Pull: los nombres chocarían) que no
+// sobrevive a PrepareBase: los tars quedan abiertos y ya borrados, así que
+// tampoco se quedan en disco si nadie llama a Write. Mientras dura, c no se
+// puede usar desde otra goroutine: se le cambian Unpack y MaxBytes.
 func PrepareBase(ctx context.Context, c *oci.Client, lock DebianBase, arch string, pins []DebPin, d Debs) (*Base, error) {
+	if err := os.MkdirAll(c.Cache, 0o755); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp(c.Cache, ".unpack-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	defer func(u string, m int64) { c.Unpack, c.MaxBytes = u, m }(c.Unpack, c.MaxBytes)
+	c.Unpack = dir
+	if c.MaxBytes == 0 {
+		c.MaxBytes = maxBaseBytes
+	}
 	img, err := c.Pull(ctx, lock.Image, lock.Manifest, arch)
 	if err != nil {
 		return nil, fmt.Errorf("debian base image: %w", err)
@@ -339,7 +364,18 @@ func PrepareBase(ctx context.Context, c *oci.Client, lock DebianBase, arch strin
 	root := ext4.NewDir(0o755, 0, 0, d.T)
 	var streams []ext4.Stream
 	for i, l := range img.Layers {
-		rc, err := oci.OpenLayer(l)
+		abrir := func() (io.ReadCloser, error) { return oci.OpenLayer(l) }
+		if l.Tar != "" {
+			// El tar se abre ya y se lee siempre por ese descriptor: el
+			// directorio se borra al salir de aquí. Lo cierra el recolector
+			// cuando nadie usa ya la base.
+			f, err := os.Open(l.Tar)
+			if err != nil {
+				return nil, err
+			}
+			abrir = func() (io.ReadCloser, error) { return io.NopCloser(io.NewSectionReader(f, 0, 1<<62)), nil }
+		}
+		rc, err := abrir()
 		if err != nil {
 			return nil, err
 		}
@@ -349,8 +385,7 @@ func PrepareBase(ctx context.Context, c *oci.Client, lock DebianBase, arch strin
 		if err != nil {
 			return nil, fmt.Errorf("debian layer %d: %w", i, err)
 		}
-		l := l
-		streams = append(streams, ext4.TarStream(func() (io.ReadCloser, error) { return oci.OpenLayer(l) }))
+		streams = append(streams, ext4.TarStream(abrir))
 	}
 	if d.Snapshot == "" {
 		d.Snapshot = lock.Snapshot

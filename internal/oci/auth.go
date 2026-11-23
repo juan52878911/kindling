@@ -3,7 +3,7 @@ package oci
 import (
 	"encoding/base64"
 	"fmt"
-	"net"
+	"slices"
 	"strings"
 )
 
@@ -69,25 +69,28 @@ func (c *Client) credFor(registry string) *Credential {
 }
 
 // realmPermitido dice si se le pueden mandar las credenciales de registry al
-// servicio de tokens realmHost: el mismo host, o el dominio del registro sin
-// su primera etiqueta (registry-1.docker.io → docker.io, que cubre
-// auth.docker.io) si quedan al menos dos. Con una IP o un registro de dos
-// etiquetas (ghcr.io), solo él y sus subdominios. Los de esta máquina, entre
-// ellos.
+// servicio de tokens realmHost: el mismo host, uno de realmsConocidos, o, los
+// de esta máquina, entre ellos. Nada de «el dominio sin la primera etiqueta»:
+// en un sufijo compartido (*.azurecr.io, *.jfrog.io, co.uk) eso era mandar
+// la contraseña a otro inquilino del mismo proveedor.
 func realmPermitido(registry, realmHost string) bool {
 	reg := strings.ToLower(registryHost(registry))
 	realm := strings.ToLower(strings.TrimSuffix(realmHost, "."))
 	if realm == reg || (isLocalHost(reg) && isLocalHost(realm)) {
 		return true
 	}
-	if net.ParseIP(reg) != nil {
-		return false
-	}
-	dom := reg
-	if _, resto, ok := strings.Cut(reg, "."); ok && strings.Contains(resto, ".") {
-		dom = resto
-	}
-	return realm == dom || strings.HasSuffix(realm, "."+dom)
+	return slices.Contains(realmsConocidos[reg], realm)
+}
+
+// realmsConocidos son los servicios de tokens de los registros públicos que
+// no están en el mismo host que el registro. Un GitLab propio con el
+// registro en otro nombre (registry.example.com → gitlab.example.com) no
+// está: con credenciales, su realm se rechaza con un error que lo dice.
+var realmsConocidos = map[string][]string{
+	"docker.io":            {"auth.docker.io"},
+	"index.docker.io":      {"auth.docker.io"},
+	"registry-1.docker.io": {"auth.docker.io"},
+	"registry.gitlab.com":  {"gitlab.com"},
 }
 
 // pista es lo que se añade a un 401 o un 403: con credenciales, que se
