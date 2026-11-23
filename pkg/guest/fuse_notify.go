@@ -54,23 +54,55 @@ type synthOp struct {
 var droppedEvents atomic.Uint64
 
 // enqueue pone un aviso en la cola del notificador (que arranca con el
-// primero). Si la cola está llena se pierde: las cachés de 1 s siguen ahí.
+// primero). Si la cola está llena se pierde, y se apunta (perdidos).
 func (fs *fuseFS) enqueue(ev pushEvent) {
 	fs.evOnce.Do(func() { go fs.notifyLoop() })
 	select {
 	case fs.evq <- ev:
 	default:
+		fs.perdidos.Store(true)
 		if droppedEvents.Add(1) == 1 {
-			log.Printf("share %s: too many host changes at once; some are seen after the 1 s cache instead", fs.mount)
+			log.Printf("share %s: too many host changes at once; the guest's caches are dropped and kept short until it catches up", fs.mount)
 		}
 	}
 }
 
+// Avisos perdidos. Con la caché larga (30 s) no se sabe qué entrada quedó
+// vieja, así que se tira todo lo que el kernel tiene (invalidarTodo) y,
+// mientras la cola no se vacía, ttls da 1 s a lo nuevo. Se invalida dos
+// veces: en cuanto se nota la pérdida, para que lo viejo no dure lo que dure
+// la ráfaga, y al vaciarse la cola, por lo que se diera largo entre medias
+// (una respuesta que salió justo antes de marcar la pérdida). Después ya no
+// hay nada en caché que dependa de un aviso perdido y se vuelve a la caché
+// larga. Una cola llena implica avisos detrás, así que el notificador siempre
+// vuelve a pasar por aquí tras una pérdida.
 func (fs *fuseFS) notifyLoop() {
 	lockThread()
 	fs.synthTID.Store(gettid())
+	enDesborde := false
 	for ev := range fs.evq {
+		if !enDesborde && fs.perdidos.Load() {
+			enDesborde = true
+			fs.invalidarTodo()
+		}
 		fs.apply(ev)
+		if len(fs.evq) == 0 && fs.perdidos.Swap(false) {
+			enDesborde = false
+			fs.invalidarTodo()
+		}
+	}
+}
+
+// invalidarTodo tira de la caché del kernel todo lo que el agente le ha dado:
+// la entrada de cada nodo en su padre (en un directorio, d_invalidate poda
+// también lo que cuelga de él, negativas incluidas) y sus atributos y
+// páginas. Las negativas de la raíz no se alcanzan, por eso van con 1 s.
+func (fs *fuseFS) invalidarTodo() {
+	for _, e := range fs.nodes.entradas() {
+		if e.parent != 0 {
+			fs.notifyEntry(e.parent, e.name)
+		}
+		fs.notifyInode(e.id)
 	}
 }
 
@@ -100,6 +132,9 @@ func splitPath(p string) (string, string) {
 // aviso: no puede tenerlo en caché ni tener un vigilante encima.
 func (fs *fuseFS) apply(ev pushEvent) {
 	if ev.path == "" {
+		if ev.ev == eventForget {
+			fs.invalidarTodo()
+		}
 		return
 	}
 	dir, name := splitPath(ev.path)
@@ -110,9 +145,22 @@ func (fs *fuseFS) apply(ev pushEvent) {
 	child := fs.nodes.child(parent, name)
 	full := fs.mount + "/" + ev.path
 	switch ev.ev {
+	case eventForget:
+		// El daemon ya no vigila la ruta: fuera de la caché, sin operación
+		// sintética (no cambió nada). El próximo LOOKUP la vuelve a vigilar.
+		fs.notifyEntry(parent.id, name)
+		if child != nil {
+			fs.notifyInode(child.id)
+		}
 	case share.EventModify:
 		if child == nil {
 			return
+		}
+		if child.typ.Load() == share.SIFDIR {
+			// De un directorio el daemon solo dice «cambió» cuando no tiene
+			// su foto: no sabe qué nombre apareció. Las negativas de dentro
+			// caen con la entrada del directorio.
+			fs.notifyEntry(parent.id, name)
 		}
 		fs.notifyInode(child.id)
 		if !fs.readOnly {

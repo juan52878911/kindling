@@ -13,7 +13,7 @@ import (
 
 // avisoOlvido es el código del aviso «deja de fiarte de esta ruta» (ver
 // EventForget en watch.go).
-const avisoOlvido = 4
+const avisoOlvido = EventForget
 
 type aviso struct {
 	ev   byte

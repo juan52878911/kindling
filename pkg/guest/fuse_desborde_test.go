@@ -4,12 +4,20 @@ import (
 	"net"
 	"testing"
 
+	hostshare "github.com/juan52878911/kindling/internal/share"
 	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
-// avisoOlvido es el aviso «deja de fiarte de esta ruta» del daemon (ver
-// eventForget en share_session.go).
-const avisoOlvido = 4
+// avisoOlvido es el aviso «deja de fiarte de esta ruta» del daemon.
+const avisoOlvido = eventForget
+
+// El agente repite el código del aviso porque shareproto no lo tiene: tiene
+// que ser el del daemon.
+func TestEventForgetEsElDelDaemon(t *testing.T) {
+	if eventForget != hostshare.EventForget {
+		t.Fatalf("guest eventForget %d, daemon EventForget %d", eventForget, hostshare.EventForget)
+	}
+}
 
 // sesionFalsa es una sesión cuyo otro extremo es el test: puede mandar los
 // avisos que quiera sin un daemon detrás.

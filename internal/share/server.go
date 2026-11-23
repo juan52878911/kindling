@@ -499,6 +499,16 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 			return errReply(id, e)
 		}
 		a, e := s.stat(p)
+		if e == proto.ENOENT && p != "" {
+			// El invitado guarda el ENOENT como entrada negativa con la caché
+			// larga: solo se enterará de que el nombre apareció si el padre
+			// sigue vigilado (ver watcher.notePadre).
+			padre := ""
+			if i := strings.LastIndexByte(p, '/'); i >= 0 {
+				padre = p[:i]
+			}
+			ss.watcher().notePadre(padre)
+		}
 		if e != 0 {
 			return errReply(id, e)
 		}
