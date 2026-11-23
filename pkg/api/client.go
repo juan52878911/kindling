@@ -175,7 +175,9 @@ const (
 	MaxResponseBytes = 16 << 20
 	// MaxListResponseBytes acota las listas que salen del agente del invitado
 	// (procesos, sesiones): el daemon corta en el mismo valor.
-	MaxListResponseBytes = 1 << 20
+	// Se deriva de lo máximo que el agente deja guardar: 64 sesiones con el
+	// entorno al tope (16 MiB) más margen para el resto del JSON.
+	MaxListResponseBytes = SessionMax*SessionMaxEnv + 1<<20
 	// MaxFileListBytes acota la respuesta de ListFiles.
 	MaxFileListBytes = 8 << 20
 )
@@ -667,7 +669,7 @@ func (c *Client) RunHooks(ctx context.Context, ref string, wait time.Duration) (
 
 func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
 	var l []*Snapshot
-	return l, c.do(ctx, http.MethodGet, "/snapshots", nil, &l)
+	return l, c.doMax(ctx, topeAnotaciones, http.MethodGet, "/snapshots", nil, &l)
 }
 
 // RemoveImage retira una imagen del disco.
@@ -720,7 +722,10 @@ func (c *Client) Guest(ctx context.Context, ref string, r GuestRequest) (*GuestR
 	// descongelándose, y la herramienta que se invoca puede tardar lo suyo.
 	// Acotar esto por cabeceras es acotar el trabajo del usuario, no la salud
 	// del daemon.
-	if err := c.doWith(c.long, ctx, "POST", "/machines/"+url.PathEscape(ref)+"/guest", r, &out); err != nil {
+	// El tope sigue al contrato: el cuerpo va como cadena JSON (puede doblar
+	// con los escapes) y MaxBodyBytes llega hasta GuestMaxBodyCap.
+	tope := 2*max(r.MaxBodyBytes, GuestMaxBody) + 1<<20
+	if err := c.doWithMax(c.long, tope, ctx, "POST", "/machines/"+url.PathEscape(ref)+"/guest", r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

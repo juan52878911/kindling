@@ -64,16 +64,20 @@ func IsUnsupported(err error) bool {
 	return errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusMethodNotAllowed)
 }
 
+// topeAnotaciones es lo que puede pesar un snapshot con sus anotaciones al
+// máximo (MaxAnnotations × MaxValueBytes) más margen para el resto.
+const topeAnotaciones = MaxAnnotations*MaxValueBytes + 1<<20
+
 // Snapshot trae un snapshot por nombre.
 func (c *Client) Snapshot(ctx context.Context, name string) (*Snapshot, error) {
 	var s Snapshot
-	return &s, c.do(ctx, http.MethodGet, "/snapshots/"+url.PathEscape(name), nil, &s)
+	return &s, c.doMax(ctx, topeAnotaciones, http.MethodGet, "/snapshots/"+url.PathEscape(name), nil, &s)
 }
 
 // SetAnnotation guarda v (serializado a JSON) como la anotación key del snapshot.
 func (c *Client) SetAnnotation(ctx context.Context, name, key string, v any) (*Snapshot, error) {
 	var s Snapshot
-	return &s, c.do(ctx, http.MethodPut,
+	return &s, c.doMax(ctx, topeAnotaciones, http.MethodPut,
 		"/snapshots/"+url.PathEscape(name)+"/annotations/"+url.PathEscape(key), v, &s)
 }
 

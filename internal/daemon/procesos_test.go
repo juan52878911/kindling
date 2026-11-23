@@ -259,3 +259,24 @@ func TestProcesosRespuestaDelAgenteConTope(t *testing.T) {
 		t.Fatalf("ndjson: %d %d", rr.Code, rr.Body.Len())
 	}
 }
+
+// R6-I2 (R2): el estado máximo que el agente admite (64 sesiones con el
+// entorno al tope) se reenvía sin 502.
+func TestProcesosReenviaListaAlMaximo(t *testing.T) {
+	s, _ := testServer(t)
+	var lista []api.Session
+	env := []string{"V=" + strings.Repeat("x", api.SessionMaxEnv-4)}
+	for i := 0; i < api.SessionMax; i++ {
+		lista = append(lista, api.Session{ID: "s", Env: env})
+	}
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(lista)
+	}))
+	defer g.Close()
+	rr := httptest.NewRecorder()
+	s.reenviar(rr, httptest.NewRequest("GET", "/sessions", nil), g.URL, "m", &api.Machine{})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("lista al máximo: %d %.200s", rr.Code, rr.Body.String())
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -418,6 +419,38 @@ func esperarProceso(p *proceso, exitCh chan syscall.WaitStatus) {
 	p.mu.Unlock()
 }
 
+// maxCmdLista es lo que la lista de procesos trae de cada Cmd; el detalle de
+// un proceso lo trae entero.
+const maxCmdLista = 4 << 10
+
+// recortarCmd devuelve cmd con, como mucho, max bytes en total (el último
+// argumento se corta y los siguientes se omiten). No toca el original.
+func recortarCmd(cmd []string, max int) []string {
+	n := 0
+	for _, a := range cmd {
+		n += len(a)
+	}
+	if n <= max {
+		return cmd
+	}
+	out := make([]string, 0, len(cmd))
+	resto := max
+	for _, a := range cmd {
+		if resto <= 0 {
+			break
+		}
+		if len(a) > resto {
+			a = a[:resto]
+			for len(a) > 0 && !utf8.ValidString(a) {
+				a = a[:len(a)-1]
+			}
+		}
+		out = append(out, a)
+		resto -= len(a)
+	}
+	return out
+}
+
 func listarProcesos(w http.ResponseWriter) {
 	procs.mu.Lock()
 	all := make([]*proceso, 0, len(procs.m))
@@ -427,7 +460,9 @@ func listarProcesos(w http.ResponseWriter) {
 	procs.mu.Unlock()
 	out := make([]api.ProcessInfo, 0, len(all))
 	for _, p := range all {
-		out = append(out, p.snapshot())
+		i := p.snapshot()
+		i.Cmd = recortarCmd(i.Cmd, maxCmdLista)
+		out = append(out, i)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].StartedAt.Equal(out[j].StartedAt) {
