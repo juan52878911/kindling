@@ -65,6 +65,26 @@ type SandboxSpec struct {
 	OnTTL      string `json:"onTTL,omitempty"`
 	Egress     string `json:"egress,omitempty"`
 	MemMiB     int    `json:"memMiB,omitempty"`
+	// AllowDomains son los dominios permitidos con egress: allowlist.
+	AllowDomains []string `json:"allowDomains,omitempty"`
+	VCPUs        int      `json:"vcpus,omitempty"`
+	// Labels van al sandbox en el frontal. La etiqueta k8s-uid es del operador
+	// y no se puede pisar desde aquí.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Env son variables de entorno de la sesión "default" del sandbox.
+	Env     map[string]string `json:"env,omitempty"`
+	Volumes []VolumeSpec      `json:"volumes,omitempty"`
+	// Paused pausa el sandbox (pause) y, al volver a false, lo reanuda
+	// (resume). Sí se aplica en caliente. No despierta uno congelado por su
+	// propio TTL: congelar es cosa del frontal.
+	Paused bool `json:"paused,omitempty"`
+}
+
+// VolumeSpec es un volumen del tenant a montar en el sandbox.
+type VolumeSpec struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 // SandboxStatus es status.* del CRD: lo que el operador observó del frontal.
@@ -81,6 +101,9 @@ type SandboxStatus struct {
 	// del frontal sin que el operador lo haya borrado él mismo).
 	State     string     `json:"state,omitempty"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	// Endpoint es la URL del sandbox en el frontal (el plano de datos: exec,
+	// ficheros...). Se llega con el token del tenant; no lleva ningún secreto.
+	Endpoint string `json:"endpoint,omitempty"`
 	// Message es un puntero, no un string a secas: PatchStatus manda un merge
 	// patch a partir de un SandboxStatus a medio rellenar, y con omitempty un
 	// string en cero (recuperado, sin error) nunca saldría en el JSON — el
@@ -111,6 +134,45 @@ type Sandbox struct {
 
 // Key identifica el objeto dentro del operador: "namespace/name".
 func (s *Sandbox) Key() string { return s.Metadata.Namespace + "/" + s.Metadata.Name }
+
+// PoolResource es el plural del segundo CRD, SandboxPool.
+const PoolResource = "sandboxpools"
+
+// PoolSpec es spec.* de un SandboxPool: cuántas copias despiertas de una
+// plantilla se quieren. Size 0 apaga el fondo y lo vacía.
+type PoolSpec struct {
+	Template string `json:"template"`
+	Size     int    `json:"size"`
+}
+
+// PoolStatus es status.* de un SandboxPool.
+type PoolStatus struct {
+	// Available son las copias ya despiertas y reclamables, sumadas en todos
+	// los hosts que tienen la plantilla. Puntero: 0 es un valor que hay que
+	// poder escribir en un merge patch.
+	Available *int `json:"available,omitempty"`
+	// Message es el último error (puntero a "" = limpiarlo; ver SandboxStatus).
+	Message            *string `json:"message,omitempty"`
+	ObservedGeneration int64   `json:"observedGeneration,omitempty"`
+}
+
+// Pool es un objeto SandboxPool.
+type Pool struct {
+	APIVersion string     `json:"apiVersion,omitempty"`
+	Kind       string     `json:"kind,omitempty"`
+	Metadata   ObjectMeta `json:"metadata"`
+	Spec       PoolSpec   `json:"spec"`
+	Status     PoolStatus `json:"status,omitempty"`
+}
+
+// Key identifica el objeto: "namespace/name".
+func (p *Pool) Key() string { return p.Metadata.Namespace + "/" + p.Metadata.Name }
+
+// PoolList es la respuesta de un LIST de SandboxPool.
+type PoolList struct {
+	Metadata listMeta `json:"metadata"`
+	Items    []Pool   `json:"items"`
+}
 
 // listMeta es metadata.* de una lista: solo hace falta el resourceVersion
 // desde el que arrancar el watch.

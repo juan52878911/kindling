@@ -352,6 +352,22 @@ else
   bad "renew" "observedGeneration to catch up and expiresAt to change" "generation stayed at $gens, expiresAt $before -> $after"
 fi
 
+# ── 9b. spec.paused pausa y reanuda; status.endpoint ───────────────────────
+step "9b. spec.paused pauses and resumes; status.endpoint is set"
+ep=$(kubectl get sandbox "$SB_TEMPLATE" -n "$NAMESPACE" -o jsonpath='{.status.endpoint}')
+if contains "$ep" "/v1/sandboxes/"; then ok "status.endpoint = $ep"; else bad "endpoint" "a /v1/sandboxes/... URL" "got '$ep'"; fi
+for want in paused:true running:false; do
+  state_want="${want%%:*}"; paused="${want##*:}"
+  kubectl patch sandbox "$SB_TEMPLATE" -n "$NAMESPACE" --type=merge -p "{\"spec\":{\"paused\":$paused}}" >/dev/null
+  got=""
+  for _ in $(seq 1 50); do
+    got=$(kubectl get sandbox "$SB_TEMPLATE" -n "$NAMESPACE" -o jsonpath='{.status.state}')
+    [ "$got" = "$state_want" ] && break
+    sleep 0.2
+  done
+  if [ "$got" = "$state_want" ]; then ok "paused=$paused -> status.state=$got"; else bad "paused" "status.state=$state_want" "got '$got'"; fi
+done
+
 # ── 10. kubectl delete: finalizer limpia en el frontal ────────────────
 step "10. kubectl delete removes the finalizer and the sandbox at the frontal"
 kubectl delete sandbox "$SB_IMAGE" -n "$NAMESPACE" --timeout=15s >/dev/null 2>&1

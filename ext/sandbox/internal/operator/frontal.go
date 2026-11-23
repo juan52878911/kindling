@@ -109,8 +109,20 @@ func (f *FrontalClient) Create(ctx context.Context, spec SandboxSpec, uid string
 		Egress:     spec.Egress,
 		MemMiB:     spec.MemMiB,
 	}
-	if uid != "" {
-		pet.Labels = map[string]string{LabelK8sUID: uid}
+	pet.AllowDomains = spec.AllowDomains
+	pet.VCPUs = spec.VCPUs
+	pet.Env = spec.Env
+	for _, v := range spec.Volumes {
+		pet.Volumes = append(pet.Volumes, frontal.VolumenPeticion{Name: v.Name, Mount: v.MountPath, ReadOnly: v.ReadOnly})
+	}
+	if len(spec.Labels) > 0 || uid != "" {
+		pet.Labels = map[string]string{}
+		for k, v := range spec.Labels {
+			pet.Labels[k] = v
+		}
+		if uid != "" {
+			pet.Labels[LabelK8sUID] = uid // el del operador manda siempre
+		}
 	}
 	var sb frontal.Sandbox
 	if err := f.do(ctx, http.MethodPost, "/v1/sandboxes", pet, &sb); err != nil {
@@ -205,6 +217,54 @@ func (f *FrontalClient) Renew(ctx context.Context, id string, ttlSeconds int) (*
 		return nil, err
 	}
 	return &sb, nil
+}
+
+// Endpoint es la URL del sandbox id en el frontal.
+func (f *FrontalClient) Endpoint(id string) string {
+	ruta, err := rutaSandbox(id)
+	if err != nil {
+		return ""
+	}
+	return f.baseURL + ruta
+}
+
+// Pause pausa un sandbox running.
+func (f *FrontalClient) Pause(ctx context.Context, id string) (*frontal.Sandbox, error) {
+	return f.accion(ctx, id, "pause")
+}
+
+// Resume despierta un sandbox pausado.
+func (f *FrontalClient) Resume(ctx context.Context, id string) (*frontal.Sandbox, error) {
+	return f.accion(ctx, id, "resume")
+}
+
+func (f *FrontalClient) accion(ctx context.Context, id, accion string) (*frontal.Sandbox, error) {
+	ruta, err := rutaSandbox(id)
+	if err != nil {
+		return nil, err
+	}
+	var sb frontal.Sandbox
+	if err := f.do(ctx, http.MethodPost, ruta+"/"+accion, nil, &sb); err != nil {
+		return nil, err
+	}
+	return &sb, nil
+}
+
+// plantillaValida: el nombre de una plantilla va en la ruta del frontal.
+var plantillaValida = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+// SetPool fija el tamaño del fondo precalentado de una plantilla
+// (PUT /v1/templates/{name}/pool, solo admin: el token del operador tiene que
+// serlo para usar SandboxPool).
+func (f *FrontalClient) SetPool(ctx context.Context, plantilla string, size int) (*frontal.PoolRespuesta, error) {
+	if !plantillaValida.MatchString(plantilla) {
+		return nil, fmt.Errorf("invalid template name %q", plantilla)
+	}
+	var out frontal.PoolRespuesta
+	if err := f.do(ctx, http.MethodPut, "/v1/templates/"+url.PathEscape(plantilla)+"/pool", api.PoolRequest{Size: size}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Delete borra el sandbox. Un 404 cuenta como éxito: si ya no está, el
