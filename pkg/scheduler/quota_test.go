@@ -278,3 +278,21 @@ func TestScaleOutSueltaLaCuotaAlRegistrar(t *testing.T) {
 		t.Fatalf("instancias del tenant = %d, quería 2", n)
 	}
 }
+
+// BenchmarkAuthHandler mide el coste por petición de resolver el token con
+// varios inquilinos registrados (el camino caliente de toda petición).
+func BenchmarkAuthHandler(b *testing.B) {
+	g := &Scheduler{}
+	g.SetTenants([]TenantLimit{
+		{Name: "a", Token: "tok-a-0123456789"}, {Name: "b", Token: "tok-b-0123456789"},
+		{Name: "c", Token: "tok-c-0123456789"}, {Name: "d", Token: "tok-d-0123456789"},
+	})
+	h := g.authHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "tok-main-0123456789")
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer tok-c-0123456789")
+	w := httptest.NewRecorder()
+	b.ReportAllocs()
+	for range b.N {
+		h.ServeHTTP(w, r)
+	}
+}
