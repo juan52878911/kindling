@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -259,5 +260,99 @@ func TestReadyForAdoptSondeoCorto(t *testing.T) {
 	}
 	if el := time.Since(t0); el > 5*time.Second {
 		t.Errorf("la adopción esperó %v con el candado del servicio; debía ser un sondeo corto", el)
+	}
+}
+
+// gwTrabajo arma un planificador sin daemon con dos instancias calientes de
+// svc (primaria y réplica) de maxSessions sesiones cada una. Un scale-out
+// falla y se cuenta: los tests de abajo no deben necesitarlo.
+func gwTrabajo(t *testing.T, maxSessions int) (*Scheduler, *entry, *entry, *atomic.Int32) {
+	t.Helper()
+	ahora := time.Now()
+	e1 := &entry{machineID: "m1", lastUse: ahora, checkedAt: ahora, maxSessions: maxSessions}
+	e2 := &entry{machineID: "m2", lastUse: ahora, checkedAt: ahora, maxSessions: maxSessions}
+	var escalados atomic.Int32
+	g := &Scheduler{
+		idle:     time.Minute,
+		services: map[string]*entry{"svc": e1},
+		extra:    map[string][]*entry{"svc": {e2}},
+		routes:   map[string]*sessionRoute{},
+		buildFn: func(context.Context, string, *tenant, bool) (*entry, error) {
+			escalados.Add(1)
+			return nil, fmt.Errorf("no scale-out in this test")
+		},
+	}
+	return g, e1, e2, &escalados
+}
+
+// R8-07: entre elegir la réplica y que la petición la marque en vuelo (Begin)
+// hay un hueco. Con max_inflight 1, dos peticiones que llegan a la vez leían
+// las dos inflight 0 y elegían la misma réplica: la segunda esperaba en cola
+// teniendo otra libre. Las reservas cuentan como trabajo al elegir.
+func TestDosPeticionesSimultaneasNoMismaReplica(t *testing.T) {
+	g, _, _, escalados := gwTrabajo(t, 32)
+	g.MaxInflightFor = func(string) int { return 1 }
+	ctx := context.Background()
+	a, err := g.pickInstance(ctx, "svc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := g.pickInstance(ctx, "svc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("las dos peticiones fueron a %s con max_inflight 1 y otra réplica libre", a.machineID)
+	}
+	if n := escalados.Load(); n != 0 {
+		t.Errorf("hubo %d scale-out con una réplica libre", n)
+	}
+}
+
+// R8-07: con MaxInflightFor el tope de sesiones (la fórmula de memoria del
+// puente MCP, 1 en una réplica de 64 MiB) no limita: el producto no usa
+// sesiones y lo que cuenta es el trabajo. Y una petición que pasa de reserva a
+// en vuelo (Begin) no cuenta dos veces.
+func TestMaxInflightForSinTopeDeSesiones(t *testing.T) {
+	g, e1, e2, escalados := gwTrabajo(t, 1)
+	g.MaxInflightFor = func(string) int { return 2 }
+	ctx := context.Background()
+	var elegidas []*entry
+	for i := 0; i < 4; i++ {
+		e, err := g.pickInstance(ctx, "svc", nil)
+		if err != nil {
+			t.Fatalf("petición %d: %v", i, err)
+		}
+		g.begin(e)
+		elegidas = append(elegidas, e)
+	}
+	if n := escalados.Load(); n != 0 {
+		t.Fatalf("hubo %d scale-out con hueco de trabajo libre (tope de sesiones aplicado)", n)
+	}
+	if elegidas[0] != e1 || elegidas[1] != e1 || elegidas[2] != e2 || elegidas[3] != e2 {
+		t.Errorf("reparto = %s %s %s %s; quería m1 m1 m2 m2", elegidas[0].machineID,
+			elegidas[1].machineID, elegidas[2].machineID, elegidas[3].machineID)
+	}
+	for _, e := range elegidas {
+		g.end(e)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if e1.inflight != 0 || e2.inflight != 0 || e1.reservasLocked() != 0 || e2.reservasLocked() != 0 {
+		t.Errorf("tras End quedan inflight %d/%d reservas %d/%d", e1.inflight, e2.inflight,
+			e1.reservasLocked(), e2.reservasLocked())
+	}
+}
+
+// Sin MaxInflightFor (el gateway MCP) se reparte como siempre: por sesiones y
+// MaxInflight global, sin contar reservas como trabajo.
+func TestMaxInflightForNilComoSiempre(t *testing.T) {
+	g, e1, _, _ := gwTrabajo(t, 32)
+	g.MaxInflight = 1
+	ctx := context.Background()
+	a, _ := g.pickInstance(ctx, "svc", nil)
+	b, _ := g.pickInstance(ctx, "svc", nil)
+	if a != e1 || b != e1 {
+		t.Errorf("sin gancho las dos reservas iban a la primaria (inflight 0); fueron a %s y %s", a.machineID, b.machineID)
 	}
 }
