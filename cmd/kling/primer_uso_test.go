@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/internal/upgrade"
 )
 
@@ -222,7 +223,7 @@ func TestStartMacDaemonSinAgenteFallaSiNoHayQuienConfirme(t *testing.T) {
 	old := confirmarAgente
 	confirmarAgente = func(agenteDaemon) bool { return false }
 	t.Cleanup(func() { confirmarAgente = old })
-	err := startMacDaemon(a, "/tmp/kling-no-such.sock", t.TempDir())
+	err := startMacDaemon(io.Discard, a, "/tmp/kling-no-such.sock", t.TempDir())
 	if err == nil {
 		t.Fatal("kling up without a daemon and without an agent must fail, not say 'Next step'")
 	}
@@ -241,7 +242,7 @@ func TestStartMacDaemonInstalaElAgenteSiConfirman(t *testing.T) {
 	lanzarctl = func(args ...string) ([]byte, error) { cmds = append(cmds, strings.Join(args, " ")); return nil, nil }
 	t.Cleanup(func() { confirmarAgente, lanzarctl, esperaDaemonMac = oldC, oldL, oldE })
 	// launchctl "funciona" pero el socket nunca contesta: error, no éxito.
-	err := startMacDaemon(a, "/tmp/kling-no-such.sock", dir)
+	err := startMacDaemon(io.Discard, a, "/tmp/kling-no-such.sock", dir)
 	if _, serr := os.Stat(a.plist); serr != nil {
 		t.Fatalf("the agent was not written: %v", serr)
 	}
@@ -446,6 +447,7 @@ func TestTryArrancandoNoEnsuciaStdout(t *testing.T) {
 	t.Setenv("KLING_LAUNCH_AGENT_PLIST", filepath.Join(dir, "x.plist"))
 	t.Setenv("KLING_LAUNCH_AGENT_LABEL", "dev.kindling.revtest")
 	t.Setenv("KLING_ROOT", filepath.Join(dir, "root"))
+	t.Setenv("HOME", dir)
 	oldC, oldL, oldE := confirmarAgente, lanzarctl, esperaDaemonMac
 	esperaDaemonMac = 100 * time.Millisecond
 	confirmarAgente = func(agenteDaemon) bool { return true }
@@ -457,7 +459,7 @@ func TestTryArrancandoNoEnsuciaStdout(t *testing.T) {
 	r, w, _ := os.Pipe()
 	old := os.Stdout
 	os.Stdout = w
-	_ = arrancarDaemonLocal(context.Background(), "/tmp/kling-rev-no-such.sock")
+	_ = arrancarDaemonLocal(context.Background(), transport.DefaultSocketPath())
 	w.Close()
 	os.Stdout = old
 	b, _ := io.ReadAll(r)
@@ -516,5 +518,47 @@ func TestUnidadSystemdRechazaBinarioEscribible(t *testing.T) {
 func TestTextoUnidadCitaLaRuta(t *testing.T) {
 	if got := textoUnidad("/opt/with space/kling"); !strings.Contains(got, `ExecStart="/opt/with space/kling" daemon`) {
 		t.Errorf("ExecStart must quote the path:\n%s", got)
+	}
+}
+
+// R25: try solo arranca el agente si el destino es el socket por defecto.
+func TestDestinoEsElLocal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	def := transport.DefaultSocketPath()
+	for _, ok := range []string{"", def, "unix://" + def} {
+		if !destinoEsElLocal(ok) {
+			t.Errorf("%q is the local daemon", ok)
+		}
+	}
+	if destinoEsElLocal("/tmp/otra-raiz/kling.sock") || destinoEsElLocal("unix:///tmp/otra-raiz/kling.sock") {
+		t.Error("a socket under another root is not the local daemon")
+	}
+}
+
+// R27: un plist que solo difiere en claves conocidas se migra; otro cambio no.
+func TestEscribirPlistMigraClavesConocidas(t *testing.T) {
+	dir := t.TempDir()
+	a := agenteDaemon{label: "dev.kindling.test", plist: filepath.Join(dir, "x.plist"), log: filepath.Join(dir, "x.log")}
+	nuevo := plistDaemon(a, "/usr/local/bin/kling", nil)
+	viejo := strings.Replace(nuevo, "<integer>30</integer>", "<integer>10</integer>", 1)
+	viejo = strings.Replace(viejo, "<key>ProcessType</key>\n  <string>Adaptive</string>\n", "", 1)
+	if viejo == nuevo {
+		t.Fatal("the test did not alter the plist")
+	}
+	if err := os.WriteFile(a.plist, []byte(viejo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := escribirPlist(a, nuevo); err != nil || !ok {
+		t.Fatalf("known keys must migrate: %v %v", ok, err)
+	}
+	if b, _ := os.ReadFile(a.plist); string(b) != nuevo {
+		t.Error("not migrated")
+	}
+	ajustado := strings.Replace(nuevo, "<true/>", "<false/>", 1)
+	if err := os.WriteFile(a.plist, []byte(ajustado), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := escribirPlist(a, nuevo); !errors.Is(err, errPlistDistinto) {
+		t.Fatalf("a hand-edited plist must be left alone: %v", err)
 	}
 }
