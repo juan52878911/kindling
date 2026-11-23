@@ -106,13 +106,19 @@ func waitReadyAddr(ctx context.Context, addr string, timeout time.Duration) erro
 // pregunta al daemon con probe_only, que mira dentro del invitado. En Linux,
 // el dial directo de siempre, que es submilisegundo.
 func (g *Scheduler) esperarListo(ctx context.Context, mc *api.Machine, timeout time.Duration) error {
+	return g.esperarListoEn(ctx, mc, g.port(), timeout)
+}
+
+// esperarListoEn es esperarListo sobre el puerto port del invitado (el de
+// PortFor para el servicio).
+func (g *Scheduler) esperarListoEn(ctx context.Context, mc *api.Machine, port int, timeout time.Duration) error {
 	if len(mc.Forwards) > 0 && g.client != nil {
 		_, err := g.client.Guest(ctx, mc.ID, api.GuestRequest{
-			Port: g.port(), ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
+			Port: port, ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
 		})
 		return err
 	}
-	return waitReadyAddr(ctx, mc.Addr(g.port()), timeout)
+	return waitReadyAddr(ctx, mc.Addr(port), timeout)
 }
 
 // Scheduler mantiene instancias calientes por servicio: las despierta al llegar
@@ -384,6 +390,10 @@ type entry struct {
 
 	// memMiB es la memoria configurada de la máquina: el coste de pausarla.
 	memMiB int
+
+	// port es el puerto del invitado de su servicio (PortFor) con que se
+	// sondeó y al que apunta proxy; 0 = g.port() (ver puertoDe).
+	port int
 
 	// aislada es la clave de la sesión dueña de esta instancia cuando es la
 	// microVM propia de una sesión aislada (ver aislada.go); vacía en el resto.
@@ -868,7 +878,7 @@ func (g *Scheduler) bind(sid, guestSID, service string, e *entry) error {
 		service: service, guestSID: guestSID, machineID: e.machineID, ip: e.ip, fwd: e.fwd,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
-	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(g.port()))
+	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(g.puertoDe(e)))
 	return nil
 }
 
@@ -1139,8 +1149,25 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 	// sondeo sería una vuelta más (0,2 ms de 2) para nada. Si por lo que sea
 	// no contestara, la primera petición falla al conectar y postGuest/el
 	// proxy ya reintentan con otra.
+	//
+	// Con ReadyFor, tras restaurar o adoptar no basta con que el puerto
+	// acepte: un servidor que lo abre antes de cargar pasaría el dial y la
+	// primera petición recibiría el error (R8-08). El plazo de la sonda acota
+	// las dos esperas; al adoptar, con el candado del servicio tomado, se
+	// recorta a adoptReadyTimeout.
+	port := g.portFor(service)
 	if how != "resume" {
-		if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
+		sonda := g.readyFor(service)
+		if how != "restore" && how != "adopt" {
+			sonda = nil
+		}
+		espera := plazoListo(sonda, how)
+		hasta := time.Now().Add(espera)
+		err := g.esperarListoEn(ctx, mc, port, espera)
+		if err == nil && sonda != nil {
+			err = esperarSonda(ctx, mc.Addr(port), sonda, hasta)
+		}
+		if err != nil {
 			g.soltarSinEscuchar(ctx, service, mc.ID, how)
 			return nil, fmt.Errorf("tool did not start listening: %w", err)
 		}
@@ -1162,7 +1189,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		g.OnWake(service, tr)
 	}
 
-	target, _ := url.Parse("http://" + mc.Addr(g.port()))
+	target, _ := url.Parse("http://" + mc.Addr(port))
 	e := &entry{
 		machineID:   mc.ID,
 		ip:          mc.IP,
@@ -1173,6 +1200,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		tenant:      tnt.name,   // quien la despertó es su dueño para cuota y fairness
 		maxSessions: gwMaxSessions(mc.MemMiB),
 		memMiB:      mc.MemMiB,
+		port:        port,
 		proxy:       proxyInvitado(target),
 	}
 	e.wake.Store(tr)
@@ -1204,7 +1232,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
 		// reintentar: la respuesta distingue dos situaciones muy distintas —el
 		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
-		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(g.port()), 3*time.Second) == nil
+		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(g.puertoDe(e)), 3*time.Second) == nil
 
 		if vivo && !retried(r) && r.GetBody != nil {
 			body, berr := r.GetBody()
@@ -2470,7 +2498,7 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		apartadas[v.id] = apartada{service: v.service, e: e, l: l}
 		// La dirección se resuelve antes de quitarla del mapa: después ya no
 		// queda la entrada de la que sacarla.
-		addr := e.Addr(g.port())
+		addr := e.Addr(g.puertoDe(e))
 		g.removeEntryLocked(v.service, v.id)
 		g.mu.Unlock()
 		// Antes de dormirla, con el invitado aún corriendo: así el cierre de
@@ -2644,7 +2672,7 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			g.adquiriendo = map[string]bool{}
 		}
 		g.adquiriendo[id] = true
-		addr := victima.Addr(g.port())
+		addr := victima.Addr(g.puertoDe(victima))
 		g.removeEntryLocked(elegido, id)
 		g.mu.Unlock()
 

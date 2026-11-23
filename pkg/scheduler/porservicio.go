@@ -1,6 +1,13 @@
 package scheduler
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
 
 // Este fichero es la SEMILLA de la ronda 8 (analisis/ronda8-ia/plan.md §2):
 // solo declaraciones, cero comportamiento. Su dueño es Z3 (planificador por
@@ -68,4 +75,125 @@ type PorServicio struct {
 	// gateway de IA suelta ahí sus conexiones y su estado por réplica. Se
 	// llama una vez por instancia y con g.mu suelto.
 	OnForget func(service, addr string)
+}
+
+// adoptReadyTimeout es el plazo de la sonda de una máquina ADOPTADA (ya
+// corría) cuando el servicio tiene ReadyFor. La adopción de la primaria se
+// hace con el candado del servicio tomado: esperar el plazo entero dejaba en
+// fila hasta 20 s a todas las peticiones de ese servicio (R8-08). Una máquina
+// que ya corría o contesta enseguida o no está para atender.
+const adoptReadyTimeout = 2 * time.Second
+
+// portFor es el puerto del invitado del servicio: el de PortFor si lo da, si
+// no Port (o GuestPort). Con g.mu suelto.
+func (g *Scheduler) portFor(service string) int {
+	if g.PortFor != nil {
+		if p := g.PortFor(service); p > 0 {
+			return p
+		}
+	}
+	return g.port()
+}
+
+// puertoDe es el puerto del invitado de la instancia e: el que se fijó al
+// crearla, o g.port() si no se fijó (entradas hechas a mano en los tests).
+func (g *Scheduler) puertoDe(e *entry) int {
+	if e.port > 0 {
+		return e.port
+	}
+	return g.port()
+}
+
+// readyFor es la sonda HTTP del servicio, o nil si no la hay (sin gancho, el
+// gancho da nil o Path vacío): entonces basta el dial TCP de siempre. Con g.mu
+// suelto.
+func (g *Scheduler) readyFor(service string) *Probe {
+	if g.ReadyFor == nil {
+		return nil
+	}
+	p := g.ReadyFor(service)
+	if p == nil || p.Path == "" {
+		return nil
+	}
+	return p
+}
+
+// plazoListo es cuánto se espera a que una instancia conseguida de la forma
+// how quede lista: readyTimeout sin sonda; con ella, su Timeout (si lo da),
+// recortado a adoptReadyTimeout al adoptar.
+func plazoListo(sonda *Probe, how string) time.Duration {
+	if sonda == nil {
+		return readyTimeout
+	}
+	espera := readyTimeout
+	if sonda.Timeout > 0 {
+		espera = sonda.Timeout
+	}
+	if how == "adopt" && espera > adoptReadyTimeout {
+		espera = adoptReadyTimeout
+	}
+	return espera
+}
+
+// clienteSonda hace las sondas de disponibilidad: sin redirecciones (el
+// código que cuenta es el del invitado) ni conexiones que se queden abiertas
+// hacia una instancia que quizá se descarta.
+var clienteSonda = &http.Client{
+	Transport: &http.Transport{DisableKeepAlives: true},
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// esperarSonda repite GET p.Path contra addr hasta que contesta p.Expect (200
+// si es 0) o vence hasta. Cada intento va acotado a lo que quede del plazo y
+// a un segundo como mucho, para que un invitado que acepta y no contesta no
+// se coma el plazo de una vez.
+func esperarSonda(ctx context.Context, addr string, p *Probe, hasta time.Time) error {
+	want := p.Expect
+	if want == 0 {
+		want = http.StatusOK
+	}
+	path := p.Path
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	url := "http://" + addr + path
+	var last error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		resto := time.Until(hasta)
+		if resto <= 0 {
+			if last == nil {
+				last = context.DeadlineExceeded
+			}
+			return fmt.Errorf("readiness probe %s: %w", path, last)
+		}
+		intento := min(resto, time.Second)
+		rctx, cancel := context.WithTimeout(ctx, intento)
+		req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
+		if err != nil {
+			cancel()
+			return err
+		}
+		resp, err := clienteSonda.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+			resp.Body.Close()
+			if resp.StatusCode == want {
+				cancel()
+				return nil
+			}
+			err = fmt.Errorf("got %d, want %d", resp.StatusCode, want)
+		}
+		cancel()
+		last = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(50*time.Millisecond, max(time.Until(hasta), 0))):
+		}
+	}
 }
