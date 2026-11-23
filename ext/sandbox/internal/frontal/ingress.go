@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,12 @@ import (
 // LabelPublico lista los puertos públicos del sandbox como "puerto:caducidad
 // unix,...". Va en el espacio reservado: el cliente no la ve ni la pone.
 const LabelPublico = "kling.sandbox.public"
+
+// LabelRevocados lista, como "puerto:µs unix,...", cuándo se revocó cada
+// puerto: los tokens de endpoint de ese puerto emitidos antes ya no valen. Es
+// reservada como LabelPublico, y una entrada se descarta pasado el máximo de
+// vida de un token (no puede quedar ninguno anterior).
+const LabelRevocados = "kling.sandbox.revoked"
 
 const (
 	cookieEndpoint   = "kling_ep"
@@ -164,6 +171,9 @@ type cargaEndpoint struct {
 	ID     string `json:"s"`
 	Puerto int    `json:"p"`
 	Exp    int64  `json:"e"`
+	// Iat es cuándo se emitió (µs unix): un token anterior a la revocación de
+	// su puerto (LabelRevocados) ya no vale.
+	Iat int64 `json:"i,omitempty"`
 }
 
 func (g *ingreso) firmar(c cargaEndpoint) string {
@@ -262,7 +272,7 @@ func (s *Servidor) handleEndpoint(w http.ResponseWriter, r *http.Request, id str
 		}
 		g.olvidar(id)
 	} else {
-		out.Token = g.firmar(cargaEndpoint{Tenant: t.Nombre, ID: id, Puerto: pet.Port, Exp: exp.Unix()})
+		out.Token = g.firmar(cargaEndpoint{Tenant: t.Nombre, ID: id, Puerto: pet.Port, Exp: exp.Unix(), Iat: time.Now().UnixMicro()})
 	}
 	writeJSON(w, http.StatusCreated, out)
 }
@@ -289,6 +299,115 @@ func publicosDe(etiqueta string, ahora time.Time) map[int]int64 {
 		}
 	}
 	return m
+}
+
+// revocadosDe lee LabelRevocados sin las entradas ya inútiles.
+func revocadosDe(etiqueta string, ahora time.Time) map[int]int64 {
+	m := map[int]int64{}
+	limite := ahora.Add(-ttlEndpointMax).UnixMicro()
+	for _, par := range strings.Split(etiqueta, ",") {
+		p, e, ok := strings.Cut(par, ":")
+		n, err1 := strconv.Atoi(p)
+		x, err2 := strconv.ParseInt(e, 10, 64)
+		if ok && err1 == nil && err2 == nil && x > limite {
+			m[n] = x
+		}
+	}
+	return m
+}
+
+func revocadosCon(actual string, puerto int, ahora time.Time) string {
+	m := revocadosDe(actual, ahora)
+	m[puerto] = ahora.UnixMicro()
+	var l []string
+	for p, e := range m {
+		l = append(l, strconv.Itoa(p)+":"+strconv.FormatInt(e, 10))
+	}
+	sort.Strings(l)
+	return strings.Join(l, ",")
+}
+
+// despachaEndpoints atiende /v1/sandboxes/{id}/endpoints[/{port}].
+func (s *Servidor) despachaEndpoints(w http.ResponseWriter, r *http.Request, id string, resto []string) {
+	switch {
+	case len(resto) == 0 && r.Method == http.MethodPost:
+		s.handleEndpoint(w, r, id)
+	case len(resto) == 0 && r.Method == http.MethodGet:
+		s.handleEndpoints(w, r, id)
+	case len(resto) == 1 && r.Method == http.MethodDelete:
+		s.handleEndpointRevocar(w, r, id, resto[0])
+	case len(resto) <= 1:
+		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
+	default:
+		noRuta(w, r)
+	}
+}
+
+// handleEndpoints sirve GET .../endpoints: los endpoints PÚBLICOS vigentes. Los
+// de token no se listan: no hay estado donde guardarlos (son tokens firmados);
+// se revocan por puerto igualmente.
+func (s *Servidor) handleEndpoints(w http.ResponseWriter, r *http.Request, id string) {
+	g := s.ingreso
+	if g == nil {
+		fail(w, http.StatusNotImplemented, errors.New("port ingress is not configured on this gateway (start it with -ingress-domain)"))
+		return
+	}
+	_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+	if err != nil {
+		fail(w, codigoBuscar(err), err)
+		return
+	}
+	out := []Endpoint{}
+	for p, exp := range publicosDe(mc.Labels[LabelPublico], time.Now()) {
+		out = append(out, Endpoint{
+			URL:  g.o.Esquema + "://" + strconv.Itoa(p) + "-" + hosts.IDaDNS(id) + g.sufijo + "/",
+			Port: p, Public: true, ExpiresAt: time.Unix(exp, 0).UTC(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleEndpointRevocar sirve DELETE .../endpoints/{port}: quita el puerto de
+// los públicos y revoca los tokens de endpoint de ese puerto emitidos hasta
+// ahora. Los emitidos después valen.
+func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request, id, puerto string) {
+	g := s.ingreso
+	if g == nil {
+		fail(w, http.StatusNotImplemented, errors.New("port ingress is not configured on this gateway (start it with -ingress-domain)"))
+		return
+	}
+	p, err := strconv.Atoi(puerto)
+	if err == nil {
+		err = api.PortPublish{Guest: p}.Validate()
+	}
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid port %q", puerto))
+		return
+	}
+	h, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+	if err != nil {
+		fail(w, codigoBuscar(err), err)
+		return
+	}
+	ahora := time.Now()
+	pub := publicosDe(mc.Labels[LabelPublico], ahora)
+	delete(pub, p)
+	var l []string
+	for q, e := range pub {
+		l = append(l, strconv.Itoa(q)+":"+strconv.FormatInt(e, 10))
+	}
+	sort.Strings(l)
+	err = h.Cliente.SetLabels(r.Context(), mc.ID, map[string]string{
+		LabelPublico:   strings.Join(l, ","),
+		LabelRevocados: revocadosCon(mc.Labels[LabelRevocados], p, ahora),
+	})
+	if err != nil {
+		fail(w, http.StatusBadGateway, deHost(h, err))
+		return
+	}
+	g.olvidar(id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- servir
@@ -453,6 +572,9 @@ func (g *ingreso) autorizar(mc *api.Machine, id string, puerto int, tok string) 
 	if dueno == "" {
 		c, ok := g.verificar(tok)
 		if !ok || c.ID != id || c.Puerto != puerto {
+			return no()
+		}
+		if rev, ok := revocadosDe(mc.Labels[LabelRevocados], time.Now())[puerto]; ok && c.Iat <= rev {
 			return no()
 		}
 		dueno = c.Tenant

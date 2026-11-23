@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -170,6 +171,23 @@ func (s *Servidor) handleFiles(w http.ResponseWriter, r *http.Request, id string
 			writeJSON(w, http.StatusOK, ls)
 			return
 		}
+		if q.Get("tar") == "1" {
+			rc, err := cl.ReadTar(r.Context(), mc.ID, path)
+			if err != nil {
+				fail(w, http.StatusBadGateway, deHost(h, err))
+				return
+			}
+			defer rc.Close()
+			w.Header().Set("Content-Type", "application/x-tar")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.Copy(w, rc)
+			return
+		}
+		if rango := r.Header.Get("Range"); strings.HasPrefix(rango, "bytes=") {
+			if servido := s.descargaConRango(w, r, h, mc.ID, path, rango); servido {
+				return
+			}
+		}
 		rc, err := cl.ReadFile(r.Context(), mc.ID, path)
 		if err != nil {
 			fail(w, http.StatusBadGateway, err)
@@ -177,12 +195,29 @@ func (s *Servidor) handleFiles(w http.ResponseWriter, r *http.Request, id string
 		}
 		defer rc.Close()
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 		// Tope también aquí: el daemon ya lo aplica, pero el frontal no debe
 		// depender de que sea así.
 		_, _ = io.Copy(w, io.LimitReader(rc, api.FileMaxDownload))
 
 	case http.MethodPut:
+		if q.Get("tar") == "1" {
+			// Extrae el tar dentro del directorio path (lo valida el invitado).
+			res, err := cl.WriteTar(r.Context(), mc.ID, path, q.Get("mkdir") == "1",
+				&lectorAcotado{r: r.Body, quedan: api.FileMaxUpload})
+			if err != nil {
+				var ea *errAcotado
+				if errors.As(err, &ea) {
+					fail(w, http.StatusRequestEntityTooLarge, err)
+					return
+				}
+				fail(w, http.StatusBadGateway, deHost(h, err))
+				return
+			}
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
 		// No se trunca en silencio: si el cuerpo pasa del tope sin haber
 		// anunciado Content-Length, el lector falla y la subida falla con él.
 		st, err := cl.WriteFile(r.Context(), mc.ID, path, uint32(modo), q.Get("mkdir") == "1",

@@ -83,12 +83,46 @@ paths:
       description: |
         Un host caído no oculta los demás: se devuelve lo que hay y la cabecera
         `X-Kindling-Partial` lista los fallos.
+
+        Sin parámetros devuelve la lista entera. `state` y `label` filtran
+        (todas las etiquetas dadas deben casar); con `limit` la respuesta es
+        una página ordenada por id y, si hay más, `X-Kindling-Next-Cursor`
+        trae el `cursor` de la siguiente.
+      parameters:
+        - name: state
+          in: query
+          description: Solo los sandboxes en este estado (created, running, frozen, paused, stopped, failed)
+          schema:
+            type: string
+        - name: label
+          in: query
+          description: "`clave=valor`; se puede repetir"
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - name: limit
+          in: query
+          description: Tamaño de página (1-1000)
+          schema:
+            type: integer
+        - name: cursor
+          in: query
+          description: El `X-Kindling-Next-Cursor` de la página anterior
+          schema:
+            type: string
       responses:
         "200":
           description: Lista (puede ir vacía)
           headers:
             X-Kindling-Partial:
               description: Errores de los hosts que no contestaron
+              schema:
+                type: string
+            X-Kindling-Next-Cursor:
+              description: Cursor de la página siguiente; ausente en la última
               schema:
                 type: string
           content:
@@ -316,6 +350,53 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "422":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [sandboxes]
+      summary: Lista los endpoints públicos vigentes
+      description: |
+        Solo los públicos: los de token no tienen estado en el gateway (son
+        tokens firmados), así que no se pueden listar; sí revocar por puerto.
+      responses:
+        "200":
+          description: Endpoints públicos (puede ir vacía)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Endpoint"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/endpoints/{port}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: port
+        in: path
+        required: true
+        schema:
+          type: integer
+    delete:
+      tags: [sandboxes]
+      summary: Revoca los endpoints de un puerto
+      description: |
+        Quita el puerto de los públicos y revoca los tokens de endpoint de ese
+        puerto emitidos hasta ahora (una lista de revocaciones por sandbox, en
+        una etiqueta interna). Los tokens que se emitan después valen.
+      responses:
+        "204":
+          description: Revocado
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
           $ref: "#/components/responses/Error"
         "501":
           $ref: "#/components/responses/Error"
@@ -851,9 +932,19 @@ paths:
           schema:
             type: string
             enum: ["1"]
+        - name: tar
+          in: query
+          description: "`1` para descargar el directorio `path` como tar"
+          schema:
+            type: string
+            enum: ["1"]
       responses:
         "200":
-          description: Contenido (se corta en 256 MiB), FileStat o FileList
+          description: |
+            Contenido (se corta en 256 MiB), FileStat o FileList. Con la
+            cabecera `Range: bytes=a-b` (un solo rango) devuelve el trozo
+            con 206 y `Content-Range`; fuera del fichero, 416. `?tar=1`
+            devuelve el directorio como tar.
           content:
             application/octet-stream:
               schema:
@@ -885,6 +976,15 @@ paths:
         - name: mkdir
           in: query
           description: "`1` crea los directorios que falten"
+          schema:
+            type: string
+            enum: ["1"]
+        - name: tar
+          in: query
+          description: |
+            `1`: el cuerpo es un tar que se extrae dentro del directorio
+            `path`; responde un TarResult. El invitado rechaza entradas con
+            `..`, absolutas, enlaces que salen o dispositivos.
           schema:
             type: string
             enum: ["1"]
@@ -926,6 +1026,94 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "502":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/files/move:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Mueve o renombra un fichero o directorio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoverPeticion"
+      responses:
+        "200":
+          description: Movido (devuelve la petición)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoverPeticion"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/files/mkdir:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [sandboxes]
+      summary: Crea un directorio (y los que falten, como `mkdir -p`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MkdirPeticion"
+      responses:
+        "201":
+          description: Directorio creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileStat"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{id}/files/search:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - name: path
+        in: query
+        required: true
+        description: Directorio absoluto donde buscar, recursivo
+        schema:
+          type: string
+      - name: glob
+        in: query
+        required: true
+        description: Patrón del NOMBRE del fichero (`*.log`); no puede llevar `/`
+        schema:
+          type: string
+    get:
+      tags: [sandboxes]
+      summary: Busca ficheros por nombre
+      description: |
+        Corre `find` dentro del sandbox con un plazo de 20 s, 1 MiB de salida
+        y 1000 resultados; si algo se corta, `truncated` es true.
+      responses:
+        "200":
+          description: Rutas que casan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusquedaFicheros"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
           $ref: "#/components/responses/Error"
   /v1/volumes:
     get:
@@ -1354,7 +1542,40 @@ components:
           type: string
         code:
           type: string
-          description: Código estable (bad_request, unauthorized, forbidden, not_found, conflict...); puede faltar
+          description: |
+            Código estable, siempre presente: el del daemon si lo trae
+            (no_claimable, machine_limit, name_taken...) y, si no, el del
+            estado HTTP (bad_request, unauthorized, forbidden, not_found,
+            method_not_allowed, conflict, too_many_requests, bad_gateway...).
+            En los flujos NDJSON, un fallo tras el 200 sale como evento
+            `error` sin datos internos del host.
+    MoverPeticion:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+    MkdirPeticion:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+    BusquedaFicheros:
+      type: object
+      properties:
+        path:
+          type: string
+        glob:
+          type: string
+        matches:
+          type: array
+          items:
+            type: string
+        truncated:
+          type: boolean
     Health:
       type: object
       properties:
@@ -1496,6 +1717,14 @@ components:
           type: object
           additionalProperties:
             type: string
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Variables de entorno (hasta 64, 32 KiB). Se guardan como la sesión
+            `default` del sandbox (caduca a las 24 h de inactividad): un exec con
+            `session: default` las ve. No admitido junto con `count`.
         count:
           type: integer
           minimum: 1
