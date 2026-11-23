@@ -410,7 +410,9 @@ func (a *app) roleRemove(ctx context.Context, ref, owner, name string) error {
 // lo crea este comando: lo crearon las migraciones). Clave nueva generada aquí
 // (al invitado, solo su verificador), LOGIN, y su línea de pg_hba.conf. Un
 // superusuario no: por red solo entran roles sin poderes de administración.
-// No le cambia ni un privilegio. Las copias que nacen de esta heredan el
+// No le cambia ni un privilegio, pero sí la clave: la que tuviera (con la que
+// entre la aplicación de dentro) se guarda aquí y -rm se la devuelve, igual
+// que el LOGIN. Las copias que nacen de esta heredan el
 // verificador SCRAM y el LOGIN (están en pg_authid, dentro del disco), pero
 // no la línea de pg_hba.conf (purgeInheritedRoles la quita), así que no entran
 // por red; la clave en claro solo la guarda este host, para esta copia.
@@ -436,7 +438,11 @@ func (a *app) roleLogin(ctx context.Context, ref, owner, name string) error {
 	if lastLine(super) == "t" {
 		return fmt.Errorf("role %s is a superuser (or replication role): it only gets in through the local socket, never from the host", name)
 	}
-	prev, err := a.roleLoginBefore(ctx, mc.ID, name)
+	// Un -login repetido guarda lo de antes del primero, no la clave del host.
+	prev, err := dbstate.ReadRoleLogin(mc.ID, name)
+	if dbstate.IsNotExist(err) {
+		prev, err = a.roleLoginBefore(ctx, mc.ID, name)
+	}
 	if err != nil {
 		return err
 	}
@@ -519,25 +525,35 @@ func (a *app) roleLoginRemove(ctx context.Context, ref, owner, name string) erro
 // ISO 8601, que ::timestamptz lee igual sea cual sea el DateStyle.
 var sincePattern = lazyre.New(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$`)
 
-// roleLoginBefore lee cómo está el rol antes de -login: si tiene LOGIN, y la
-// hora del invitado (desde la que contar las sesiones de la clave nueva).
+// storedVerifierPattern es una clave tal como la guarda pg_authid y se le
+// puede devolver con ALTER ROLE ... PASSWORD '<verificador>' (Postgres no la
+// vuelve a cifrar): SCRAM-SHA-256 o md5. Sin comillas ni nada que escapar.
+var storedVerifierPattern = lazyre.New(`^(SCRAM-SHA-256\$[0-9]{1,7}:[A-Za-z0-9+/=]{1,128}\$[A-Za-z0-9+/=]{1,128}:[A-Za-z0-9+/=]{1,128}|md5[0-9a-f]{32})$`)
+
+// roleLoginBefore lee cómo está el rol antes de -login: si tiene LOGIN, su
+// clave y la hora del invitado (desde la que contar las sesiones de la nueva).
+// Una clave que no se sabría devolver tal cual se niega: -login la perdería.
 func (a *app) roleLoginBefore(ctx context.Context, id, name string) (dbstate.RoleLogin, error) {
 	var st dbstate.RoleLogin
 	out, err := a.sqlSuper(ctx, id, fmt.Sprintf(
-		"SELECT CASE WHEN rolcanlogin THEN 't' ELSE 'f' END || '|' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM pg_authid WHERE rolname = '%s';\n", name),
+		"SELECT CASE WHEN rolcanlogin THEN 't' ELSE 'f' END || '|' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') || '|' || coalesce(rolpassword, '') FROM pg_authid WHERE rolname = '%s';\n", name),
 		"reading the role")
 	if err != nil {
 		return st, err
 	}
-	login, since, ok := strings.Cut(lastLine(out), "|")
-	if !ok || (login != "t" && login != "f") || !sincePattern.MatchString(since) {
+	f := strings.SplitN(lastLine(out), "|", 3)
+	if len(f) != 3 || (f[0] != "t" && f[0] != "f") || !sincePattern.MatchString(f[1]) {
 		return st, errors.New("reading the role: unexpected answer")
 	}
-	return dbstate.RoleLogin{CanLogin: login == "t", Since: since}, nil
+	if f[2] != "" && !storedVerifierPattern.MatchString(f[2]) {
+		return st, fmt.Errorf("role %s has a password stored in a form kling db cannot give back: not replacing it", name)
+	}
+	return dbstate.RoleLogin{CanLogin: f[0] == "t", Since: f[1], Verifier: f[2]}, nil
 }
 
 // revokeLogin quita lo que dio -login: la línea de pg_hba.conf (y recarga),
-// la clave del rol (PASSWORD NULL) y su LOGIN si antes no lo tenía, y corta
+// la clave del host (el rol recupera la que tenía, o se queda sin ninguna) y
+// su LOGIN si antes no lo tenía, y corta
 // las sesiones abiertas por red desde -login, que son las de esa clave. Sin
 // prev (un -login de una versión anterior) se quita la clave, el LOGIN se
 // deja y se cortan todas sus sesiones por red. Lo intenta todo aunque algo
@@ -563,14 +579,19 @@ func (a *app) revokeLogin(ctx context.Context, id, db, name string, prev *dbstat
 }
 
 // revokeLoginSQL es lo que revokeLogin manda al rol. name pasó
-// roleNamePattern y prev.Since sincePattern: nada que escapar.
+// roleNamePattern, prev.Since sincePattern y prev.Verifier
+// storedVerifierPattern: nada que escapar.
 func revokeLoginSQL(name string, prev *dbstate.RoleLogin) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "ALTER ROLE %s", qIdent(name))
 	if prev != nil {
 		b.WriteString(map[bool]string{true: " LOGIN", false: " NOLOGIN"}[prev.CanLogin])
 	}
-	b.WriteString(" PASSWORD NULL;\n")
+	if prev != nil && storedVerifierPattern.MatchString(prev.Verifier) {
+		fmt.Fprintf(&b, " PASSWORD '%s';\n", prev.Verifier)
+	} else {
+		b.WriteString(" PASSWORD NULL;\n")
+	}
 	fmt.Fprintf(&b, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = '%s' AND client_addr IS NOT NULL", name)
 	if prev != nil && sincePattern.MatchString(prev.Since) {
 		fmt.Fprintf(&b, " AND backend_start >= '%s'::timestamptz", prev.Since)

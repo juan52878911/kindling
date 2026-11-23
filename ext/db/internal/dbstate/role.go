@@ -117,9 +117,11 @@ func RemoveRolePassword(id, role string) error {
 // diera LOGIN y una clave de este host: lo que hay que devolverle al quitarlo
 // (o si -login falla a medias). Since es la hora del invitado al darle la
 // clave: las sesiones abiertas desde entonces por red son las de esa clave.
+// Verifier es el verificador que tenía (vacío si no tenía clave).
 type RoleLogin struct {
 	CanLogin bool   `json:"can_login"`
 	Since    string `json:"since"`
+	Verifier string `json:"verifier,omitempty"`
 }
 
 // RoleLoginPath es el fichero del estado previo del rol: <rol>.login.
