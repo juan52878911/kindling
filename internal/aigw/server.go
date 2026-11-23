@@ -24,17 +24,37 @@ import (
 // de un origen de loopback (scheduler.SoloLoopback), porque escuchar en
 // loopback no basta frente a una página abierta en el navegador. En el socket
 // Unix no hace falta, y el Host que mandan los clientes no es de loopback.
+//
+// En el socket Unix sin token, el modo sin autenticación del arranque se
+// conserva para el dueño del socket aunque un reload traiga inquilinos: una
+// petición sin Authorization entra como el dueño (lo protege el permiso del
+// socket), y una con token se comprueba contra los inquilinos como siempre.
 func (g *Gateway) ServeHandler(token string, tcp bool) http.Handler {
-	h := g.Handler(token)
-	if tcp && g.sched.AuthDisabled(token) {
+	rutas := g.rutas()
+	h := g.sched.AuthHandler(rutas, token)
+	if !g.sched.AuthDisabled(token) {
+		return h
+	}
+	if tcp {
 		return scheduler.SoloLoopback(h)
 	}
-	return h
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			rutas.ServeHTTP(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Handler expone la API. token vacío y sin tenants = sin autenticación, que
 // solo es aceptable en el socket Unix (lo decide `kling ai serve`).
 func (g *Gateway) Handler(token string) http.Handler {
+	return g.sched.AuthHandler(g.rutas(), token)
+}
+
+// rutas es la API sin autenticación: las rutas con sus topes (limits).
+func (g *Gateway) rutas() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -61,7 +81,7 @@ func (g *Gateway) Handler(token string) http.Handler {
 	mux.HandleFunc("POST /v1/admin/retrain", g.admin(g.handleRetrain))
 	mux.HandleFunc("POST /v1/admin/promote", g.admin(g.handlePromote))
 	mux.HandleFunc("POST /v1/admin/rollback", g.admin(g.handleRollback))
-	return g.sched.AuthHandler(g.limits(mux), token)
+	return g.limits(mux)
 }
 
 // limits es lo que vale para todas las rutas: cuerpo acotado, ninguna ruta de
