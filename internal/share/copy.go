@@ -37,6 +37,9 @@ type CopyStats struct {
 	Symlinks int
 	// Blocks estima los bloques de 4 KiB que ocupará en un ext4.
 	Blocks int64
+	// RootTime es la fecha de la raíz del tar ("./"), si la traía; Extract no
+	// la aplica a dst.
+	RootTime time.Time
 }
 
 // Entries es el total de entradas.
@@ -89,9 +92,11 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 			if h.Typeflag != tar.TypeDir {
 				return st, errors.New("the archive root is not a directory")
 			}
-			if !h.ModTime.IsZero() {
-				dirTimes["."] = h.ModTime
-			}
+			// Su fecha no se pone en dst: es el temporal de la subida, y el
+			// recolector (internal/machine, gcUploads) decide por su mtime. Con
+			// la fecha original lo daría por abandonado a mitad de construir el
+			// ext4. Queda en RootTime para quien la quiera aplicar al final.
+			st.RootTime = h.ModTime
 			continue
 		}
 		if seen[name] {

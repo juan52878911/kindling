@@ -118,6 +118,40 @@ func TestTopeDeTamano(t *testing.T) {
 
 // Lo extraído conserva las fechas del tar: ficheros y directorios (estos,
 // aunque se creen cosas dentro de ellos después de nacer).
+// La fecha de la raíz del tar ("./") no se pone en dst. dst es el temporal de
+// la subida y su recolector decide por su mtime: con la fecha original (a
+// menudo de hace meses) lo daría por abandonado mientras aún se construye el
+// ext4 con él.
+func TestExtraeNoEnvejeceElDestino(t *testing.T) {
+	vieja := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range []*tar.Header{
+		{Name: "./", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: vieja},
+		{Name: "./f.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2, ModTime: vieja},
+	} {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Size > 0 {
+			tw.Write([]byte("hi"))
+		}
+	}
+	tw.Close()
+	dst := t.TempDir()
+	inicio := time.Now().Add(-time.Minute)
+	if _, err := Extract(&buf, dst, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.ModTime().Before(inicio) {
+		t.Fatalf("the destination got the archive root's mtime %v", fi.ModTime())
+	}
+}
+
 func TestExtraeConservaFechas(t *testing.T) {
 	antes := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
 	otra := time.Date(2019, 1, 2, 3, 4, 5, 0, time.UTC)

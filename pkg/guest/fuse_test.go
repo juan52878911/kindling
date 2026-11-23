@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -490,6 +491,41 @@ func TestFUSEOlvidos(t *testing.T) {
 	}
 	if e, _, _ := m.lookup(t, sub, "fa"); e != 0 {
 		t.Fatalf("lookup after eviction: %d", e)
+	}
+}
+
+// Expulsar un nodo con handles abiertos rompe esos fd para siempre: el
+// kernel no vuelve a buscar por nombre un fichero que ya tiene abierto, y
+// cada READ o WRITE da ESTALE. El tope solo puede expulsar nodos sin abrir.
+func TestFUSEExpulsarRespetaHandles(t *testing.T) {
+	dir := carpeta(t)
+	for i := 0; i < 40; i++ {
+		os.WriteFile(filepath.Join(dir, "sub", fmt.Sprintf("f%02d", i)), nil, 0o644)
+	}
+	m := montar(t, dir, true)
+	e, id, _ := m.lookup(t, rootID, "hello.txt")
+	if e != 0 {
+		t.Fatalf("lookup: %d", e)
+	}
+	e, fh := m.open(t, id, linuxORdonly)
+	if e != 0 {
+		t.Fatalf("open: %d", e)
+	}
+	e, sub, _ := m.lookup(t, rootID, "sub")
+	if e != 0 {
+		t.Fatalf("lookup sub: %d", e)
+	}
+
+	// El fichero abierto es la hoja más vieja: la primera candidata.
+	m.fs.nodes.max = 16
+	for i := 0; i < 40; i++ {
+		if e, _, _ := m.lookup(t, sub, fmt.Sprintf("f%02d", i)); e != 0 {
+			t.Fatalf("lookup f%02d: %d", i, e)
+		}
+	}
+	e, data := m.dev.pedir(t, opRead, id, readIn(fh, 0, 4096))
+	if e != 0 || string(data) != "hello from the host\n" {
+		t.Fatalf("read of an open file after the table filled up: errno %d %q", e, data)
 	}
 }
 

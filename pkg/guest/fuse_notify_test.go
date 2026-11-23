@@ -163,8 +163,8 @@ func TestAvisosDelHost(t *testing.T) {
 	}
 }
 
-// synthReply solo contesta las peticiones del hilo del notificador, y solo
-// las de la operación en curso.
+// synthReply solo da por hechas las peticiones de la operación en curso; las
+// demás mutadoras de su hilo se rechazan en local, sin llegar al host.
 func TestSynthReplySoloSuHilo(t *testing.T) {
 	dir := carpeta(t)
 	m := montar(t, dir, false)
@@ -175,8 +175,8 @@ func TestSynthReplySoloSuHilo(t *testing.T) {
 	n := m.fs.nodes.get(hello)
 	m.fs.syn = synthOp{ev: share.EventDelete, node: hello, parent: rootID, name: "hello.txt"}
 	req := fuseReq{opcode: opUnlink, unique: 9, nodeid: rootID, arg: cstr("otro.txt")}
-	if _, ok := m.fs.synthReply(req, m.fs.nodes.get(rootID)); ok {
-		t.Fatal("answered an unlink of another name")
+	if out, ok := m.fs.synthReply(req, m.fs.nodes.get(rootID)); !ok || int32(le.Uint32(out[4:])) != -int32(share.EPERM) {
+		t.Fatalf("an unlink of another name was not refused locally: ok=%v", ok)
 	}
 	req.arg = cstr("hello.txt")
 	out, ok := m.fs.synthReply(req, m.fs.nodes.get(rootID))
@@ -190,4 +190,90 @@ func TestSynthReplySoloSuHilo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "hello.txt")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// El toque sintético que dispara inotify no puede acabar cambiando el host.
+// Sobre un enlace simbólico, el stat/truncate del toque sigue el enlace y el
+// SETATTR llega con el nodo destino, que synthReply no reconocía: se mandaba
+// al host como un truncate de verdad (y lo escrito entre medias se perdía).
+func TestToqueSinteticoNoMutaElHost(t *testing.T) {
+	dir := carpeta(t)
+	if err := os.Symlink("hello.txt", filepath.Join(dir, "enlace")); err != nil {
+		t.Fatal(err)
+	}
+	m := montar(t, dir, false)
+	var mu sync.Mutex
+	var hechas []synthOp
+	m.fs.touchHost = func(op synthOp, full string) {
+		mu.Lock()
+		hechas = append(hechas, op)
+		mu.Unlock()
+	}
+	e, enlace, _ := m.lookup(t, rootID, "enlace")
+	if e != 0 {
+		t.Fatalf("lookup enlace: %d", e)
+	}
+	e, hello, _ := m.lookup(t, rootID, "hello.txt")
+	if e != 0 {
+		t.Fatalf("lookup hello: %d", e)
+	}
+
+	// Un Modify sobre algo que no es un fichero regular no se toca.
+	m.fs.apply(pushEvent{ev: share.EventModify, path: "enlace"})
+	mu.Lock()
+	if len(hechas) != 0 {
+		t.Errorf("touched a symlink: %+v", hechas)
+	}
+	mu.Unlock()
+
+	// Con un toque en curso, una petición mutadora de su hilo que no es la
+	// esperada (otro nodo) se contesta en local y no llega al host.
+	const tid = 4242
+	m.fs.synthTID.Store(tid)
+	m.fs.synMu.Lock()
+	m.fs.syn = synthOp{ev: share.EventModify, node: enlace, path: "enlace"}
+	m.fs.synMu.Unlock()
+	sa := make([]byte, 88)
+	le.PutUint32(sa[0:], fattrSize)
+	le.PutUint64(sa[16:], 0)
+	m.fs.handle(fuseReq{opcode: opSetattr, unique: 77, nodeid: hello, pid: tid, arg: sa})
+	m.fs.synMu.Lock()
+	m.fs.syn = synthOp{}
+	m.fs.synMu.Unlock()
+
+	b, err := os.ReadFile(filepath.Join(dir, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "hello from the host\n" {
+		t.Fatalf("the synthetic touch reached the host: content %q", b)
+	}
+}
+
+// Al volver una sesión (thaw, reinicio del daemon, corte), el vigilante del
+// host empieza vacío: lo que cambió mientras no había sesión no llegó como
+// aviso. Lo que el kernel tenga en caché larga se tiene que invalidar.
+func TestReconectarInvalidaLaCache(t *testing.T) {
+	dir := carpeta(t)
+	m := montar(t, dir, false)
+	m.stop()
+	m.stop = m.conectarConWatch(t)
+	m.fs.touchHost = func(synthOp, string) {}
+
+	e, hello, _ := m.lookup(t, rootID, "hello.txt")
+	if e != 0 {
+		t.Fatalf("lookup: %d", e)
+	}
+	// Vaciar lo que dejó la conexión anterior.
+	for len(m.dev.notas) > 0 {
+		<-m.dev.notas
+	}
+
+	// Corte y sesión nueva; entre medias el host cambia el fichero.
+	m.stop()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("changed while detached\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.stop = m.conectarConWatch(t)
+	esperarNota(t, m.dev, "reattach", func(n nota) bool { return n.code == notifyInvalInode && n.a == hello })
 }
