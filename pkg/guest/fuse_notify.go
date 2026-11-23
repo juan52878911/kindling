@@ -163,7 +163,9 @@ func (fs *fuseFS) apply(ev pushEvent) {
 			fs.notifyEntry(parent.id, name)
 		}
 		fs.notifyInode(child.id)
-		if !fs.readOnly {
+		// El toque solo sobre ficheros regulares: el de un enlace seguiría el
+		// enlace y la petición llegaría con otro nodo.
+		if !fs.readOnly && child.typ.Load() == share.SIFREG {
 			fs.synth(synthOp{ev: share.EventModify, node: child.id, path: ev.path}, full)
 		}
 	case share.EventCreate:
@@ -223,7 +225,41 @@ func (fs *fuseFS) synth(op synthOp, full string) {
 }
 
 // synthReply contesta, sin ir al host, las peticiones que provoca synth.
+//
+// Toda petición mutadora del hilo del notificador se queda aquí, la reconozca
+// synthOpReply o no: el toque existe solo para que inotify dispare, y si su
+// ruta acabó en otro nodo (un enlace, un nodo sustituido entre apply y el
+// toque) mandarla al host cambiaría datos de verdad.
 func (fs *fuseFS) synthReply(req fuseReq, n *node) ([]byte, bool) {
+	if out, ok := fs.synthOpReply(req, n); ok {
+		return out, true
+	}
+	if mutadora(req) {
+		return reply(req.unique, share.EPERM), true
+	}
+	return nil, false
+}
+
+// mutadora dice si una petición puede cambiar algo en el host. Un OPEN solo
+// si abre para escribir o trunca.
+func mutadora(req fuseReq) bool {
+	switch req.opcode {
+	case opSetattr, opSymlink, opMknod, opMkdir, opUnlink, opRmdir, opRename,
+		opRename2, opLink, opWrite, opCreate:
+		return true
+	case opOpen:
+		if len(req.arg) < 4 {
+			return true
+		}
+		f := le.Uint32(req.arg[0:])
+		return f&linuxOAccMode != linuxORdonly || f&linuxOTrunc != 0
+	}
+	return false
+}
+
+// synthOpReply contesta las peticiones que corresponden a la operación en
+// curso.
+func (fs *fuseFS) synthOpReply(req fuseReq, n *node) ([]byte, bool) {
 	fs.synMu.Lock()
 	op := fs.syn
 	fs.synMu.Unlock()

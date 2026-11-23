@@ -163,8 +163,8 @@ func TestAvisosDelHost(t *testing.T) {
 	}
 }
 
-// synthReply solo contesta las peticiones del hilo del notificador, y solo
-// las de la operación en curso.
+// synthReply solo da por hechas las peticiones de la operación en curso; las
+// demás mutadoras de su hilo se rechazan en local, sin llegar al host.
 func TestSynthReplySoloSuHilo(t *testing.T) {
 	dir := carpeta(t)
 	m := montar(t, dir, false)
@@ -175,8 +175,8 @@ func TestSynthReplySoloSuHilo(t *testing.T) {
 	n := m.fs.nodes.get(hello)
 	m.fs.syn = synthOp{ev: share.EventDelete, node: hello, parent: rootID, name: "hello.txt"}
 	req := fuseReq{opcode: opUnlink, unique: 9, nodeid: rootID, arg: cstr("otro.txt")}
-	if _, ok := m.fs.synthReply(req, m.fs.nodes.get(rootID)); ok {
-		t.Fatal("answered an unlink of another name")
+	if out, ok := m.fs.synthReply(req, m.fs.nodes.get(rootID)); !ok || int32(le.Uint32(out[4:])) != -int32(share.EPERM) {
+		t.Fatalf("an unlink of another name was not refused locally: ok=%v", ok)
 	}
 	req.arg = cstr("hello.txt")
 	out, ok := m.fs.synthReply(req, m.fs.nodes.get(rootID))
