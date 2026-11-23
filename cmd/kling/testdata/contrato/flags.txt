@@ -392,7 +392,12 @@ kling try:  -ttl
 kling up:  -H
 kling up:  -check
 kling up:  -install
+kling up:  -key
 kling up:  -root
+kling up:  -sig
+kling up:  -tag
+kling up:  -uninstall
+kling up:  -verify-sums
 kling upgrade:  -H
 kling upgrade:  -check
 kling upgrade:  -cli

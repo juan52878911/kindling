@@ -34,11 +34,16 @@ type section struct {
 // coreTree son los comandos del núcleo, en el orden en que salen.
 var coreTree = []section{
 	{title: "START HERE", cmds: []plugin.Command{
-		{Name: "up", Summary: "gets the runtime ready and starts the daemon", Usage: `  up [-check] [-root DIR] [-install]               gets the runtime ready: KVM,
+		{Name: "up", Summary: "gets the runtime ready and starts the daemon", Usage: `  up [-check] [-root DIR] [-install | -uninstall]  gets the runtime ready: KVM,
                                                    nftables, user, images, daemon
                                                    and extension units (-check: only
                                                    check; -install: macOS, start the
-                                                   daemon at login)
+                                                   daemon at login; Linux, write the
+                                                   systemd unit; -uninstall: macOS,
+                                                   remove the launchd agent)
+  up -verify-sums FILE -sig FILE -tag vX.Y.Z [-key K]
+                                                   checks a release's SHA256SUMS
+                                                   signature (what install.sh uses)
 `},
 		{Name: "upgrade", Summary: "replaces kling and the daemon with another release; rolls back if it fails", Usage: `  upgrade [-tag vX.Y.Z | -from-dir DIR]            downloads and verifies a release,
       [-dry-run|-check] [-force] [-unit NAME]      checks it reads the state, backs up,

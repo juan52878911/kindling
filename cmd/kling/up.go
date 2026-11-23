@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -36,6 +35,7 @@ import (
 	"github.com/juan52878911/kindling/internal/assets"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/internal/transport"
+	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -55,12 +55,34 @@ func cmdUp(args []string) error {
 	host := hostFlag(fs)
 	root := fs.String("root", os.Getenv("KLING_ROOT"), "daemon data directory (default: the platform's, /var/lib/kindling on Linux)")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
-	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it")
+	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it. Linux (as root): write the systemd unit")
+	uninstall := fs.Bool("uninstall", false, "macOS: stop the launchd agent and remove its plist (the daemon no longer starts at login)")
+	// Para install.sh: comprueba la firma de SHA256SUMS con este kling, sin minisign.
+	verifySums := fs.String("verify-sums", "", "check SHA256SUMS against its minisign signature (-sig) and release (-tag), then exit; for install.sh")
+	sig := fs.String("sig", "", "with -verify-sums: the SHA256SUMS.minisig file")
+	tag := fs.String("tag", "", "with -verify-sums: the release the signature must be for (vX.Y.Z)")
+	keys := fs.String("key", "", "with -verify-sums: the public keys to trust, separated by spaces (default: the ones built into this kling)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
-	if *install && (runtime.GOOS != "darwin" || *checkOnly) {
-		return errors.New("-install is for macOS (on Linux, kling up installs the systemd units) and doesn't go with -check")
+	if *verifySums != "" {
+		if *sig == "" || *tag == "" {
+			return errUso("-verify-sums needs -sig FILE and -tag vX.Y.Z")
+		}
+		return verificarSumas(*verifySums, *sig, *tag, *keys)
+	}
+	if *install && *checkOnly || *uninstall && (runtime.GOOS != "darwin" || *install || *checkOnly) {
+		return errUso("-uninstall is for macOS and doesn't go with -install or -check; -install doesn't go with -check")
+	}
+	if *install && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return errUso("-install is for macOS (launchd agent) and Linux (systemd unit)")
+	}
+	if *uninstall {
+		a, err := agenteDaemonMac()
+		if err != nil {
+			return err
+		}
+		return desinstalarAgente(a)
 	}
 
 	endpoint := loadConfig().Host(*host)
@@ -77,6 +99,11 @@ func cmdUp(args []string) error {
 		// En macOS el runtime es kling-vz, sin KVM.
 		return upMac(config.Or(*root, transport.DefaultRoot()), endpoint, *checkOnly, *install)
 	case hasKVM():
+		if *install {
+			if err := instalarUnidadSystemd(); err != nil {
+				return err
+			}
+		}
 		return upHere(config.Or(*root, transport.DefaultRoot()), *checkOnly)
 	default:
 		return explainNoRuntime()
@@ -665,11 +692,24 @@ func materialize(root string) error {
 			fmt.Printf("artifacts:   already in %s\n", dir)
 			return nil
 		}
-		fmt.Printf("artifacts:   this binary doesn't include them, and they're missing from %s\n", dir)
-		fmt.Printf("  Build the full daemon (`make daemon-full`) or get them by hand:\n")
-		fmt.Printf("    sudo ./scripts/30-fetch-artifacts.sh      # guest kernel\n")
-		fmt.Printf("    sudo ./scripts/70-build-minimal-image.sh  # 'min' base image\n")
-		fmt.Printf("    sudo install -m644 /opt/fc/vmlinux %s/vmlinux\n", dir)
+		// Un binario de release no lleva el kernel ni min dentro: se bajan de la
+		// release de esta versión, verificados contra su SHA256SUMS (lo mismo
+		// que en Mac).
+		ctx, cancel := ctxWithSignals()
+		err := bajarImagenesMac(ctx, &upgrade.Fuente{VersionPropia: Version}, "v"+strings.TrimPrefix(Version, "v"), root, runtime.GOARCH, os.Stdout)
+		cancel()
+		if err == nil && fileExists(filepath.Join(dir, "vmlinux")) && fileExists(filepath.Join(dir, "min.ext4")) {
+			return nil
+		}
+		if err != nil {
+			if os.IsPermission(err) {
+				return fmt.Errorf("can't write to %s: %w\nrun it again as root:  %s", dir, err, privilegedSelf("up", "-root", root))
+			}
+			fmt.Printf("artifacts:   not downloaded (%v)\n", err)
+		}
+		fmt.Printf("artifacts:   missing from %s\n", dir)
+		fmt.Printf("  Get them from the release of this version: https://github.com/juan52878911/kindling/releases\n")
+		fmt.Printf("    vmlinux-<arch>.zst and min-<arch>.ext4.zst  ->  %s/vmlinux and %s/min.ext4 (zstd -d)\n", dir, dir)
 		return nil
 	}
 
@@ -697,9 +737,9 @@ func materialize(root string) error {
 // startServices levanta daemon y gateway con systemd, si la unit está puesta.
 func startServices(p probe) error {
 	if !p.systemd || !p.unit {
-		fmt.Println("services:    no systemd units installed.")
-		fmt.Println("  Deploy them from this repo (installs binary, units, and token):")
-		fmt.Println("    make deploy HOST=ssh://user@this-host")
+		fmt.Println("services:    no systemd unit installed.")
+		fmt.Println("  Install and start it with this binary:")
+		fmt.Printf("    %s\n", privilegedSelf("up", "-install"))
 		fmt.Println()
 		fmt.Println("  Or start it by hand:")
 		fmt.Printf("    %s\n", privilegedSelf("daemon", "-root", p.root))

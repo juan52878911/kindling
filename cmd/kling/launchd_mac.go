@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -115,6 +116,13 @@ func plistDaemon(a agenteDaemon, exe string, env map[string]string) string {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- Sin esto, un daemon que muere al arrancar se relanza cada ~10 s para siempre. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <!-- Un servicio de fondo que atiende peticiones interactivas: Adaptive lo
+       trata como Background hasta que lo despierta una, y entonces lo sube. -->
+  <key>ProcessType</key>
+  <string>Adaptive</string>
   <!-- SIGTERM al pararlo: el daemon escribe su estado y sale. -->
   <key>ExitTimeOut</key>
   <integer>30</integer>
@@ -196,5 +204,65 @@ func instalarAgente(a agenteDaemon, root string) error {
 	default:
 		fmt.Printf("agent:       "+uiMarks().ok+" %s already installed\n", a.plist)
 	}
+	return nil
+}
+
+// maxLogAgente es lo que puede crecer el registro del agente antes de rotarlo.
+const maxLogAgente = 10 << 20
+
+// rotarLog aparta path a path.1 (pisando el que hubiera) si pasa de max
+// bytes. launchd no rota la salida del agente y el daemon la escribe para
+// siempre; solo se llama con el daemon parado, así que nadie tiene el fichero
+// abierto: launchd lo vuelve a crear al arrancar. Sin fichero no es un error.
+func rotarLog(path string, max int64) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Size() <= max {
+		return nil
+	}
+	return os.Rename(path, path+".1")
+}
+
+// lanzarctl ejecuta launchctl (args[0]) y devuelve su salida; en un test se
+// sustituye.
+var lanzarctl = func(args ...string) ([]byte, error) {
+	return exec.Command(args[0], args[1:]...).CombinedOutput()
+}
+
+// confirmarAgente pregunta si instalar el agente cuando `kling up` o `kling
+// try` encuentran el daemon parado y sin agente. Sin terminal no hay a quién
+// preguntar: no (y el error dice la orden).
+var confirmarAgente = func(a agenteDaemon) bool {
+	if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stderr.Fd()) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "kling needs its background daemon, and nothing starts it yet.\n"+
+		"Install the launchd agent %s so it starts at login? [Y/n] ", a.plist)
+	var r string
+	fmt.Fscanln(os.Stdin, &r)
+	r = strings.ToLower(strings.TrimSpace(r))
+	return r == "" || r == "y" || r == "yes"
+}
+
+// desinstalarAgente descarga el agente de launchd y borra su plist: lo
+// contrario de `kling up -install`. El registro se deja (puede explicar algo).
+func desinstalarAgente(a agenteDaemon) error {
+	if !fileExists(a.plist) {
+		fmt.Printf("agent:       not installed (%s does not exist)\n", a.plist)
+		return nil
+	}
+	if out, err := lanzarctl("launchctl", "bootout", a.dominio()+"/"+a.label); err != nil {
+		// No cargado es lo normal tras un reinicio sin sesión: se sigue.
+		fmt.Printf("agent:       launchctl bootout: %s (continuing)\n", strings.TrimSpace(string(out)))
+	}
+	if err := os.Remove(a.plist); err != nil {
+		return err
+	}
+	fmt.Printf("agent:       "+uiMarks().ok+" removed %s; the daemon no longer starts at login (log kept: %s)\n", a.plist, a.log)
 	return nil
 }

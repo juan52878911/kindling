@@ -33,6 +33,8 @@ type releaseFalsa struct {
 	minKling     string // min_kling del manifiesto de kling-mcp
 	klingPATH    string // si no vacío, un kling en el PATH que dice esta versión
 	conWget      bool   // sin curl en el PATH: baja con un wget falso
+	plat         string // si no vacío, la plataforma que dice un uname falso (darwin-arm64)
+	sinGuest     bool   // la release no publica kling-guest-linux-<arch>
 }
 
 type resultadoInstall struct {
@@ -42,8 +44,11 @@ type resultadoInstall struct {
 	plugins string
 }
 
-func plataformaInstall(t *testing.T) string {
+func plataformaInstall(t *testing.T, forzada string) string {
 	t.Helper()
+	if forzada != "" {
+		return forzada
+	}
 	var os_ string
 	switch runtime.GOOS {
 	case "linux", "darwin":
@@ -67,7 +72,7 @@ func sha256Hex(b []byte) string {
 // correrInstall monta la release falsa y corre install.sh con args.
 func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstall {
 	t.Helper()
-	plat := plataformaInstall(t)
+	plat := plataformaInstall(t, r.plat)
 	raiz := t.TempDir()
 	home := filepath.Join(raiz, "home")
 	falsos := filepath.Join(raiz, "bin")
@@ -85,12 +90,15 @@ func correrInstall(t *testing.T, r releaseFalsa, args ...string) resultadoInstal
 
 	// Los binarios de la release: scripts que dicen su versión.
 	binarios := map[string]string{
-		"kling-" + plat:        "#!/bin/sh\necho 'kling " + tagRel + "'\n",
+		"kling-" + plat:        klingFalso(tagRel),
 		"kling-mcp-" + plat:    "#!/bin/sh\n[ \"$1\" = --kling-manifest ] && echo '{\"name\":\"mcp\",\"min_kling\": \"" + r.minKling + "\"}'\nexit 0\n",
 		"kling-bridge-" + plat: "#!/bin/sh\nexit 0\n",
 	}
 	if plat == "darwin-arm64" {
 		binarios["kling-vz-darwin-arm64"] = "#!/bin/sh\nexit 0\n"
+		if !r.sinGuest {
+			binarios["kling-guest-linux-arm64"] = "#!/bin/sh\nexit 0\n"
+		}
 	}
 	var sums strings.Builder
 	for n, c := range binarios {
@@ -188,6 +196,16 @@ echo "Signature and comment signature verified"
 echo "Trusted comment: $(sed -n 2p "$x")"
 `, 0o755)
 	}
+	if r.plat != "" {
+		so, arq, _ := strings.Cut(r.plat, "-")
+		escribir(t, filepath.Join(falsos, "uname"), `#!/bin/sh
+case "$1" in
+    -s) echo `+strings.ToUpper(so[:1])+so[1:]+` ;;
+    -m) echo `+arq+` ;;
+    *) echo `+strings.ToUpper(so[:1])+so[1:]+` ;;
+esac
+`, 0o755)
+	}
 	if r.klingPATH != "" {
 		escribir(t, filepath.Join(falsos, "kling"), "#!/bin/sh\necho 'kling "+r.klingPATH+"'\n", 0o755)
 	}
@@ -269,13 +287,10 @@ func TestInstallRechazaYNoInstalaNada(t *testing.T) {
 		motivo string
 	}
 	casos := map[string]caso{
-		"firma de otra etiqueta": {releaseFalsa{tagFirmado: "v0.9.0"}, "no está firmado para " + tagInstall},
-		"sin SHA256SUMS.minisig": {releaseFalsa{sinFirma: true}, "no trae SHA256SUMS.minisig"},
-		"SHA256SUMS alterado":    {releaseFalsa{sumaAlterada: true}, "la firma de SHA256SUMS no es válida"},
-		"binario alterado":       {releaseFalsa{binAlterado: true}, "no coincide"},
-	}
-	if !existe("/usr/bin/minisign") && !existe("/bin/minisign") {
-		casos["sin minisign"] = caso{releaseFalsa{sinMinisign: true}, "no encuentro minisign"}
+		"firma de otra etiqueta": {releaseFalsa{tagFirmado: "v0.9.0"}, "is not signed for " + tagInstall},
+		"sin SHA256SUMS.minisig": {releaseFalsa{sinFirma: true}, "has no SHA256SUMS.minisig"},
+		"SHA256SUMS alterado":    {releaseFalsa{sumaAlterada: true}, "the SHA256SUMS signature is not valid"},
+		"binario alterado":       {releaseFalsa{binAlterado: true}, "does not match"},
 	}
 	for nombre, c := range casos {
 		t.Run(nombre, func(t *testing.T) {
@@ -321,8 +336,8 @@ func TestInstallMinKlingConPrerelease(t *testing.T) {
 	}
 }
 
-// Una 0.x sin firma se instala solo si se pide con --tag (docs/firmas.md);
-// la que llega como «latest» se rechaza, y con firma se instala igual.
+// Una 0.x sin firma se instala con aviso, también como «latest» (hoy es lo que
+// resuelve el one-liner del README); una 1.x sin firma se rechaza.
 func TestInstallCeroXSinFirmaSoloConTag(t *testing.T) {
 	casos := []struct {
 		nombre string
@@ -330,11 +345,11 @@ func TestInstallCeroXSinFirmaSoloConTag(t *testing.T) {
 		ok     bool
 		motivo string
 	}{
-		{"0.x pedida con --tag", releaseFalsa{tag: "v0.20.1", sinFirma: true}, true, "verifico solo por sha256"},
-		{"0.x sin firma como latest", releaseFalsa{tag: "v0.20.1", sinFirma: true, latest: true}, false, "pedida con --tag"},
-		{"0.x firmada como latest", releaseFalsa{tag: "v0.20.1", latest: true}, true, "firma de SHA256SUMS"},
-		{"1.x firmada como latest", releaseFalsa{latest: true}, true, "firma de SHA256SUMS"},
-		{"1.x sin firma como latest", releaseFalsa{sinFirma: true, latest: true}, false, "no trae SHA256SUMS.minisig"},
+		{"0.x pedida con --tag", releaseFalsa{tag: "v0.20.1", sinFirma: true}, true, "checking with sha256 only"},
+		{"0.x sin firma como latest (el one-liner del README)", releaseFalsa{tag: "v0.20.1", sinFirma: true, latest: true}, true, "checking with sha256 only"},
+		{"0.x firmada como latest", releaseFalsa{tag: "v0.20.1", latest: true}, true, "SHA256SUMS signature"},
+		{"1.x firmada como latest", releaseFalsa{latest: true}, true, "SHA256SUMS signature"},
+		{"1.x sin firma como latest", releaseFalsa{sinFirma: true, latest: true}, false, "has no SHA256SUMS.minisig"},
 	}
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
@@ -385,10 +400,105 @@ func TestInstallCortadoNoEjecutaNada(t *testing.T) {
 			cmd := exec.Command("/bin/sh", cortado, "--dry-run", "--tag", tagInstall)
 			cmd.Env = []string{"HOME=" + home, "PATH=" + falsos + ":/usr/bin:/bin", "LC_ALL=C"}
 			out, _ := cmd.CombinedOutput()
-			if strings.Contains(string(out), "plataforma:") || strings.Contains(string(out), "(dry-run)") ||
+			if strings.Contains(string(out), "platform:") || strings.Contains(string(out), "(dry-run)") ||
 				(c > fin && len(out) > 0 && !strings.Contains(strings.ToLower(string(out)), "syntax error")) || existe(home) {
 				t.Fatalf("cortado en el byte %d, el script hizo algo:\n%s", c, out)
 			}
 		})
+	}
+}
+
+// klingFalso es el kling de la release falsa: dice su versión y sabe lo que el
+// kling de verdad hace con `up -verify-sums` (lo que install.sh usa cuando no
+// hay minisign): el sha256 del fichero tiene que ser la línea 1 de la firma, y
+// su comentario de confianza, el tag pedido.
+func klingFalso(tag string) string {
+	return `#!/bin/sh
+if [ "$1" = up ] && [ "$2" = -verify-sums ]; then
+    m="$3"; shift 3; x=""; t=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -sig) x="$2"; shift 2 ;;
+            -tag) t="$2"; shift 2 ;;
+            -key) shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$m" | awk '{print $1}')"
+    else got="$(shasum -a 256 "$m" | awk '{print $1}')"; fi
+    [ "$(sed -n 1p "$x")" = "$got" ] || { echo "signature does not match: the file was altered" >&2; exit 1; }
+    sed -n 2p "$x" | tr '\t' '\n' | grep -qx "tag:$t" || { echo "signed for another release: not signed for $t" >&2; exit 1; }
+    echo "signature ok for $t"
+    exit 0
+fi
+echo 'kling ` + tag + `'
+`
+}
+
+// D2: desde 1.0 la firma se comprueba con el kling recién bajado, sin que el
+// usuario tenga minisign.
+func TestInstallFirmadaSinMinisignEnElPATH(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{sinMinisign: true, latest: true})
+	if !r.ok || !existe(filepath.Join(r.prefijo, "kling")) {
+		t.Fatalf("a signed 1.x release must install without minisign:\n%s", r.salida)
+	}
+	if strings.Contains(r.salida, "brew install minisign") {
+		t.Fatalf("it must not send the user to install minisign:\n%s", r.salida)
+	}
+	if !strings.Contains(r.salida, "SHA256SUMS signature") {
+		t.Fatalf("it should say the signature was checked:\n%s", r.salida)
+	}
+}
+
+func TestInstallSinMinisignRechazaFirmaMala(t *testing.T) {
+	for nombre, rel := range map[string]releaseFalsa{
+		"sin firma":           {sinMinisign: true, sinFirma: true},
+		"firma de otra etiq.": {sinMinisign: true, tagFirmado: "v0.9.0"},
+	} {
+		t.Run(nombre, func(t *testing.T) {
+			r := correrInstall(t, rel)
+			if r.ok || existe(filepath.Join(r.prefijo, "kling")) {
+				t.Fatalf("installed with a bad signature:\n%s", r.salida)
+			}
+		})
+	}
+}
+
+// D3: en Mac, install.sh deja el agente de invitado donde el daemon lo busca.
+func TestInstallMacDejaLibKlingGuest(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{plat: "darwin-arm64"})
+	if !r.ok {
+		t.Fatalf("install failed:\n%s", r.salida)
+	}
+	home := filepath.Dir(r.plugins)
+	g := filepath.Join(home, "Library", "Application Support", "kindling", "lib", "kling-guest")
+	if !existe(g) {
+		t.Fatalf("lib/kling-guest missing at %s:\n%s", g, r.salida)
+	}
+}
+
+func TestInstallMacSinGuestEnLaReleaseSigue(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{plat: "darwin-arm64", sinGuest: true})
+	if !r.ok {
+		t.Fatalf("an older release without kling-guest must still install:\n%s", r.salida)
+	}
+}
+
+// D1/D35: el final recomienda probar, no doctor, y la salida es inglesa.
+func TestInstallSalidaEnInglesYRecomiendaTry(t *testing.T) {
+	r := correrInstall(t, releaseFalsa{})
+	if !r.ok {
+		t.Fatalf("install failed:\n%s", r.salida)
+	}
+	if !strings.Contains(r.salida, "kling try -- uname -a") {
+		t.Fatalf("no kling try suggestion:\n%s", r.salida)
+	}
+	if strings.Contains(r.salida, "kling doctor") {
+		t.Fatalf("it should recommend kling try, not doctor:\n%s", r.salida)
+	}
+	for _, es := range []string{"descargando", "verificado", "instalado en", "plataforma", "Comprobar", "listo"} {
+		if strings.Contains(r.salida, es) {
+			t.Fatalf("Spanish %q in the output:\n%s", es, r.salida)
+		}
 	}
 }

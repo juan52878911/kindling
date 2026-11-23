@@ -56,9 +56,9 @@ type tryJSON struct {
 }
 
 func cmdTry(args []string) (int, error) {
-	fs := flag.NewFlagSet("try", flag.ExitOnError)
+	fs := flag.NewFlagSet("try", flag.ContinueOnError)
 	host := hostFlag(fs)
-	image := fs.String("image", "", "image with the guest agent, or a Docker reference (alpine:3.20, imported the first time; default: "+tryDefaultImage+")")
+	image := fs.String("image", "", "image with the guest agent, or a Docker reference (alpine:3.20, imported the first time; default: "+tryDefaultImage+", or min if that's the one the daemon has)")
 	from := fs.String("from", "", "snapshot made from a machine with -allow-exec (~300 ms instead of a cold boot)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default 256)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default 1)")
@@ -73,18 +73,20 @@ func cmdTry(args []string) (int, error) {
 		fmt.Fprintln(os.Stderr, "  creates a throwaway sandbox, runs cmd (or opens a shell) and removes it")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return 2, err
+	// parseFlags y no fs.Parse con ExitOnError: un flag malo sale por main con
+	// su código y, con -json, como JSON.
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return codigoDeSalida(err), err
 	}
 	cmd := fs.Args()
 	if len(cmd) > 0 && cmd[0] == "--" {
 		cmd = cmd[1:]
 	}
 	if *image != "" && *from != "" {
-		return 2, errors.New("pass -image or -from, not both")
+		return 2, errUso("pass -image or -from, not both")
 	}
 	if *asJSON && len(cmd) == 0 {
-		return 2, errors.New("-json needs a command: kling try -json -image alpine:3.20 -- uname -a")
+		return 2, errUso("-json needs a command: kling try -json -image alpine:3.20 -- uname -a")
 	}
 	o := tryOptions{keep: *keep, cmd: cmd, req: api.SandboxRequest{
 		Image: *image, From: *from, MemMiB: *mem, VCPUs: *cpus,
@@ -92,19 +94,29 @@ func cmdTry(args []string) (int, error) {
 	}}
 	avisarAllow(os.Stderr, o.req.AllowDomains)
 	porDefecto := o.req.Image == "" && o.req.From == ""
-	if porDefecto {
-		o.req.Image = tryDefaultImage
-	}
 
 	endpoint := hostOf(*host)
 	c := api.NewClient(endpoint)
+	// Un daemon que no corre se arranca (por su agente), y sin imagen se baja
+	// min: el primer uso no tiene pasos intermedios.
+	{
+		ctx, stop := ctxWithSignalsTuberia()
+		err := asegurarDaemon(ctx, c, endpoint)
+		if err == nil && porDefecto {
+			o.req.Image, err = elegirImagenTry(ctx, c, endpoint)
+		}
+		stop()
+		if err != nil {
+			return codigoTry(err, 1), err
+		}
+	}
 	// Una referencia de Docker se importa la primera vez, como en run -image.
 	if esRefDocker(o.req.Image) {
 		ctx, stop := ctxWithSignalsTuberia()
 		name, err := asegurarImagenDocker(ctx, c, o.req.Image)
 		stop()
 		if err != nil {
-			return 1, err
+			return codigoTry(err, 1), err
 		}
 		o.req.Image = name
 	}
@@ -112,14 +124,6 @@ func cmdTry(args []string) (int, error) {
 		ctx, stop := ctxWithSignalsTuberia()
 		defer stop()
 		return runTryJSON(ctx, c, o, os.Stdout)
-	}
-	if porDefecto {
-		ctx, stop := ctxWithSignalsTuberia()
-		err := imagenTryDisponible(ctx, c)
-		stop()
-		if err != nil {
-			return 1, err
-		}
 	}
 	if len(cmd) > 0 {
 		ctx, stop := ctxWithSignalsTuberia()
@@ -137,7 +141,7 @@ func cmdTry(args []string) (int, error) {
 	mc, err := tryCreate(ctx, c, o.req, os.Stderr)
 	stop()
 	if err != nil {
-		return 1, err
+		return codigoTry(err, 1), err
 	}
 	defer tryCleanup(c, mc, o.keep, os.Stderr)
 	return cmdShell([]string{"-H", endpoint, mc.ID})
@@ -147,6 +151,10 @@ func cmdTry(args []string) (int, error) {
 // Devuelve el código del comando: un 1 de grep no es un fallo de kling.
 func runTry(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.Writer) (int, error) {
 	r, err := runTryCon(ctx, c, o, stdout, stderr)
+	if err != nil && r.code == 1 {
+		// Un fallo de kling, no el código del comando: conserva el del contrato.
+		r.code = codigoTry(err, 1)
+	}
 	return r.code, err
 }
 
@@ -219,6 +227,9 @@ func runTryJSON(ctx context.Context, c *api.Client, o tryOptions, w io.Writer) (
 		if msgs.Len() > 0 {
 			os.Stderr.Write(msgs.Bytes())
 		}
+		if r.code == 1 {
+			r.code = codigoTry(err, 1)
+		}
 		return r.code, err
 	}
 	j := tryJSON{
@@ -235,36 +246,6 @@ func runTryJSON(ctx context.Context, c *api.Client, o tryOptions, w io.Writer) (
 		return 1, err
 	}
 	return r.code, nil
-}
-
-// imagenTryDisponible comprueba, antes de crear nada, que la imagen por
-// defecto existe: una instalación recién hecha no la trae, y el error del
-// daemon ("image does not exist") llegaba después de pedir el sandbox y sin
-// decir que hay que construirla. No la construye: tarda minutos y descarga
-// node y python, y eso lo decide quien lo pide. Si no se puede listar (un
-// daemon viejo, un fallo de red) se sigue como antes: el daemon dirá lo suyo.
-func imagenTryDisponible(ctx context.Context, c *api.Client) error {
-	imgs, err := c.Images(ctx)
-	if err != nil {
-		return nil
-	}
-	hayMin := false
-	for _, im := range imgs {
-		switch im.Name {
-		case tryDefaultImage:
-			return nil
-		case "min":
-			hayMin = true
-		}
-	}
-	hint := "kling image toolchain   (builds it: node, python and the guest agent; takes a few minutes)"
-	if hayMin {
-		hint += "\n     or use the small image you already have:  kling try -image min -- <cmd>"
-	}
-	return &errWithHint{
-		err:  fmt.Errorf("kling try uses the image %q by default, and this daemon doesn't have it", tryDefaultImage),
-		hint: hint,
-	}
 }
 
 // tryCreate crea el sandbox y lo cuenta por stderr: stdout es del comando, y

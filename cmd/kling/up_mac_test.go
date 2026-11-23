@@ -41,8 +41,8 @@ func TestChecksMac(t *testing.T) {
 	}
 	sinMkfs := sano
 	sinMkfs.mkfs = false
-	if !fatales(sinMkfs)["mkfs.ext4"] {
-		t.Fatal("sin mkfs.ext4 no hay overlay: es fatal")
+	if f := fatales(sinMkfs); len(f) != 0 {
+		t.Fatalf("sin el formateador se arranca igual (la plantilla la escribe kling): aviso, no fatal: %v", f)
 	}
 	// Sin debugfs se arranca igual (solo falla inspeccionar imágenes): aviso.
 	sinDebugfs := sano
