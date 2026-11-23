@@ -460,3 +460,31 @@ func TestAvisoConntrack(t *testing.T) {
 		}
 	}
 }
+
+// B1: al invitado solo le llegan flujos nuevos originados en el host. Lo NEW
+// que entra por el veth con otro origen y lo INVALID se descartan, y van antes
+// de cualquier ACCEPT de ESTABLISHED.
+func TestForwardBaseDescartaNuevasAjenasPorElVeth(t *testing.T) {
+	n := redDePrueba()
+	for nombre, reglas := range map[string][][]string{
+		"forwardBase": n.forwardBase(),
+		"ranura":      n.reglasBaseRanura(),
+		"none":        n.egressRules(EgressNone),
+	} {
+		nueva, invalida, estab := -1, -1, -1
+		for i, r := range reglas {
+			s := strings.Join(r, " ")
+			switch {
+			case s == "-A FORWARD -i "+n.NSIf+" -m conntrack --ctstate NEW ! -s "+n.HostIP+" -j DROP":
+				nueva = i
+			case s == "-A FORWARD -i "+n.NSIf+" -m conntrack --ctstate INVALID -j DROP":
+				invalida = i
+			case strings.Contains(s, "ESTABLISHED,RELATED") && estab < 0:
+				estab = i
+			}
+		}
+		if nueva < 0 || invalida < 0 || estab < 0 || nueva > estab || invalida > estab {
+			t.Errorf("%s: nueva=%d invalida=%d established=%d", nombre, nueva, invalida, estab)
+		}
+	}
+}
