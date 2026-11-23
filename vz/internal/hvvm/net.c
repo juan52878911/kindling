@@ -398,6 +398,8 @@ void vnet_parar(void) {
   pthread_mutex_unlock(&mu);
 }
 
+static uint64_t n_features(void) { return (1u << 5) | (1u << 16) | khv_event_idx | (mtu ? (1u << 3) : 0); }
+
 bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   // Los dos accesos de cada trama van sin mu: el notify de tx (QueueNotify,
   // 0x50, no toca más estado que la cola 1) y el ACK de la interrupción
@@ -456,7 +458,7 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   // del tamaño de la MTU (ver spec.DefaultMTU).
   // VIRTIO_RING_F_EVENT_IDX (29): avisos e interrupciones solo cuando hacen
   // falta (ver vq_interrumpir y vq_pedir_aviso en virtio.c).
-  uint64_t feat = (1u << 5) | (1u << 16) | khv_event_idx | (mtu ? (1u << 3) : 0);
+  uint64_t feat = n_features();
   // Notify e ISR ya se atendieron arriba.
   if (vmmio_acceso(&s.m, s.q, 2, 1, feat, off, escribir, val, &cola) == VM_RESET) {
     uint8_t nivel = s.m.nivel;
@@ -518,6 +520,7 @@ void vnet_reafirmar(void) {
 void vnet_set(const struct vnet_state *i) {
   todo_bloquear();
   s = *i;
+  vmmio_restaurado(&s.m, (1u << 3) | (1u << 5) | (1u << 16) | (1ULL << VIRTIO_RING_F_EVENT_IDX));
   todo_soltar();
 }
 

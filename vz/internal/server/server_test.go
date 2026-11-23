@@ -515,6 +515,36 @@ func TestDeferredRestore(t *testing.T) {
 	r.mustFail("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`"}}`, "fresh")
 }
 
+// GET /kling/info devuelve el desglose de la última creación de la VM: antes
+// de crearla no hay nada; tras restaurar, las fases de aquí y las del VMM si
+// la VM las sabe dar (kling-hv).
+func TestInfoTimings(t *testing.T) {
+	r := newRig(t)
+	if out := r.must("GET", "/kling/info", ""); strings.Contains(out, "timings") {
+		t.Fatalf("timings before any VM: %s", out)
+	}
+	snap, mem := writeSnapshot(t, t.TempDir())
+	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":true}`)
+	var info struct {
+		Timings map[string]any `json:"timings"`
+	}
+	if err := json.Unmarshal([]byte(r.must("GET", "/kling/info", "")), &info); err != nil {
+		t.Fatal(err)
+	}
+	tm := info.Timings
+	if tm["kind"] != "restore" {
+		t.Fatalf("timings = %v", tm)
+	}
+	for _, k := range []string{"net_ms", "sandbox_ms", "create_ms", "restore_ms", "resume_ms", "total_ms"} {
+		if v, ok := tm[k].(float64); !ok || v < 0 {
+			t.Errorf("%s = %v in %v", k, tm[k], tm)
+		}
+	}
+	if _, ok := tm["vmm"]; ok {
+		t.Errorf("the fake VM has no VMM timings, but got %v", tm["vmm"])
+	}
+}
+
 // Secuencia de Thaw: cargar y reanudar de una vez.
 func TestLoadAndResume(t *testing.T) {
 	r := newRig(t)

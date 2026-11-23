@@ -337,6 +337,8 @@ void vq_pedir_aviso_ya(const struct vmmio *m, const struct vq *q, uint16_t *avai
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
+void vmmio_restaurado(struct vmmio *m, uint64_t feat_lo) { m->drv_features &= (feat_lo & 0xffffffffULL) | (1ULL << 32); }
+
 static void dir_lo(uint64_t *d, uint32_t v) { *d = (*d & ~0xffffffffULL) | v; }
 static void dir_hi(uint64_t *d, uint32_t v) { *d = (*d & 0xffffffffULL) | ((uint64_t)v << 32); }
 
@@ -354,9 +356,13 @@ int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_
     switch (off) {
       case 0x014: m->dev_feat_sel = v; break;
       case 0x020:
+        // Solo lo ofrecido (DeviceFeatures: feat_lo y VERSION_1): quien mira
+        // drv_features (con_event_idx, el globo) se fía de que el
+        // dispositivo lo ofreció.
         if (m->drv_feat_sel < 2) {
+          uint32_t ofrece = m->drv_feat_sel == 0 ? (uint32_t)feat_lo : 1;
           m->drv_features &= ~(0xffffffffULL << (32 * m->drv_feat_sel));
-          m->drv_features |= (uint64_t)v << (32 * m->drv_feat_sel);
+          m->drv_features |= (uint64_t)(v & ofrece) << (32 * m->drv_feat_sel);
         }
         break;
       case 0x024: m->drv_feat_sel = v; break;
@@ -429,6 +435,14 @@ struct vblk {
   // dorado de un clon, otro kling-hv) puede seguir en la caché. Solo desde el
   // hilo del disco.
   bool sucio;
+  // Cuota de F_FULLFSYNC (b_ficha): fichas que quedan y cuándo se repuso la
+  // última. full_debe: un FLUSH de un disco full se asentó con
+  // F_BARRIERFSYNC por pasar de la cuota, y falta un F_FULLFSYNC (lo hace el
+  // siguiente FLUSH con ficha o, si no llega, el hilo al reponerse una). Solo
+  // con ocupado puesto.
+  uint32_t fichas;
+  uint64_t fichas_t;
+  bool full_debe;
   uint32_t alin;  // sectores por bloque del sistema de ficheros del host (F_PUNCHHOLE)
   uint64_t sectores;
   uint32_t intid;
@@ -566,8 +580,68 @@ static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, in
   return 0;
 }
 
-// vblk_sincs: los F_FULLFSYNC/F_BARRIERFSYNC que mandaron los FLUSH (pruebas).
-static uint64_t vblk_sincs;
+// vblk_sincs: los F_FULLFSYNC/F_BARRIERFSYNC que mandaron los FLUSH (pruebas);
+// vblk_fullsincs, de ellos los F_FULLFSYNC.
+static uint64_t vblk_sincs, vblk_fullsincs;
+
+// Cuota de F_FULLFSYNC por disco. Un F_FULLFSYNC vacía la caché del SSD
+// entero, de todo el Mac (~6 ms en un M4, y las escrituras de los demás
+// procesos esperan), y un invitado que alterne una escritura y un FLUSH lo
+// pedía sin tope (~150 por segundo medidos con BenchmarkFlushAlternado). Por
+// encima de KHV_FULL_POR_S (con ráfagas de hasta KHV_FULL_RAFAGA) el FLUSH se
+// asienta con F_BARRIERFSYNC, que mantiene el orden (el journal de ext4 queda
+// coherente), y el F_FULLFSYNC que falta llega en cuanto se repone una ficha:
+// lo que un corte de luz podría llevarse queda acotado a ~1/KHV_FULL_POR_S s
+// de FLUSH, no a todo lo de después. Un invitado que asienta a un ritmo normal
+// (el commit de ext4 cada 5 s, un Postgres con decenas de commits por
+// segundo) no lo nota.
+#define KHV_FULL_PASO_NS (1000000000ULL / KHV_FULL_POR_S)
+
+static void b_reponer(struct vblk *b, uint64_t ahora) {
+  if (b->fichas >= KHV_FULL_RAFAGA) {
+    b->fichas_t = ahora;
+    return;
+  }
+  if (ahora < b->fichas_t) return;
+  uint64_t n = (ahora - b->fichas_t) / KHV_FULL_PASO_NS;
+  if (n >= KHV_FULL_RAFAGA - b->fichas) {
+    b->fichas = KHV_FULL_RAFAGA;
+    b->fichas_t = ahora;
+  } else {
+    b->fichas += (uint32_t)n;
+    b->fichas_t += n * KHV_FULL_PASO_NS;
+  }
+}
+
+// b_ficha gasta una ficha si la hay. Solo con ocupado puesto.
+static bool b_ficha(struct vblk *b) {
+  b_reponer(b, khv_ahora_ns());
+  if (b->fichas == 0) return false;
+  b->fichas--;
+  return true;
+}
+
+// b_hasta_ficha: ns hasta que haya una ficha (0 si ya la hay). Solo con
+// ocupado puesto o con mu tomado y ocupado sin poner.
+static uint64_t b_hasta_ficha(struct vblk *b) {
+  uint64_t ahora = khv_ahora_ns();
+  b_reponer(b, ahora);
+  if (b->fichas > 0) return 0;
+  uint64_t t = b->fichas_t + KHV_FULL_PASO_NS;
+  return t > ahora ? t - ahora : 0;
+}
+
+// b_full_diferido hace el F_FULLFSYNC que dejó pendiente un FLUSH por encima
+// de la cuota (full_debe), si ya hay ficha. Solo con ocupado puesto. Si
+// falla no se reintenta: el invitado ya oyó que su FLUSH fue bien, y lo de
+// antes llegó al SSD con F_BARRIERFSYNC.
+static void b_full_diferido(struct vblk *b) {
+  if (!b->full_debe || !b_ficha(b)) return;
+  b->full_debe = false;
+  __atomic_fetch_add(&vblk_sincs, 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&vblk_fullsincs, 1, __ATOMIC_RELAXED);
+  if (fcntl(b->fd, F_FULLFSYNC) != 0 && errno == ENOTSUP) (void)fsync(b->fd);
+}
 
 // Atiende las peticiones pendientes de la cola. Solo desde el hilo del disco,
 // con ocupado puesto. *irq: hay que interrumpir al invitado (hubo respuestas y
@@ -726,7 +800,13 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
       // que asentar: el FLUSH se contesta sin tocar el fichero (F_FULLFSYNC
       // vacía la caché del SSD entero, de todo el Mac, y un invitado puede
       // pedirlo en bucle).
-      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE && !b->ro && b->sucio) {
+      // En un disco full, por encima de la cuota (b_ficha), F_BARRIERFSYNC y
+      // el F_FULLFSYNC después (full_debe); un FLUSH sin escrituras nuevas y
+      // sin ficha no hace nada: lo pendiente ya va en full_debe.
+      bool full = b->sinc == KHV_SINC_FULL;
+      bool ficha = false;
+      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE && !b->ro && (b->sucio || (full && b->full_debe)) &&
+          ((ficha = full && b_ficha(b)) || b->sucio)) {
         b->sucio = false;
         __atomic_fetch_add(&vblk_sincs, 1, __ATOMIC_RELAXED);
         // full, F_FULLFSYNC: el fsync de macOS deja los datos en la caché del
@@ -740,10 +820,13 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         // overlay desechable (kling_disposable, como el synchronizationMode
         // none de vz; el núcleo lo asienta antes de conservar el disco,
         // internal/machine/desechable.go) o un volumen que se pidió así.
-        int op = b->sinc == KHV_SINC_BARRIER ? F_BARRIERFSYNC : F_FULLFSYNC;
+        int op = ficha ? F_FULLFSYNC : F_BARRIERFSYNC;
+        if (op == F_FULLFSYNC) __atomic_fetch_add(&vblk_fullsincs, 1, __ATOMIC_RELAXED);
         if (fcntl(b->fd, op) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) {
           estado = 1;
           b->sucio = true;  // el siguiente FLUSH lo vuelve a intentar
+        } else if (full) {
+          b->full_debe = !ficha;
         }
       }
     }
@@ -760,7 +843,26 @@ static void *vblk_hilo(void *a) {
   khv_qos_dispositivo();
   pthread_mutex_lock(&b->mu);
   for (;;) {
-    while (!(b->pend && !g_pausa)) pthread_cond_wait(&b->cv, &b->mu);
+    while (!(b->pend && !g_pausa)) {
+      // Un F_FULLFSYNC pendiente de la cuota (full_debe) sin FLUSH que lo
+      // haga: se espera a la ficha y lo hace este hilo, como una tanda.
+      if (b->full_debe && !g_pausa && !b->ocupado) {
+        uint64_t ns = b_hasta_ficha(b);
+        if (ns == 0) {
+          b->ocupado = true;
+          pthread_mutex_unlock(&b->mu);
+          b_full_diferido(b);
+          pthread_mutex_lock(&b->mu);
+          b->ocupado = false;
+          pthread_cond_broadcast(&b->cv);
+          continue;
+        }
+        struct timespec ts = {(time_t)(ns / 1000000000ULL), (long)(ns % 1000000000ULL)};
+        pthread_cond_timedwait_relative_np(&b->cv, &b->mu, &ts);
+        continue;
+      }
+      pthread_cond_wait(&b->cv, &b->mu);
+    }
     b->pend = false;
     b->ocupado = true;
     struct vq q = b->s.q;
@@ -804,6 +906,33 @@ void vblk_prueba(int idx) {
 }
 
 uint64_t vblk_prueba_sincs(void) { return __atomic_load_n(&vblk_sincs, __ATOMIC_RELAXED); }
+bool vblk_prueba_full_debe(int idx) {
+  pthread_mutex_lock(&blks[idx].mu);
+  bool r = blks[idx].full_debe;
+  pthread_mutex_unlock(&blks[idx].mu);
+  return r;
+}
+
+// vblk_prueba_diferido suelta la pausa (sin VM todo empieza en pausa) hasta
+// ms ms para que el hilo del disco idx haga solo el F_FULLFSYNC pendiente de
+// la cuota. Devuelve si ya no queda ninguno.
+bool vblk_prueba_diferido(int idx, int ms) {
+  struct vblk *b = &blks[idx];
+  bool antes = g_pausa;
+  g_pausa = false;
+  uint64_t fin = khv_ahora_ns() + (uint64_t)ms * 1000000ULL;
+  pthread_mutex_lock(&b->mu);
+  pthread_cond_broadcast(&b->cv);
+  while ((b->full_debe || b->ocupado) && khv_ahora_ns() < fin) {
+    struct timespec ts = {0, 5000000};
+    pthread_cond_timedwait_relative_np(&b->cv, &b->mu, &ts);
+  }
+  bool r = !b->full_debe;
+  pthread_mutex_unlock(&b->mu);
+  g_pausa = antes;
+  return r;
+}
+uint64_t vblk_prueba_fullsincs(void) { return __atomic_load_n(&vblk_fullsincs, __ATOMIC_RELAXED); }
 
 // vblk_prueba_modo cambia ro y sinc del disco idx (solo pruebas, con la cola
 // quieta); el disco queda sucio, como recién abierto.
@@ -812,6 +941,9 @@ void vblk_prueba_modo(int idx, bool ro, int sinc) {
   blks[idx].ro = ro;
   blks[idx].sinc = sinc;
   blks[idx].sucio = true;
+  blks[idx].fichas = KHV_FULL_RAFAGA;
+  blks[idx].fichas_t = khv_ahora_ns();
+  blks[idx].full_debe = false;
   pthread_mutex_unlock(&blks[idx].mu);
 }
 
@@ -834,6 +966,9 @@ int vblk_init(int idx, const char *ruta, bool ro, int sinc, uint32_t intid) {
   b->sectores = (uint64_t)st.st_size / 512;
   b->ro = ro;
   b->sucio = true;
+  b->fichas = KHV_FULL_RAFAGA;
+  b->fichas_t = khv_ahora_ns();
+  b->full_debe = false;
   b->sinc = ro || sinc < KHV_SINC_FULL || sinc > KHV_SINC_NONE ? KHV_SINC_FULL : sinc;
   // F_PUNCHHOLE solo admite bloques enteros del sistema de ficheros (4 KiB
   // en APFS): es la alineación que se anuncia al invitado.
@@ -934,6 +1069,8 @@ void vblk_reafirmar(int idx) {
 void vblk_set(int idx, const struct vblk_state *s) {
   pthread_mutex_lock(&blks[idx].mu);
   blks[idx].s = *s;
+  vmmio_restaurado(&blks[idx].s.m, (1u << 2) | (1u << 5) | (1u << 9) | (1u << 13) | (1u << 14) |
+                                       (1ULL << VIRTIO_RING_F_EVENT_IDX));
   pthread_mutex_unlock(&blks[idx].mu);
 }
 
@@ -1019,8 +1156,41 @@ void vrng_reafirmar(void) {
   pthread_mutex_unlock(&r_mu);
 }
 
+// vmmio_prueba_feats: lo que queda en drv_features tras escribir lo, hi en
+// DriverFeatures (sel 0 y 1) a un dispositivo que ofrece feat_lo (pruebas).
+uint64_t vmmio_prueba_feats(uint64_t feat_lo, uint32_t lo, uint32_t hi) {
+  struct vmmio m;
+  memset(&m, 0, sizeof m);
+  struct vq q;
+  memset(&q, 0, sizeof q);
+  uint32_t cola = 0;
+  for (uint32_t sel = 0; sel < 2; sel++) {
+    uint64_t v = sel;
+    vmmio_acceso(&m, &q, 1, 4, feat_lo, 0x024, true, &v, &cola);
+    v = sel ? hi : lo;
+    vmmio_acceso(&m, &q, 1, 4, feat_lo, 0x020, true, &v, &cola);
+  }
+  return m.drv_features;
+}
+
+// vrng_prueba_feats: las drv_features de virtio-rng tras vrng_set con esas
+// (pruebas; virtio-rng no ofrece nada salvo VERSION_1).
+uint64_t vrng_prueba_feats(uint64_t f) {
+  struct vrng_state st;
+  vrng_get(&st);
+  struct vrng_state antes = st;
+  st.m.drv_features = f;
+  vrng_set(&st);
+  pthread_mutex_lock(&r_mu);
+  uint64_t r = rs.m.drv_features;
+  pthread_mutex_unlock(&r_mu);
+  vrng_set(&antes);
+  return r;
+}
+
 void vrng_set(const struct vrng_state *s) {
   pthread_mutex_lock(&r_mu);
   rs = *s;
+  vmmio_restaurado(&rs.m, 0);
   pthread_mutex_unlock(&r_mu);
 }
