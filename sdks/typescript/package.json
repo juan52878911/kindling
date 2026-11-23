@@ -7,7 +7,7 @@
   "types": "./src/index.d.ts",
   "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
   "files": ["src", "README.md"],
-  "engines": { "node": ">=18" },
-  "license": "UNLICENSED",
-  "scripts": { "test": "node --test test/sdk.test.ts" }
+  "engines": { "node": ">=22.18" },
+  "license": "Apache-2.0",
+  "scripts": { "test": "node --test test/sdk.test.ts test/cobertura.test.ts" }
 }
