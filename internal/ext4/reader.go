@@ -1,6 +1,7 @@
 package ext4
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,13 +25,27 @@ import (
 // La imagen puede ser hostil (la de un sistema Android que se importa, una
 // que se compara): lo que no cuadre da error, sin pánico, y lo que se lee o
 // se pide de memoria queda acotado por el tamaño de la imagen.
-func Read(r io.ReaderAt) (root *Node, err error) {
+//
+// Lo que no queda acotado es leer los datos de un fichero disperso, que
+// puede declarar hasta 16 TiB de hueco: si la imagen no es de fiar, mejor
+// ReadContext con un plazo.
+func Read(r io.ReaderAt) (*Node, error) {
+	return ReadContext(context.Background(), r)
+}
+
+// ReadContext es Read con un contexto: si vence, la lectura del árbol se
+// corta con su error, y también la de los datos de los ficheros del árbol
+// devuelto (Open, o escribirlo en otra imagen), que guardan el contexto.
+func ReadContext(ctx context.Context, r io.ReaderAt) (root *Node, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			root, err = nil, fmt.Errorf("corrupt ext4 image: %v", p)
 		}
 	}()
-	return read(r)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return read(ctx, r)
 }
 
 // Topes del lector, además de los que pone el tamaño de la imagen.
@@ -45,9 +60,13 @@ const (
 	// se leía entero.
 	maxEnlace     = 4096
 	maxDirectorio = 64 << 20
+	// maxFichero es lo que direcciona un extent: números de bloque lógico de
+	// 32 bits. Lo que un fichero regular declare de más no lo cubre ningún
+	// extent, y se leía entero como ceros de un hueco.
+	maxFichero = 1 << 32 * blockSize
 )
 
-func read(r io.ReaderAt) (*Node, error) {
+func read(ctx context.Context, r io.ReaderAt) (*Node, error) {
 	sb := make([]byte, 1024)
 	if _, err := r.ReadAt(sb, 1024); err != nil {
 		return nil, err
@@ -60,7 +79,8 @@ func read(r io.ReaderAt) (*Node, error) {
 	if bs != blockSize {
 		return nil, fmt.Errorf("block size %d not supported (only 4096)", bs)
 	}
-	rd := &reader{r: r,
+	rd := &reader{r: r, ctx: ctx,
+		enCurso:   map[uint32]bool{},
 		ipg:       le.Uint32(sb[40:]),
 		isz:       uint32(le.Uint16(sb[88:])),
 		incompat:  le.Uint32(sb[96:]),
@@ -120,6 +140,7 @@ func read(r io.ReaderAt) (*Node, error) {
 
 type reader struct {
 	r         io.ReaderAt
+	ctx       context.Context
 	ipg, isz  uint32
 	incompat  uint32
 	groups    int
@@ -133,6 +154,16 @@ type reader struct {
 	// acotado por el tamaño de la imagen aunque muchos inodos repitan el
 	// mismo árbol.
 	nodos, tramos uint64
+	// enCurso son los directorios que se están recorriendo (de la raíz al
+	// actual): una entrada que apunte a uno de ellos es un ciclo. Sin esto
+	// el ciclo solo lo paraba el tope de profundidad, releyendo el
+	// directorio entero en cada nivel.
+	enCurso map[uint32]bool
+	// aMemoria son los bytes de directorios y enlaces leídos a memoria en
+	// toda la imagen: en una sana no comparten bloques, así que no pasan
+	// del tamaño de la imagen. Cada uno tiene su tope, pero muchos inodos
+	// que apunten a los mismos bloques se leían todos.
+	aMemoria uint64
 }
 
 // enLaImagen comprueba que los blocks bloques que declara el superbloque
@@ -253,11 +284,14 @@ func (rd *reader) node(ino uint32) (*Node, []byte, error) {
 			}
 			n.Data = Bytes(d[:n.Size])
 		} else {
+			if n.Size > maxFichero {
+				return nil, nil, fmt.Errorf("inode %d: %d bytes, more than extents can address", ino, n.Size)
+			}
 			runs, err := rd.extents(iblock, flags)
 			if err != nil {
 				return nil, nil, fmt.Errorf("inode %d: %w", ino, err)
 			}
-			n.Data = &Extents{r: rd.r, runs: runs}
+			n.Data = &Extents{r: rd.r, runs: runs, ctx: rd.ctx}
 		}
 	case ModeLink:
 		if n.Size > maxEnlace {
@@ -326,7 +360,11 @@ func (rd *reader) leerEntero(ino uint32, iblock []byte, flags uint32, size int64
 	if uint64(size) > fin*blockSize {
 		return nil, fmt.Errorf("inode %d: %d bytes, but its extents cover %d", ino, size, fin*blockSize)
 	}
-	return (&Node{Size: size, Data: &Extents{r: rd.r, runs: runs}}).ReadAll()
+	rd.aMemoria += uint64(size)
+	if rd.aMemoria > rd.blocks*blockSize {
+		return nil, fmt.Errorf("inode %d: directories and symlinks add up to more than the image (%d bytes)", ino, rd.blocks*blockSize)
+	}
+	return (&Node{Size: size, Data: &Extents{r: rd.r, runs: runs, ctx: rd.ctx}}).ReadAll()
 }
 
 func parseXattrs(region []byte, entryOff, base int, out map[string][]byte) error {
@@ -419,9 +457,6 @@ func (rd *reader) extents(iblock []byte, flags uint32) ([]run, error) {
 }
 
 func (rd *reader) dir(ino uint32, depth int) (*Node, error) {
-	if depth > 256 {
-		return nil, errors.New("directory tree too deep")
-	}
 	n, data, err := rd.node(ino)
 	if err != nil {
 		return nil, err
@@ -429,6 +464,17 @@ func (rd *reader) dir(ino uint32, depth int) (*Node, error) {
 	if !n.IsDir() {
 		return nil, fmt.Errorf("inode %d is not a directory", ino)
 	}
+	return rd.hijos(ino, n, data, depth)
+}
+
+// hijos añade a n, el directorio ino ya leído con sus datos, sus entradas, y
+// baja a los subdirectorios.
+func (rd *reader) hijos(ino uint32, n *Node, data []byte, depth int) (*Node, error) {
+	if depth > 256 {
+		return nil, errors.New("directory tree too deep")
+	}
+	rd.enCurso[ino] = true
+	defer delete(rd.enCurso, ino)
 	n.children = map[string]*Node{}
 	le := binary.LittleEndian
 	inlineDir := len(data) > 0 && len(data)%blockSize != 0
@@ -449,6 +495,12 @@ func (rd *reader) dir(ino uint32, depth int) (*Node, error) {
 		if cino == 0 || name == "." || name == ".." {
 			continue
 		}
+		if err := rd.ctx.Err(); err != nil {
+			return nil, err
+		}
+		if rd.enCurso[cino] {
+			return nil, fmt.Errorf("directory inode %d: entry %q points back to directory %d (cycle)", ino, name, cino)
+		}
 		if c, ok := rd.inodes[cino]; ok {
 			if c.IsDir() {
 				return nil, fmt.Errorf("directory inode %d linked twice", cino)
@@ -456,12 +508,14 @@ func (rd *reader) dir(ino uint32, depth int) (*Node, error) {
 			n.children[name] = c
 			continue
 		}
-		cn, _, err := rd.node(cino)
+		// Los datos del subdirectorio se leen una vez: antes node los leía
+		// aquí y dir otra vez.
+		cn, cdata, err := rd.node(cino)
 		if err != nil {
 			return nil, err
 		}
 		if cn.IsDir() {
-			cn, err = rd.dir(cino, depth+1)
+			cn, err = rd.hijos(cino, cn, cdata, depth+1)
 			if err != nil {
 				return nil, err
 			}

@@ -1,8 +1,11 @@
 package ext4
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -219,5 +222,154 @@ func TestReadBloquesDeMas(t *testing.T) {
 	le.PutUint32(sb[0:], 1<<31) // 2^25 grupos × 64 inodos
 	if leerAcotado(t, b) == nil {
 		t.Fatal("aceptada")
+	}
+}
+
+// entradaDir busca en la imagen la entrada de directorio con ese nombre y
+// da dónde empieza (su inodo son los 4 primeros bytes).
+func entradaDir(t *testing.T, b []byte, nombre string) int {
+	t.Helper()
+	for i := 0; i+8+len(nombre) <= len(b); i += 4 {
+		if int(b[i+6]) == len(nombre) && string(b[i+8:i+8+len(nombre)]) == nombre &&
+			int(le.Uint16(b[i+4:])) >= 8+len(nombre) && le.Uint32(b[i:]) != 0 {
+			return i
+		}
+	}
+	t.Fatalf("no hay entrada %q", nombre)
+	return 0
+}
+
+// Un directorio de 1 MiB con una entrada que apunta a sí mismo: el
+// directorio solo se apuntaba como visto después de recorrerlo, así que el
+// ciclo no se reconocía y se volvía a leer entero en cada uno de los 256
+// niveles hasta el tope de profundidad.
+func TestReadCicloDeDirectorios(t *testing.T) {
+	if leerAcotado(t, imagenDirectoriosGrandes(t, 1, true)) == nil {
+		t.Fatal("aceptada")
+	}
+}
+
+// Un fichero regular de 32 TiB: más de lo que direccionan los números de
+// bloque lógico de 32 bits de un extent, así que el resto serían ceros de un
+// hueco que se «leían» enteros al abrirlo.
+func TestReadFicheroMasAllaDeLosExtents(t *testing.T) {
+	b := imagenHostil(t)
+	le.PutUint32(b[inodoOff(b, inodoDe(t, b, ModeReg))+108:], 1<<13)
+	if leerAcotado(t, b) == nil {
+		t.Fatal("aceptada")
+	}
+}
+
+// Varios directorios que comparten los bloques de un fichero de 1 MiB: cada
+// uno se leía entero a memoria, y lo leído entre todos no tenía más tope que
+// el número de inodos.
+func TestReadDirectoriosQueCompartenBloques(t *testing.T) {
+	if leerAcotado(t, imagenDirectoriosGrandes(t, 16, false)) == nil {
+		t.Fatal("aceptada")
+	}
+}
+
+// imagenDirectoriosGrandes escribe una imagen con un fichero "datos" de
+// 1 MiB hecho de bloques de directorio válidos y ndirs directorios dNN cuyos
+// inodos se reescriben para que sus datos sean los bloques de "datos". Con
+// bucle, el primer bloque lleva una entrada "bucle" que apunta a d00.
+func imagenDirectoriosGrandes(t *testing.T, ndirs int, bucle bool) []byte {
+	t.Helper()
+	tm := time.Unix(1, 0)
+	root := NewDir(0o755, 0, 0, tm)
+	// Bloques de 4 KiB con una sola entrada vacía (inodo 0): un directorio
+	// válido que no tiene hijos.
+	vacio := make([]byte, 1<<20)
+	for off := 0; off < len(vacio); off += 4096 {
+		le.PutUint16(vacio[off+4:], 4096)
+	}
+	if bucle {
+		le.PutUint32(vacio[0:], 1) // se cambia por el inodo de d00 al final
+		vacio[6] = byte(len("bucle"))
+		copy(vacio[8:], "bucle")
+	}
+	root.SetChild("datos", &Node{Mode: ModeReg | 0o644, Size: int64(len(vacio)), Data: Bytes(vacio)})
+	for i := 0; i < ndirs; i++ {
+		root.SetChild(fmt.Sprintf("d%02d", i), NewDir(0o755, 0, 0, tm))
+	}
+	p := t.TempDir() + "/compartida.ext4"
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(f, root, nil, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bucle && ndirs*len(vacio) <= len(b) {
+		t.Fatalf("la imagen mide %d bytes: no basta para pasar de su tamaño", len(b))
+	}
+	datos := inodoOff(b, int(le.Uint32(b[entradaDir(t, b, "datos"):])))
+	for i := 0; i < ndirs; i++ {
+		off := inodoOff(b, int(le.Uint32(b[entradaDir(t, b, fmt.Sprintf("d%02d", i)):])))
+		copy(b[off+32:off+36], b[datos+32:datos+36])   // flags
+		copy(b[off+40:off+100], b[datos+40:datos+100]) // extents
+		le.PutUint32(b[off+4:], uint32(len(vacio)))
+		le.PutUint32(b[off+108:], 0)
+	}
+	if bucle {
+		le.PutUint32(b[entradaDir(t, b, "bucle"):], le.Uint32(b[entradaDir(t, b, "d00"):]))
+	}
+	return b
+}
+
+// ReadContext corta la lectura del árbol y la de los datos de sus ficheros
+// cuando vence el contexto: un fichero disperso de 1 TiB (válido) se leía
+// sin plazo, con ceros de su hueco.
+func TestReadContextCortaLaLectura(t *testing.T) {
+	b := imagenHostil(t)
+	le.PutUint32(b[inodoOff(b, inodoDe(t, b, ModeReg))+108:], 256)
+	p := t.TempDir() + "/dispersa.ext4"
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	cancelado, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ReadContext(cancelado, f); !errors.Is(err, context.Canceled) {
+		t.Fatalf("con el contexto cancelado: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	root, err := ReadContext(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := root.Lookup("/d/f")
+	if n == nil || n.Size != 1<<40+5 {
+		t.Fatalf("d/f: %+v", n)
+	}
+	rc, err := n.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	hecho := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, rc)
+		hecho <- err
+	}()
+	select {
+	case err := <-hecho:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("la copia acabó con %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		panic("la lectura de d/f no se cortó al vencer el contexto")
 	}
 }

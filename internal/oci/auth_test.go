@@ -176,3 +176,51 @@ func TestRealmDeOtroInquilinoSinCredenciales(t *testing.T) {
 		}
 	}
 }
+
+// El realm del 401 lo dicta el registro. Uno remoto no puede mandar la
+// petición del token a esta máquina: el http hacia loopback se aceptaba sin
+// mirar que el registro también fuera local, y sin credenciales ni siquiera
+// pasaba por realmPermitido.
+func TestRealmLocalDeUnRegistroRemoto(t *testing.T) {
+	var mu sync.Mutex
+	conexiones := 0
+	local := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(`{"token":"del-servicio-local"}`))
+	}))
+	local.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			mu.Lock()
+			conexiones++
+			mu.Unlock()
+		}
+	}
+	local.Start()
+	defer local.Close()
+	for _, esquema := range []string{"http", "https"} {
+		realm := esquema + "://" + local.Listener.Addr().String() + "/token"
+		remoto := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("Www-Authenticate", `Bearer realm="`+realm+`",service="x"`)
+			http.Error(w, "auth", http.StatusUnauthorized)
+		}))
+		tr := remoto.Client().Transport.(*http.Transport).Clone()
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if addr != local.Listener.Addr().String() {
+				addr = remoto.Listener.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}
+		tr.TLSClientConfig.InsecureSkipVerify = true
+		cl := &oci.Client{Cache: t.TempDir(), HTTP: &http.Client{Transport: tr}}
+		_, err := cl.Pull(context.Background(), "registro.example.com/app/x", "sha256:"+strings.Repeat("0", 64), "amd64")
+		remoto.Close()
+		if err == nil {
+			t.Fatalf("%s: el Pull pasó", esquema)
+		}
+		mu.Lock()
+		n := conexiones
+		mu.Unlock()
+		if n != 0 {
+			t.Fatalf("realm %s de un registro remoto: %d conexiones al servicio local (%v)", realm, n, err)
+		}
+	}
+}

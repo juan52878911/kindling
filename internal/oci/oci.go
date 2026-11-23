@@ -1237,10 +1237,18 @@ func (c *Client) token(ctx context.Context, challenge, registry, repo string) (s
 		}
 	}
 	realm := params["realm"]
+	// Un servicio de tokens en esta máquina solo si el registro también está
+	// en ella (como en checkRedirect): el realm lo dicta el registro, y uno
+	// remoto no debe poder hacer que se pida una URL de loopback a su gusto.
+	local := isLocalHost(registryHost(registry))
 	ru, err := url.Parse(realm)
-	if err == nil && ru.Scheme == "http" && isLocalHost(ru.Hostname()) {
-		err = nil // un registro local de pruebas
-	} else if err == nil && ru.Scheme != "https" {
+	switch {
+	case err != nil:
+	case isLocalHost(ru.Hostname()) && !local:
+		err = errors.New("loopback realm for a remote registry")
+	case ru.Scheme == "http" && isLocalHost(ru.Hostname()):
+		// un registro local de pruebas
+	case ru.Scheme != "https":
 		err = errors.New("not https")
 	}
 	if err != nil {
