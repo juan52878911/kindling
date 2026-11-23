@@ -1362,6 +1362,12 @@ func (m *Manager) persistirYa() error {
 	return fmt.Errorf("state not saved to disk: %w", err)
 }
 
+// cederArranqueFrio cede al VMM de un arranque en frío su directorio y su
+// overlay.
+func (m *Manager) cederArranqueFrio(dir, overlay string) error {
+	return m.priv.Own(dir, overlay)
+}
+
 // cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
 // vida en curso. Un freeze de varios GiB tarda segundos; systemd da 90 s
 // antes del SIGKILL.
@@ -2193,7 +2199,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.mu.Unlock()
 
 	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.
-	if err := m.priv.Own(dir, overlay); err != nil {
+	if err := m.cederArranqueFrio(dir, overlay); err != nil {
 		m.desmontarRed(netcfg, id)
 		return abandonar(err)
 	}
