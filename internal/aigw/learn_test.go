@@ -381,7 +381,7 @@ func TestLearnTeacherValidatedByReviews(t *testing.T) {
 	caps, _ := f.g.learn.readCaptures("kind", 1<<24)
 	audited := map[string]bool{}
 	for _, c := range caps {
-		if _, in := auditKey(&learnCase{Captured: true, TextSHA: c.TextSHA256}); in {
+		if _, in := f.g.learn.auditKey(&learnCase{Captured: true, TextSHA: c.TextSHA256}); in {
 			audited[c.ID] = true
 		}
 	}

@@ -2,12 +2,17 @@ package aigw
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/chispa"
@@ -62,18 +67,52 @@ type learnCase struct {
 // auditPct es el tanto por ciento de capturas que forman la auditoría.
 const auditPct = 20
 
-// auditKey es la posición de un caso en la auditoría (su hash) y si está en
-// ella: solo las capturas, por el sha256 de su texto, que no depende de nada
-// que el bucle mire.
-func auditKey(c *learnCase) (uint64, bool) {
+// auditKeyFile guarda, en ai-data, la clave de la muestra de auditoría: así la
+// muestra es la misma de un arranque a otro. Empieza por punto para no chocar
+// con el directorio de una tarea (nameRE no admite un punto delante).
+const auditKeyFile = ".audit.key"
+
+// auditKey es la posición de un caso en la auditoría y si está en ella: solo
+// las capturas, por un HMAC del sha256 de su texto con una clave del gateway.
+// No depende de nada que el bucle mire, y quien manda el texto (o un maestro
+// externo) no puede calcular qué casos se van a revisar.
+func (l *learner) auditKey(c *learnCase) (uint64, bool) {
 	if !c.Captured || len(c.TextSHA) < 16 {
 		return 0, false
 	}
-	h, err := strconv.ParseUint(c.TextSHA[:16], 16, 64)
-	if err != nil {
-		return 0, false
-	}
+	m := hmac.New(sha256.New, l.auditSecret())
+	m.Write([]byte(c.TextSHA))
+	h := binary.BigEndian.Uint64(m.Sum(nil))
 	return h, h%100 < auditPct
+}
+
+// auditSecret carga (o crea, 0600) la clave de auditKey. Sin almacén, o si no
+// se puede guardar, vale una aleatoria del proceso: la muestra cambia al
+// reiniciar, pero sigue sin poderse calcular desde fuera.
+func (l *learner) auditSecret() []byte {
+	l.auditOnce.Do(func() {
+		if l.dir != "" {
+			p := filepath.Join(l.dir, auditKeyFile)
+			if b, err := os.ReadFile(p); err == nil && len(b) == 32 {
+				l.auditMAC = b
+				return
+			}
+		}
+		k := make([]byte, 32)
+		_, _ = rand.Read(k)
+		l.auditMAC = k
+		if l.dir == "" {
+			return
+		}
+		if err := os.MkdirAll(l.dir, 0o700); err != nil {
+			log.Printf("learn: audit key: %v", err)
+			return
+		}
+		if err := writeFileAtomic(filepath.Join(l.dir, auditKeyFile), k, 0o600); err != nil {
+			log.Printf("learn: audit key: %v", err)
+		}
+	})
+	return l.auditMAC
 }
 
 func textKey(s string) string {
@@ -179,13 +218,17 @@ func agreement(c *learnCase, lc LearnConfig, labels map[string]bool, counts func
 		return "", false, reasonNoTeacher
 	}
 	label := c.Votes[0].Label
+	// n cuenta MAESTROS distintos, no votos: uno solo que repita su voto no
+	// llega a MinVotes.
 	n := 0
 	anyCounted := false
+	seen := make(map[string]bool, len(c.Votes))
 	for _, v := range c.Votes {
 		if v.Label != label {
 			return majority(c.Votes), false, reasonDisagree
 		}
-		if counts == nil || counts(v.Name) {
+		if (counts == nil || counts(v.Name)) && !seen[v.Name] {
+			seen[v.Name] = true
 			n++
 			anyCounted = true
 		}
@@ -261,7 +304,8 @@ const minAcceptChecks = 10
 
 // validateTeachers valida cada maestro que aparece en los votos. evalOK son
 // los maestros que un registro de evaluación respalda; trust, los forzados.
-func validateTeachers(cases []*learnCase, lc LearnConfig, labels map[string]bool, evalOK map[string]string, trust []string) []TeacherTrust {
+// audit es learner.auditKey: qué casos son de la muestra de auditoría.
+func validateTeachers(cases []*learnCase, lc LearnConfig, labels map[string]bool, evalOK map[string]string, trust []string, audit func(*learnCase) (uint64, bool)) []TeacherTrust {
 	forced := map[string]bool{}
 	for _, t := range trust {
 		forced[t] = true
@@ -283,7 +327,7 @@ func validateTeachers(cases []*learnCase, lc LearnConfig, labels map[string]bool
 		for _, v := range c.Votes {
 			get(v.Name)
 		}
-		if _, audit := auditKey(c); c.Human == "" || !c.HasChispa || !audit {
+		if _, in := audit(c); c.Human == "" || !c.HasChispa || !in {
 			continue
 		}
 		label, pass, _ := agreement(c, lc, labels, nil)
@@ -528,7 +572,7 @@ func (g *Gateway) Review(ctx context.Context, req ReviewRequest) (*ReviewRespons
 			resp.Pending++
 			resp.Reasons[whyNow]++
 		}
-		if h, in := auditKey(c); in {
+		if h, in := g.learn.auditKey(c); in {
 			k.key, k.why = h, "random audit (measures the teachers): "+k.why
 			audit = append(audit, k)
 		} else if !okNow {
@@ -557,7 +601,7 @@ func (g *Gateway) Review(ctx context.Context, req ReviewRequest) (*ReviewRespons
 	}
 	pick := append(append([]cand(nil), audit[:nAudit]...), pend[:min(len(pend), n-nAudit)]...)
 	for _, k := range pick {
-		_, in := auditKey(k.c)
+		_, in := g.learn.auditKey(k.c)
 		resp.Cases = append(resp.Cases, ReviewCase{
 			ID: k.c.ID, TS: k.c.TS, Text: k.c.Text, Fields: k.c.Fields, Chispa: k.c.Chispa, Teachers: k.c.Votes,
 			Proposed: k.prop, Reason: k.why, Audit: in, RareClass: k.rare,
