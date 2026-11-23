@@ -116,6 +116,21 @@ func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apar
 	if congelar == nil {
 		congelar = func(id string) error { return g.congelarConPlazo(ctx, id) }
 	}
+	// La política de cada servicio (IdleFor) se lee una vez, con g.mu suelto.
+	// Una aislada guarda la sesión en su máquina: a ella no se le aplica (se
+	// pausa o congela como siempre).
+	porServicio := map[string]IdlePolicy{}
+	for _, v := range victims {
+		if _, ok := porServicio[v.service]; !ok && v.aislada == "" {
+			porServicio[v.service] = g.idleFor(v.service)
+		}
+	}
+	politica := func(v dormida) IdlePolicy {
+		if v.aislada != "" {
+			return IdleDefault
+		}
+		return porServicio[v.service]
+	}
 	var paused []dormida
 	presupuesto := 0
 	if len(victims) > 0 && g.PausedMiB != 0 && (g.pauseFn != nil || g.sabePausar(ctx)) {
@@ -125,7 +140,13 @@ func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apar
 		score := func(v dormida) float64 { return g.pop.score(v.service) / float64(v.memMiB) }
 		cands := make([]dormida, 0, len(victims))
 		for _, v := range victims {
-			if v.memMiB > 0 && v.memMiB <= presupuesto && g.pop.score(v.service) > 0 {
+			// IdleRemove no pausa nunca. IdlePause no pide popularidad: la
+			// pausa la eligió el operador para ese servicio.
+			p := politica(v)
+			if p == IdleRemove {
+				continue
+			}
+			if v.memMiB > 0 && v.memMiB <= presupuesto && (p == IdlePause || g.pop.score(v.service) > 0) {
 				cands = append(cands, v)
 			}
 		}
@@ -172,13 +193,20 @@ func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apar
 		if !pausadaFallida(paused, v.id) && !apartar(v) {
 			continue
 		}
-		if err := congelar(v.id); err != nil {
+		// Con IdlePause o IdleRemove la que no se pausa se BORRA: congelarla
+		// y descongelarla después es lo que deja a la réplica sin compartir
+		// la memoria del dorado (R8-01).
+		dormirla, hechoTxt := congelar, "frozen"
+		if sinCongelar(politica(v)) {
+			dormirla, hechoTxt = func(id string) error { return g.borrarConPlazo(ctx, id) }, "removed"
+		}
+		if err := dormirla(v.id); err != nil {
 			log.Printf("reap %s: %v", v.service, err)
 			hecho(v, false)
 			continue
 		}
 		hecho(v, true)
-		log.Printf("%s: frozen due to inactivity", v.service)
+		log.Printf("%s: %s due to inactivity", v.service, hechoTxt)
 	}
 }
 
@@ -296,7 +324,7 @@ func (g *Scheduler) ajustarPausadas(ctx context.Context) {
 		if soltar == nil {
 			return // las que quedan las está despertando alguien
 		}
-		ok := g.congelarPausada(ctx, id)
+		ok := g.congelarPausada(ctx, id, p)
 		soltar(ok)
 		if !ok {
 			return
@@ -331,7 +359,7 @@ func (g *Scheduler) enfriarPausadas(ctx context.Context) {
 		// dejaría reteniendo su RAM sin ningún dueño en el planificador (G-04)
 		// — solo el TTL del daemon (2×idle) acabaría congelándola, y
 		// renovarTTL puede seguir aplazándolo si algo la adopta.
-		soltar(g.congelarPausada(ctx, v.id))
+		soltar(g.congelarPausada(ctx, v.id, v.p))
 	}
 }
 
@@ -418,14 +446,37 @@ func (g *Scheduler) tomarPausada(id string, p pausada, vale func(pausada) bool) 
 	}
 }
 
-func (g *Scheduler) congelarPausada(ctx context.Context, id string) bool {
+// congelarPausada congela la pausada id, o la borra si la política de su
+// servicio no congela (IdlePause, IdleRemove). Devuelve si salió bien.
+func (g *Scheduler) congelarPausada(ctx context.Context, id string, p pausada) bool {
 	congelar := g.freezeFn
 	if congelar == nil {
 		congelar = func(id string) error { return g.congelarConPlazo(ctx, id) }
 	}
+	que := "freeze"
+	if p.aislada == "" && sinCongelar(g.idleFor(p.service)) {
+		congelar, que = func(id string) error { return g.borrarConPlazo(ctx, id) }, "remove"
+	}
 	if err := congelar(id); err != nil {
-		log.Printf("freeze paused %s: %v", short(id), err)
+		log.Printf("%s paused %s: %v", que, short(id), err)
 		return false
 	}
 	return true
+}
+
+// borrarConPlazo borra la máquina id acotado por plazoDormir. Ya borrada
+// (404) cuenta como hecho.
+func (g *Scheduler) borrarConPlazo(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDormir)
+	defer cancel()
+	var err error
+	if g.removeFn != nil {
+		err = g.removeFn(ctx, id)
+	} else {
+		err = g.client.Remove(ctx, id)
+	}
+	if api.IsNotFound(err) {
+		return nil
+	}
+	return err
 }

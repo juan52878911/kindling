@@ -1652,6 +1652,7 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		}
 		return m, "adopt", nil
 	}
+	politica := g.idleFor(service)
 	// 2) alguna pausada: ~1 ms, solo reanudarla (ver pausa.go).
 	//
 	// Sale del registro de pausadas solo si el thaw sale bien: si falla, sigue
@@ -1695,14 +1696,27 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		go g.renovarTTL(context.WithoutCancel(ctx), m.ID)
 		return th, "resume", nil
 	}
-	// 3) alguna congelada: ~30 ms. También para el scale-out: una réplica que
+	// 3) alguna congelada: ~30 ms. Salvo con IdlePause o IdleRemove: una
+	// réplica descongelada no comparte la memoria del dorado (R8-01), así
+	// que se restaura y las congeladas que queden (de otra política, de otro
+	// gateway) se borran aparte, sin retrasar esta petición.
+	if sinCongelar(politica) {
+		var congeladas []string
+		for m := pick(api.StateWarm); m != nil; m = pick(api.StateWarm) {
+			congeladas = append(congeladas, m.ID)
+		}
+		if len(congeladas) > 0 {
+			go g.borrarCongeladas(context.WithoutCancel(ctx), service, congeladas)
+		}
+	}
+	// También para el scale-out: una réplica que
 	// el segador congeló vuelve mucho más barata que una restauración nueva,
 	// y sin esto cada ráfaga dejaba otra máquina congelada en disco para
 	// siempre (cada una con su fichero de memoria entero en macOS). El TTL se
 	// renueva ANTES de despertarla: una vuelta del vigilante del daemon entre
 	// el thaw y la renovación la volvería a congelar, y una congelada también
 	// se puede renovar.
-	for {
+	for !sinCongelar(politica) {
 		m := pick(api.StateWarm)
 		if m == nil {
 			break
@@ -2598,7 +2612,7 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// congelarlo solo cuesta que su próximo despertar sea un thaw.
 	// Se aparta con el candado de quien la despertaría (ver tomarPausada).
 	if id, p, soltar := g.tomarPausadaMasVieja(); soltar != nil {
-		congelada := g.congelarPausada(ctx, id)
+		congelada := g.congelarPausada(ctx, id, p)
 		// Si el freeze falló, soltar la repone en vez de perderla del
 		// registro reteniendo RAM sin dueño (G-04); se sigue con el camino
 		// normal de desalojo por si hay algo despierto que sacrificar.
@@ -2707,7 +2721,12 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		if g.OnSleep != nil {
 			g.OnSleep(elegido, addr)
 		}
-		err := freeze(id)
+		// Una aislada guarda la sesión en su máquina: se congela siempre.
+		dormirla := freeze
+		if victima.aislada == "" && sinCongelar(g.idleFor(elegido)) {
+			dormirla = func(id string) error { return g.borrarConPlazo(ctx, id) }
+		}
+		err := dormirla(id)
 		g.mu.Lock()
 		delete(g.adquiriendo, id)
 		// Si NO se congeló, dejarla fuera es peor que no haberla tocado: el

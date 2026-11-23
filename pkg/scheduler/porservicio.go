@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -231,4 +232,32 @@ func elegirPorTrabajo(entries []*entry, tope int) (elegida, libre *entry) {
 		libre.porTrabajo = true
 	}
 	return nil, libre
+}
+
+// idleFor es la política de ociosidad del servicio (IdleDefault sin gancho).
+// Con g.mu suelto.
+func (g *Scheduler) idleFor(service string) IdlePolicy {
+	if g.IdleFor == nil {
+		return IdleDefault
+	}
+	return g.IdleFor(service)
+}
+
+// sinCongelar dice si la política no congela nunca: lo ocioso se pausa o se
+// borra, y lo congelado no se descongela (R8-01).
+func sinCongelar(p IdlePolicy) bool { return p == IdlePause || p == IdleRemove }
+
+// borrarCongeladas borra las congeladas ids del servicio que acquire apartó
+// (marcadas en g.adquiriendo) en vez de descongelarlas, y las desmarca.
+func (g *Scheduler) borrarCongeladas(ctx context.Context, service string, ids []string) {
+	for _, id := range ids {
+		if err := g.borrarConPlazo(ctx, id); err != nil {
+			log.Printf("%s: could not remove frozen %s: %v", service, short(id), err)
+		} else {
+			log.Printf("%s: removed frozen %s (idle policy does not thaw)", service, short(id))
+		}
+		g.mu.Lock()
+		delete(g.adquiriendo, id)
+		g.mu.Unlock()
+	}
 }
