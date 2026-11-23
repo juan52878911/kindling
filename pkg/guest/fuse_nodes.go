@@ -45,6 +45,11 @@ type node struct {
 	// cuando el host ya no puede decirlos.
 	typ atomic.Uint32
 
+	// abiertos cuenta los handles (ficheros y directorios) abiertos sobre el
+	// nodo. evictLocked no expulsa un nodo con alguno: el kernel no vuelve a
+	// buscar por nombre lo que ya tiene abierto, y ese fd daría ESTALE.
+	abiertos atomic.Int32
+
 	// wb son las escrituras diferidas pendientes (fuse_wb.go); nil si nunca
 	// hubo.
 	wb atomic.Pointer[wbState]
@@ -265,10 +270,14 @@ func (t *nodeTable) rename(op *node, on string, np *node, nn string) {
 //
 // Se expulsa en bloque (1/16 del tope) para que el coste de ordenar se pague
 // una vez cada muchas altas y no en cada una.
+//
+// Los nodos con handles abiertos no son candidatos: sus fd no se recuperan por
+// nombre. Pueden dejar la tabla por encima del tope, pero los handles ya tienen
+// el suyo (maxOpen).
 func (t *nodeTable) evictLocked() {
 	var leaves []*node
 	for _, n := range t.byID {
-		if n != t.root && len(n.children) == 0 {
+		if n != t.root && len(n.children) == 0 && n.abiertos.Load() == 0 {
 			leaves = append(leaves, n)
 		}
 	}

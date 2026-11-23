@@ -924,7 +924,10 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			return fail(share.EINVAL)
 		}
 		fs.hmu.Lock()
-		delete(fs.dirs, le.Uint64(a[0:]))
+		if dh := fs.dirs[le.Uint64(a[0:])]; dh != nil {
+			delete(fs.dirs, le.Uint64(a[0:]))
+			dh.node.abiertos.Add(-1)
+		}
 		fs.hmu.Unlock()
 		return fail(0)
 
@@ -1197,6 +1200,7 @@ func (fs *fuseFS) opendir(u uint64, n *node) []byte {
 	}
 	fs.nextFH++
 	fs.dirs[fs.nextFH] = &dirHandle{node: n, entries: entries, at: at}
+	n.abiertos.Add(1)
 	return reply(u, 0, openOut(fs.nextFH))
 }
 
@@ -1291,6 +1295,7 @@ func (fs *fuseFS) addFile(h *fileHandle) (uint64, uint32) {
 	}
 	fs.nextFH++
 	fs.files[fs.nextFH] = h
+	h.node.abiertos.Add(1)
 	return fs.nextFH, 0
 }
 
@@ -1304,7 +1309,10 @@ func (fs *fuseFS) dropFile(fh uint64) *fileHandle {
 	fs.hmu.Lock()
 	defer fs.hmu.Unlock()
 	h := fs.files[fh]
-	delete(fs.files, fh)
+	if h != nil {
+		delete(fs.files, fh)
+		h.node.abiertos.Add(-1)
+	}
 	return h
 }
 
