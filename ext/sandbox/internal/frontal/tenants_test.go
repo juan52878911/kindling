@@ -375,3 +375,28 @@ func TestTenantsAplicanTopes(t *testing.T) {
 	resp := pide(t, b.srv, tokenAlice, "GET", "/v1/sandboxes", nil)
 	esperaCodigo(t, resp, 200)
 }
+
+// R4-14: el aviso de cuotas abiertas también sale al crear o editar un inquilino.
+func TestTenantsAvisaDeCuotasAbiertasAlCrearYEditar(t *testing.T) {
+	b := montarTenants(t, "", nil, nil)
+	b.logs.Reset()
+	esperaCodigo(t, pide(t, b.srv, tokenAdmin, "POST", "/v1/tenants", map[string]any{"name": "carol"}), 201)
+	if !strings.Contains(b.logs.String(), `tenant "carol" has neither MaxSandboxes nor MaxMemTotalMiB`) {
+		t.Errorf("crear un inquilino sin cuotas no avisó: %q", b.logs.String())
+	}
+	b.logs.Reset()
+	esperaCodigo(t, pide(t, b.srv, tokenAdmin, "POST", "/v1/tenants", map[string]any{"name": "dave", "limits": map[string]int{"max_sandboxes": 3}}), 201)
+	if strings.Contains(b.logs.String(), `"dave"`) {
+		t.Errorf("avisó de un inquilino con cuota: %q", b.logs.String())
+	}
+	// Editar para quitar la cuota avisa; editar dejándola, no.
+	esperaCodigo(t, pide(t, b.srv, tokenAdmin, "PATCH", "/v1/tenants/dave", map[string]any{"limits": map[string]int{"max_sandboxes": 0}}), 200)
+	if !strings.Contains(b.logs.String(), `tenant "dave" has neither`) {
+		t.Errorf("editar un inquilino hasta dejarlo sin cuotas no avisó: %q", b.logs.String())
+	}
+	b.logs.Reset()
+	esperaCodigo(t, pide(t, b.srv, tokenAdmin, "PATCH", "/v1/tenants/dave", map[string]any{"limits": map[string]int{"max_sandboxes": 5}}), 200)
+	if strings.Contains(b.logs.String(), `"dave"`) {
+		t.Errorf("avisó tras poner cuota: %q", b.logs.String())
+	}
+}
