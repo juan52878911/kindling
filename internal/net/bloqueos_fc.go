@@ -41,6 +41,9 @@ func (n *Net) reglasRegistroIP() string {
 // añadiría esos ms a cada arranque. Si el netns se desmonta antes de que
 // acabe, nft falla y no pasa nada.
 func (n *Net) instalarRegistroIP() {
+	if instalarRegistroHook != nil {
+		instalarRegistroHook(n)
+	}
 	if _, err := exec.LookPath("nft"); err != nil {
 		return
 	}
@@ -52,6 +55,30 @@ func (n *Net) instalarRegistroIP() {
 		cmd := exec.Command("nft", "-f", "-")
 		cmd.Stdin = strings.NewReader(script)
 		_ = ejecutarEnNetns(ns, cmd) // setns, sin `ip netns exec`
+	}()
+}
+
+// instalarRegistroHook avisa de cada instalación del registro (tests).
+var instalarRegistroHook func(*Net)
+
+// registroEnRanura: netns de ranuras que ya traen el registro de none
+// instalado por MontarRanura (la tabla solo depende de HostIP y del tap). Lo
+// consume arrancarRegistroNone (none: no lo repite) o aplicarSobreRanura (otro
+// modo: lo retira, porque un registro solo tiene sentido donde se corta).
+var registroEnRanura sync.Map // ns -> struct{}
+
+// retirarRegistroDeRanura quita el registro de una ranura que se entrega con
+// un modo que no es none. En segundo plano, como la instalación.
+func (n *Net) retirarRegistroDeRanura() {
+	if _, ok := registroEnRanura.LoadAndDelete(n.NS); !ok {
+		return
+	}
+	ns := n.NS
+	registrosEnVuelo.Add(1)
+	go func() {
+		defer registrosEnVuelo.Done()
+		cmd := exec.Command("nft", "delete", "table", "ip", nftTabla)
+		_ = ejecutarEnNetns(ns, cmd)
 	}()
 }
 

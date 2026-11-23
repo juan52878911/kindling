@@ -254,6 +254,10 @@ type Manager struct {
 	// stat-earlo bajo m.mu en cada Run/runFrom/Resize (hotMemFilesMiBLocked) no
 	// aporta nada sobre calcularlo una vez. Se invalida junto con snapCache.
 	memAllocCache map[string]int64
+	// memSinPropio: id -> PID con el que se vio que la máquina no tiene
+	// volcado propio (mem.file en su directorio); m.mu. Ver
+	// hotMemFilesMiBLocked.
+	memSinPropio map[string]int
 
 	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
 	// pasada completa no libera nada, lo que significa que el disco lo llena algo
@@ -492,6 +496,10 @@ type Manager struct {
 	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
 	pendGen    uint64
 	escritoGen uint64
+	// sinFsync: la última foto se escribió con write+rename sin fsync
+	// (persistirYa) y falta el fsync, que hace la siguiente escritura con
+	// debounce. escrituraMu.
+	sinFsync bool
 	// fallosEstado cuenta las escrituras seguidas de state.json que fallaron
 	// (para la espera del reintento). Con escrituraMu.
 	fallosEstado uint
@@ -1097,6 +1105,55 @@ func (m *Manager) ultimaEscritura(plazo time.Duration) {
 // disco que falla no se puede fabricar de otra forma.
 var escribirEstado = durable.Escribir
 
+// escribirEstadoRapido es escribirEstado sin fsync: temporal, write y rename.
+// La publicación es atómica (un lector ve la foto vieja o la nueva entera),
+// pero hasta el fsync que hace la escritura con debounce (≤ ~250 ms) una
+// caída del HOST puede dejar la vieja: se pierde el registro de una máquina
+// cuyo VMM también murió con el host. Una caída del daemon, no: el rename ya
+// está en el page cache del kernel. Variable para los tests.
+var escribirEstadoRapido = func(ruta string, datos []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(ruta), filepath.Base(ruta)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	fallo := func(err error) error { f.Close(); os.Remove(tmp); return err }
+	if err := f.Chmod(perm); err != nil {
+		return fallo(fmt.Errorf("chmod %s: %w", tmp, err))
+	}
+	if _, err := f.Write(datos); err != nil {
+		return fallo(fmt.Errorf("writing %s: %w", tmp, err))
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, ruta); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// fsyncEstado asienta en disco state.json y su directorio (el fsync que
+// escribirEstadoRapido dejó para después). Variable para los tests.
+var fsyncEstado = func(ruta string) error {
+	f, err := os.Open(ruta)
+	if err != nil {
+		return err
+	}
+	err = durable.Ordenar(f)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(ruta)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
 // reintentoEstadoMax acota la espera entre reintentos de una escritura de
 // state.json que falló.
 const reintentoEstadoMax = 10 * time.Second
@@ -1106,12 +1163,24 @@ const reintentoEstadoMax = 10 * time.Second
 // escrituraMu se toma ANTES de sacar la foto: quien la saca la escribe o la
 // repone sin soltarlo, así que persistirYa, al tomarlo detrás, ve ya en
 // escritoGen el resultado de cualquier escritura en curso.
-func (m *Manager) writePending() error {
+func (m *Manager) writePending() error { return m.escribirPendiente(false) }
+
+// escribirPendiente es writePending; rapido escribe la foto con write+rename
+// sin fsync (solo persistirYa) y deja el fsync para la escritura con debounce.
+func (m *Manager) escribirPendiente(rapido bool) error {
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
 	m.stateMu.Lock()
 	if !m.hasPend {
 		m.stateMu.Unlock()
+		if m.sinFsync && !rapido {
+			// Nada nuevo, pero la última foto aún no se asentó: este es el
+			// fsync que persistirYa dejó para después.
+			if err := fsyncEstado(m.statePath()); err != nil {
+				return fmt.Errorf("could not fsync state: %w", err)
+			}
+			m.sinFsync = false
+		}
 		return nil
 	}
 	list, gen := m.pending, m.pendGen
@@ -1124,9 +1193,10 @@ func (m *Manager) writePending() error {
 	if gen <= m.escritoGen {
 		return nil // ya se escribió una foto más nueva
 	}
-	err := m.escribirFoto(list, gen)
+	err := m.escribirFoto(list, gen, rapido)
 	if err == nil {
 		m.fallosEstado = 0
+		m.sinFsync = rapido
 		return nil
 	}
 	// La foto no llegó a disco: se repone, salvo que ya haya otra más nueva
@@ -1154,7 +1224,7 @@ func (m *Manager) writePending() error {
 }
 
 // escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
-func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
+func (m *Manager) escribirFoto(list []api.Machine, gen uint64, rapido bool) error {
 	schema := esquemaParaEscribir(list)
 	b, err := serializarFoto(list, schema)
 	if err != nil {
@@ -1177,7 +1247,11 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	// mal en el otro, que es lo que pasaba con links.json.
 	// 0600: es el inventario entero (IPs, reenvíos, dueños, nombres de
 	// variables), y solo lo lee el daemon (M8).
-	if err := escribirEstado(m.statePath(), b, 0o600); err != nil {
+	escribir := escribirEstado
+	if rapido {
+		escribir = escribirEstadoRapido
+	}
+	if err := escribir(m.statePath(), b, 0o600); err != nil {
 		return fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
@@ -1276,7 +1350,7 @@ func (m *Manager) persistirYa() error {
 	m.mu.RLock()
 	gen := m.persist()
 	m.mu.RUnlock()
-	err := m.writePending()
+	err := m.escribirPendiente(true)
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
 	if m.estadoIntocable || m.escritoGen >= gen {
@@ -1902,6 +1976,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
 	// reserva tiene que existir antes de que empiece nada lento.
 	id := m.nuevoIDMaquina()
+	// Si la alta se abandona antes de asignarRed, la ranura se descarta en el
+	// acto; entregada, es no-op.
+	defer m.ranuraDescartar(id)
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]
 	}
@@ -2612,6 +2689,11 @@ func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid i
 	// 30 s por defecto del cliente en el primero, muy por encima de los 5 s.
 	ping := c.ConPlazo(plazoPing)
 	for time.Now().Before(deadline) {
+		// Con el contexto cancelado no se sigue: quien llama tiene un hueco de
+		// la puerta de arranques y su abortar mata el VMM.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if ping.Ping(ctx) == nil {
 			return nil
 		}
@@ -2626,7 +2708,11 @@ func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid i
 		if time.Since(start) > 200*time.Millisecond {
 			paso = 10 * time.Millisecond
 		}
-		time.Sleep(paso)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(paso):
+		}
 	}
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
@@ -3899,7 +3985,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// La red suele seguir montada desde el Freeze (ver red.go); si no —un
 	// reinicio del daemon o del host, o el vigilante la soltó—, se rehace con
 	// el mismo índice para que la máquina conserve su IP.
-	netcfg, errRed := m.redDelThaw(mc)
+	netcfg, esperarHost, errRed := m.redDelThaw(mc)
 	if errRed != nil {
 		soltarFull()
 		return nil, errRed
@@ -4053,6 +4139,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// si el daemon moría el volcado viejo pasaba por anterior a los sellos y el
 	// siguiente thaw cargaba aquella RAM sobre el disco ya escrito. Ahora es un
 	// rename durable (volcadoEnCurso) y, si no se puede, no se carga nada.
+	// Las barreras del host se comprobaron en paralelo: aquí se espera su
+	// resultado, antes de cargar y reanudar al invitado.
+	if err := esperarHost(); err != nil {
+		return abortar(err)
+	}
 	if err := esperarSello(); err != nil {
 		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
 	}
@@ -4550,23 +4641,37 @@ func (m *Manager) vmmCongeladoEnDisco(id string, pid int) bool {
 // host antes de dar red (knet.AsegurarHost): tras un reload del cortafuegos,
 // la máquina despertaba con el host abierto. Ahora se comprueban también, y
 // si no se pueden reponer no despierta, como en Setup.
-func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, error) {
+//
+// Devuelve la espera de la comprobación de las barreras, que corre en paralelo
+// con el resto del thaw: quien llama la ejecuta antes de cargar el volcado (el
+// invitado no corre hasta entonces) y aborta si falla.
+func (m *Manager) redDelThaw(mc *api.Machine) (*knet.Net, func() error, error) {
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
 	if redConservada(m, netcfg, mc.ID) {
-		if err := asegurarBarrerasHost(); err != nil {
-			return nil, fmt.Errorf("host firewall rules: %w", err)
-		}
-		return netcfg, nil
+		comprobar := asegurarBarrerasHost
+		hecho := make(chan error, 1)
+		go func() { hecho <- comprobar() }()
+		var once sync.Once
+		var herr error
+		return netcfg, func() error {
+			once.Do(func() {
+				if herr = <-hecho; herr != nil {
+					herr = fmt.Errorf("host firewall rules: %w", herr)
+				}
+			})
+			return herr
+		}, nil
 	}
 	n, err := m.redParaRehacer(mc)
 	if err != nil {
-		return nil, fmt.Errorf("rebuilding the network: %w", err)
+		return nil, nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
 	egress, _ := knet.ParseEgress(mc.Egress)
-	if err := m.montarRed(n, mc.ID, egress, mc.AllowDomains); err != nil {
-		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	esperar, err := m.montarRedAparte(n, mc.ID, egress, mc.AllowDomains)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
-	return n, nil
+	return n, esperar, nil
 }
 
 // redConservada es redLista detrás de una variable, para los tests (en macOS

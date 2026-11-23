@@ -1606,13 +1606,6 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		req.CPUPct = m.techoCPUPorDefecto(snap.Image, max(req.VCPUs, snap.VCPUs), req.CPUPctDefault)
 	}
 
-	id := m.nuevoIDMaquina()
-	if req.Name == "" {
-		req.Name = req.From + "-" + id[:6]
-		if ai != nil {
-			req.Name = snap.Image + "-" + id[:6] // como en frío
-		}
-	}
 	// Reserva de memoria, igual que en Run y por la misma razón: el gateway
 	// despierta varios servicios a la vez cuando el anfitrión aprieta, y sin
 	// reservar veían todos la misma memoria libre. Ahora el segundo ve que no
@@ -1642,6 +1635,19 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		return nil, merr
 	}
 	defer releaseMem()
+
+	// El id, y con él la ranura de red del fondo, se toman al final de los
+	// filtros baratos (cuota, admisión, memoria): una alta rechazada antes no
+	// quema una ranura. Si la creación se abandona antes de asignarRed, la
+	// ranura se descarta en el acto (no espera al plazo de Recoger).
+	id := m.nuevoIDMaquina()
+	if req.Name == "" {
+		req.Name = req.From + "-" + id[:6]
+		if ai != nil {
+			req.Name = snap.Image + "-" + id[:6] // como en frío
+		}
+	}
+	defer m.ranuraDescartar(id)
 
 	// El directorio nace RESERVADO: desde aquí hasta la entrada en byID —copiar
 	// el overlay dorado, resolver volúmenes, montar la red— es de lejos la
@@ -1753,7 +1759,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		return nil, err
 	}
 	// Disco y red a la vez (clonarYMontarRed): se esperan los dos antes de ceder.
-	modoCoW, err := m.clonarYMontarRed(ctx, fases, dir, netcfg, id, egress, req.AllowDomains,
+	modoCoW, esperarHost, err := m.clonarYMontarRed(ctx, fases, dir, netcfg, id, egress, req.AllowDomains,
 		func(ctx context.Context) (string, error) {
 			return m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
 		})
@@ -1774,11 +1780,13 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	// Con el overlay en el almacén, overlay es un enlace a él y Own (chown, que
 	// sigue enlaces) se lo daría en propiedad al VMM: ahí es del daemon y el VMM
 	// lo usa por grupo (ver clonarInstancia).
-	ceder := []string{dir, overlay}
-	if modoCoW == cowModoStore {
-		ceder = ceder[:1]
+	// Y el overlay normal, por descriptor abierto con O_NOFOLLOW: un enlace
+	// plantado en su sitio no lleva el chown a un fichero de fuera (B-4).
+	err = m.priv.Own(dir)
+	if err == nil && modoCoW != cowModoStore {
+		err = cederSinSeguirEnlaces(m.priv, overlay)
 	}
-	if err := m.priv.Own(ceder...); err != nil {
+	if err != nil {
 		m.desmontarRed(netcfg, id)
 		os.RemoveAll(dir)
 		return nil, err
@@ -2053,6 +2061,12 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	mc.Volumes = withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
 	fases.marca(fcLoad)
+	// Las barreras del host se comprobaron en paralelo con el montaje: aquí se
+	// espera su resultado, y no hay camino a Resume sin pasar por esta línea.
+	// El invitado no emite hasta que se reanuda.
+	if err := esperarHost(); err != nil {
+		return abortar(fmt.Errorf("host INPUT rules: %w", err))
+	}
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
 	}
@@ -2347,8 +2361,12 @@ func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
 // de la red; no dependen entre sí. Si falla una se deshace la otra y se borra
 // dir; el overlay del almacén que haya salido bien lo recoge quien llama con el
 // modo devuelto. Las fases fcDisk y fcNet llevan el tiempo propio de cada rama.
+//
+// Devuelve además la espera de la comprobación de las barreras del host
+// (montarRedAparte): quien llama la ejecuta justo antes de reanudar el
+// invitado, y un fallo ya habrá desmontado la red.
 func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, dir string, n *knet.Net, id string,
-	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, error) {
+	egress knet.Egress, domains []string, clon func(context.Context) (string, error)) (string, func() error, error) {
 	fases.marca(fcDisk)
 	var (
 		modo    string
@@ -2363,13 +2381,14 @@ func (m *Manager) clonarYMontarRed(ctx context.Context, fases *cronoCreacion, di
 		dClon = time.Since(t0)
 	}()
 	t1 := time.Now()
-	errRed := m.montarRed(n, id, egress, domains)
+	esperarHost, errRed := m.montarRedAparte(n, id, egress, domains)
 	dRed := time.Since(t1)
 	<-hecho
 	fases.d[fcDisk] += dClon
 	fases.d[fcNet] += dRed
 	fases.ultima = time.Now()
-	return m.cerrarClonYRed(dir, n, id, modo, errClon, errRed)
+	modo, err := m.cerrarClonYRed(dir, n, id, modo, errClon, errRed)
+	return modo, esperarHost, err
 }
 
 // cerrarClonYRed decide el resultado de las dos ramas y deshace lo que toque.
@@ -2385,4 +2404,23 @@ func (m *Manager) cerrarClonYRed(dir string, n *knet.Net, id, modo string, errCl
 		return modo, fmt.Errorf("copying golden overlay: %w", errClon)
 	}
 	return modo, fmt.Errorf("setting up network: %w", errRed)
+}
+
+// cederSinSeguirEnlaces cede path a Firecracker con fchown sobre un descriptor
+// abierto con O_NOFOLLOW: si path es un enlace simbólico (plantado donde debía
+// estar el overlay), falla en vez de entregar el fichero al que apunta. Un
+// fichero que no existe no es un fallo, como en Privileges.Own.
+func cederSinSeguirEnlaces(p *Privileges, path string) error {
+	if !p.Enabled {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("granting %s: %w", path, err)
+	}
+	defer f.Close()
+	return p.OwnFile(f)
 }

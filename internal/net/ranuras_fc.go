@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,11 +49,41 @@ func TamPool() int {
 // sobre 8 vCPU y todas pelean por rtnl_lock.
 var montajesCompletos = make(chan struct{}, 4)
 
+// creacionesEsperando cuenta los montajes completos de creaciones que esperan
+// hueco en montajesCompletos. Los reponedores del fondo no lo toman mientras
+// haya alguno: una ráfaga de altas no hace cola detrás de reposiciones que
+// pueden esperar.
+var creacionesEsperando atomic.Int32
+
+// tomarMontaje toma un hueco de montajesCompletos. Una creación (creacion)
+// lo pide sin más, anotando que espera; un reponedor cede el hueco mientras
+// haya creaciones esperando. Se devuelve con soltarMontaje.
+func tomarMontaje(creacion bool) {
+	if creacion {
+		creacionesEsperando.Add(1)
+		montajesCompletos <- struct{}{}
+		creacionesEsperando.Add(-1)
+		return
+	}
+	for {
+		for creacionesEsperando.Load() > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		montajesCompletos <- struct{}{}
+		if creacionesEsperando.Load() == 0 {
+			return
+		}
+		<-montajesCompletos // llegó una creación mientras esperaba: se lo deja
+	}
+}
+
+func soltarMontaje() { <-montajesCompletos }
+
 // MontarRanura monta la base de n (con DNAT) y la deja como ranura: Setup solo
 // aplicará lo propio. Si falla, lo que quedó montado se derriba.
 func (n *Net) MontarRanura(owner int) error {
-	montajesCompletos <- struct{}{}
-	defer func() { <-montajesCompletos }()
+	tomarMontaje(false)
+	defer soltarMontaje()
 	if err := n.montarBase(nuevaTrazaSetup(n.NS), owner, true); err != nil {
 		n.Teardown()
 		return err
@@ -62,6 +93,10 @@ func (n *Net) MontarRanura(owner int) error {
 		n.Teardown()
 		return err
 	}
+	// El registro de none (nft) se instala aquí, en el reponedor, y no en la
+	// creación: su tabla solo depende de HostIP y del tap.
+	n.instalarRegistroIP()
+	registroEnRanura.Store(n.NS, struct{}{})
 	n.baseLista = true
 	n.baseEgress = EgressNone
 	return nil
@@ -69,6 +104,7 @@ func (n *Net) MontarRanura(owner int) error {
 
 // DestruirRanura derriba una ranura que no llegó a máquina.
 func (n *Net) DestruirRanura() {
+	registroEnRanura.Delete(n.NS)
 	n.baseLista = false
 	n.baseEgress = ""
 	n.Teardown()
