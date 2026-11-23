@@ -134,7 +134,7 @@ func TestReadmeInstallOrdenesYPin(t *testing.T) {
 				l = strings.TrimSpace(l)
 				if strings.HasPrefix(l, "curl ") {
 					// (c) el pin.
-					if m := regexp.MustCompile(`KLING_VERSION=(v\S+)`).FindStringSubmatch(l); m != nil && semverMenor(m[1], desde) {
+					if m := regexp.MustCompile(`(?:KLING_VERSION=|--tag[ =])(v\S+)`).FindStringSubmatch(l); m != nil && semverMenor(m[1], desde) {
 						t.Errorf("%s: fija %s, menor que PRIMER_USO_DESDE %s (esa release no comprueba la firma sin minisign)", readme.fichero, m[1], desde)
 					}
 					if regexp.MustCompile(`\|\s*sudo\b`).MatchString(l) {
@@ -209,7 +209,7 @@ func TestReadmeLinuxTresLineas(t *testing.T) {
 				l = append(l, x)
 			}
 		}
-		if len(l) != 3 || !strings.HasPrefix(l[0], "curl ") || !regexp.MustCompile(`\|\s*sudo\b.*\bsh$`).MatchString(l[0]) ||
+		if len(l) != 3 || !strings.HasPrefix(l[0], "curl ") || !regexp.MustCompile(`\|\s*sudo\b.*\bsh\b`).MatchString(l[0]) ||
 			!strings.HasPrefix(l[1], "sudo kling up -install") || !strings.HasPrefix(l[2], "kling try") {
 			t.Errorf("%s: el bloque de Linux es %q", r.f, l)
 		}

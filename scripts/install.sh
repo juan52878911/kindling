@@ -56,7 +56,9 @@
 #
 # Variables de entorno respetadas:
 #   KLING_VERSION   versión a instalar (ej. v0.1.0). Por defecto: última estable.
-#   KLING_PREFIX    directorio de instalación. Por defecto: ~/.local/bin
+#   KLING_PREFIX    directorio de instalación. Por defecto: /usr/local/bin si se
+#                   corre como root (así sudo y systemd lo encuentran),
+#                   ~/.local/bin si no
 #   KLING_REPO      repo de donde descargar. Por defecto: juan52878911/kindling
 #   KLING_WITH      extensiones a instalar, como --with (ej. mcp,sandbox)
 #   KLING_PLUGIN_PATH  su primer directorio es donde van las extensiones
@@ -76,7 +78,13 @@ set -u
 main() {
 
 REPO="${KLING_REPO:-juan52878911/kindling}"
-PREFIX="${KLING_PREFIX:-${HOME}/.local/bin}"
+# El uid: KLING_INSTALL_UID lo simula (los tests), si no `id -u`.
+INSTALL_UID="${KLING_INSTALL_UID:-$(id -u 2>/dev/null || echo 1000)}"
+if [ "$INSTALL_UID" = "0" ]; then
+    PREFIX="${KLING_PREFIX:-/usr/local/bin}"
+else
+    PREFIX="${KLING_PREFIX:-${HOME}/.local/bin}"
+fi
 TAG=""
 # TAG_LATEST=1 cuando la etiqueta sale de /releases/latest y no de --tag o
 # KLING_VERSION: entonces una 0.x sin firma se rechaza (con la orden con
@@ -93,12 +101,21 @@ FORCE=0
 # Claves públicas con las que se firman las releases (minisign, separadas por
 # espacios): las mismas que clavesRelease de internal/upgrade/firma.go, lo
 # comprueba un test (docs/firmas.md).
+# Si vienen del entorno (una variable heredada) cambian la raíz de confianza
+# sin que nadie lo vea: se anota aquí y se avisa más abajo.
+CLAVES_DEL_ENV=""
+[ -n "${KLING_RELEASE_PUBKEYS+x}" ] && CLAVES_DEL_ENV="KLING_RELEASE_PUBKEYS"
+[ -n "${KLING_RELEASE_SSH_SIGNERS+x}" ] && CLAVES_DEL_ENV="$CLAVES_DEL_ENV KLING_RELEASE_SSH_SIGNERS"
 KLING_RELEASE_PUBKEYS="${KLING_RELEASE_PUBKEYS:-RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN}"
 # Firmantes de SHA256SUMS.sshsig, en el formato de allowed_signers de ssh
 # (principal "kling-release", namespace kling-release). Vacío mientras no haya
 # clave de firma ssh publicada (docs/firmas.md): sin ella el segundo verificador
 # no se usa.
 KLING_RELEASE_SSH_SIGNERS="${KLING_RELEASE_SSH_SIGNERS:-}"
+# Primera versión cuyo kling sabe comprobar SHA256SUMS por sí mismo
+# (`kling up -verify-sums`): sin minisign ni ssh-keygen, una anterior no se
+# puede verificar y el one-liner del README no puede fijarla (scripts/readme_test.go).
+PRIMER_USO_DESDE="v1.0.0-rc.3"
 # Desde esta versión mayor una release sin firma se rechaza:
 # upgrade.FirmaObligatoriaDesde (v1.0.0). Una 0.x sin firma solo se instala
 # pidiéndola con --tag (o KLING_VERSION): nunca por llegar como «latest».
@@ -268,6 +285,10 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
 fail() { printf '  ✗ %s\n' "$*" >&2; exit 1; }
 
+for V in $CLAVES_DEL_ENV; do
+    warn "$V comes from the environment, not from this script: it replaces the keys the release is checked against (unset it to use the built-in ones)"
+done
+
 # Detecta una herramienta de descarga y la usa. Prefiere curl por ser
 # ubicuo; cae a wget si curl falta.
 fetch() {
@@ -362,6 +383,29 @@ get() {
     ok "$1 verified"
 }
 
+version_ge() {
+    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "$2" ]
+}
+
+# ¿Versión $1 >= $2? Como version_ge, pero con prerelease: una 1.0.0-rc.2 es
+# menor que la 1.0.0 final (quitarle el sufijo la daba por buena ante un
+# min_kling 1.0.0). Entre dos prereleases de la misma base compara el sufijo
+# por campos (rc.9 < rc.10). El +build no cuenta.
+semver_ge() {
+    SA="${1#v}"; SA="${SA%%+*}"
+    SB="${2#v}"; SB="${SB%%+*}"
+    SA_PRE=""; case "$SA" in *-*) SA_PRE="${SA#*-}" ;; esac
+    SB_PRE=""; case "$SB" in *-*) SB_PRE="${SB#*-}" ;; esac
+    SA="${SA%%-*}"; SB="${SB%%-*}"
+    if [ "$SA" != "$SB" ]; then
+        version_ge "$SA" "$SB"
+        return
+    fi
+    [ -n "$SA_PRE" ] || return 0
+    [ -n "$SB_PRE" ] || return 1
+    [ "$(printf '%s\n%s\n' "$SB_PRE" "$SA_PRE" | sort -t. -k1,1 -k2,2n -k3,3n | head -n1)" = "$SB_PRE" ]
+}
+
 # verify_sums_signature: comprueba la firma de SHA256SUMS y que se firmó para
 # esta etiqueta (si no, el SHA256SUMS firmado de otra release valdría para colar
 # sus binarios). Por orden, el primer verificador independiente del binario que
@@ -447,6 +491,9 @@ verify_sums_signature() {
         fail "the SHA256SUMS signature check failed: $OUT"
     fi
     # 2: este kling no sabe verificar (una release anterior).
+    if [ "$REQUIRED" = "1" ] && ! semver_ge "$TAG" "$PRIMER_USO_DESDE"; then
+        fail "$TAG cannot check its own SHA256SUMS signature (that starts at $PRIMER_USO_DESDE) and there is no minisign: install minisign (brew install minisign / apt install minisign) or use KLING_VERSION=$PRIMER_USO_DESDE or later"
+    fi
     [ "$REQUIRED" = "1" ] && fail "cannot check the SHA256SUMS signature: this kling cannot do it and minisign is not installed (brew install minisign / apt install minisign)"
     warn "cannot check the SHA256SUMS signature (no minisign): sha256 only"
     return 0
@@ -496,29 +543,6 @@ done
 
 # ── comprobaciones antes de tocar nada ──────────────────────────────────────
 # Compara "X.Y.Z" por sus tres números: ¿$1 >= $2?
-version_ge() {
-    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "$2" ]
-}
-
-# ¿Versión $1 >= $2? Como version_ge, pero con prerelease: una 1.0.0-rc.2 es
-# menor que la 1.0.0 final (quitarle el sufijo la daba por buena ante un
-# min_kling 1.0.0). Entre dos prereleases de la misma base compara el sufijo
-# por campos (rc.9 < rc.10). El +build no cuenta.
-semver_ge() {
-    SA="${1#v}"; SA="${SA%%+*}"
-    SB="${2#v}"; SB="${SB%%+*}"
-    SA_PRE=""; case "$SA" in *-*) SA_PRE="${SA#*-}" ;; esac
-    SB_PRE=""; case "$SB" in *-*) SB_PRE="${SB#*-}" ;; esac
-    SA="${SA%%-*}"; SB="${SB%%-*}"
-    if [ "$SA" != "$SB" ]; then
-        version_ge "$SA" "$SB"
-        return
-    fi
-    [ -n "$SA_PRE" ] || return 0
-    [ -n "$SB_PRE" ] || return 1
-    [ "$(printf '%s\n%s\n' "$SB_PRE" "$SA_PRE" | sort -t. -k1,1 -k2,2n -k3,3n | head -n1)" = "$SB_PRE" ]
-}
-
 # Con --skip-kling el kling que ya hay puede ser más viejo que la extensión: se
 # compara con el min_kling de su manifiesto, como hacía el instalador de
 # kindling-mcp. Si kling viene de esta misma release no hace falta.
@@ -639,6 +663,9 @@ add_rc() {
     ok "added to $RC: $1"
 }
 
+# Como root (instalando para sudo y systemd) no se toca el rc de nadie.
+[ "$INSTALL_UID" = "0" ] && { NO_RC=1; RC=""; }
+
 KLING_BIN="$PREFIX/kling"
 [ -x "$KLING_BIN" ] || KLING_BIN="$(command -v kling 2>/dev/null || true)"
 
@@ -664,7 +691,7 @@ if [ "$NO_RC" != "1" ] && [ -n "$KLING_BIN" ] && [ -n "$RC" ]; then
 fi
 
 echo
-if [ -n "$PATH_LINE" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
+if [ -n "$PATH_LINE" ] && [ "$INSTALL_UID" != "0" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
 cat <<EOF
   To use kling in an open shell, add this to your rc file:
 
@@ -672,7 +699,7 @@ cat <<EOF
 
 EOF
 fi
-if [ "$NO_RC" = "1" ] || [ -z "$RC" ]; then
+if [ "$INSTALL_UID" != "0" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
 cat <<EOF
   Shell completion: write the script and add the line it prints to your rc file:
 
@@ -680,6 +707,26 @@ cat <<EOF
 
 EOF
 fi
+case "$PLAT" in
+    linux-*)
+        if [ "$INSTALL_UID" = "0" ]; then
+            ORDEN_UNIDAD="kling up -install"
+        elif [ "$PREFIX" = "/usr/local/bin" ]; then
+            ORDEN_UNIDAD="sudo /usr/local/bin/kling up -install"
+        else
+            ORDEN_UNIDAD="sudo install -m755 $PREFIX/kling /usr/local/bin/kling && sudo /usr/local/bin/kling up -install"
+        fi
+cat <<EOF
+  The daemon runs as a systemd service, which needs root and a root-owned kling
+  (sudo does not look in $PREFIX). This installs firecracker and jailer if they
+  are missing, creates the kindling users, writes the unit and starts it
+  (add -dry-run to see the steps first):
+
+      $ORDEN_UNIDAD
+
+EOF
+        ;;
+esac
 cat <<EOF
   Try it (in a new shell, or after 'source ${RC:-your rc}'):
 

@@ -482,7 +482,7 @@ func TestE2EMacWorkflowPartsSinPruebasFalla(t *testing.T) {
 // estable (que pasa a ser «latest») no puede dejar ningún pin.
 func TestReleaseSeNiegaConElPinDelREADMEDistinto(t *testing.T) {
 	pin := func(v string) string {
-		return "# kindling\n\n## Install\n\n```sh\ncurl -fsSL https://example.invalid/install.sh | KLING_VERSION=" + v + " sh\n```\n"
+		return "# kindling\n\n## Install\n\n```sh\ncurl -fsSL https://example.invalid/install.sh | sudo sh -s -- --tag " + v + "\n```\n"
 	}
 	for _, c := range []struct {
 		nombre, version, readme string

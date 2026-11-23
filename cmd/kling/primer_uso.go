@@ -337,6 +337,56 @@ func instalarUnidadSystemd() error {
 // dondeCopiar es la orden que deja el binario donde root puede fiarse de él.
 const dondeCopiar = "sudo install -m 755 <path to kling> /usr/local/bin/kling && sudo /usr/local/bin/kling up -install"
 
+// ordenUpInstall es la orden para escribir la unidad: la de copiar el binario
+// a /usr/local/bin cuando el de ahora no es de root (la unidad lo rechazaría),
+// y si no, este mismo binario con sudo.
+func ordenUpInstall() string {
+	exe, err := ejecutableReal()
+	if err == nil {
+		err = comprobarBinarioDeRoot(exe)
+	}
+	return ordenUpInstallSegun(err)
+}
+
+func ordenUpInstallSegun(errBinario error) string {
+	if errBinario != nil {
+		return dondeCopiar
+	}
+	return privilegedSelf("up", "-install")
+}
+
+// instalarEnLinux es `kling up -install` en Linux: firecracker, jailer y los
+// usuarios si faltan, y la unidad. Con dryRun, solo dice qué haría. Se
+// comprueba antes que se es root y que el binario es de root: así no se baja
+// nada para acabar rechazando la unidad.
+func instalarEnLinux(dryRun bool) error {
+	if !dryRun {
+		if os.Geteuid() != 0 {
+			return &errWithHint{
+				err:  fmt.Errorf("writing %s needs root", rutaUnidad),
+				hint: ordenUpInstall(),
+			}
+		}
+		exe, err := ejecutableReal()
+		if err != nil {
+			return err
+		}
+		if err := comprobarBinarioDeRoot(exe); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := prepararHostLinux(ctx, hostLinuxReal(dryRun)); err != nil {
+		return err
+	}
+	if dryRun {
+		fmt.Printf("would: write %s (this kling as ExecStart) and start it with systemctl enable --now kling\n", rutaUnidad)
+		return nil
+	}
+	return instalarUnidadSystemd()
+}
+
 // comprobarBinarioDeRoot es lo que hay que cumplir para que una unidad de
 // systemd ejecute exe como root: exe y cada directorio por encima son de root y
 // no los escribe el grupo ni otros (salvo un directorio con bit pegajoso por

@@ -96,8 +96,8 @@ func TestFCRutasConPuntosPuntoNoEscapan(t *testing.T) {
 	dir := filepath.Join(raiz, "destino")
 	os.Mkdir(dir, 0o755)
 	b, sha := tgzFC(t, "v9.9.9", "x86_64", map[string]string{
-		"../firecracker":                                "malo",
-		"release-v9.9.9-x86_64/../../jailer":            "malo",
+		"../firecracker":                                     "malo",
+		"release-v9.9.9-x86_64/../../jailer":                 "malo",
 		"release-v9.9.9-x86_64/../firecracker-v9.9.9-x86_64": "malo",
 	})
 	err := descargarFirecracker(context.Background(), descargaDe(servirTgz(t, b), dir, sha))

@@ -109,6 +109,22 @@ case "$VERSION" in
     *)   VERSION="v$VERSION" ;;
 esac
 
+# El one-liner del README: una prerelease no es «latest», así que el README la
+# fija (KLING_VERSION, o --tag con sudo) y tiene que ser ESTA; una estable sí lo es, y no puede
+# seguir fijando ninguna (instalaría una versión vieja). Se mira antes que nada
+# más caro: olvidarlo publica un README que manda a una versión que no es.
+for F in README.md README.es.md; do
+    [ -f "$F" ] || continue
+    for PIN in $(grep -oE '(KLING_VERSION=|--tag )v[^ `"]*' "$F" | sed -E 's/^(KLING_VERSION=|--tag )//' | sort -u); do
+        case "$VERSION" in
+            *-*) [ "$PIN" = "$VERSION" ] && continue
+                 echo "$F pins $PIN but this release is $VERSION: change the pin in the install blocks of README.md and README.es.md first" >&2 ;;
+            *)   echo "$F pins $PIN and $VERSION is a stable release (it becomes latest): remove the pin from the install blocks of README.md and README.es.md first" >&2 ;;
+        esac
+        exit 1
+    done
+done
+
 if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null 2>&1; then
     echo "tag $VERSION already exists locally" >&2
     exit 1
