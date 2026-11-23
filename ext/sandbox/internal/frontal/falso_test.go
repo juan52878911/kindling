@@ -29,7 +29,7 @@ import (
 )
 
 type falso struct {
-	t   *testing.T
+	t   testing.TB
 	srv *httptest.Server
 	// endpoint es la ruta del socket Unix.
 	endpoint string
@@ -176,7 +176,7 @@ type falso struct {
 
 // nuevoFalso arranca un daemon falso en un socket Unix corto (macOS limita
 // la ruta de un socket a 104 bytes y t.TempDir() puede pasarse).
-func nuevoFalso(t *testing.T) *falso {
+func nuevoFalso(t testing.TB) *falso {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "fr")
 	if err != nil {
