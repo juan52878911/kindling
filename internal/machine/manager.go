@@ -489,7 +489,8 @@ type Manager struct {
 
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
-	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
+	// hasPend: hay cambios sin escribir (pendGen sin llegar a disco). La foto
+	// no se guarda aquí: la saca el escritor al ir a escribir (ver persist).
 	hasPend bool
 	// pendGen numera las fotos; escritoGen es la última que llegó a disco.
 	// Hacen falta desde que hay dos escritores (persistLoop y persistirYa):
@@ -1040,27 +1041,28 @@ func (m *Manager) barridoBloqueado() bool { return m.estadoIlegible != "" }
 //
 // Antes serializaba y escribía aquí mismo, con el lock global cogido: cada
 // transición pagaba la latencia del disco y, mientras tanto, ninguna otra
-// máquina podía arrancar, congelarse ni descongelarse. Ahora solo toma la foto y
-// se va; escribirla es cosa de persistLoop.
+// máquina podía arrancar, congelarse ni descongelarse. Después tomaba aquí la
+// foto (una copia profunda de toda la flota) y se iba: O(n) con m.mu tomado en
+// cada transición, unas cuatro veces por alta, 0,3-0,7 ms cada una con 1000
+// máquinas (A-19, BenchmarkPersist). Ahora solo numera el cambio y avisa: la
+// foto la saca el escritor (fotoEstado) justo antes de escribirla, bajo
+// m.mu.RLock, una vez por escritura y no por transición; las ráfagas
+// coalescen en una sola copia.
 //
-// La foto es una copia PROFUNDA (Clone), no el puntero ni una copia por valor.
-// Es la diferencia entre esto y una carrera de datos: si se guardaran los
-// *api.Machine, json.Marshal los leería fuera del lock mientras otra goroutine
-// les cambia State, PID o los punteros StartedAt/FrozenAt, y el fichero podría
-// acabar describiendo un estado que nunca existió (una máquina "warm" con PID
-// vivo, por ejemplo). Y una copia por valor no basta: comparte con la viva los
-// arrays de Volumes, Shares o AllowDomains y los mapas de Labels y Forwards, y
-// cualquier escritura en su sitio sobre ellos corre con el Marshal (M-03).
+// La foto sigue siendo una copia PROFUNDA (Clone), no el puntero ni una copia
+// por valor. Es la diferencia entre esto y una carrera de datos: si se
+// guardaran los *api.Machine, json.Marshal los leería fuera del lock mientras
+// otra goroutine les cambia State, PID o los punteros StartedAt/FrozenAt, y el
+// fichero podría acabar describiendo un estado que nunca existió (una máquina
+// "warm" con PID vivo, por ejemplo). Y una copia por valor no basta: comparte
+// con la viva los arrays de Volumes, Shares o AllowDomains y los mapas de
+// Labels y Forwards, y cualquier escritura en su sitio sobre ellos corre con
+// el Marshal (M-03).
 func (m *Manager) persist() uint64 {
-	list := make([]api.Machine, 0, len(m.byID))
-	for _, mc := range m.byID {
-		list = append(list, *mc.Clone())
-	}
-
 	m.stateMu.Lock()
 	m.pendGen++
 	gen := m.pendGen
-	m.pending, m.hasPend = list, true
+	m.hasPend = true
 	m.stateMu.Unlock()
 
 	// Aviso no bloqueante: si ya hay uno sin atender, este sobra. Las ráfagas
@@ -1253,9 +1255,15 @@ func (m *Manager) writePending() error { return m.escribirPendiente(false) }
 func (m *Manager) escribirPendiente(rapido bool) error {
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
+	// La foto se saca con m.mu.RLock (orden escrituraMu → m.mu → stateMu: nadie
+	// toma escrituraMu con m.mu tomado, ver doc.go). Con m.mu tomado no cambia
+	// ninguna máquina, así que la copia describe al menos todo lo numerado
+	// hasta pendGen.
+	m.mu.RLock()
 	m.stateMu.Lock()
 	if !m.hasPend {
 		m.stateMu.Unlock()
+		m.mu.RUnlock()
 		if m.sinFsync && !rapido {
 			// Nada nuevo, pero la última foto aún no se asentó: este es el
 			// fsync que persistirYa dejó para después.
@@ -1266,30 +1274,32 @@ func (m *Manager) escribirPendiente(rapido bool) error {
 		}
 		return nil
 	}
-	list, gen := m.pending, m.pendGen
-	m.pending, m.hasPend = nil, false
+	gen := m.pendGen
+	m.hasPend = false
 	m.stateMu.Unlock()
 
 	if m.estadoIntocable {
+		m.mu.RUnlock()
 		return nil // ver ponerEnCuarentena
 	}
 	if gen <= m.escritoGen {
+		m.mu.RUnlock()
 		return nil // ya se escribió una foto más nueva
 	}
+	list := m.fotoEstadoLocked()
+	m.mu.RUnlock()
 	sinFsync, err := m.escribirFoto(list, gen, rapido)
 	if err == nil {
 		m.fallosEstado = 0
 		m.sinFsync = sinFsync
 		return nil
 	}
-	// La foto no llegó a disco: se repone, salvo que ya haya otra más nueva
-	// (gen crece siempre, así que la pendiente la incluye), y se reintenta
-	// con espera creciente. Antes se perdía: solo quedaba en el log, y un
-	// VMM recién lanzado vivía sin su máquina en disco.
+	// La foto no llegó a disco: queda pendiente otra vez (pendGen ya es >= gen,
+	// y la siguiente escritura saca una foto nueva que incluye esta), y se
+	// reintenta con espera creciente. Antes se perdía: solo quedaba en el log,
+	// y un VMM recién lanzado vivía sin su máquina en disco.
 	m.stateMu.Lock()
-	if !m.hasPend {
-		m.pending, m.pendGen, m.hasPend = list, gen, true
-	}
+	m.hasPend = true
 	m.stateMu.Unlock()
 	m.fallosEstado++
 	espera := persistDebounce << min(m.fallosEstado, 8)
@@ -1304,6 +1314,16 @@ func (m *Manager) escribirPendiente(rapido bool) error {
 		}
 	})
 	return err
+}
+
+// fotoEstadoLocked es la foto de state.json: una copia profunda de cada
+// máquina (ver persist). Se llama con m.mu tomado, al menos en lectura.
+func (m *Manager) fotoEstadoLocked() []api.Machine {
+	list := make([]api.Machine, 0, len(m.byID))
+	for _, mc := range m.byID {
+		list = append(list, *mc.Clone())
+	}
+	return list
 }
 
 // escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
