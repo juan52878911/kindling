@@ -108,7 +108,7 @@ func (s *Servidor) despachaCodigo(w http.ResponseWriter, r *http.Request, id str
 		}
 		s.handleCodigo(w, r, id)
 	case resto[0] != "contexts" || len(resto) > 2:
-		http.NotFound(w, r)
+		noRuta(w, r)
 	case len(resto) == 1:
 		switch r.Method {
 		case http.MethodPost:
@@ -476,7 +476,13 @@ func (s *Servidor) handleCodigo(w http.ResponseWriter, r *http.Request, id strin
 	case err != nil && !empezado:
 		fail(w, codigoExec(err), deHost(h, err))
 	case err != nil:
-		_ = emitir(CodigoEvento{Type: "error", Ename: "GatewayError", Evalue: err.Error()})
+		// El flujo ya dijo 200: se explica el fallo (sin datos del host) y se
+		// cierra con done, como todo flujo de /code.
+		_ = emitir(CodigoEvento{Type: "error", Ename: "GatewayError", Evalue: errorDeFlujo(deHost(h, err))})
+		if !terminado {
+			ok := false
+			_ = emitir(CodigoEvento{Type: "done", OK: &ok})
+		}
 	case !terminado:
 		// El cliente murió o el contexto se perdió sin cerrar el flujo.
 		msg := fmt.Sprintf("the execution ended without finishing (exit %d)", res.ExitCode)

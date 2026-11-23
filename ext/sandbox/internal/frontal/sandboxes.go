@@ -269,6 +269,11 @@ func (s *Servidor) handleListar(w http.ResponseWriter, r *http.Request) {
 // handleSandbox despacha /v1/sandboxes/{host}/{ref}[/acción].
 func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	resto := strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/")
+	if resto == "" || r.URL.Path == "/v1/sandboxes" {
+		// La colección solo admite GET y POST, que el mux ya despachó.
+		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
+		return
+	}
 	partes := strings.Split(resto, "/")
 	if len(partes) < 2 || partes[0] == "" || partes[1] == "" {
 		fail(w, http.StatusNotFound, noSandbox(resto))
@@ -280,7 +285,7 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		accion = partes[2]
 	}
 	if len(partes) > 3 && accion != "processes" && accion != "sessions" && accion != "code" {
-		http.NotFound(w, r)
+		noRuta(w, r)
 		return
 	}
 	switch {
@@ -313,7 +318,7 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	case accion == "" || accion == "renew" || accion == "pause" || accion == "resume" || accion == "egress" || accion == "exec" || accion == "shell" || accion == "files" || accion == "endpoints":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
-		http.NotFound(w, r)
+		noRuta(w, r)
 	}
 }
 

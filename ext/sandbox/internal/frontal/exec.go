@@ -5,6 +5,7 @@ package frontal
 // daemon tal cual, con los mismos topes.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,8 +33,16 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := json.Unmarshal(b, &req); err != nil {
+	// Como el resto de rutas: un campo desconocido (un typo en timeout_seconds)
+	// es un 400, no se ignora en silencio.
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+		return
+	}
+	if dec.More() {
+		fail(w, http.StatusBadRequest, errors.New("invalid body: trailing data"))
 		return
 	}
 	// Se valida aquí para contestar 400 antes de molestar al daemon, y para
@@ -87,7 +96,7 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		fail(w, codigoExec(err), err)
 	case err != nil:
 		// Ya se contestó 200: solo queda decirlo en el flujo, como hace el daemon.
-		_ = emitir(api.ExecEvent{Error: err.Error()})
+		_ = emitir(api.ExecEvent{Error: errorDeFlujo(deHost(h, err))})
 	default:
 		code := res.ExitCode
 		_ = emitir(api.ExecEvent{Exit: &code, DurationMS: res.DurationMS, Truncated: res.Truncated, TimedOut: res.TimedOut})
