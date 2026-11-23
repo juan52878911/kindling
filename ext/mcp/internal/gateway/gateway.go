@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -92,6 +93,14 @@ type Gateway struct {
 	linkMu    sync.RWMutex
 	linkCache []*mcp.Link
 	linkAt    time.Time
+}
+
+// PoolOwnerDe da el id estable (mismo valor tras un reinicio) con que un
+// gateway marca las máquinas de su fondo: sale de su dirección de escucha y del
+// socket del daemon, así que dos gateways sobre un daemon no se barren.
+func PoolOwnerDe(listen string, c *api.Client) string {
+	h := sha256.Sum256([]byte(listen + "\x00" + c.Endpoint()))
+	return hex.EncodeToString(h[:8])
 }
 
 func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, memService string) *Gateway {

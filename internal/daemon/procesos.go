@@ -24,7 +24,9 @@ const maxCuerpoProc = 1 << 20
 
 // maxRespuestaProc acota una respuesta JSON del agente que se reenvía (el flujo
 // NDJSON de salida tiene su propio régimen).
-const maxRespuestaProc = 1 << 20
+// Se deriva de lo máximo que el agente deja guardar (api.MaxListResponseBytes:
+// 64 sesiones con el entorno al tope), no de un número suelto.
+const maxRespuestaProc = api.MaxListResponseBytes
 
 // maxEsperaProc es el mayor ?wait= que se acepta de una vez (el cliente puede
 // repetir).

@@ -1,6 +1,8 @@
 package machine
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -123,5 +125,55 @@ func TestReconcileLimpiaRedYCgroupDeLasQueNoTienenVMM(t *testing.T) {
 		if existe(filepath.Join(m.cgroupRoot, cgName(id))) {
 			t.Errorf("el cgroup de %s (%s) sigue en pie", shortID(id), st)
 		}
+	}
+}
+
+// R6-I2 (R6): un commit cortado tras releaseVolumes deja la plantilla sin
+// volúmenes. Tras revertir el overlay y reanudar, reconcile se los devuelve
+// (acquireVolumes); si no puede, la máquina queda failed, no running.
+func TestReconcileCommitCortadoConVolumenesLosDevuelve(t *testing.T) {
+	for _, falla := range []bool{false, true} {
+		m := newTestManager(t)
+		id := "a7a7000000000f06"
+		_, _ = vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+		m.mu.Lock()
+		m.byID[id].Volumes = []api.VolumeAttachment{{}}
+		m.mu.Unlock()
+		if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+			t.Fatal(err)
+		}
+		var llamadas atomic.Int32
+		old := devolverVolumenes
+		devolverVolumenes = func(_ *Manager, mc *api.Machine) error {
+			llamadas.Add(1)
+			if falla {
+				return errors.New("el invitado no monta")
+			}
+			return nil
+		}
+		t.Cleanup(func() { devolverVolumenes = old })
+
+		m.reconcile()
+
+		if llamadas.Load() != 1 {
+			t.Fatalf("falla=%v: acquireVolumes llamado %d veces, quería 1", falla, llamadas.Load())
+		}
+		viva := vivaDe(t, m, id)
+		if falla && viva.State != api.StateFailed {
+			t.Fatalf("sin poder devolver los volúmenes quedó %s, quería failed", viva.State)
+		}
+		if !falla && viva.State != api.StateRunning {
+			t.Fatalf("con los volúmenes devueltos quedó %s (%q), quería running", viva.State, viva.LastErr)
+		}
+	}
+}
+
+// R6-I2 (R29): «ocupado» o sin contestar es un VMM volcando; un rechazo claro no.
+func TestVMMOcupado(t *testing.T) {
+	if !vmmOcupado(context.DeadlineExceeded) || !vmmOcupado(errors.New("Resource busy")) {
+		t.Fatal("un VMM ocupado no se reconoció")
+	}
+	if vmmOcupado(errors.New("PATCH /drives/overlay: 400: no")) {
+		t.Fatal("un rechazo claro se tomó por ocupado")
 	}
 }

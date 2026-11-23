@@ -270,7 +270,14 @@ func (g *Scheduler) TakeWarm(service string) *Warm { return g.pool.take(service)
 // precalentada recién sacada con TakeWarm o una efímera creada para una sola
 // llamada. Hay que llamar a la función que devuelve al terminar. Ver mantenerTTL.
 func (g *Scheduler) HoldTTL(ctx context.Context, id string) (release func()) {
-	return g.mantenerTTL(ctx, id)
+	rel := g.mantenerTTL(ctx, id)
+	if g.pool == nil {
+		return rel
+	}
+	// Si es una entregada del fondo, el barrido la respeta mientras dure la
+	// llamada y la olvida al soltar (no por reloj).
+	soltar := g.pool.sostener(id)
+	return func() { rel(); soltar() }
 }
 
 // FillPool repone en segundo plano las precalentadas del servicio.

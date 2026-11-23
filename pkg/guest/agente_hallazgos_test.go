@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -27,8 +27,8 @@ func TestR6SegundoTiempoRezagadoCortaExecNuevo(t *testing.T) {
 
 	// El .tmp del fichero de generación es un FIFO: os.WriteFile se queda en
 	// open(2) hasta que alguien lo abra para leer (E/S colgada).
-	fifo := generationFile + ".tmp"
-	if err := os.MkdirAll(strings.TrimSuffix(fifo, "/generation.tmp"), 0o755); err != nil {
+	fifo := tmpGeneracion(generationFile, 1)
+	if err := os.MkdirAll(filepath.Dir(fifo), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Mkfifo(fifo, 0o644); err != nil {

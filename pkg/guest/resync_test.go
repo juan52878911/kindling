@@ -234,7 +234,7 @@ func TestCapsAnunciaResyncReloj(t *testing.T) {
 	}
 }
 
-// fifoGeneracion deja en generationFile+".tmp" una tubería: escribir la
+// fifoGeneracion deja en tmpGeneracion(generationFile, 1) una tubería: escribir la
 // generación se queda esperando a que alguien la lea, y así el test controla
 // cuándo acaba el paso lento sin tocar el código.
 func fifoGeneracion(t *testing.T) {
@@ -242,7 +242,7 @@ func fifoGeneracion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(generationFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(generationFile+".tmp", 0o644); err != nil {
+	if err := syscall.Mkfifo(tmpGeneracion(generationFile, 1), 0o644); err != nil {
 		t.Skipf("sin mkfifo: %v", err)
 	}
 }
@@ -259,7 +259,7 @@ func TestResyncRespondeAntesDeLoLento(t *testing.T) {
 	go func() { hecho <- postResync(t, cuerpo(t, host.UnixNano(), semilla)) }()
 	// Pase lo que pase, se libera la tubería para que nada quede colgado.
 	t.Cleanup(func() {
-		if f, err := os.Open(generationFile + ".tmp"); err == nil {
+		if f, err := os.Open(tmpGeneracion(generationFile, 1)); err == nil {
 			_, _ = io.Copy(io.Discard, f)
 			f.Close()
 		}

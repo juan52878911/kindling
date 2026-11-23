@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -302,5 +303,30 @@ func TestRutasDeProcesosYSesionesSonDeControl(t *testing.T) {
 		if !IsControlPath(p) {
 			t.Errorf("%s no es ruta de control: un proxy de terceros la alcanzaría", p)
 		}
+	}
+}
+
+// R6-I2 (R2): la lista recorta Cmd a maxCmdLista por entrada.
+func TestRecortarCmdDeLaLista(t *testing.T) {
+	grande := []string{"sh", "-c", strings.Repeat("é", 1<<20)}
+	r := recortarCmd(grande, maxCmdLista)
+	n := 0
+	for _, a := range r {
+		n += len(a)
+		if !utf8.ValidString(a) {
+			t.Fatalf("argumento cortado a mitad de un carácter")
+		}
+	}
+	if n > maxCmdLista || len(r) != 3 {
+		t.Fatalf("recortado: %d bytes, %d argumentos", n, len(r))
+	}
+	if len(grande[2]) != 2<<20 {
+		t.Fatal("el original se modificó")
+	}
+	if got := recortarCmd([]string{"ls", "-l"}, maxCmdLista); len(got) != 2 {
+		t.Fatalf("un cmd corto no se toca: %v", got)
+	}
+	if got := recortarCmd([]string{"a", "b", "c"}, 2); len(got) != 2 || got[1] != "b" {
+		t.Fatalf("omite los siguientes: %v", got)
 	}
 }

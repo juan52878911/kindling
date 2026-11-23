@@ -180,6 +180,7 @@ func cmdGateway(args []string) error {
 			return fmt.Errorf("can't reach host %q (%s): %w", h.Name, h.Endpoint, err)
 		}
 		gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
+		gw.PoolOwner = gateway.PoolOwnerDe(addr, c)
 		gw.KeepWarm = *keepwarm
 		// El nivel pausada (pkg/scheduler/pausa.go). Apagado por defecto: una
 		// pausada retiene su RAM, y en un host justo eso es decisión del

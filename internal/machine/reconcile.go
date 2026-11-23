@@ -36,6 +36,7 @@ func (m *Manager) reconcile() {
 	// candado el daemon tardaba segundos en escuchar (A14).
 	limpieza.desmontarRedes(m)
 	m.resyncTrasReconcile(resync)
+	m.volumenesTrasReconcile(limpieza.volumenes)
 	// Fuera de m.mu: escanea los procesos (ver killOrphanVMMs).
 	m.killOrphanVMMs()
 	// Tras matar a los huérfanos: el cgroup de un VMM que sigue vivo no se
@@ -49,6 +50,9 @@ func (m *Manager) reconcile() {
 type limpiezaReconcile struct {
 	redes []redADesmontar
 	cpu   []string
+	// volumenes son las plantillas readoptadas tras un commit cortado que
+	// hay que dejar con sus volúmenes montados (volumenesTrasReconcile).
+	volumenes []string
 }
 
 type redADesmontar struct {
@@ -146,6 +150,12 @@ func (m *Manager) reconciliarEstado() (resyncPendientes []string, limpieza *limp
 			delete(live, mc.ID)
 		}
 		if pid, alive := live[mc.ID]; alive {
+			// Un commit cortado tras soltar los volúmenes (releaseVolumes): la
+			// plantilla sigue sin ellos. Una en pausa no los soltó (el commit no
+			// los suelta si ya estaba pausada) y VolumeWait no los tiene montados.
+			if previas[mc.ID].commitRevertido && len(mc.Volumes) > 0 && !mc.VolumeWait && mc.State != api.StatePaused {
+				limpieza.volumenes = append(limpieza.volumenes, mc.ID)
+			}
 			// Un thaw cortado tras cargar el volcado (el sello ya retirado, la
 			// máquina aún warm en disco): su invitado corre, o corre ahora que
 			// readoptable lo reanudó, con el reloj y la entropía del volcado.
@@ -814,15 +824,36 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 // su overlay propio (el invitado no llegó a escribir en el dorado: estaba en
 // pausa) y lo reanuda si no era una pausa pedida. Quita la marca solo si todo
 // salió bien; si no, devuelve false y readoptable lo da por failed.
-func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, pausada bool) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
-	defer cancel()
+func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, pausada bool, memMiB int) bool {
 	c := m.clienteReconcile(id, pid)
-	if err := c.PatchDrive(ctx, "overlay", filepath.Join(dir, "overlay.ext4")); err != nil {
+	overlay := filepath.Join(dir, "overlay.ext4")
+	ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
+	err := c.PatchDrive(ctx, "overlay", overlay)
+	cancel()
+	// Un VMM que sigue volcando la memoria (una plantilla grande) no contesta o
+	// contesta «ocupado» hasta acabar: se le espera lo que un volcado (R29), no
+	// los plazoEstadoVMM de una consulta. Un rechazo claro no se reintenta.
+	if err != nil && vmmOcupado(err) {
+		log.Printf("reconcile: %s: its VMM is still busy with the dump of a cut commit; waiting up to %s", shortID(id), plazoVolcado(memMiB))
+		ctx, cancel := context.WithTimeout(context.Background(), plazoVolcado(memMiB))
+		defer cancel()
+		for {
+			if err = c.PatchDrive(ctx, "overlay", overlay); err == nil || !vmmOcupado(err) || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+	}
+	if err != nil {
 		log.Printf("reconcile: %s: couldn't give the overlay back to the VMM of a cut commit: %v", shortID(id), err)
 		return false
 	}
 	if estado == "Paused" && !pausada {
+		ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
+		defer cancel()
 		if err := c.Resume(ctx); err != nil {
 			log.Printf("reconcile: %s: couldn't resume the VMM of a cut commit: %v", shortID(id), err)
 			return false
@@ -830,6 +861,49 @@ func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, 
 	}
 	quitarMarcaCommit(dir)
 	return true
+}
+
+// vmmOcupado dice si err es un VMM que no contesta a tiempo o que dice estar
+// ocupado (un volcado en marcha).
+func vmmOcupado(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	t := strings.ToLower(err.Error())
+	return strings.Contains(t, "busy") || strings.Contains(t, "in progress")
+}
+
+// devolverVolumenes devuelve los volúmenes a una plantilla readoptada tras un
+// commit cortado; variable para los tests.
+var devolverVolumenes = func(m *Manager, mc *api.Machine) error { return m.acquireVolumes(mc) }
+
+// volumenesTrasReconcile hace, fuera de m.mu y a la vez, acquireVolumes de las
+// máquinas ids (R6): un commit cortado tras releaseVolumes las dejó sin
+// volúmenes, y seguir así las haría escribir en su overlay. Si no se pueden
+// devolver, la máquina no sigue en marcha: failed, como en commit.
+func (m *Manager) volumenesTrasReconcile(ids []string) {
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		m.mu.RLock()
+		var copia api.Machine
+		viva := m.byID[id]
+		if viva != nil {
+			copia = *viva
+		}
+		m.mu.RUnlock()
+		if viva == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := devolverVolumenes(m, &copia); err != nil {
+				log.Printf("reconcile: %s: its commit was cut and the template couldn't mount its volumes again: %v", shortID(id), err)
+				m.fail(viva, fmt.Errorf("commit was cut and the template could not get its volumes back: %w", err))
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // estadoNoArrancado es lo que contesta el VMM (Firecracker, kling-vz y
@@ -866,6 +940,7 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 		pid       int
 		congelada *time.Time
 		pausada   bool
+		memMiB    int
 	}
 	var cands, commits []candidata
 	var sinArrancar []string
@@ -876,7 +951,8 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 		if mc != nil && !copiaSinEntregar(mc) {
 			if hay, pidMarca := marcaCommitDe(m.dir(id)); hay && (pidMarca <= 0 || pidMarca == pid) &&
 				pidCongeladoApuntado(m.dir(id)) != pid {
-				commits = append(commits, candidata{id: id, dir: m.dir(id), pid: pid, pausada: mc.State == api.StatePaused})
+				commits = append(commits, candidata{id: id, dir: m.dir(id), pid: pid, pausada: mc.State == api.StatePaused,
+					memMiB: max(mc.MemMiB, mc.MemMaxMiB)})
 				continue
 			}
 		}
@@ -918,7 +994,7 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok := m.revertirCommitCortado(c.id, c.dir, c.pid, estados[c.id], c.pausada)
+			ok := m.revertirCommitCortado(c.id, c.dir, c.pid, estados[c.id], c.pausada, c.memMiB)
 			mu.Lock()
 			out[c.id] = previaReadopcion{commitRevertido: ok}
 			mu.Unlock()
