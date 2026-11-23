@@ -20,19 +20,25 @@ func TestAsegurarHostInputCincuentaALaVez(t *testing.T) {
 	var rondas atomic.Int32
 	guardarTablas = func() (string, error) {
 		rondas.Add(1)
-		time.Sleep(20 * time.Millisecond) // una comprobación que tarda
+		// Una comprobación que tarda bastante más que lo que tarda el runner
+		// más lento en soltar las 50 goroutines (con 20 ms, en macOS del CI
+		// las últimas llegaban con la primera ya acabada).
+		time.Sleep(200 * time.Millisecond)
 		return f.guardado(), nil
 	}
 	var wg sync.WaitGroup
+	salida := make(chan struct{})
 	for range 50 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-salida // todas a la vez
 			if err := asegurarHostInput(); err != nil {
 				t.Error(err)
 			}
 		}()
 	}
+	close(salida)
 	wg.Wait()
 	if n := rondas.Load(); n < 1 || n > 3 {
 		t.Fatalf("%d comprobaciones del host para 50 Setup, quería <= 3", n)
