@@ -255,8 +255,27 @@ func (m *Manager) pendingUploads() int {
 	return n
 }
 
-// gcUploads borra las subidas que nadie usó a tiempo y los árboles que dejó
-// una subida interrumpida (un daemon que murió a mitad).
+// uploadTmpGrace es cuánto tarda el barrido periódico en tirar un .tree o un
+// .tmp: una subida en curso los tiene (el árbol que se extrae, el ext4 que se
+// construye), así que no se tiran en cuanto aparecen; pero tampoco hace falta
+// esperar la hora de uploadTTL para algo que ya no avanza.
+const uploadTmpGrace = 15 * time.Minute
+
+// esTemporalDeSubida dice si name es un resto de una subida a medias: el árbol
+// extraído (.tree) o el ext4 a medio construir (.tmp).
+func esTemporalDeSubida(name string) bool {
+	return strings.HasSuffix(name, ".tree") || strings.HasSuffix(name, ".tmp")
+}
+
+// inicioDelProceso es cuándo arrancó este daemon: un .tree o .tmp más viejo es
+// de una vida anterior y ninguna subida lo está usando.
+var inicioDelProceso = time.Now()
+
+// gcUploads borra las subidas que nadie usó a tiempo y los árboles y ext4
+// a medias que dejó una subida interrumpida (un daemon que murió a mitad). Los
+// temporales no esperan a uploadTTL: los de antes de arrancar este daemon se
+// tiran en la primera vuelta del vigilante (ninguna subida puede estar en
+// curso con ellos), y los demás pasada uploadTmpGrace sin tocarse.
 func (m *Manager) gcUploads() {
 	ents, err := os.ReadDir(m.uploadsDir())
 	if err != nil {
@@ -264,7 +283,15 @@ func (m *Manager) gcUploads() {
 	}
 	for _, e := range ents {
 		fi, err := e.Info()
-		if err != nil || time.Since(fi.ModTime()) < uploadTTL {
+		if err != nil {
+			continue
+		}
+		edad := time.Since(fi.ModTime())
+		if esTemporalDeSubida(e.Name()) {
+			if edad < uploadTmpGrace && !fi.ModTime().Before(inicioDelProceso) {
+				continue
+			}
+		} else if edad < uploadTTL {
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(m.uploadsDir(), e.Name()))

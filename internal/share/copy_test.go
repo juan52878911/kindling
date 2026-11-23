@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type entrada struct {
@@ -112,5 +113,39 @@ func TestTopeDeTamano(t *testing.T) {
 	_, err := Extract(tarDe(t, entrada{name: "big", typ: tar.TypeReg, body: strings.Repeat("x", 2048)}), t.TempDir(), 1024)
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+// Lo extraído conserva las fechas del tar: ficheros y directorios (estos,
+// aunque se creen cosas dentro de ellos después de nacer).
+func TestExtraeConservaFechas(t *testing.T) {
+	antes := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+	otra := time.Date(2019, 1, 2, 3, 4, 5, 0, time.UTC)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range []*tar.Header{
+		{Name: "d/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: otra},
+		{Name: "d/f.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2, ModTime: antes},
+	} {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Size > 0 {
+			tw.Write([]byte("hi"))
+		}
+	}
+	tw.Close()
+	dst := t.TempDir()
+	if _, err := Extract(&buf, dst, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]time.Time{"d": otra, "d/f.txt": antes} {
+		fi, err := os.Stat(filepath.Join(dst, p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.ModTime().Equal(want) {
+			t.Errorf("%s: mtime %v, want %v", p, fi.ModTime(), want)
+		}
 	}
 }

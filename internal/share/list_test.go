@@ -115,3 +115,55 @@ func TestListPorPaginas(t *testing.T) {
 		t.Errorf("%d descriptors still held after the session ended", n)
 	}
 }
+
+// OpListPlus: los ficheros llevan sus atributos, los directorios no, y el
+// daemon la anuncia en OpHello (CapListPlus).
+func TestListPlus(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hola"), 0o644))
+	must(t, os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+	srv, err := Open(dir, true, t.Name())
+	must(t, err)
+	defer srv.Close()
+	a, b := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = srv.Serve(ctx, a); close(done) }()
+	defer func() { cancel(); b.Close(); <-done }()
+	c := &cliente{t: t, conn: b}
+
+	e, d := c.call(proto.OpHello, func(e *proto.Enc) { e.U32(proto.MaxIO) })
+	if e != 0 {
+		t.Fatalf("hello: %d", e)
+	}
+	d.U32()
+	if caps := d.U32(); caps&proto.CapListPlus == 0 {
+		t.Fatalf("hello caps %#x lack CapListPlus", caps)
+	}
+	e, d = c.call(proto.OpListPlus, func(e *proto.Enc) { e.Str(""); e.U64(0); e.U32(0) })
+	if e != 0 {
+		t.Fatalf("list plus: %d", e)
+	}
+	d.U8()
+	n := d.U32()
+	got := map[string]*proto.Attr{}
+	for i := uint32(0); i < n; i++ {
+		name, _ := d.Str(), d.U32()
+		if d.U8() != 0 {
+			at := proto.GetAttr(d)
+			got[name] = &at
+		} else {
+			got[name] = nil
+		}
+	}
+	d.U64()
+	if d.Done() != nil || len(got) != 2 {
+		t.Fatalf("malformed reply or wrong entries: %v", got)
+	}
+	if at := got["a.txt"]; at == nil || at.Size != 4 || at.Mode&proto.SIFMT != proto.SIFREG {
+		t.Errorf("a.txt attrs: %+v", at)
+	}
+	if at, ok := got["sub"]; !ok || at != nil {
+		t.Errorf("sub should be listed without attrs: %+v", at)
+	}
+}

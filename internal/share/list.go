@@ -47,7 +47,7 @@ type listCursor struct {
 }
 
 // list sirve OpList.
-func (ss *session) list(id uint64, p string, cookie uint64, max int) []byte {
+func (ss *session) list(id uint64, p string, cookie uint64, max int, plus bool) []byte {
 	c := ss.takeCursor(p, cookie)
 	if c == nil {
 		f, err := openDir(ss.srv.root, rel(p))
@@ -63,7 +63,7 @@ func (ss *session) list(id uint64, p string, cookie uint64, max int) []byte {
 		}
 		c = &listCursor{f: f, path: p}
 	}
-	resp, more := c.page(id, cookie, max)
+	resp, more := c.page(ss, id, cookie, max, plus)
 	if more {
 		ss.keepCursor(c)
 	} else {
@@ -74,7 +74,7 @@ func (ss *session) list(id uint64, p string, cookie uint64, max int) []byte {
 
 // page escribe la página que empieza en cookie. more dice si el listado sigue
 // y el cursor vale para la siguiente.
-func (c *listCursor) page(id, cookie uint64, max int) (resp []byte, more bool) {
+func (c *listCursor) page(ss *session, id, cookie uint64, max int, plus bool) (resp []byte, more bool) {
 	var ent proto.Enc
 	n, eof := uint32(0), false
 	for {
@@ -100,11 +100,14 @@ func (c *listCursor) page(id, cookie uint64, max int) (resp []byte, more bool) {
 		// contando también lo que no se enseña: la cookie es la posición en
 		// el directorio, no en lo enviado.
 		if c.idx >= cookie && servible(de.Type()) && proto.ValidName(de.Name()) == nil {
-			if len(ent.B)+len(de.Name())+6 > max {
+			if len(ent.B)+len(de.Name())+6 > max || (plus && len(ent.B)+len(de.Name())+6+plusExtra > max) {
 				break
 			}
 			ent.Str(de.Name())
 			ent.U32(typeBits(de.Type()))
+			if plus {
+				c.attrOf(ss, &ent, de)
+			}
 			n++
 		}
 		c.idx++
@@ -120,6 +123,34 @@ func (c *listCursor) page(id, cookie uint64, max int) (resp []byte, more bool) {
 	r.B = append(r.B, ent.B...)
 	r.U64(c.idx)
 	return r.B, !eof
+}
+
+// plusExtra es lo que añade a una entrada de OpListPlus el byte de «hay Attr»
+// y el Attr (4+8+8+4+8+4+8+4+8+4 bytes), con margen.
+const plusExtra = 72
+
+// attrOf añade a ent el byte «hay atributos» y, si los hay, el Attr de de.
+// Solo se dan los de ficheros y enlaces, y solo mientras la vigilancia de la
+// sesión tenga sitio para la ruta: con atributos en la lista, el invitado se
+// ahorra el LOOKUP de esa entrada, y con ello el stat que registraba la ruta
+// como vigilada. Se registra aquí, o un cambio del host en un fichero que nadie
+// vigila se vería hasta 30 s tarde. Los directorios van sin atributos (vigilar
+// uno lee su foto entera): el invitado los pregunta uno a uno, como antes.
+func (c *listCursor) attrOf(ss *session, ent *proto.Enc, de fs.DirEntry) {
+	w := ss.watcher()
+	if de.Type().IsDir() || w.room() <= 0 {
+		ent.U8(0)
+		return
+	}
+	full := proto.Join(c.path, de.Name())
+	a, e := ss.srv.stat(full)
+	if e != 0 || a.Mode&proto.SIFMT == proto.SIFDIR {
+		ent.U8(0)
+		return
+	}
+	w.note(full, false)
+	ent.U8(1)
+	a.Put(ent)
 }
 
 // takeCursor saca de la sesión el cursor que sigue el listado de p en cookie,

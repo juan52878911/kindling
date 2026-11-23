@@ -223,6 +223,18 @@ func (w *watcher) close() {
 	w.snapBytes = 0
 }
 
+// room dice cuántas rutas más se pueden vigilar sin expulsar otras (con un
+// margen de una cuarta parte para lo que el invitado nombre solo). Un watcher
+// nulo (sesión sin OpWatch) no vigila nada y no pone tope.
+func (w *watcher) room() int {
+	if w == nil {
+		return 1 << 30
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return maxWatchesPerSession*3/4 - len(w.entries)
+}
+
 // note registra rel como vista por el invitado (y, si es nueva, la vigila).
 func (w *watcher) note(rel string, dir bool) {
 	if w == nil {

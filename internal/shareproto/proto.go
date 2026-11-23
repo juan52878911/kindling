@@ -259,6 +259,11 @@ const (
 	// proceso del host que lo siga no sale de ella. Un daemon anterior contesta
 	// ENOSYS y el agente da EPERM, como antes.
 	OpSymlink byte = 19 // path, target -> Attr
+	// OpListPlus es OpList con atributos: cada entrada lleva detrás un u8
+	// (1 si sigue un Attr, 0 si no: directorios, o el daemon no pudo o no quiso
+	// vigilarla). Solo se manda si el daemon anunció CapListPlus; un daemon
+	// anterior contestaría ENOSYS.
+	OpListPlus byte = 20 // path, cookie u64, max u32 -> eof u8, n u32, n×(name, mode u32, has u8, [Attr]), next u64
 )
 
 // Avisos del daemon al agente (tras OpWatch). Son las únicas tramas que el
@@ -285,6 +290,9 @@ const (
 	// que llegue al host (pkg/guest/fuse_wb.go). Este daemon atiende más
 	// operaciones grandes a la vez, y es con el que se probó.
 	CapWriteBehind uint32 = 1 << 0
+	// CapListPlus: el daemon sirve OpListPlus. El agente, con ella, pide al
+	// kernel READDIRPLUS y lo contesta desde el listado, sin un viaje por entrada.
+	CapListPlus uint32 = 1 << 1
 )
 
 // Bye es la última trama de un cierre ordenado (ServeDrain): `PushID | ERetry`,

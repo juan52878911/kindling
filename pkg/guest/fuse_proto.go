@@ -54,6 +54,7 @@ const (
 	opInit        = 26
 	opOpendir     = 27
 	opReaddir     = 28
+	opReaddirplus = 44
 	opReleasedir  = 29
 	opFsyncdir    = 30
 	opAccess      = 34
@@ -66,13 +67,15 @@ const (
 
 // Flags de INIT que pedimos (y solo si el kernel los ofrece).
 const (
-	initAsyncRead     = 1 << 0
-	initAtomicOTrunc  = 1 << 3
-	initBigWrites     = 1 << 5
-	initAutoInvalData = 1 << 12
-	initParallelDirop = 1 << 18
-	initMaxPages      = 1 << 22
-	initCacheSymlinks = 1 << 23
+	initAsyncRead       = 1 << 0
+	initAtomicOTrunc    = 1 << 3
+	initBigWrites       = 1 << 5
+	initAutoInvalData   = 1 << 12
+	initDoReaddirplus   = 1 << 13
+	initReaddirplusAuto = 1 << 14
+	initParallelDirop   = 1 << 18
+	initMaxPages        = 1 << 22
+	initCacheSymlinks   = 1 << 23
 )
 
 // Bits de fuse_setattr_in.valid.
@@ -214,19 +217,34 @@ func (a fattr) put(b []byte) {
 // mucho este tiempo.
 const cacheSeconds = 1
 
+// cacheLargo es la validez, en segundos, de entradas y atributos cuando el
+// daemon avisa de los cambios del host (OpWatch): el aviso invalida lo que
+// cambie, y el plazo solo cubre lo que la vigilancia no vea (una ruta
+// expulsada de ella, un origen en NFS).
+const cacheLargo = 30
+
 func entryOut(nodeid uint64, a fattr) []byte {
+	return entryOutT(nodeid, a, cacheSeconds, cacheSeconds)
+}
+
+// entryOutT es entryOut con los plazos (en segundos) de la entrada y de los
+// atributos. Con nodeid 0 es una entrada negativa: el kernel recuerda que el
+// nombre no existe durante entry.
+func entryOutT(nodeid uint64, a fattr, entry, attr uint64) []byte {
 	b := make([]byte, entryOutSize)
 	le.PutUint64(b[0:], nodeid)
 	le.PutUint64(b[8:], 0) // generation: los ids no se reutilizan nunca
-	le.PutUint64(b[16:], cacheSeconds)
-	le.PutUint64(b[24:], cacheSeconds)
+	le.PutUint64(b[16:], entry)
+	le.PutUint64(b[24:], attr)
 	a.put(b[40:])
 	return b
 }
 
-func attrOut(a fattr) []byte {
+func attrOut(a fattr) []byte { return attrOutT(a, cacheSeconds) }
+
+func attrOutT(a fattr, attr uint64) []byte {
 	b := make([]byte, attrOutSize)
-	le.PutUint64(b[0:], cacheSeconds)
+	le.PutUint64(b[0:], attr)
 	a.put(b[16:])
 	return b
 }
