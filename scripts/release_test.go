@@ -447,6 +447,7 @@ func correrVeredicto(t *testing.T, r92, r95 int, previas ...string) (string, boo
 HERE=` + here + `; TOP=` + raiz + `; E2E="92 95"; KLING_E2E_CACHE=` + cache + `
 WORK=` + filepath.Join(raiz, "work") + `; BIN=$WORK/bin; IMGS=$WORK/images
 SHA=` + sha + `; SUCIO=""; AGENTE=0; LABEL=dev.kindling.daemon
+VMLINUX_SHA=aaaaaaaaaaaa; MIN_SHA=bbbbbbbbbbbb; OLD_TAG=v9.9.9; OLD_TAG_NOTA=""
 say() { :; }; explica_agente() { :; }
 `
 	escribir(t, filepath.Join(raiz, "veredicto.sh"), preludio+string(b[i:]), 0o755)
@@ -550,5 +551,66 @@ func TestReleaseSeNiegaConElPinDelREADMEDistinto(t *testing.T) {
 				t.Errorf("el rechazo no nombra el README:\n%s", out)
 			}
 		})
+	}
+}
+
+// H-18: el commit status dice con qué kernel y qué min se ganó (sus sha256
+// cortos): sin eso, nadie puede ver si el e2e del Mac arrancó los de esta
+// versión o unos viejos del daemon del desarrollador.
+func TestE2EMacReleaseStatusDiceKernelEImagen(t *testing.T) {
+	out, ok, gh, _ := correrVeredicto(t, 0, 0)
+	if !ok || !strings.Contains(gh, "state=success") {
+		t.Fatalf("con 92 y 95 en verde no publicó success (ok=%v):\n%s\n%s", ok, gh, out)
+	}
+	for _, w := range []string{"vmlinux aaaaaaaaaaaa", "min bbbbbbbbbbbb"} {
+		if !strings.Contains(gh, w) {
+			t.Errorf("la descripción del status no lleva %q:\n%s", w, gh)
+		}
+	}
+}
+
+// H-18: un vmlinux que no es el de kernel.pin de este commit no gana el sello
+// (el del daemon de quien lo corre, o el de la release anterior, puede ser de
+// otra versión). kernel_del_pin lee la cadena «Linux version» del binario.
+func TestKernelDelPin(t *testing.T) {
+	dir := t.TempDir()
+	pin := filepath.Join(dir, "kernel.pin")
+	escribir(t, pin, "# comentario\nKERNEL_VERSION=6.1.140\nKERNEL_SHA256=00\n", 0o644)
+	vm := func(nombre, banner string) string {
+		p := filepath.Join(dir, nombre)
+		b := append([]byte{0x7f, 0, 1, 2, 0xff}, []byte(banner)...)
+		b = append(b, 0, 0xfe, 3)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	correr := func(vmlinux string) (string, bool) {
+		cmd := exec.Command("bash", "-c", `. ./lib-e2e-upgrade.sh && kernel_del_pin "$1" "$2"`, "x", vmlinux, pin)
+		out, err := cmd.CombinedOutput()
+		return string(out), err == nil
+	}
+	if out, ok := correr(vm("bueno", "Linux version 6.1.140-kindling (kindling@kindling) #1 SMP")); !ok {
+		t.Errorf("el kernel del pin no pasó:\n%s", out)
+	}
+	for n, b := range map[string]string{
+		"viejo":   "Linux version 6.1.139-kindling (kindling@kindling) #1 SMP",
+		"prefijo": "Linux version 6.1.1400-kindling (kindling@kindling) #1 SMP",
+		"otro":    "Linux version 6.1.140 (builder@ci) #1 SMP",
+		"nada":    "no banner here",
+	} {
+		if out, ok := correr(vm(n, b)); ok {
+			t.Errorf("%s: aceptado un kernel que no es el del pin:\n%s", n, out)
+		}
+	}
+	// Y los dos caminos del e2e del Mac lo comprueban.
+	for _, f := range []string{"e2e-mac-release.sh", "../.github/workflows/e2e-mac.yml"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "kernel_del_pin ") {
+			t.Errorf("%s no comprueba el kernel con kernel_del_pin", f)
+		}
 	}
 }
