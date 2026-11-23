@@ -268,32 +268,22 @@ fi
 # ── e2e de kling-hv ────────────────────────────────────────────────────────
 # kling-hv es estable desde 1.0 con una condición (compatibilidad.md): cada
 # release pasa 92-e2e-mac.sh y 95-e2e-upgrade-mac.sh con VMM=hv en un Apple
-# Silicon. Vale el job de e2e-mac.yml en verde sobre este commit (skipped no
-# vale: es lo que sale sin runner) o el commit status e2e-mac/kling-hv en
-# success que publica scripts/e2e-mac-release.sh cuando pasan los dos. Ya no
+# Silicon. Vale solo el commit status e2e-mac/kling-hv en success, que publican
+# el job de e2e-mac.yml (cuando corrieron y pasaron los dos) y
+# scripts/e2e-mac-release.sh. El check run del job no basta: sale verde aunque
+# se lance sin una de las dos pruebas. Ya no
 # vale KLING_E2E_HV=<sha>: era una línea a mano que no dejaba rastro y que
 # nada comprobaba; el status queda en el commit, a la vista.
 # Opcional en esa puerta: E2E="92 95 96" scripts/e2e-mac-release.sh añade
 # 96-e2e-primer-uso.sh (install.sh y el primer `kling try` en un HOME vacío con
 # el kling del árbol); informa, no entra en el status.
-# El contexto es el de e2e-mac-release.sh: si cambia, en los dos.
-E2E_HV_CONTEXTO="e2e-mac/kling-hv"
+# La consulta es scripts/e2e-hv-estado.sh, la misma que hace release.yml antes
+# de firmar (una etiqueta empujada a mano tampoco se salta la puerta).
 e2e_hv_hecho() {
     if [ -n "${KLING_E2E_HV:-}" ]; then
-        echo "KLING_E2E_HV is no longer accepted: the proof is the $E2E_HV_CONTEXTO commit status" >&2
+        echo "KLING_E2E_HV is no longer accepted: the proof is the e2e-mac/kling-hv commit status" >&2
     fi
-    if command -v gh >/dev/null 2>&1; then
-        C=$(gh api "repos/$REPO/commits/$COMMIT/check-runs?per_page=100" \
-            --jq '[.check_runs[] | select(.name == "microVMs (kling-hv, Hypervisor.framework)" and .conclusion == "success")] | length' 2>/dev/null || echo 0)
-        if [ "${C:-0}" -gt 0 ]; then echo "kling-hv e2e green on the Apple Silicon runner"; return 0; fi
-        # El combinado da el último status de cada contexto: uno en failure
-        # posterior a un success no cuenta.
-        S=$(gh api "repos/$REPO/commits/$COMMIT/status" \
-            --jq "[.statuses[] | select(.context == \"$E2E_HV_CONTEXTO\" and .state == \"success\")] | length" 2>/dev/null || echo 0)
-        if [ "${S:-0}" -gt 0 ]; then echo "kling-hv e2e passed on an Apple Silicon Mac (commit status $E2E_HV_CONTEXTO)"; return 0; fi
-    fi
-    echo "kling-hv e2e not run on $COMMIT: run scripts/e2e-mac-release.sh on an Apple Silicon Mac with gh authenticated; it publishes the $E2E_HV_CONTEXTO commit status (docs/releases.md)" >&2
-    return 1
+    sh "$(dirname "$0")/e2e-hv-estado.sh" "$REPO" "$COMMIT"
 }
 case "${VERSION#v}" in
     0.*) ;;

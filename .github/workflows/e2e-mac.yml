@@ -12,8 +12,9 @@
 # `sin-runner`, que lo dice en el resumen y en un aviso del commit: un saltado
 # en gris se confunde con «no hacía falta». No es rojo a propósito (cada PR
 # que toque internal/machine saldría en rojo sin culpa); la puerta está en
-# scripts/release.sh, que solo acepta este job en success o el commit status
-# e2e-mac/kling-hv (scripts/e2e-mac-release.sh), así que saltado bloquea.
+# scripts/release.sh y en release.yml, que solo aceptan el commit status
+# e2e-mac/kling-hv: lo publica este job cuando 92 y 95 corrieron y pasaron, o
+# scripts/e2e-mac-release.sh. Saltado bloquea.
 # Corre también en cada push a main: el commit que se etiqueta tiene así a la
 # vista su estado del e2e del Mac, corrido o no.
 #
@@ -97,6 +98,11 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 120
+    # statuses: write para el commit status e2e-mac/kling-hv, la única prueba
+    # que aceptan scripts/release.sh y release.yml.
+    permissions:
+      contents: read
+      statuses: write
     env:
       GOWORK: 'off'
       VMM: hv
@@ -135,6 +141,11 @@ jobs:
           for f in vmlinux min.ext4 "$IMG.layer.ext4"; do
             [ -f "$dir/$f" ] || { echo "::error::$dir/$f is missing (see the header of e2e-mac.yml)"; exit 1; }
           done
+          # El kernel de este commit (kernel.pin), no uno de otra versión que
+          # quedara en el directorio: el commit status no puede ganarse con él.
+          . scripts/lib-e2e-upgrade.sh
+          kernel_del_pin "$dir/vmlinux" scripts/builders/kernel/kernel.pin \
+            || { echo "::error::$dir/vmlinux is not the kernel that scripts/builders/kernel/kernel.pin fixes"; exit 1; }
           # El agente del usuario de esta cuenta no se toca: 95 lo reemplazaría.
           if launchctl print "gui/$(id -u)/dev.kindling.daemon" >/dev/null 2>&1 \
              || [ -e "$HOME/Library/LaunchAgents/dev.kindling.daemon.plist" ]; then
@@ -165,14 +176,19 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: 92-e2e-mac (VMM=hv)
+        id: e92
         if: contains(inputs.parts || 'e2e upgrade', 'e2e')
         env:
+          # Una parte saltada hace fallar el paso: el commit status no se gana
+          # con una pasada a medias.
+          KLING_E2E_STRICT: '1'
           KLING: ${{ steps.bin.outputs.dir }}/kling
           IMAGES_DIR: ${{ steps.pre.outputs.images }}
           IMG: ${{ steps.pre.outputs.img }}
         run: bash scripts/92-e2e-mac.sh
 
       - name: 95-e2e-upgrade-mac (VMM=hv)
+        id: e95
         if: (success() || failure()) && contains(inputs.parts || 'e2e upgrade', 'upgrade')
         env:
           NEW_DIR: ${{ steps.bin.outputs.dir }}
@@ -180,6 +196,39 @@ jobs:
           # Para el API de releases (la N-1) sin el límite anónimo.
           GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/95-e2e-upgrade-mac.sh
+
+      # El commit status que exigen release.sh y release.yml (el mismo contexto
+      # que scripts/e2e-hv-estado.sh): success solo si 92 y 95 corrieron y
+      # pasaron; un paso saltado (parts sin e2e o sin upgrade) no es un success.
+      # Si una falla, failure: un success anterior no queda como la última
+      # palabra. En un PR no: su GITHUB_SHA es el merge, que nadie etiqueta.
+      - name: commit status e2e-mac/kling-hv
+        if: >-
+          always() && github.event_name != 'pull_request' &&
+          ((steps.e92.outcome == 'success' && steps.e95.outcome == 'success') ||
+           steps.e92.outcome == 'failure' || steps.e95.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R92: ${{ steps.e92.outcome }}
+          R95: ${{ steps.e95.outcome }}
+          IMAGES_DIR: ${{ steps.pre.outputs.images }}
+        run: |
+          set -euo pipefail
+          if [ "$R92" = success ] && [ "$R95" = success ]; then
+            st=success; d="92 and 95 passed"
+          else
+            st=failure; d="92: $R92, 95: $R95"
+          fi
+          # Con qué kernel y qué min (sha256 cortos), como e2e-mac-release.sh.
+          kh=$(shasum -a 256 "$IMAGES_DIR/vmlinux" | cut -c1-12)
+          mh=$(shasum -a 256 "$IMAGES_DIR/min.ext4" | cut -c1-12)
+          d="$d with VMM=hv, vmlinux $kh, min $mh (e2e-mac.yml, macOS $(sw_vers -productVersion))"
+          # curl y no gh: el Mac del runner no tiene por qué tener gh.
+          curl -fsS -o /dev/null -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -d "{\"state\":\"$st\",\"context\":\"e2e-mac/kling-hv\",\"description\":\"${d:0:140}\"}"
+          echo "commit status e2e-mac/kling-hv=$st on $GITHUB_SHA"
 
       # Las pruebas limpian lo suyo; esto es por si una se cortó a medias (el
       # tope del job, un cancel). Solo procesos de las raíces y binarios de

@@ -40,7 +40,8 @@
 # Go ni red se salta, y lo dice) y las KLING_E2E_DB_GOLDEN* de 6h (la arista
 # credential; si 6f construyó su golden, lo usa). KLING_E2E_LOGS (un directorio):
 # si la prueba falla, ahí van el log del daemon y la consola de cada máquina
-# antes de que la limpieza los borre.
+# antes de que la limpieza los borre. KLING_E2E_STRICT=1 (lo ponen
+# e2e-mac-release.sh y e2e-mac.yml): una parte saltada hace fallar la pasada.
 #
 # La salida va en inglés, como el resto de lo que ve el usuario. Un fallo no
 # aborta el resto: saber que fallan tres cosas relacionadas vale más que
@@ -83,9 +84,15 @@ E2E_SPEC="$HERE/e2e-tools.spec.json"
 SHARES="$TMPBASE/kling-e2e-mac/shares-$$"
 export KLING_SHARE_ROOTS="$SHARES"
 
-pass=0; fail=0
+pass=0; fail=0; skipped=0
 ok()   { printf "  \033[32mok\033[0m    %s\n" "$1"; pass=$((pass+1)); }
 bad()  { printf "  \033[31mFAIL\033[0m  %s\n        expected: %s\n        got:      %s\n" "$1" "$2" "$3"; fail=$((fail+1)); }
+# skip: una parte que no se probó y cuenta (el resumen la dice, y con
+# KLING_E2E_STRICT=1, el camino de la release, la pasada falla). opcional: lo
+# que necesita algo que ese camino no da (un Postgres externo, la imagen del
+# puente MCP de FROM); se dice y no cuenta.
+skip()     { printf "  \033[33mskip\033[0m  %s\n" "$1"; skipped=$((skipped+1)); }
+opcional() { printf "  \033[33mskip\033[0m  %s (optional, not counted)\n" "$1"; }
 step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 info() { printf "        %s\n" "$1"; }
 
@@ -423,7 +430,7 @@ if [ $HAVE_BRIDGE = 1 ]; then
     bad "run $BRIDGE_IMG" "running" "failed"
   fi
 else
-  info "skipped the MCP bridge check: no image $BRIDGE_IMG"
+  opcional "the MCP bridge check: no image $BRIDGE_IMG (it comes with FROM)"
 fi
 
 # ── 4. sandbox ────────────────────────────────────────────────────────────────
@@ -716,7 +723,7 @@ fi
 # servidor con TLS (verify-full).
 step "6e. postgres credential proxy"
 if [ -z "${KLING_E2E_PG_URL:-}" ]; then
-  printf "  \033[33mskip\033[0m  KLING_E2E_PG_URL is not set (postgres://role:password@host:port/db): no server to test\n"
+  opcional "KLING_E2E_PG_URL is not set (postgres://role:password@host:port/db): no server to test"
 else
   PGC="$P-pgcred"
   read -r PG_HOST PG_PORT PG_USER PG_DB < <(python3 -c '
@@ -847,7 +854,7 @@ if k volume create "$SV" -size 64M >/dev/null 2>&1; then
   contiene "$out" "-snapshots" && ok "volume rm refuses while snapshots exist" || bad "volume rm" "refusal naming -snapshots" "$out"
   k volume rm -f -snapshots "$SV" >/dev/null 2>&1
 else
-  info "skipped: volume create failed (e2fsprogs missing?)"
+  skip "volume checks: volume create failed (e2fsprogs missing?)"
 fi
 
 # ── 7. reinicio del daemon y kill -9─────────────────────────────────────────
@@ -1127,7 +1134,7 @@ if [ -z "$DBSKIP" ] && [ -z "$DBG" ]; then
 fi
 
 if [ -n "$DBSKIP" ]; then
-  printf "  \033[33mskip\033[0m  %s\n" "$DBSKIP"
+  skip "$DBSKIP"
 else
   DBTMP="$DBSTAGE"; export KLING_DB_STATE="$DBTMP/state"
   # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
@@ -1153,7 +1160,7 @@ print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip(
   [ -n "$PW1" ] && ok "the copy has its own password on the host" || bad "copy password" "a password file" "nothing"
 
   if ! command -v psql >/dev/null; then
-    printf "  \033[33mskip\033[0m  no psql on this host: host-side password checks skipped\n"
+    skip "no psql on this host: host-side password checks skipped"
   else
     out=$(dbhostsql "$PW1" "$DBU" "SELECT 1")
     [ "$out" = "1" ] && ok "the host gets in with the copy's password" || bad "host connection" "1" "$out"
@@ -1164,7 +1171,7 @@ print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip(
       rechazo_clave "$out" && ok "the template's password does NOT get into the copy" \
         || bad "template password" "password authentication failed" "$out"
     else
-      printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD is not set: template password not tried from the host\n"
+      skip "KLING_E2E_DB_GOLDEN_PASSWORD is not set: template password not tried from the host"
     fi
     dsn=$(k db connect "$DBU" -dsn 2>/dev/null </dev/null)
     # El DSN se descompone en variables PG*: la clave va por entorno, nunca en el argv de psql.
@@ -1237,7 +1244,7 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   if [ -z "$ROPW" ]; then
     bad "ro role password" "a password file on the host" "nothing"
   elif ! command -v psql >/dev/null; then
-    printf "  \033[33mskip\033[0m  no psql on this host: read-only role checks skipped\n"
+    skip "no psql on this host: read-only role checks skipped"
   else
     out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SELECT count(*) FROM e2e_ro")
     [ "$out" = "2" ] && ok "the ro role can SELECT" || bad "ro SELECT" "2" "$out"
@@ -1339,7 +1346,7 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   # parent did not change, from a live fork when it did), the .env inside .git
   # switches on every checkout, the other branches freeze in the background.
   if ! command -v git >/dev/null; then
-    printf "  \033[33mskip\033[0m  no git: kling db branch not tried\n"
+    skip "no git: kling db branch not tried"
   else
     BR="$DBSTAGE/repo"; BLOG="$DBSTAGE/hook.log"; : > "$BLOG"
     export KLING
@@ -1349,7 +1356,9 @@ b, spare = sys.argv[1], len(sys.argv) > 2
 for r in json.load(sys.stdin):
     if r["branch"] == b and bool(r.get("spare")) == spare:
         print(r["copy"]); break' "$@"; }
-    bidle() { local i; for i in $(seq 1 600); do pgrep -f "branch -settle" >/dev/null || return 0; sleep 0.2; done; }
+    # bidle: espera al settle de ESTA prueba (el kling-db de su DBSTAGE, no
+    # cualquiera del sistema) y, si no acaba en 120 s, lo dice y devuelve 1.
+    bidle() { local i; for i in $(seq 1 600); do pgrep -f "${DBSTAGE##*/}/plugins/kling-db branch -settle" >/dev/null || return 0; sleep 0.2; done; bad "kling db branch -settle" "finished within 120 s" "still running"; return 1; }
     bco() { local t0; t0=$(now_ms); (cd "$BR" && git checkout -q "$@" 2>>"$BLOG"); BMS=$(( $(now_ms) - t0 )); }
     benv() { grep '^PGPASSWORD=' "$BR/.git/kling-db.env" 2>/dev/null; }
     mkdir -p "$BR" && (cd "$BR" && git init -q -b main && git -c user.name=e2e -c user.email=e2e@localhost commit -q --allow-empty -m init)
@@ -1401,7 +1410,7 @@ DBGOLD=""; [ -z "$DBSKIP" ] && DBGOLD="$DBG"
 # un 501 es un fallo. Lo demás de las aristas está en 6h.
 step "6g. graphs (lifecycle; a link edge must work)"
 if ! k graph ls >/dev/null 2>&1; then
-  printf "  \033[33mskip\033[0m  this daemon does not know graphs (graphs capability)\n"
+  skip "this daemon does not know graphs (graphs capability)"
 else
   G="$P-g"; GTMP=$(mktemp -d "$TMPBASE/kling-e2e-graph.XXXXXX")
   gstate() { k graph inspect "$1" -json 2>/dev/null | pyj "d['state'] + ' ' + ' '.join(n+'='+(v.get('state') or '-') for n,v in sorted(d['nodes'].items()))"; }
@@ -1478,7 +1487,7 @@ fi
 # credential hacia un Postgres de verdad.
 step "6h. graphs: link and credential edges"
 if ! k graph ls >/dev/null 2>&1; then
-  printf "  \033[33mskip\033[0m  the daemon does not know graphs (capability graphs)\n"
+  skip "the daemon does not know graphs (capability graphs)"
 else
   G="$P-ge"; GDBT="$P-gdb"; GTMP=$(mktemp -d "$TMPBASE/kling-e2e-edges.XXXXXX")
   gstate() { k graph inspect "$1" -json 2>/dev/null | python3 -c 'import sys,json; g=json.load(sys.stdin); print(g["state"], " ".join(n+"="+(v.get("state") or "-") for n,v in sorted(g["nodes"].items())))'; }
@@ -1589,7 +1598,7 @@ EOF
       fi
       k graph rm "$GC" >/dev/null 2>&1
     else
-      printf "  \033[33mskip\033[0m  credential edge: no Postgres golden (6f skipped and KLING_E2E_DB_GOLDEN/_PASSWORD are not set)\n"
+      skip "credential edge: no Postgres golden (6f skipped and KLING_E2E_DB_GOLDEN/_PASSWORD are not set)"
     fi
 
     k graph rm "$G" >/dev/null 2>&1
@@ -1624,5 +1633,9 @@ info "footprint thawed:       ${FP_THAW} MiB, replica ${FP_RESTORED} MiB, squeez
 info "burst of $BURST:           p50 ${BURST_P50} ms, p95 ${BURST_P95} ms, peak ${peak} MiB"
 info "live share (rw):        write ${SH_W:-?}, read ${SH_R:-?}; ${SH_SMALL:-?}"
 
-printf "\n\033[1m%d ok · %d failed\033[0m\n" "$pass" "$fail"
+printf "\n\033[1m%d ok · %d failed · %d skipped\033[0m\n" "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
+if [ "$skipped" -gt 0 ] && [ "${KLING_E2E_STRICT:-0}" = 1 ]; then
+  echo "KLING_E2E_STRICT=1: $skipped part(s) skipped, so this run does not count as a full e2e" >&2
+  exit 1
+fi
