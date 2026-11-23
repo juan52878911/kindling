@@ -820,6 +820,11 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 	return true
 }
 
+// reintentoCommitSinRespuesta es lo que reconcile reintenta, en total, con un
+// VMM de un commit cortado que no contesta (R3-5): reconcile corre antes de
+// que el daemon escuche, y uno colgado no puede retrasarlo un plazoVolcado.
+const reintentoCommitSinRespuesta = 10 * time.Second
+
 // revertirCommitCortado devuelve a un VMM vivo, cuyo commit cortó el reinicio,
 // su overlay propio (el invitado no llegó a escribir en el dorado: estaba en
 // pausa) y lo reanuda si no era una pausa pedida. Quita la marca solo si todo
@@ -827,24 +832,35 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, pausada bool, memMiB int) bool {
 	c := m.clienteReconcile(id, pid)
 	overlay := filepath.Join(dir, "overlay.ext4")
-	ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
-	err := c.PatchDrive(ctx, "overlay", overlay)
-	cancel()
-	// Un VMM que sigue volcando la memoria (una plantilla grande) no contesta o
-	// contesta «ocupado» hasta acabar: se le espera lo que un volcado (R29), no
-	// los plazoEstadoVMM de una consulta. Un rechazo claro no se reintenta.
-	if err != nil && vmmOcupado(err) {
-		log.Printf("reconcile: %s: its VMM is still busy with the dump of a cut commit; waiting up to %s", shortID(id), plazoVolcado(memMiB))
-		ctx, cancel := context.WithTimeout(context.Background(), plazoVolcado(memMiB))
+	inicio := time.Now()
+	intentar := func(plazo time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), plazo)
 		defer cancel()
-		for {
-			if err = c.PatchDrive(ctx, "overlay", overlay); err == nil || !vmmOcupado(err) || ctx.Err() != nil {
-				break
-			}
-			select {
-			case <-ctx.Done():
-			case <-time.After(500 * time.Millisecond):
-			}
+		return c.PatchDrive(ctx, "overlay", overlay)
+	}
+	err := intentar(plazoEstadoVMM)
+	switch {
+	case err != nil && vmmContestaOcupado(err):
+		// Un VMM que CONTESTA «ocupado» sigue volcando la memoria (una
+		// plantilla grande): se le espera lo que un volcado (R29), no los
+		// plazoEstadoVMM de una consulta.
+		log.Printf("reconcile: %s: its VMM is still busy with the dump of a cut commit; waiting up to %s", shortID(id), plazoVolcado(memMiB))
+		fin := inicio.Add(plazoVolcado(memMiB))
+		for err != nil && vmmContestaOcupado(err) && time.Until(fin) > 500*time.Millisecond {
+			time.Sleep(500 * time.Millisecond)
+			err = intentar(min(plazoEstadoVMM, time.Until(fin)))
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		// Sin respuesta no se sabe si vuelca o está colgado: se reintenta,
+		// pero como mucho reintentoCommitSinRespuesta en total. Después,
+		// failed: killOrphanVMMs para el VMM y un kling start la arranca.
+		fin := inicio.Add(reintentoCommitSinRespuesta)
+		for errors.Is(err, context.DeadlineExceeded) && time.Until(fin) > 0 {
+			err = intentar(min(plazoEstadoVMM, time.Until(fin)))
+		}
+		if err != nil {
+			log.Printf("reconcile: %s: the VMM of a cut commit hasn't answered in %s; giving up on it",
+				shortID(id), time.Since(inicio).Round(time.Millisecond))
 		}
 	}
 	if err != nil {
@@ -863,11 +879,12 @@ func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, 
 	return true
 }
 
-// vmmOcupado dice si err es un VMM que no contesta a tiempo o que dice estar
-// ocupado (un volcado en marcha).
-func vmmOcupado(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
+// vmmContestaOcupado dice si err es la RESPUESTA de un VMM que dice estar
+// ocupado (un volcado en marcha). Un plazo vencido no lo es: no se sabe si
+// vuelca o está colgado (ver revertirCommitCortado).
+func vmmContestaOcupado(err error) bool {
+	if !errorDelVMM(err) || errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
 	t := strings.ToLower(err.Error())
 	return strings.Contains(t, "busy") || strings.Contains(t, "in progress")

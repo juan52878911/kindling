@@ -118,13 +118,17 @@ func (p *Privileges) OwnFile(f *os.File) error {
 
 // OwnNoFollow cede una ruta abriéndola con O_NOFOLLOW y cediendo el
 // descriptor (OwnFile): un enlace simbólico plantado en su sitio no se sigue
-// (falla con ELOOP), ni siquiera entre un Lstat y el chown.
+// (falla con ELOOP), ni siquiera entre un Lstat y el chown. Una ruta que no
+// existe no es un fallo, como en Own.
 func (p *Privileges) OwnNoFollow(path string) error {
 	if !p.Enabled {
 		return nil
 	}
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		if err == syscall.ENOENT {
+			return nil
+		}
 		return fmt.Errorf("granting %s: %w", path, &os.PathError{Op: "open", Path: path, Err: err})
 	}
 	f := os.NewFile(uintptr(fd), path)
