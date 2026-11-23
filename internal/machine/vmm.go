@@ -7,6 +7,7 @@ package machine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -167,6 +168,21 @@ func evaluarNivelMemoria(nivel, minimo int) error {
 			"Another microVM would push the system into killing processes.\n"+
 			"Freeze or remove idle instances (`kling ps`), or lower the minimum with KLING_MIN_MEM_LEVEL",
 		nivel, minimo)}
+}
+
+// sinCapacidadVMM traduce el 507 del VMM a la falta de capacidad del daemon.
+// kling-hv contesta 507 cuando hv_vm_create da HV_NO_RESOURCES: el cupo de VMs
+// de Hypervisor.framework, de todo el Mac. Sin traducir llegaba como texto y
+// acababa en un 500; como api.StatusError 507, el planificador lo trata como
+// la falta de memoria: congela ociosas y reintenta. El mensaje empieza por el
+// del VMM, para que errorDelVMM siga sabiendo que contestó. Lo demás, intacto.
+func sinCapacidadVMM(err error) error {
+	var fe *fc.Error
+	if !errors.As(err, &fe) || fe.Status != api.StatusInsufficientMemory {
+		return err
+	}
+	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: err.Error() +
+		"\nThe VMM found no room for another VM on this host. Freeze or remove idle instances (`kling ps`) and try again"}
 }
 
 // parseSwapUsage interpreta el valor crudo de vm.swapusage de macOS (struct
