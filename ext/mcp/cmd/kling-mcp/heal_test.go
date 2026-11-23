@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -193,5 +194,31 @@ func TestElMotivoDeReconstruirDiceLaCausaCorrecta(t *testing.T) {
 	}
 	if strings.Contains(m, "reboot") {
 		t.Errorf("el caso de la imagen no puede hablar del reinicio: %q", m)
+	}
+}
+
+// El modo de aislamiento es una anotacion del dorado, y el Commit con reemplazo
+// que hace el import crea un snapshot sin anotaciones: si la autocuracion no lo
+// pasa explicito, un servicio con una microVM por sesion vuelve a ser una
+// instancia compartida sin que nada lo diga.
+func TestArgvReimportarConservaElAislamiento(t *testing.T) {
+	valor := func(argv []string) string {
+		i := slices.Index(argv, "-isolation")
+		if i < 0 || i+1 >= len(argv) {
+			t.Fatalf("falta -isolation en %v", argv)
+		}
+		return argv[i+1]
+	}
+	sesion := &api.Snapshot{
+		Name:        "x",
+		Labels:      map[string]string{api.LabelService: "x"},
+		Annotations: map[string]json.RawMessage{mcp.IsolationKey: json.RawMessage(`"session"`)},
+	}
+	if got := valor(argvReimportar(sesion, "")); got != mcp.IsolationSession {
+		t.Errorf("-isolation = %q, esperaba %q", got, mcp.IsolationSession)
+	}
+	compartido := &api.Snapshot{Name: "x", Labels: map[string]string{api.LabelService: "x"}}
+	if got := valor(argvReimportar(compartido, "")); got != mcp.IsolationService {
+		t.Errorf("-isolation = %q, esperaba %q", got, mcp.IsolationService)
 	}
 }
