@@ -32,6 +32,9 @@ type KlingInfo struct {
 	// ("http", "postgres", "mysql", "sigv4"). Un kling-vz anterior no lo manda: solo
 	// HTTP.
 	CredentialKinds []string `json:"credential_kinds,omitempty"`
+	// SnapshotRepoint: sabe leer kling_repoint en PUT /snapshot/load y no abrir
+	// las rutas del snap.file. Un VMM anterior no lo manda: ignora el campo.
+	SnapshotRepoint bool `json:"snapshot_repoint,omitempty"`
 }
 
 // KlingNetwork es la política de salida de una máquina (PUT /kling/network).

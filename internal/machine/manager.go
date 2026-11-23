@@ -4147,11 +4147,18 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := esperarSello(); err != nil {
 		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
 	}
+	// macOS: las rutas del daemon, para que el VMM no abra las del snap.file
+	// (reapuntar.go). En Linux, nil. Antes de intentoCarga: un fallo aquí no
+	// ha cargado nada.
+	rp, err := m.reapuntarDe(ctx, c, pid, func() (*fc.Repoint, error) { return m.rutasDelThaw(mc) })
+	if err != nil {
+		return abortar(err)
+	}
 	intentoCarga = true
 	start := time.Now()
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
-	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotTracking(ctx, snapPath, memPath, true, base != ""); err != nil {
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotRepoint(ctx, snapPath, memPath, true, base != "", rp); err != nil {
 		// Si el VMM contestó con un error, no cargó: el invitado no corrió y el
 		// volcado sigue describiendo su disco, así que recupera su sello. Sin
 		// respuesta (un plazo, el socket cortado) no se sabe si reanudó y se

@@ -228,3 +228,31 @@ func TestBalloonStatsCuerpoConTope(t *testing.T) {
 		t.Fatal("un cuerpo de 16 MiB se leyó entero")
 	}
 }
+
+func TestLoadSnapshotRepoint(t *testing.T) {
+	c, _, cuerpo := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ctx := context.Background()
+	// Con nil, el cuerpo es el de LoadSnapshotTracking, byte a byte.
+	if err := c.LoadSnapshotTracking(ctx, "/s/snap.file", "/s/mem.file", true, true); err != nil {
+		t.Fatal(err)
+	}
+	hoy := string(*cuerpo)
+	if err := c.LoadSnapshotRepoint(ctx, "/s/snap.file", "/s/mem.file", true, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(*cuerpo) != hoy || strings.Contains(hoy, "kling_repoint") {
+		t.Fatalf("con nil el cuerpo cambió: %s vs %s", *cuerpo, hoy)
+	}
+	rp := &Repoint{Kernel: "/k", Drives: map[string]RepointDrive{"rootfs": {Path: "/r", ReadOnly: true}}}
+	if err := c.LoadSnapshotRepoint(ctx, "/s/snap.file", "/s/mem.file", true, false, rp); err != nil {
+		t.Fatal(err)
+	}
+	var d struct {
+		R *Repoint `json:"kling_repoint"`
+	}
+	if err := json.Unmarshal(*cuerpo, &d); err != nil || d.R == nil || d.R.Kernel != "/k" || d.R.Drives["rootfs"] != (RepointDrive{"/r", true}) {
+		t.Fatalf("cuerpo = %s (%v)", *cuerpo, err)
+	}
+}
