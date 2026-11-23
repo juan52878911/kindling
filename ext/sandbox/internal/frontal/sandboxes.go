@@ -430,6 +430,10 @@ func (s *Servidor) handleBorrar(w http.ResponseWriter, r *http.Request, id strin
 		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
+	if s.ingreso != nil {
+		s.ingreso.olvidar(id)
+		s.ingreso.cortar(id, 0) // las conexiones abiertas por el ingress no sobreviven al sandbox
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
