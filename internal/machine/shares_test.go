@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	hostshare "github.com/juan52878911/kindling/internal/share"
 	share "github.com/juan52878911/kindling/internal/shareproto"
@@ -244,5 +245,56 @@ func TestSubidasConcurrentesRespetanElTope(t *testing.T) {
 	}
 	if n := m.pendingUploads(); n != ok {
 		t.Fatalf("pendingUploads() = %d, want %d (the accepted ones)", n, ok)
+	}
+}
+
+// gcUploads: los .tree y .tmp de una subida a medias no esperan a uploadTTL
+// (al arrancar, ninguno; en el barrido, uploadTmpGrace); las subidas listas,
+// sí esperan su hora.
+func TestGcUploadsTemporales(t *testing.T) {
+	m := newTestManager(t)
+	dir := m.uploadsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	crear := func(name string, edad time.Duration, dirp bool) string {
+		p := filepath.Join(dir, name)
+		if dirp {
+			if err := os.MkdirAll(filepath.Join(p, "x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cuando := time.Now().Add(-edad)
+		if err := os.Chtimes(p, cuando, cuando); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	existe := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	arbolViejo := crear("u1.tree", 30*time.Minute, true)
+	tmpViejo := crear("u2.ext4.tmp", 30*time.Minute, false)
+	arbolNuevo := crear("u3.tree", time.Minute, true)
+	tmpNuevo := crear("u4.ext4.tmp", time.Minute, false)
+	listaNueva := crear("u5.ext4", 10*time.Minute, false)
+	listaVieja := crear("u6.ext4", 2*time.Hour, false)
+
+	defer func(v time.Time) { inicioDelProceso = v }(inicioDelProceso)
+	inicioDelProceso = time.Now().Add(-time.Hour) // el daemon lleva una hora en marcha
+	m.gcUploads()
+	for p, want := range map[string]bool{arbolViejo: false, tmpViejo: false, arbolNuevo: true, tmpNuevo: true, listaNueva: true, listaVieja: false} {
+		if existe(p) != want {
+			t.Errorf("after the sweep, %s exists=%v, want %v", filepath.Base(p), !want, want)
+		}
+	}
+	// En la primera vuelta tras arrancar, todo temporal anterior es basura; una
+	// subida lista y reciente, no.
+	inicioDelProceso = time.Now()
+	m.gcUploads()
+	for p, want := range map[string]bool{arbolNuevo: false, tmpNuevo: false, listaNueva: true} {
+		if existe(p) != want {
+			t.Errorf("after startup, %s exists=%v, want %v", filepath.Base(p), !want, want)
+		}
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
@@ -58,11 +59,20 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 	seen := map[string]bool{".": true}
 	dirs := map[string]bool{".": true}
 	links := map[string]string{}
+	// Las fechas de los directorios se ponen al final: crear lo que cuelga de
+	// uno cambia la suya.
+	dirTimes := map[string]time.Time{}
 
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return st, checkLinks(links)
+			if err := checkLinks(links); err != nil {
+				return st, err
+			}
+			for name, mt := range dirTimes {
+				_ = os.Chtimes(filepath.Join(dst, filepath.FromSlash(name)), mt, mt)
+			}
+			return st, nil
 		}
 		if err != nil {
 			return st, fmt.Errorf("reading the archive: %w", err)
@@ -78,6 +88,9 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 			// La raíz del propio tar ("./"): ya existe.
 			if h.Typeflag != tar.TypeDir {
 				return st, errors.New("the archive root is not a directory")
+			}
+			if !h.ModTime.IsZero() {
+				dirTimes["."] = h.ModTime
 			}
 			continue
 		}
@@ -107,6 +120,9 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 				}
 			}
 			dirs[name] = true
+			if !h.ModTime.IsZero() {
+				dirTimes[name] = h.ModTime
+			}
 			st.Dirs++
 			st.Blocks++
 
@@ -137,6 +153,12 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 			}
 			if n != h.Size {
 				return st, fmt.Errorf("%s is truncated in the archive", name)
+			}
+			// La fecha del original (por ruta: ningún ancestro es un enlace, como
+			// con os.Symlink más abajo): make, rsync y las cachés de compilación
+			// deciden por ella qué está al día.
+			if !h.ModTime.IsZero() {
+				_ = os.Chtimes(filepath.Join(dst, filepath.FromSlash(name)), h.ModTime, h.ModTime)
 			}
 			st.Bytes += n
 			st.Files++

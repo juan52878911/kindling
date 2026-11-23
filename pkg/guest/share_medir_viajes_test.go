@@ -178,6 +178,7 @@ func TestMedirViajes(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+	t.Logf("ls -l of %d files: %d round trips to the host (READDIRPLUS=%v, %d entries with attrs)", N, b.n()-a0, plus, len(conAttr))
 	if v := b.n() - a0; v > 12 {
 		t.Errorf("ls -l of %d files took %d round trips to the host, want <= 12", N, v)
 	}

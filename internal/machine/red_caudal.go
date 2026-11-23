@@ -93,26 +93,18 @@ func (m *Manager) caudalRedDe(id string) (bps int64, propio bool) {
 	}
 	m.mu.RUnlock()
 	bps = caudalRed(pedido, m.netMiBps)
-	// El suelo de las carpetas sustituye al caudal de siempre, no a uno que
-	// alguien eligió: un daemon.net_mibps menor puesto a propósito se respeta.
-	if pedido <= 0 && carpetas && !caudalDelDaemon(m.netMiBps) {
+	// El suelo de las carpetas se aplica también con daemon.net_mibps: con un
+	// valor del daemon menor, el `cp` de una carpeta iba a ese caudal (en el
+	// modo ro/rw la carpeta viaja por la red de la máquina). Solo lo pedido
+	// por la propia máquina (net_mibps) lo baja.
+	if pedido <= 0 && carpetas {
 		bps = max(bps, netMiBpsCarpetas<<20)
 	}
 	return bps, pedido > 0 || carpetas
 }
 
-// caudalDelDaemon dice si el daemon tiene un caudal propio válido
-// (daemon.net_mibps o KLING_NET_MIBPS), y no el de siempre.
-func caudalDelDaemon(daemon func() int) bool {
-	if daemon == nil {
-		return false
-	}
-	n := daemon()
-	return n > 0 && n <= config.MaxNetMiBps
-}
-
 // netMiBpsCarpetas es el caudal mínimo de una máquina con carpetas que no pide
-// otro: viajan por su red, y con los 16 MiB/s de siempre un `cp` de la carpeta
+// otro (tampoco lo baja daemon.net_mibps): viajan por su red, y con los 16 MiB/s de siempre un `cp` de la carpeta
 // iba a 16 MiB/s. El CLI ya lo pedía (run -share, compose); decidirlo aquí lo
 // da también a lo que arranca por el API (gateway, sandbox) y a las plantillas
 // con carpetas, cuyas copias heredan el limitador de su snapshot.

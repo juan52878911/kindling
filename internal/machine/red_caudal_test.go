@@ -86,7 +86,7 @@ func TestInterfazRedLlegaAFirecracker(t *testing.T) {
 
 // Con carpetas y sin pedir caudal (lo que arranca por el API), eth0 lleva al
 // menos netMiBpsCarpetas, como pide el CLI; lo pedido y lo que diga el daemon
-// siguen mandando.
+// siguen mandando (un valor mayor del daemon, o lo pedido por la máquina).
 func TestInterfazRedConCarpetas(t *testing.T) {
 	m := newTestManager(t)
 	daemon := 32
@@ -104,8 +104,8 @@ func TestInterfazRedConCarpetas(t *testing.T) {
 	}{
 		{"aaaa000000000004", 0, netMiBpsCarpetas},
 		{"aaaa000000000004", 1024, 1024},
-		// P1: un daemon.net_mibps menor puesto a propósito se respeta.
-		{"aaaa000000000004", 32, 32},
+		// El suelo vale también con un daemon.net_mibps menor.
+		{"aaaa000000000004", 32, netMiBpsCarpetas},
 		{"aaaa000000000005", 32, 8},
 		{"aaaa000000000005", 0, 8},
 		{"aaaa000000000006", 32, 32},

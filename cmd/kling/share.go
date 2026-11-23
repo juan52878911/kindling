@@ -5,6 +5,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,7 +96,13 @@ func uploadDir(ctx context.Context, c *api.Client, dir string) (*api.ShareUpload
 	pr, pw := io.Pipe()
 	skipped := make(chan []string, 1)
 	go func() {
-		sk, err := writeTar(pw, dir)
+		// El tar escribe en bloques de 512 bytes: sin búfer, cada uno es un
+		// traspaso por la tubería y una escritura al socket.
+		bw := bufio.NewWriterSize(pw, 1<<20)
+		sk, err := writeTar(bw, dir)
+		if ferr := bw.Flush(); err == nil {
+			err = ferr
+		}
 		skipped <- sk
 		pw.CloseWithError(err)
 	}()
