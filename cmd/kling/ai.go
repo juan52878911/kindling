@@ -196,12 +196,6 @@ func aiServe(args []string) error {
 			}
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
-	}()
 
 	auth := "no token (socket 0600)"
 	switch {
@@ -218,11 +212,25 @@ func aiServe(args []string) error {
 	for _, n := range aigw.CascadeNotes(g.Cascades()) {
 		fmt.Println("  " + n)
 	}
-	err = srv.Serve(ln)
+	err = servirHastaApagar(ctx, srv, ln, 10*time.Second)
 	// Al salir no queda ninguna réplica corriendo: se congelan todas.
 	cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	g.Close(cctx)
+	return err
+}
+
+// servirHastaApagar sirve ln hasta que ctx acaba y entonces apaga srv con un
+// plazo de drain. Al volver, quien llama sale del proceso: lo que siga en
+// vuelo se corta.
+func servirHastaApagar(ctx context.Context, srv *http.Server, ln net.Listener, drain time.Duration) error {
+	go func() {
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), drain)
+		defer cancel()
+		_ = srv.Shutdown(sctx)
+	}()
+	err := srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
