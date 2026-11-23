@@ -231,3 +231,31 @@ func TestProcesosAgenteAntiguoEs501(t *testing.T) {
 		t.Fatalf("%d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// Una respuesta JSON del agente que pasa del tope es un 502; el flujo NDJSON
+// no tiene ese tope.
+func TestProcesosRespuestaDelAgenteConTope(t *testing.T) {
+	s, _ := testServer(t)
+	mux := http.NewServeMux()
+	grande := strings.Repeat("{},", (maxRespuestaProc/3)+10)
+	mux.HandleFunc("/json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[" + grande + "{}]"))
+	})
+	mux.HandleFunc("/nd", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(grande))
+	})
+	g := httptest.NewServer(mux)
+	defer g.Close()
+	rr := httptest.NewRecorder()
+	s.reenviar(rr, httptest.NewRequest("GET", "/json", nil), g.URL, "m", &api.Machine{})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("json: %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	s.reenviar(rr, httptest.NewRequest("GET", "/nd", nil), g.URL, "m", &api.Machine{})
+	if rr.Code != http.StatusOK || rr.Body.Len() <= maxRespuestaProc {
+		t.Fatalf("ndjson: %d %d", rr.Code, rr.Body.Len())
+	}
+}
