@@ -2019,6 +2019,8 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotRepoint(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false, enDiff, rp); err != nil {
+		// Un 507 de kling-hv (sin cupo de VMs) es falta de capacidad.
+		err = sinCapacidadVMM(err)
 		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
 		// propagar: este error acaba en el 502 del gateway y en el CLI, y el
 		// texto crudo de Firecracker no le dice a nadie qué hacer.

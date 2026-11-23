@@ -802,6 +802,9 @@ func perfilE2fs(bin string) string {
 // el nivel en 22–40, por encima del 15 %), con el swap casi lleno y sin disco
 // en el que crecer. Ver evaluarSwap.
 func (m *Manager) checkPresionPlataforma() error {
+	if err := m.checkCupoHV(); err != nil {
+		return err
+	}
 	if nivel, err := syscall.SysctlUint32("kern.memorystatus_level"); err == nil {
 		if err := evaluarNivelMemoria(int(nivel), minMemLevel()); err != nil {
 			return err
@@ -812,6 +815,55 @@ func (m *Manager) checkPresionPlataforma() error {
 		return nil // sin poder medirlo no se bloquea nada
 	}
 	return evaluarSwap(usado, total, discoLibreMiB(volumenSwapMac, m.root), minFreeDiskMiB(), maxSwapPct())
+}
+
+// defaultMaxVMsHV es el cupo de máquinas con VMM vivo con kling-hv. macOS
+// admite unas 127 VMs de Hypervisor.framework a la vez, en todo el Mac
+// (medido en el M4: HV_NO_RESOURCES en la 128); 120 deja sitio a las de otros
+// procesos. Si aun así no caben, el 507 de kling-hv (sinCapacidadVMM) es la
+// red de debajo.
+const defaultMaxVMsHV = 120
+
+// maxVMsHV lee KLING_HV_MAX_VMS; "0" apaga la comprobación.
+func maxVMsHV() int {
+	if v := os.Getenv("KLING_HV_MAX_VMS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultMaxVMsHV
+}
+
+// checkCupoHV rechaza con 507, antes de crear nada, la máquina que ya no cabe
+// en el cupo de Hypervisor.framework. Solo con hv: con vz el cupo lo pone el
+// propio framework (dos VMs de macOS, ilimitadas de Linux) y su error ya es
+// claro. Gastan cupo las máquinas con VMM (PID) y las que están naciendo: las
+// warm y las paradas no tienen VM. Run aparta su hueco (m.naciendo) antes de
+// admitir, así que ya se cuenta; Thaw y Start, no, y su máquina es la que
+// falta: de ahí el max(naciendo, 1). Con un Run y un Thaw a la vez se cuenta
+// una de menos, y para eso está el 507 del VMM.
+func (m *Manager) checkCupoHV() error {
+	cupo := maxVMsHV()
+	if backendVMM != BackendHV || cupo == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	vivas := 0
+	for _, mc := range m.byID {
+		if mc.PID != 0 {
+			vivas++
+		}
+	}
+	n := vivas + max(m.naciendo, 1)
+	m.mu.RUnlock()
+	if n <= cupo {
+		return nil
+	}
+	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
+		"kling-hv can run %d machines at once (%d have a VMM now): macOS admits about 127 "+
+			"Hypervisor.framework VMs system-wide.\n"+
+			"Freeze or remove idle instances (`kling ps`), or change the cap with KLING_HV_MAX_VMS on the daemon",
+		cupo, vivas)}
 }
 
 // minDiscoLibrePlataforma: 16 GiB en macOS. El disco de datos es también el

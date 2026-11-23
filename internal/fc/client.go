@@ -107,6 +107,17 @@ func (c *Client) do(ctx context.Context, method, path string, body any) error {
 	return nil
 }
 
+// Error es una respuesta >= 300 del VMM. Status es su código HTTP: con él el
+// núcleo distingue el 507 de kling-hv sin cupo (HV_NO_RESOURCES) de un 400 de
+// configuración mala. Msg es el texto de siempre, "firecracker MÉTODO RUTA:
+// estado[: motivo]", que otros reconocen por su prefijo (errorDelVMM).
+type Error struct {
+	Status int
+	Msg    string
+}
+
+func (e *Error) Error() string { return e.Msg }
+
 // errorDeFirecracker es el error de una respuesta >= 300: con su
 // fault_message si lo trae; si no, con lo que contestó (recortado), y sin
 // cuerpo, solo con el código. Antes, sin fault_message, el error acababa en
@@ -123,10 +134,11 @@ func errorDeFirecracker(method, path string, resp *http.Response) error {
 	if motivo == "" {
 		motivo = strings.TrimSpace(string(cuerpo))
 	}
-	if motivo == "" {
-		return fmt.Errorf("firecracker %s %s: %s", method, path, resp.Status)
+	msg := fmt.Sprintf("firecracker %s %s: %s", method, path, resp.Status)
+	if motivo != "" {
+		msg += ": " + motivo
 	}
-	return fmt.Errorf("firecracker %s %s: %s: %s", method, path, resp.Status, motivo)
+	return &Error{Status: resp.StatusCode, Msg: msg}
 }
 
 // Ping comprueba que el socket responde; se usa para esperar el arranque.

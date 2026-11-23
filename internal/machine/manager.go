@@ -2690,7 +2690,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// Y las carpetas vivas por virtio-fs, si el VMM lo tiene (kling-hv).
 	m.carpetasAntesDeArrancar(ctx, c, id)
 	if err := c.Start(ctx); err != nil {
-		return pid, err
+		return pid, sinCapacidadVMM(err)
 	}
 	// Y los reenvíos de puertos, sin los que en macOS el host no llega al
 	// invitado. No hacen falta en Linux.
@@ -4261,6 +4261,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
 	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotRepoint(ctx, snapPath, memPath, true, base != "", rp); err != nil {
+		// Un 507 de kling-hv (sin cupo de VMs) es falta de capacidad.
+		err = sinCapacidadVMM(err)
 		// Si el VMM contestó con un error, no cargó: el invitado no corrió y el
 		// volcado sigue describiendo su disco, así que recupera su sello. Sin
 		// respuesta (un plazo, el socket cortado) no se sabe si reanudó y se
