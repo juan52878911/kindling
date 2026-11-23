@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -428,26 +429,44 @@ func (m *Manager) crearParaFondo(ctx context.Context, name string) (string, erro
 }
 
 // peticionLlana dice si la petición se conforma con lo que una copia del
-// fondo ya es. Red, volúmenes y límite de CPU se fijan al restaurar; lo único que se puede ajustar después es el nombre, las
-// etiquetas, el TTL y qué hacer al vencer.
+// fondo ya es. Red, volúmenes, puentes al host, caudal y límite de CPU se
+// fijan al restaurar; lo único que se puede ajustar después es el nombre, las
+// etiquetas, el TTL y qué hacer al vencer (adjudicarDelFondo).
+//
+// Es una lista BLANCA: se vacían los campos que el fondo sabe aplicar o que
+// dan igual con From, y lo demás tiene que quedar en su valor cero. Antes era
+// una lista negra y lo que no nombraba (host_ports, net_mibps, nested, y
+// cualquier campo nuevo de RunRequest) se perdía en silencio.
 //
 // Con un dueño explícito (cuota de inquilino, docs/authz.md) tampoco se
 // reclama: la copia nació con las etiquetas del dorado y la cuota del dueño
 // se decide al crearla.
 func peticionLlana(req api.RunRequest, snap *api.Snapshot) bool {
-	// VCPUs, MemMiB, MemMaxMiB, DiskMiB e Image no cuentan: con From runFrom los
-	// ignora y hereda los del dorado (el CLI manda siempre VCPUs y MemMiB).
-	if req.CPUPct != 0 || len(req.AllowDomains) != 0 || len(req.VolumeSet()) != 0 || len(req.Shares) != 0 ||
-		len(req.Env) != 0 {
-		return false
-	}
 	if _, ok := req.Labels[api.LabelOwner]; ok {
 		return false
 	}
 	if req.Egress != "" && req.Egress != snap.Egress && !(req.Egress == "none" && snap.Egress == "") {
 		return false
 	}
-	return !req.AllowExec || snap.AllowExec
+	if req.AllowExec && !snap.AllowExec {
+		return false
+	}
+	resto := req
+	// Lo que aplica adjudicarDelFondo, o el llamador después de crearla
+	// (esperar a que esté lista; Publish lo publica el daemon).
+	resto.Name, resto.From, resto.Labels, resto.TTLSeconds, resto.OnTTL = "", "", nil, 0, ""
+	resto.WaitReady, resto.ReadyTimeoutSeconds, resto.Publish = false, 0, nil
+	// VCPUs, MemMiB, MemMaxMiB, DiskMiB e Image: con From runFrom los ignora y
+	// hereda los del dorado (el CLI manda siempre VCPUs y MemMiB).
+	resto.VCPUs, resto.MemMiB, resto.MemMaxMiB, resto.DiskMiB, resto.Image = 0, 0, 0, 0, ""
+	// Ya comprobados arriba.
+	resto.Egress, resto.AllowExec = "", false
+	// El techo por defecto del cliente solo cuenta si la plantilla no trae
+	// el suyo (ver CPUPctDefault): con él, runFrom tampoco lo usaría.
+	if snap.CPUPct != 0 {
+		resto.CPUPctDefault = 0
+	}
+	return reflect.DeepEqual(resto, api.RunRequest{})
 }
 
 // reclamarFondo entrega una copia ya despierta del fondo de req.From, o
