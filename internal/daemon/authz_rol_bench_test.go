@@ -47,6 +47,73 @@ func servidorConReglaDeGrupo(tb testing.TB) (*Server, *int) {
 	return s, &llamadas
 }
 
+// El rol del llamante del sistema se resuelve una vez por conexión; una
+// conexión nueva lo vuelve a resolver, y lo que no es fiable (consulta de
+// grupos vacía, sin rol) no se recuerda.
+func TestRolSeRecuerdaPorConexion(t *testing.T) {
+	p := politicaDePrueba(t)
+	consultas := 0
+	devolver := []int{gidEquipoC}
+	p.grupos = func(int) []int { consultas++; return devolver }
+	s := &Server{authz: p}
+	var ll Llamante
+	s.identificar = func(net.Conn) (Llamante, error) { return ll, nil }
+	pedir := func(ctx context.Context) (Rol, error) {
+		t.Helper()
+		r := httptest.NewRequest("GET", "/machines", nil).WithContext(ctx)
+		return s.rolDePeticion(r)
+	}
+
+	ll = Llamante{UID: uidDeC, GID: 1, Conocido: true}
+	con := s.conContexto(context.Background(), nil)
+	for i := 0; i < 5; i++ {
+		if rol, err := pedir(con); err != nil || rol.Tenant != "c" {
+			t.Fatalf("petición %d: %+v %v", i, rol, err)
+		}
+	}
+	if consultas != 1 {
+		t.Fatalf("5 peticiones de una conexión consultaron los grupos %d veces, quiero 1", consultas)
+	}
+	if _, err := pedir(s.conContexto(context.Background(), nil)); err != nil || consultas != 2 {
+		t.Fatalf("conexión nueva: consultas = %d, %v; quiero 2", consultas, err)
+	}
+
+	// La consulta vuelve vacía (lo mismo que un fallo de la base de usuarios):
+	// sin rol en esa petición, y la siguiente vuelve a consultar.
+	devolver = nil
+	con = s.conContexto(context.Background(), nil)
+	if _, err := pedir(con); err == nil {
+		t.Fatal("sin grupos, el uid de c no debía tener rol")
+	}
+	devolver = []int{gidEquipoC}
+	if rol, err := pedir(con); err != nil || rol.Tenant != "c" {
+		t.Fatalf("tras el fallo pasajero: %+v %v", rol, err)
+	}
+	if consultas != 4 {
+		t.Fatalf("consultas = %d, quiero 4 (el vacío no se recuerda)", consultas)
+	}
+
+	// Un uid sin rol (con grupos, pero ninguno con regla) tampoco se
+	// recuerda; el token se mira por petición.
+	devolver = []int{2}
+	ll = Llamante{UID: uidNadie, GID: 1, Conocido: true}
+	con = s.conContexto(context.Background(), nil)
+	antes := consultas
+	for i := 0; i < 2; i++ {
+		if _, err := pedir(con); err == nil {
+			t.Fatal("uid sin regla con rol")
+		}
+	}
+	if consultas != antes+2 {
+		t.Fatalf("consultas = %d, quiero %d", consultas, antes+2)
+	}
+	r := httptest.NewRequest("GET", "/machines", nil).WithContext(con)
+	r.Header.Set("Authorization", "Bearer "+tokenDeA)
+	if rol, err := s.rolDePeticion(r); err != nil || rol.Tenant != "a" {
+		t.Fatalf("token en una conexión sin rol: %+v %v", rol, err)
+	}
+}
+
 // BenchmarkRolDePeticion mide el coste de autorizar cada petición de una
 // misma conexión (keep-alive) con una regla de grupo por delante.
 func BenchmarkRolDePeticion(b *testing.B) {

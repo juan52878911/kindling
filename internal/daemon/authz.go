@@ -418,40 +418,54 @@ func CargarPolitica(ruta string, obligatoria bool) (*Politica, error) {
 // rol es el rol de un llamante: admin implícito, o la primera regla que case,
 // en el orden del fichero.
 func (p *Politica) rol(ll Llamante) Rol {
+	r, _ := p.rolFiable(ll)
+	return r
+}
+
+// rolFiable es rol, y además dice si se puede recordar para la conexión: no si
+// hubo que preguntar los grupos a la base de usuarios y no dio ninguno, que
+// también es lo que devuelve gruposSistema cuando la consulta falla (un fallo
+// pasajero no debe quedarse pegado a la conexión).
+func (p *Politica) rolFiable(ll Llamante) (Rol, bool) {
 	if !ll.Conocido {
-		return Rol{}
+		return Rol{}, true
 	}
 	if p.admins[ll.UID] {
-		return Rol{Admin: true}
+		return Rol{Admin: true}, true
 	}
 	var grupos []int
-	resueltos := false
+	resueltos, fiable := false, true
 	for _, rg := range p.reglas {
 		if rg.porUID {
 			if rg.id == ll.UID {
-				return rg.rol
+				return rg.rol, fiable
 			}
 			continue
 		}
 		if !resueltos {
-			grupos, resueltos = p.gruposDe(ll), true
+			grupos, fiable = p.gruposDe(ll)
+			resueltos = true
 		}
 		if slices.Contains(grupos, rg.id) {
-			return rg.rol
+			return rg.rol, fiable
 		}
 	}
-	return Rol{}
+	return Rol{}, fiable
 }
 
-func (p *Politica) gruposDe(ll Llamante) []int {
+// gruposDe son el grupo principal y los suplementarios de ll. fiable es false
+// si hubo que consultar la base de usuarios y no devolvió ninguno.
+func (p *Politica) gruposDe(ll Llamante) (grupos []int, fiable bool) {
 	if ll.Groups != nil {
-		return append([]int{ll.GID}, ll.Groups...)
+		return append([]int{ll.GID}, ll.Groups...), true
 	}
 	out := []int{ll.GID}
 	if p.grupos != nil {
-		out = append(out, p.grupos(ll.UID)...)
+		extra := p.grupos(ll.UID)
+		out = append(out, extra...)
+		return out, len(extra) > 0
 	}
-	return out
+	return out, true
 }
 
 // rolDeToken busca el token entre los de la política. Compara con todos, sin
@@ -479,6 +493,40 @@ func (p *Politica) snapVisible(name string, s *api.Snapshot, t string) bool {
 
 type claveLlamante struct{}
 type claveRol struct{}
+type claveRolConexion struct{}
+
+// rolConexion recuerda, para una conexión, el rol de su llamante del sistema
+// (J-06): la identidad es fija por conexión y la política no cambia sin
+// reiniciar, así que resolverlo en cada petición repetía la consulta a la base
+// de usuarios (user.LookupId y GroupIds, con NSS puede ser lento o bloquear)
+// delante de cada exec. Consecuencia: un cambio de grupos del usuario vale en
+// su siguiente conexión, no en su siguiente petición. El token se sigue
+// mirando por petición, en rolDePeticion.
+type rolConexion struct {
+	mu  sync.Mutex
+	pol *Politica // la política con la que se calculó; nil = sin calcular
+	rol Rol
+}
+
+// rolDeLlamante es p.rol(ll), recordado en la conexión de ctx si la tiene.
+// Solo se recuerda un rol válido y fiable (rolFiable): uno sin rol o con la
+// consulta de grupos vacía se vuelve a calcular en la petición siguiente.
+func rolDeLlamante(ctx context.Context, p *Politica, ll Llamante) Rol {
+	m, _ := ctx.Value(claveRolConexion{}).(*rolConexion)
+	if m == nil {
+		return p.rol(ll)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pol == p {
+		return m.rol
+	}
+	rol, fiable := p.rolFiable(ll)
+	if fiable && rol.Valido() {
+		m.pol, m.rol = p, rol
+	}
+	return rol
+}
 
 // conContexto es el ConnContext del servidor: lee una vez, al aceptar la
 // conexión, quién está al otro lado. s.identificar lo sustituye en los tests
@@ -490,7 +538,7 @@ func (s *Server) conContexto(ctx context.Context, c net.Conn) context.Context {
 		if !ci.llOK {
 			ll = Llamante{}
 		}
-		return context.WithValue(ctx, claveLlamante{}, ll)
+		return conRolConexion(context.WithValue(ctx, claveLlamante{}, ll))
 	}
 	id := s.identificar
 	if id == nil {
@@ -500,7 +548,11 @@ func (s *Server) conContexto(ctx context.Context, c net.Conn) context.Context {
 	if err != nil {
 		ll = Llamante{}
 	}
-	return context.WithValue(ctx, claveLlamante{}, ll)
+	return conRolConexion(context.WithValue(ctx, claveLlamante{}, ll))
+}
+
+func conRolConexion(ctx context.Context) context.Context {
+	return context.WithValue(ctx, claveRolConexion{}, &rolConexion{})
 }
 
 func llamanteDe(ctx context.Context) Llamante {
@@ -726,7 +778,7 @@ func (s *Server) rolDePeticion(r *http.Request) (Rol, error) {
 	if !ll.Conocido {
 		return Rol{}, errAuthz(http.StatusForbidden, "the daemon has an authz policy and couldn't tell who you are on its socket")
 	}
-	rol := s.authz.rol(ll)
+	rol := rolDeLlamante(r.Context(), s.authz, ll)
 	if !rol.Valido() {
 		return Rol{}, errAuthz(http.StatusForbidden, "uid %d has no role in the daemon's authz policy (%s)", ll.UID, s.authz.Ruta)
 	}
