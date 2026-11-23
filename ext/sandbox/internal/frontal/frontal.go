@@ -390,6 +390,11 @@ func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.ingreso.servir(w, r)
 		return
 	}
+	// Lo que el mux no casa (404) o casa con otro método (405) contesta texto
+	// plano; solo en ese caso se envuelve para darlo como JSON.
+	if _, patron := s.mux.Handler(r); patron == "" {
+		w = &escritorJSON{ResponseWriter: w, r: r}
+	}
 	s.mux.ServeHTTP(w, r)
 }
 

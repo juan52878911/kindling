@@ -1,13 +1,14 @@
 package frontal
 
-// Intérprete de código (EXPERIMENTAL), versión mínima de /code y
-// /code/contexts del execd de OpenSandbox: Python, estado que persiste entre
-// ejecuciones de un contexto y salida en flujo NDJSON.
+// Intérprete de código: /code y /code/contexts del execd de OpenSandbox con
+// Python, bash y JavaScript (node), estado que persiste entre ejecuciones de un
+// contexto, resultados por tipo MIME, interrupción y salida en flujo NDJSON.
 //
 // No toca el agente del invitado. Un contexto es un proceso de fondo
 // (/processes) que corre el conductor (codigo_conductor.py) y escucha en un
-// socket Unix de un directorio 0700; ejecutar es un exec de un cliente de una
-// línea que manda el código por stdin a ese socket. El gateway no guarda
+// socket Unix de un directorio 0700 (en bash, una FIFO); ejecutar es un exec
+// de un cliente de una línea que manda el código por stdin a ese socket. Cada
+// lenguaje trae su conductor embebido (tabla lenguajes). El gateway no guarda
 // estado: los contextos de un sandbox se reconocen por la línea de órdenes de
 // sus procesos, así que sobreviven a un reinicio del gateway y el dueño es el
 // del sandbox (buscarEjecutable ya contesta 404 por los ajenos).
@@ -35,6 +36,51 @@ import (
 //go:embed codigo_conductor.py
 var conductorPy []byte
 
+//go:embed codigo_conductor.sh
+var conductorSh []byte
+
+//go:embed codigo_conductor.js
+var conductorJs []byte
+
+// lenguaje es un lenguaje del intérprete: su intérprete en el invitado, el
+// nombre del conductor y su fuente.
+type lenguaje struct {
+	nombre     string
+	interprete string
+	conductor  string
+	fuente     []byte
+}
+
+// lenguajes: los admitidos. El primero es el de por defecto.
+var lenguajes = []lenguaje{
+	{nombre: "python", interprete: "python3", conductor: "conductor.py", fuente: conductorPy},
+	{nombre: "bash", interprete: "bash", conductor: "conductor.sh", fuente: conductorSh},
+	{nombre: "javascript", interprete: "node", conductor: "conductor.js", fuente: conductorJs},
+}
+
+// lenguajeDe resuelve el nombre ("" = Python).
+func lenguajeDe(nombre string) (lenguaje, error) {
+	if nombre == "" {
+		return lenguajes[0], nil
+	}
+	var nombres []string
+	for _, l := range lenguajes {
+		if l.nombre == nombre {
+			return l, nil
+		}
+		nombres = append(nombres, fmt.Sprintf("%q", l.nombre))
+	}
+	return lenguaje{}, fmt.Errorf("unsupported language %q: use %s", nombre, strings.Join(nombres, ", "))
+}
+
+// errSinInterprete es que la imagen del sandbox no trae el intérprete.
+type errSinInterprete struct{ l lenguaje }
+
+func (e *errSinInterprete) Error() string {
+	return fmt.Sprintf("this sandbox image has no %s: %s code contexts need it (add %s to the image)",
+		e.l.interprete, e.l.nombre, e.l.interprete)
+}
+
 const (
 	// maxContextosPorSandbox acota los contextos vivos de un sandbox.
 	maxContextosPorSandbox = 8
@@ -44,8 +90,6 @@ const (
 	// dirCodigo es el prefijo del directorio (0700) de cada contexto; el
 	// resto es el id.
 	dirCodigo = "/tmp/.kindling-code-"
-	// lenguajePython es el único lenguaje que hay.
-	lenguajePython = "python"
 	// salidaCodigoMax acota los bytes que el cliente de una ejecución puede
 	// devolver (el exec lo trunca; el proceso del conductor sigue).
 	salidaCodigoMax = 8 << 20
@@ -80,16 +124,23 @@ type CodigoPeticion struct {
 }
 
 // CodigoEvento es una línea del flujo NDJSON de POST .../code. Type es
-// stdout o stderr (con Text), result (Text = repr del último valor), error
-// (Ename, Evalue, Traceback) o done (OK, DurationMS); done cierra el flujo.
+// stdout o stderr (con Text), result (Text = repr del último valor y Results
+// = sus representaciones por tipo MIME), error (Ename, Evalue, Traceback) o
+// done (OK, DurationMS); done cierra el flujo, siempre.
 type CodigoEvento struct {
-	Type       string   `json:"type"`
-	Text       string   `json:"text,omitempty"`
-	Ename      string   `json:"ename,omitempty"`
-	Evalue     string   `json:"evalue,omitempty"`
-	Traceback  []string `json:"traceback,omitempty"`
-	OK         *bool    `json:"ok,omitempty"`
-	DurationMS *int64   `json:"duration_ms,omitempty"`
+	Type      string   `json:"type"`
+	Text      string   `json:"text,omitempty"`
+	Ename     string   `json:"ename,omitempty"`
+	Evalue    string   `json:"evalue,omitempty"`
+	Traceback []string `json:"traceback,omitempty"`
+	// Results: text/plain siempre; text/html e image/png (base64) si el valor
+	// las tiene.
+	Results    map[string]string `json:"results,omitempty"`
+	OK         *bool             `json:"ok,omitempty"`
+	DurationMS *int64            `json:"duration_ms,omitempty"`
+	// ExecutionCount es el número de ejecuciones del contexto, contada con
+	// esta (en result y done).
+	ExecutionCount int `json:"execution_count,omitempty"`
 }
 
 func (c Contexto) dir() string { return dirCodigo + c.ID }
@@ -107,8 +158,14 @@ func (s *Servidor) despachaCodigo(w http.ResponseWriter, r *http.Request, id str
 			return
 		}
 		s.handleCodigo(w, r, id)
-	case resto[0] != "contexts" || len(resto) > 2:
-		http.NotFound(w, r)
+	case resto[0] != "contexts" || len(resto) > 3 || (len(resto) == 3 && resto[2] != "execution"):
+		noRuta(w, r)
+	case len(resto) == 3:
+		if r.Method != http.MethodDelete {
+			nomala()
+			return
+		}
+		s.handleInterrumpir(w, r, id, resto[1])
 	case len(resto) == 1:
 		switch r.Method {
 		case http.MethodPost:
@@ -130,9 +187,6 @@ func (s *Servidor) despachaCodigo(w http.ResponseWriter, r *http.Request, id str
 	}
 }
 
-// errSinPython es que la imagen del sandbox no trae python3.
-var errSinPython = errors.New("this sandbox image has no python3: code contexts need it (add python3 to the image)")
-
 // contextosDe lista los contextos vivos de un sandbox, por sus procesos.
 func contextosDe(ctx context.Context, h *hosts.Host, ref string) ([]Contexto, error) {
 	ps, err := h.Cliente.Processes(ctx, ref)
@@ -141,14 +195,18 @@ func contextosDe(ctx context.Context, h *hosts.Host, ref string) ([]Contexto, er
 	}
 	var out []Contexto
 	for _, p := range ps {
-		if p.State != api.ProcessRunning || len(p.Cmd) != 4 || p.Cmd[0] != "python3" || p.Cmd[2] != "serve" {
+		if p.State != api.ProcessRunning || len(p.Cmd) != 4 || p.Cmd[2] != "serve" {
+			continue
+		}
+		l, ok := lenguajeDeProceso(p.Cmd[0], path.Base(p.Cmd[1]))
+		if !ok {
 			continue
 		}
 		id, ok := strings.CutPrefix(path.Dir(p.Cmd[1]), dirCodigo)
-		if !ok || !reIDContexto.MatchString(id) || path.Base(p.Cmd[1]) != "conductor.py" {
+		if !ok || !reIDContexto.MatchString(id) {
 			continue
 		}
-		out = append(out, Contexto{ID: id, Language: lenguajePython, PID: p.PID, Cwd: p.Dir, StartedAt: p.StartedAt})
+		out = append(out, Contexto{ID: id, Language: l.nombre, PID: p.PID, Cwd: p.Dir, StartedAt: p.StartedAt})
 	}
 	return out, nil
 }
@@ -171,16 +229,19 @@ func buscarContexto(ctx context.Context, h *hosts.Host, ref, cid string) (*Conte
 
 func noContexto(cid string) error { return fmt.Errorf("no code context %q in this sandbox", cid) }
 
-func lenguajeValido(l string) error {
-	if l != "" && l != lenguajePython {
-		return fmt.Errorf("unsupported language %q: only %q", l, lenguajePython)
+// lenguajeDeProceso reconoce el conductor de un contexto por su línea de órdenes.
+func lenguajeDeProceso(interprete, conductor string) (lenguaje, bool) {
+	for _, l := range lenguajes {
+		if l.interprete == interprete && l.conductor == conductor {
+			return l, true
+		}
 	}
-	return nil
+	return lenguaje{}, false
 }
 
 // crearContexto monta el directorio, sube el conductor y lo arranca como
-// proceso de fondo. Devuelve errSinPython si la imagen no tiene python3.
-func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd string) (*Contexto, error) {
+// proceso de fondo. Devuelve *errSinInterprete si la imagen no tiene el intérprete.
+func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd string, l lenguaje) (*Contexto, error) {
 	cs, err := contextosDe(ctx, h, ref)
 	if err != nil {
 		return nil, err
@@ -190,12 +251,12 @@ func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd st
 	}
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
-	c := &Contexto{ID: hex.EncodeToString(b), Language: lenguajePython, Cwd: cwd}
+	c := &Contexto{ID: hex.EncodeToString(b), Language: l.nombre, Cwd: cwd}
 	dir := c.dir()
 
 	// El directorio nace 0700: umask 077 antes de mkdir.
 	res, err := h.Cliente.Exec(ctx, ref, api.ExecRequest{
-		Cmd:            []string{"sh", "-c", "command -v python3 >/dev/null 2>&1 || exit 127; umask 077; mkdir -p " + dir},
+		Cmd:            []string{"sh", "-c", "command -v " + l.interprete + " >/dev/null 2>&1 || exit 127; umask 077; mkdir -p " + dir},
 		TimeoutSeconds: 30,
 	}, nil)
 	if err != nil {
@@ -204,18 +265,18 @@ func (s *Servidor) crearContexto(ctx context.Context, h *hosts.Host, ref, cwd st
 	switch res.ExitCode {
 	case 0:
 	case 127:
-		return nil, errSinPython
+		return nil, &errSinInterprete{l}
 	default:
 		return nil, fmt.Errorf("preparing the context directory failed (exit %d): %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
 	}
 	limpiar := func() { s.borrarDirContexto(h, ref, dir) }
 	// 0644 dentro de un directorio 0700: el dueño del directorio lo lee y nadie más llega.
-	if _, err := h.Cliente.WriteFile(ctx, ref, dir+"/conductor.py", 0o644, false, bytes.NewReader(conductorPy)); err != nil {
+	if _, err := h.Cliente.WriteFile(ctx, ref, dir+"/"+l.conductor, 0o644, false, bytes.NewReader(l.fuente)); err != nil {
 		limpiar()
 		return nil, err
 	}
 	p, err := h.Cliente.StartProcess(ctx, ref, api.ProcessStartRequest{
-		Cmd: []string{"python3", dir + "/conductor.py", "serve", dir + "/s.sock"},
+		Cmd: []string{l.interprete, dir + "/" + l.conductor, "serve", dir + "/s.sock"},
 		Dir: cwd,
 	})
 	if err != nil {
@@ -243,8 +304,9 @@ func (e *errTope) Error() string { return e.msg }
 // errContexto traduce un error de crearContexto o de borrado a una respuesta.
 func (s *Servidor) errContexto(w http.ResponseWriter, h *hosts.Host, err error) {
 	var et *errTope
+	var si *errSinInterprete
 	switch {
-	case errors.Is(err, errSinPython):
+	case errors.As(err, &si):
 		fail(w, http.StatusUnprocessableEntity, err)
 	case errors.As(err, &et):
 		fail(w, http.StatusTooManyRequests, err)
@@ -259,7 +321,8 @@ func (s *Servidor) handleContextoNuevo(w http.ResponseWriter, r *http.Request, i
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := lenguajeValido(req.Language); err != nil {
+	l, err := lenguajeDe(req.Language)
+	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -268,7 +331,7 @@ func (s *Servidor) handleContextoNuevo(w http.ResponseWriter, r *http.Request, i
 		fail(w, codigoBuscar(err), err)
 		return
 	}
-	c, err := s.crearContexto(r.Context(), h, mc.ID, req.Cwd)
+	c, err := s.crearContexto(r.Context(), h, mc.ID, req.Cwd, l)
 	if err != nil {
 		s.errContexto(w, h, err)
 		return
@@ -329,6 +392,31 @@ func (s *Servidor) handleContextoBorrar(w http.ResponseWriter, r *http.Request, 
 	s.matarContexto(r.Context(), h, mc.ID, c, w)
 }
 
+// handleInterrumpir sirve DELETE .../code/contexts/{cid}/execution: SIGINT al
+// conductor, que lo convierte en una interrupción de la ejecución en curso (y
+// no hace nada si no hay ninguna). El contexto y su estado siguen.
+func (s *Servidor) handleInterrumpir(w http.ResponseWriter, r *http.Request, id, cid string) {
+	h, mc, err := s.buscarEjecutable(r.Context(), tenantDe(r), id)
+	if err != nil {
+		fail(w, codigoBuscar(err), err)
+		return
+	}
+	c, err := buscarContexto(r.Context(), h, mc.ID, cid)
+	if err != nil {
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	if c == nil {
+		fail(w, http.StatusNotFound, noContexto(cid))
+		return
+	}
+	if _, err := h.Cliente.SignalProcess(r.Context(), mc.ID, c.PID, "INT"); err != nil {
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // matarContexto mata el proceso del contexto (y a sus hijos: DELETE señala al
 // grupo) y quita su directorio. Contesta 204 o el error.
 func (s *Servidor) matarContexto(ctx context.Context, h *hosts.Host, ref string, c *Contexto, w http.ResponseWriter) {
@@ -373,7 +461,8 @@ func (s *Servidor) handleCodigo(w http.ResponseWriter, r *http.Request, id strin
 		fail(w, http.StatusNotFound, noContexto(req.ContextID))
 		return
 	}
-	if err := lenguajeValido(req.Language); err != nil {
+	l, err := lenguajeDe(req.Language)
+	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -397,8 +486,18 @@ func (s *Servidor) handleCodigo(w http.ResponseWriter, r *http.Request, id strin
 			fail(w, http.StatusNotFound, noContexto(req.ContextID))
 			return
 		}
+		// El contexto manda: un language que lo contradice es un error, no se
+		// ejecuta en otro intérprete.
+		if req.Language != "" && req.Language != c.Language {
+			fail(w, http.StatusBadRequest, fmt.Errorf("context %s is a %s context, not %s", c.ID, c.Language, req.Language))
+			return
+		}
+		if l, err = lenguajeDe(c.Language); err != nil {
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
 	} else {
-		if c, err = s.crearContexto(r.Context(), h, mc.ID, ""); err != nil {
+		if c, err = s.crearContexto(r.Context(), h, mc.ID, "", l); err != nil {
 			s.errContexto(w, h, err)
 			return
 		}
@@ -448,7 +547,7 @@ func (s *Servidor) handleCodigo(w http.ResponseWriter, r *http.Request, id strin
 	}
 	dir := c.dir()
 	res, err := h.Cliente.Exec(r.Context(), mc.ID, api.ExecRequest{
-		Cmd:            []string{"python3", dir + "/conductor.py", "run", dir + "/s.sock", strconv.Itoa(plazo)},
+		Cmd:            []string{l.interprete, dir + "/" + l.conductor, "run", dir + "/s.sock", strconv.Itoa(plazo)},
 		Stdin:          []byte(req.Code),
 		TimeoutSeconds: plazo + 15,
 		MaxOutputBytes: salidaCodigoMax,
@@ -476,7 +575,13 @@ func (s *Servidor) handleCodigo(w http.ResponseWriter, r *http.Request, id strin
 	case err != nil && !empezado:
 		fail(w, codigoExec(err), deHost(h, err))
 	case err != nil:
-		_ = emitir(CodigoEvento{Type: "error", Ename: "GatewayError", Evalue: err.Error()})
+		// El flujo ya dijo 200: se explica el fallo (sin datos del host) y se
+		// cierra con done, como todo flujo de /code.
+		_ = emitir(CodigoEvento{Type: "error", Ename: "GatewayError", Evalue: errorDeFlujo(deHost(h, err))})
+		if !terminado {
+			ok := false
+			_ = emitir(CodigoEvento{Type: "done", OK: &ok})
+		}
 	case !terminado:
 		// El cliente murió o el contexto se perdió sin cerrar el flujo.
 		msg := fmt.Sprintf("the execution ended without finishing (exit %d)", res.ExitCode)

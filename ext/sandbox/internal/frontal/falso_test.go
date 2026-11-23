@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -131,6 +132,11 @@ type falso struct {
 	// código (un daemon que ya no tiene la ruta); borrados cuenta los DELETE.
 	reclamoCorta, reclamoPlano404 bool
 	borrados                      []string
+
+	// execCorta hace que exec mande un evento y corte la conexión.
+	execCorta bool
+	// ultimoTar son los parámetros del último PUT files?format=tar.
+	ultimoTar url.Values
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -654,6 +660,13 @@ func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 
 	salida := []byte("hola\n")
+	if f.execCorta {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(api.ExecEvent{Stream: "stdout", Data: salida})
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
 	if r.URL.Query().Get("wait") == "1" {
 		if libera != nil {
 			<-libera
@@ -724,6 +737,11 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.ficheros[clave] = b
+		if q.Get("format") == "tar" {
+			f.ultimoTar = q
+			writeJSON(w, 200, api.TarResult{Entries: 1, Files: 1, Bytes: int64(len(b))})
+			return
+		}
 		writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: int64(len(b)), Mode: q.Get("mode")})
 	case http.MethodDelete:
 		delete(f.ficheros, clave)
