@@ -395,6 +395,13 @@ type entry struct {
 	// sondeó y al que apunta proxy; 0 = g.port() (ver puertoDe).
 	port int
 
+	// porTrabajo: la instancia se reparte por trabajo (MaxInflightFor del
+	// servicio) y no por sesiones. Entonces Begin convierte una reserva en
+	// petición en vuelo (y End ya no suelta reservas), para que la carga que
+	// se compara con el tope, inflight + reservas, no cuente dos veces una
+	// petición (R8-07). Se toca con g.mu.
+	porTrabajo bool
+
 	// aislada es la clave de la sesión dueña de esta instancia cuando es la
 	// microVM propia de una sesión aislada (ver aislada.go); vacía en el resto.
 	// Una instancia aislada vive en g.extra para que el segador, el desalojo,
@@ -432,6 +439,9 @@ func (g *Scheduler) begin(e *entry) {
 	g.mu.Lock()
 	e = e.vigenteLocked()
 	e.inflight++
+	if e.porTrabajo && len(e.reservas) > 0 {
+		e.reservas = e.reservas[1:]
+	}
 	e.lastUse = time.Now()
 	g.mu.Unlock()
 }
@@ -445,7 +455,7 @@ func (g *Scheduler) end(e *entry) {
 	// La petición que acaba puede no ser la que reservó (no llevan nombre),
 	// pero soltar antes de tiempo solo deja pasar a otra al puente, que la
 	// rechaza y el gateway escala: lo de antes, nunca una fuga.
-	if len(e.reservas) > 0 {
+	if !e.porTrabajo && len(e.reservas) > 0 {
 		e.reservas = e.reservas[1:]
 	}
 	e.lastUse = time.Now()
@@ -603,10 +613,18 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	if _, err := g.ensure(ctx, service); err != nil {
 		return nil, err
 	}
+	// Con MaxInflightFor el servicio se reparte por trabajo (R8-07). El
+	// gancho se consulta antes de tomar g.mu.
+	tope := g.maxInflightPropio(service)
 	// La elegida se reserva con el mismo candado con que se eligió: soltarlo
 	// antes dejaba a N initialize concurrentes leer el mismo hueco.
 	g.mu.Lock()
-	elegida, libre := elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	var elegida, libre *entry
+	if tope > 0 {
+		elegida, libre = elegirPorTrabajo(g.entriesLocked(service), tope)
+	} else {
+		elegida, libre = elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	}
 	if elegida != nil {
 		elegida.reservarLocked()
 		g.mu.Unlock()
@@ -1437,6 +1455,7 @@ func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *te
 	// cada una creaba la suya (max_replicas 2 y 8 réplicas bajo un conjunto de
 	// CI). Las que están naciendo cuentan como si ya existieran.
 	tope := g.topeReplicas(service) // fuera de g.mu: MaxReplicasFor es del producto
+	enVuelo := g.maxInflightPropio(service)
 	g.mu.Lock()
 	if unirse {
 		if n := g.unirseANacienteLocked(service); n != nil {
@@ -1457,7 +1476,13 @@ func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *te
 	if g.nacientes == nil {
 		g.nacientes = map[string][]*naciente{}
 	}
-	n := &naciente{capacidad: g.capacidadNacienteLocked(service), pendientes: 1, listo: make(chan struct{}),
+	capacidad := g.capacidadNacienteLocked(service)
+	if enVuelo > 0 {
+		// Repartida por trabajo, en la réplica nueva caben enVuelo peticiones,
+		// no las sesiones que diga su memoria.
+		capacidad = enVuelo
+	}
+	n := &naciente{capacidad: capacidad, pendientes: 1, listo: make(chan struct{}),
 		inquilino: nombreInquilino(tnt)}
 	g.nacientes[service] = append(g.nacientes[service], n)
 	g.mu.Unlock()
@@ -1494,6 +1519,9 @@ func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *te
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
 	g.soltarCuotaLocked(e)
+	if enVuelo > 0 {
+		e.porTrabajo = true
+	}
 	// Nace para la sesión que la pidió y para las que se le apuntaron mientras
 	// arrancaba (ver pickInstance): un hueco reservado por cada una.
 	for i := 0; i < n.pendientes; i++ {

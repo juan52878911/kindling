@@ -197,3 +197,38 @@ func esperarSonda(ctx context.Context, addr string, p *Probe, hasta time.Time) e
 		}
 	}
 }
+
+// maxInflightPropio es el tope de peticiones en vuelo que el servicio da por
+// MaxInflightFor, o 0 si no lo da (entonces se reparte como siempre, por
+// sesiones y MaxInflight). Con g.mu suelto.
+func (g *Scheduler) maxInflightPropio(service string) int {
+	if g.MaxInflightFor == nil {
+		return 0
+	}
+	return max(g.MaxInflightFor(service), 0)
+}
+
+// elegirPorTrabajo es elegirInstancia para un servicio repartido por trabajo
+// (MaxInflightFor, R8-07): la carga de una instancia es lo que tiene en vuelo
+// más sus reservas (peticiones ya elegidas que aún no han hecho Begin), y el
+// tope de sesiones derivado de la memoria no cuenta: el producto no fija
+// sesiones. Contar las reservas cierra el hueco entre elegir y Begin, en el
+// que dos peticiones simultáneas leían la misma réplica libre. La elegida
+// queda marcada porTrabajo (ver begin). Con g.mu tomado.
+func elegirPorTrabajo(entries []*entry, tope int) (elegida, libre *entry) {
+	var cargaLibre int
+	for _, e := range entries {
+		carga := e.inflight + e.reservasLocked()
+		if carga < tope {
+			e.porTrabajo = true
+			return e, nil
+		}
+		if libre == nil || carga < cargaLibre {
+			libre, cargaLibre = e, carga
+		}
+	}
+	if libre != nil {
+		libre.porTrabajo = true
+	}
+	return nil, libre
+}
