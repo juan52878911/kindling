@@ -19,7 +19,10 @@ type escritorConPlazo struct {
 	n      int
 }
 
-func (e *escritorConPlazo) SetWriteDeadline(t time.Time) error { e.plazos = append(e.plazos, t); return nil }
+func (e *escritorConPlazo) SetWriteDeadline(t time.Time) error {
+	e.plazos = append(e.plazos, t)
+	return nil
+}
 func (e *escritorConPlazo) Write(p []byte) (int, error) {
 	e.n++
 	if e.falla {

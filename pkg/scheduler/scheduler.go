@@ -2370,6 +2370,9 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	if barrer {
 		g.barrerAisladas(ctx)
+		if g.pool != nil {
+			g.pool.barrerHuerfanas(ctx)
+		}
 	}
 }
 

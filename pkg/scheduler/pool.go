@@ -43,6 +43,10 @@ type pool struct {
 	// cuyo Remove falló: siguen vivas, ya no se entregan a nadie, y se vuelven
 	// a intentar en cada evictStale y en drain.
 	pendientes []string
+	// entregadas son las que take dio a una llamada: siguen siendo pool=true
+	// pero ya tienen dueño (quien las usa las destruye). El barrido de
+	// huérfanas no las toca; se olvidan pasado su TTL, que las congelaría.
+	entregadas map[string]time.Time
 
 	// wg cuenta las reposiciones en vuelo para que drain pueda esperarlas.
 	wg sync.WaitGroup
@@ -90,7 +94,68 @@ func (p *pool) take(service string) *warmVM {
 	}
 	vm := q[0]
 	p.ready[service] = q[1:]
+	if p.entregadas == nil {
+		p.entregadas = map[string]time.Time{}
+	}
+	p.entregadas[vm.id] = time.Now()
 	return vm
+}
+
+// barrerHuerfanas borra del daemon las máquinas pool=true propias (con las
+// etiquetas de este planificador) que el fondo no conoce: las del fondo viven
+// solo en memoria, y si el gateway cayó, el nuevo no las ve, no las adopta
+// (acquire las excluye) y nada más las barre. Se salta las que están en ready,
+// las entregadas a una llamada, las pendientes de borrar, y las más jóvenes
+// que barridoGracia (una en pleno calentamiento aún no está en ready).
+func (p *pool) barrerHuerfanas(ctx context.Context) {
+	ms, err := p.gw.client.List(ctx)
+	if err != nil {
+		return
+	}
+	p.mu.Lock()
+	conocidas := map[string]bool{}
+	for _, q := range p.ready {
+		for _, vm := range q {
+			conocidas[vm.id] = true
+		}
+	}
+	for _, id := range p.pendientes {
+		conocidas[id] = true
+	}
+	ttl := p.gw.idle*2 + 2*time.Minute
+	for id, t := range p.entregadas {
+		if time.Since(t) > ttl {
+			delete(p.entregadas, id)
+		} else {
+			conocidas[id] = true
+		}
+	}
+	cerrado := p.closed
+	p.mu.Unlock()
+	if cerrado {
+		return
+	}
+	n := 0
+	for _, m := range ms {
+		if m.Labels["pool"] != "true" || conocidas[m.ID] || time.Since(m.CreatedAt) < barridoGracia {
+			continue
+		}
+		ajena := false
+		for k, v := range p.gw.MachineLabels {
+			if m.Labels[k] != v {
+				ajena = true
+			}
+		}
+		if ajena {
+			continue
+		}
+		if p.quitar(ctx, m.ID) == nil {
+			n++
+		}
+	}
+	if n > 0 {
+		log.Printf("pool: %d prewarmed instance(s) without an owner removed", n)
+	}
 }
 
 // fill repone el fondo de un servicio hasta su tamaño, en segundo plano.
