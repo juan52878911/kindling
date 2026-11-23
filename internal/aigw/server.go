@@ -40,7 +40,9 @@ func (g *Gateway) Handler(token string) http.Handler {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, "ok\n")
 	})
-	mux.HandleFunc("GET /metrics", g.handleMetrics)
+	// /metrics enseña nombres y volúmenes de todas las tareas y tenants: es del
+	// operador (token principal), no de un inquilino.
+	mux.HandleFunc("GET /metrics", g.admin(g.handleMetrics))
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", g.handleProxy)
 	mux.HandleFunc("POST /v1/completions", g.handleProxy)

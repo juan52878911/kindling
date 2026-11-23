@@ -290,7 +290,12 @@ type learner struct {
 	once sync.Once
 
 	idPrefix string
-	idSeq    atomic.Uint64
+
+	// La clave de la muestra de auditoría (auditKey), cargada la primera vez
+	// que hace falta.
+	auditOnce sync.Once
+	auditMAC  []byte
+	idSeq     atomic.Uint64
 
 	fbMu sync.Mutex // escrituras de feedback.jsonl (rutas de administración)
 

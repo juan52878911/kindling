@@ -485,7 +485,7 @@ func (g *Gateway) loadLearnTask(ctx context.Context, task string, trust []string
 		return nil, err
 	}
 	lt.cases = buildCases(caps, fb, predict)
-	lt.trust = validateTeachers(lt.cases, lt.lc, lt.labels, g.evalTeachers(task, tc), append(append([]string(nil), lt.lc.TrustTeachers...), trust...))
+	lt.trust = validateTeachers(lt.cases, lt.lc, lt.labels, g.evalTeachers(task, tc), append(append([]string(nil), lt.lc.TrustTeachers...), trust...), g.learn.auditKey)
 	lt.validated = map[string]bool{}
 	for _, t := range lt.trust {
 		if t.Validated {

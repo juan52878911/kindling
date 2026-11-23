@@ -994,3 +994,30 @@ func TestSigV4TrailerConTopeDeLineas(t *testing.T) {
 		t.Error("un trailer de más de maxLineasTrailer líneas debía fallar")
 	}
 }
+
+// Un PUT o POST firmado con cuerpo vacío (crear una subida multiparte, copiar
+// un objeto, un objeto vacío) tiene que salir con Content-Length: 0. Si el
+// cuerpo sale como lector con longitud 0, net/http lo toma por longitud
+// desconocida y S3 rechaza la petición por faltarle el Content-Length.
+func TestSigV4CuerpoVacioSaleConContentLengthCero(t *testing.T) {
+	m := nuevoMontajeS3(t)
+	var mu sync.Mutex
+	var te []string
+	var cl int64
+	m.ver.responder = func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		te, cl = r.TransferEncoding, r.ContentLength
+		mu.Unlock()
+	}
+	h := sha256.Sum256(nil)
+	for _, hash := range []string{hex.EncodeToString(h[:]), hashSinFirmar} {
+		for _, metodo := range []string{"PUT", "POST"} {
+			resp, b := m.peticionInvitado(t, metodo, "/mi-cubo/vacio", "uploads=", hash, nil, nil)
+			mu.Lock()
+			if resp.StatusCode != 200 || len(te) != 0 || cl != 0 {
+				t.Errorf("%s %s: %d %s, el proveedor vio Transfer-Encoding %v y Content-Length %d", metodo, hash[:8], resp.StatusCode, b, te, cl)
+			}
+			mu.Unlock()
+		}
+	}
+}

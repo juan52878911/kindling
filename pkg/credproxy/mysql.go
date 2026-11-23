@@ -482,6 +482,16 @@ func (s *sesionMy) servir() {
 		s.rec.Database = ":cred"
 	}
 
+	// Como en Postgres (maquina.go): la sesión se apunta antes de marcar, y
+	// SetCredentials la corta si su credencial se quita o se rota.
+	quitar, vigente := p.registrarSesion(&s.sesionPG, cred)
+	defer quitar()
+	if !vigente {
+		s.rec.Reason, s.rec.Denied = ReasonNoCredential, true
+		s.errorMy(seq+1, 1045, "28000", "the credential was withdrawn")
+		return
+	}
+
 	// 3. El servidor: saludo, TLS verificado y la autenticación con la clave.
 	fin := s.inicio.Add(p.pgAuth)
 	_ = guest.SetDeadline(fin)
