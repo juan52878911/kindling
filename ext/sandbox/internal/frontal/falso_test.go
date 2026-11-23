@@ -61,6 +61,10 @@ type falso struct {
 	// frontal no acumula el flujo.
 	execLibera chan struct{}
 	ultimoExec api.ExecRequest
+	// ultimoShell es el cuerpo del último POST shell; sesionesEstrictas hace
+	// que un exec con una sesión que el daemon no tiene conteste 404, como el real.
+	ultimoShell       api.ShellRequest
+	sesionesEstrictas bool
 	// procs es el estado del daemon falso para procesos y sesiones.
 	procs procsFalsos
 	// shellIlegal: la shell falsa manda al cliente una trama que no le toca.
@@ -691,7 +695,17 @@ func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.ultimoExec = req
 	libera := f.execLibera
+	estricto := f.sesionesEstrictas
 	f.mu.Unlock()
+	if estricto && req.Session != "" {
+		f.procs.mu.Lock()
+		_, hay := f.procs.sesiones[req.Session]
+		f.procs.mu.Unlock()
+		if !hay {
+			failDaemon(w, 404, fmt.Errorf("no session %q (expired or never created)", req.Session))
+			return
+		}
+	}
 
 	salida := []byte("hola\n")
 	if f.execCorta {
@@ -821,6 +835,9 @@ func (f *falso) shell(w http.ResponseWriter, r *http.Request) {
 	// bytes se leerían como tramas.
 	var req api.ShellRequest
 	_ = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req)
+	f.mu.Lock()
+	f.ultimoShell = req
+	f.mu.Unlock()
 	conn, brw, err := w.(http.Hijacker).Hijack()
 	if err != nil {
 		return

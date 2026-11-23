@@ -52,6 +52,8 @@ type daemonReal struct {
 	// sinInterprete: el exec que busca ese intérprete contesta 127.
 	sinInterprete string
 	senales       []string
+	// arranques son los procesos de fondo que se pidieron.
+	arranques []api.ProcessStartRequest
 	// dirsCodigo son los directorios de contexto que el daemon vio escribir.
 	dirsCodigo []string
 }
@@ -223,6 +225,9 @@ func ponerReal(t *testing.T, f *falso) *daemonReal {
 	m.HandleFunc("POST /machines/{ref}/processes", func(w http.ResponseWriter, r *http.Request) {
 		var req api.ProcessStartRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.mu.Lock()
+		d.arranques = append(d.arranques, req)
+		d.mu.Unlock()
 		c := exec.Command(req.Cmd[0], req.Cmd[1:]...)
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := c.Start(); err != nil {
