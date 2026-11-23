@@ -171,3 +171,58 @@ func TestRoleLoginRmRevoca(t *testing.T) {
 		}
 	}
 }
+
+// oldVerifier es la clave que el rol ya tenía (con la que entra la aplicación
+// de dentro de la copia).
+const oldVerifier = "SCRAM-SHA-256$4096:c2FsdHNhbHQ=$c3RvcmVka2V5:c2VydmVya2V5"
+
+// Un rol con clave propia la recupera al quitar -login (y si -login falla):
+// -login se la cambia por la del host, y antes se perdía.
+func TestRoleLoginDevuelveLaClaveDeAntes(t *testing.T) {
+	ctx := context.Background()
+	t.Run("rm", func(t *testing.T) {
+		ta, lk, _ := loginApp(t)
+		lk.login["web"], lk.verifier["web"] = true, oldVerifier
+		if err := ta.roleLogin(ctx, "c1", defaultOwner, "web"); err != nil {
+			t.Fatal(err)
+		}
+		if lk.verifier["web"] == oldVerifier {
+			t.Fatal("login did not set the host's password")
+		}
+		// Un segundo -login no olvida la clave de antes.
+		if err := ta.roleLogin(ctx, "c1", defaultOwner, "web"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ta.roleLoginRemove(ctx, "c1", defaultOwner, "web"); err != nil {
+			t.Fatal(err)
+		}
+		if !lk.login["web"] || lk.verifier["web"] != oldVerifier {
+			t.Errorf("after -rm: login=%v verifier=%q; want the role as it was", lk.login["web"], lk.verifier["web"])
+		}
+	})
+	t.Run("undo", func(t *testing.T) {
+		ta, lk, _ := loginApp(t)
+		lk.login["web"], lk.verifier["web"] = true, oldVerifier
+		lk.badHBA = true
+		if err := ta.roleLogin(ctx, "c1", defaultOwner, "web"); err == nil {
+			t.Fatal("login worked")
+		}
+		if !lk.login["web"] || lk.verifier["web"] != oldVerifier {
+			t.Errorf("after the undo: login=%v verifier=%q; want the role as it was", lk.login["web"], lk.verifier["web"])
+		}
+	})
+}
+
+// Una clave de antes con una forma que no se sabe devolver tal cual: -login no
+// la pisa.
+func TestRoleLoginRechazaUnaClaveDeAntesRara(t *testing.T) {
+	ta, lk, id := loginApp(t)
+	lk.login["web"], lk.verifier["web"] = true, "SCRAM-SHA-256$4096:x'y$z:w"
+	if err := ta.roleLogin(context.Background(), "c1", defaultOwner, "web"); err == nil {
+		t.Fatal("login worked over a password it cannot give back")
+	}
+	if lk.verifier["web"] != "SCRAM-SHA-256$4096:x'y$z:w" {
+		t.Error("the role's password was changed")
+	}
+	noRolePassword(t, id, "web")
+}
