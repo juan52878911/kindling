@@ -596,3 +596,32 @@ func TestUDPSinPlazaNoLanzaGoroutine(t *testing.T) {
 		t.Fatalf("sin respuesta con una plaza libre: %v", err)
 	}
 }
+
+// R11: la comprobación de la lista y la siembra van bajo el mismo allowMu en
+// lectura: un cambio de dominios (escritura) no se cuela entre las dos.
+func TestSembrarRetieneAllowMuEnLectura(t *testing.T) {
+	addr, closeFn := fakeUpstream(t, func(q []byte) []byte { return buildAnswerFor(q, "9.9.9.9", 300) })
+	defer closeFn()
+	oldN := anadirNetlink
+	t.Cleanup(func() { anadirNetlink = oldN })
+	dentro, soltar := make(chan struct{}), make(chan struct{})
+	anadirNetlink = func(_, _, _ string, _ int) error {
+		close(dentro)
+		<-soltar
+		return nil
+	}
+	r := newTestResolver(addr)
+	hecho := make(chan struct{})
+	go func() { r.process(buildQuery(0x1234, "example.com", 1), false); close(hecho) }()
+	<-dentro
+	if r.allowMu.TryLock() {
+		r.allowMu.Unlock()
+		t.Fatal("sembrando, allowMu no estaba tomado en lectura: un fijarDominios podría colarse entre comprobar y sembrar")
+	}
+	close(soltar)
+	<-hecho
+	if !r.allowMu.TryLock() {
+		t.Fatal("allowMu no se soltó al acabar")
+	}
+	r.allowMu.Unlock()
+}
