@@ -30,9 +30,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -185,7 +187,7 @@ Options:
 
 	srv := &http.Server{
 		Addr:    *listen,
-		Handler: mux,
+		Handler: manejadorDelPuente(mux, os.Getpid() == 1, hostsPermitidos(os.Getenv(envHostsPermitidos))),
 		// El puente es el PID 1 del invitado: una goroutine y un descriptor
 		// retenidos para siempre por un cliente que no termina su cabecera se
 		// pagan contra las ~12 sesiones que caben en 1 GiB, no contra un
@@ -289,7 +291,84 @@ func exposedWarning(listen string, pid1 bool) string {
 	}
 	return fmt.Sprintf("WARNING: listening on %s (%s) with NO authentication: anyone who "+
 		"can reach the port can call the MCP server and /reset. "+
-		"Use -listen 127.0.0.1:PORT if the gateway runs on this machine.", listen, where)
+		"Use -listen 127.0.0.1:PORT if the gateway runs on this machine; if not, put the name or IP "+
+		"it uses in "+envHostsPermitidos+" (any other Host gets 403).", listen, where)
+}
+
+// envHostsPermitidos añade nombres (o IP) que el puente acepta en Host y en
+// Origin además de loopback, separados por comas: el de esta máquina en la LAN
+// cuando el gateway corre en otra (kling mcp link http://<ip>:9100/mcp). Vacía
+// por defecto.
+const envHostsPermitidos = "KLING_BRIDGE_ALLOWED_HOSTS"
+
+// hostsPermitidos parte el valor de KLING_BRIDGE_ALLOWED_HOSTS: sin puerto, en
+// minúsculas y sin el punto final. nil si no hay ninguno.
+func hostsPermitidos(v string) []string {
+	var out []string
+	for _, h := range strings.Split(v, ",") {
+		h = strings.ToLower(strings.TrimSuffix(strings.Trim(strings.TrimSpace(h), "[]"), "."))
+		if h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// manejadorDelPuente pone delante del mux lo que el puente necesita fuera de
+// una microVM. Ahí no autentica (kling mcp link no manda cabeceras), así que
+// escuchar en loopback no basta: una página web puede hacer que el navegador
+// le hable a 127.0.0.1 con su propio nombre (DNS rebinding) o mandarle un POST
+// de formulario desde otro origen, y llamar a las herramientas o a /reset. Se
+// exige un Host y un Origin de loopback (o de la lista de
+// KLING_BRIDGE_ALLOWED_HOSTS), como scheduler.SoloLoopback, y que todo POST
+// sea application/json, que un formulario no puede mandar sin preflight.
+//
+// Como PID 1 (el /entrypoint de la microVM) no se pone nada: el gateway llega
+// por la tap con la IP del invitado, y fuera del host nadie alcanza la tap.
+func manejadorDelPuente(mux http.Handler, pid1 bool, permitidos []string) http.Handler {
+	if pid1 {
+		return mux
+	}
+	vale := func(host string) bool {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return true
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return true
+		}
+		for _, p := range permitidos {
+			if host == p {
+				return true
+			}
+		}
+		return false
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !vale(r.Host) {
+			http.Error(w, "kling-bridge only answers requests addressed to loopback (Host "+strconv.Quote(r.Host)+
+				"); add the name to "+envHostsPermitidos+" to allow it", http.StatusForbidden)
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" {
+			u, err := url.Parse(o)
+			if err != nil || u.Host == "" || !vale(u.Host) {
+				http.Error(w, "kling-bridge refuses requests from another origin ("+strconv.Quote(o)+")", http.StatusForbidden)
+				return
+			}
+		}
+		if r.Method == http.MethodPost {
+			mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || mt != "application/json" {
+				http.Error(w, "kling-bridge only accepts POST with Content-Type: application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // closeAll cierra todas las sesiones y mata sus procesos hijo, incluido el
