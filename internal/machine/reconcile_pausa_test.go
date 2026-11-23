@@ -89,12 +89,44 @@ func TestReconcileSinPoderReanudarLaDejaPendiente(t *testing.T) {
 	}
 }
 
-// Con la marca de commit, el disco del VMM es el overlay dorado: no se
-// readopta ni se reanuda; muere y la máquina queda failed.
-func TestReconcileNoReadoptaUnCommitCortado(t *testing.T) {
+// Con la marca de commit y su VMM vivo en pausa (A11): reconcile le devuelve
+// su overlay propio, lo reanuda y quita la marca. No pierde la RAM de una
+// máquina sana.
+func TestReconcileRevierteUnCommitCortado(t *testing.T) {
 	m := newTestManager(t)
 	id := "a7a7000000000003"
 	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	m.reconcile()
+
+	drives := falso.llamadasA(http.MethodPatch, "/drives/overlay")
+	if len(drives) != 1 || !strings.Contains(string(drives[0].Cuerpo), filepath.Join(m.dir(id), "overlay.ext4")) {
+		t.Fatalf("PATCH /drives/overlay: %+v; quería uno con el overlay propio", drives)
+	}
+	if st := falso.verEstado(); st != "Running" {
+		t.Fatalf("el VMM sigue %s: no se reanudó", st)
+	}
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning || !readoptada(m, id) {
+		t.Fatalf("estado %s (%q), readoptada %v; quería running readoptada", viva.State, viva.LastErr, readoptada(m, id))
+	}
+	if existe(filepath.Join(m.dir(id), marcaCommit)) {
+		t.Fatal("la marca de commit sigue tras devolverle el disco")
+	}
+	if !sigueVivo(fin) {
+		t.Fatal("reconcile mató el VMM de una máquina que podía seguir")
+	}
+}
+
+// Si no se le puede devolver el disco, el VMM no se reanuda: muere y la
+// máquina queda failed, como antes.
+func TestReconcileNoReadoptaUnCommitCortadoSiFallaElDisco(t *testing.T) {
+	m := newTestManager(t)
+	id := "a7a7000000000005"
+	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+	falso.fallar(http.MethodPatch, "/drives/overlay", 400, "no")
 	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -120,89 +152,27 @@ func TestReconcileNoReadoptaUnCommitCortado(t *testing.T) {
 	}
 }
 
-// También con la máquina en pausa en disco (commitPausada): la marca manda.
-func TestReconcileNoReadoptaUnCommitCortadoDeUnaPausada(t *testing.T) {
+// Con la máquina en pausa en disco (commitPausada): vuelve a su disco y sigue
+// en pausa, sin Resume.
+func TestReconcileRevierteUnCommitCortadoDeUnaPausada(t *testing.T) {
 	m := newTestManager(t)
 	id := "a7a7000000000004"
-	_, fin := vmmEnPausaTrasReinicio(t, m, id, api.StatePaused)
+	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StatePaused)
 	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
 		t.Fatal(err)
 	}
 	m.reconcile()
-	if viva := vivaDe(t, m, id); viva.State != api.StateFailed {
-		t.Fatalf("estado %s; quería failed", viva.State)
+	if viva := vivaDe(t, m, id); viva.State != api.StatePaused || !readoptada(m, id) {
+		t.Fatalf("estado %s; quería paused readoptada", viva.State)
 	}
-	select {
-	case <-fin:
-	case <-time.After(5 * time.Second):
-		t.Fatal("el VMM del commit cortado sigue vivo")
+	if n := len(falso.llamadasA(http.MethodPatch, "/drives/overlay")); n != 1 {
+		t.Fatalf("PATCH /drives/overlay: %d, quería 1", n)
 	}
-}
-
-// Pausada figurando running con su volcado sellado: un Freeze que selló y no
-// llegó a escribir warm. Reanudarla haría divergir el disco del volcado: queda
-// warm y el VMM muere.
-func TestReconcileConVolcadoSelladoLaDejaWarm(t *testing.T) {
-	m := newTestManager(t)
-	id := "a7a7000000000005"
-	congeladaParaThaw(t, m, id, 64)
-	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
-
-	m.reconcile()
-
-	if n := len(falso.llamadasA(http.MethodPatch, "/vm")); n != 0 {
-		t.Fatalf("reconcile reanudó un VMM cuyo volcado sigue sellado (%d PATCH /vm)", n)
+	if st := falso.verEstado(); st != "Paused" {
+		t.Fatalf("el VMM está %s; una pausada sigue en pausa", st)
 	}
-	if viva := vivaDe(t, m, id); viva.State != api.StateWarm || readoptada(m, id) {
-		t.Fatalf("estado %s, readoptada %v; quería warm sin readoptar", viva.State, readoptada(m, id))
-	}
-	if err := volcadoValido(m.dir(id), nil); err != nil {
-		t.Fatalf("el volcado dejó de valer: %v", err)
-	}
-	select {
-	case <-fin:
-	case <-time.After(5 * time.Second):
-		t.Fatal("el VMM pausado del congelado sigue vivo")
-	}
-}
-
-// Despierta figurando en pausa (un Resume cortado antes de persistir): running.
-func TestReconcileDespiertaQueFiguraEnPausaPasaARunning(t *testing.T) {
-	m := newTestManager(t)
-	id := "a7a7000000000006"
-	falso, _ := vmmEnPausaTrasReinicio(t, m, id, api.StatePaused)
-	falso.ponerEstado("Running")
-	m.reconcile()
-	if viva := vivaDe(t, m, id); viva.State != api.StateRunning {
-		t.Fatalf("estado %s; quería running", viva.State)
-	}
-}
-
-// Commit deja la marca mientras el disco apunta al dorado y la retira al
-// devolverle el suyo.
-func TestCommitMarcaElReapuntadoAlDorado(t *testing.T) {
-	puedePerforar(t)
-	m := newTestManager(t)
-	id := "a7a7000000000007"
-	falso, _ := plantillaParaCommit(t, m, id)
-	dir := m.snapDir("dorado")
-	marca := filepath.Join(m.dir(id), marcaCommit)
-	conMarca := false
-	falso.enGancho(func(metodo, ruta string) {
-		if ruta == "/snapshot/create" {
-			_, err := os.Stat(marca)
-			conMarca = err == nil
-			volcadoFalso(m, id, dir)
-		}
-	})
-	if _, err := m.Commit(t.Context(), id, "dorado", false); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	if !conMarca {
-		t.Fatal("el volcado del commit corrió sin la marca en disco")
-	}
-	if existe(marca) {
-		t.Fatal("la marca sigue tras devolverle el disco a la plantilla")
+	if !sigueVivo(fin) {
+		t.Fatal("el VMM murió")
 	}
 }
 
@@ -220,6 +190,10 @@ func TestMarcaDeCommitNoMataAlVMMDeUnArranquePosterior(t *testing.T) {
 	if err := marcarCommitEnCurso(m.dir(id), "dorado", pidCommit); err != nil {
 		t.Fatal(err)
 	}
+	falso0 := nuevoFcFalso(t)
+	falso0.ponerEstado("Paused")
+	falso0.fallar(http.MethodPatch, "/drives/overlay", 400, "no")
+	m.pruebasSocketVMM = func(string) string { return falso0.Sock }
 	m.reconcile()
 	if viva := vivaDe(t, m, id); viva.State != api.StateFailed {
 		t.Fatalf("con el VMM del commit vivo: estado %s; quería failed", viva.State)

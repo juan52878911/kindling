@@ -1,6 +1,9 @@
 package machine
 
 import (
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,5 +87,41 @@ func TestReproR6_SecretosNoSeOlvidanAlBorrar(t *testing.T) {
 	}
 	if queda {
 		t.Errorf("m.secretos conserva la entrada de %s tras borrarla", shortID(id))
+	}
+}
+
+// A15: reconcile LIMPIA, no solo cambia el estado: por cada máquina sin VMM
+// (created, running y warm) desmonta su red una vez y borra su cgroup.
+func TestReconcileLimpiaRedYCgroupDeLasQueNoTienenVMM(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	m.cgroupRoot = t.TempDir()
+	var n atomic.Int32
+	previo := desmontarRedHost
+	desmontarRedHost = func(*knet.Net) { n.Add(1) }
+	defer func() { desmontarRedHost = previo }()
+
+	casos := map[string]api.State{
+		"c1c10001aaaaaaaa": api.StateCreated,
+		"c1c10002aaaaaaaa": api.StateRunning,
+		"c1c10003aaaaaaaa": api.StateWarm,
+	}
+	for id, st := range casos {
+		mc := m.addForTest(id)
+		m.mu.Lock()
+		mc.Name, mc.State, mc.PID = "m"+id[len(id)-1:], st, 0
+		m.mu.Unlock()
+		if err := os.Mkdir(filepath.Join(m.cgroupRoot, cgName(id)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.reconcile()
+	if got := n.Load(); got != int32(len(casos)) {
+		t.Errorf("desmontarRedHost llamado %d veces, quería %d", got, len(casos))
+	}
+	for id, st := range casos {
+		if existe(filepath.Join(m.cgroupRoot, cgName(id))) {
+			t.Errorf("el cgroup de %s (%s) sigue en pie", shortID(id), st)
+		}
 	}
 }
