@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -86,5 +87,56 @@ func TestReaperEstadoAdelantadoAlRegistro(t *testing.T) {
 	defer r.mu.Unlock()
 	if len(r.tracked) != 0 || r.adelantados != nil {
 		t.Fatalf("quedó estado: tracked=%d adelantados=%v", len(r.tracked), r.adelantados)
+	}
+}
+
+// R6-I2 (R4): con arranques solapados de continuo, la tabla de adelantados no
+// crece sin límite, y un arranque posterior no hereda un estado anterior a él
+// (pid reutilizado).
+func TestReaperAdelantadosPorSecuencia(t *testing.T) {
+	r := &Reaper{tracked: map[int]chan syscall.WaitStatus{}}
+	suelta := make(chan struct{})
+	dentro := make(chan struct{})
+	r.iniciar = func(c *exec.Cmd) error {
+		if c.Path == "viejo" {
+			close(dentro)
+			<-suelta
+		}
+		c.Process = &os.Process{Pid: 424242}
+		return nil
+	}
+	hecho := make(chan struct{})
+	go func() {
+		defer close(hecho)
+		_, _ = r.arrancar(&exec.Cmd{Path: "viejo"})
+	}()
+	<-dentro
+	// Un huérfano se recoge mientras el arranque viejo sigue en curso.
+	r.mu.Lock()
+	r.adelantados = map[int]adelantado{424242: {ws: 7 << 8, seq: r.secuencia}}
+	r.mu.Unlock()
+	// Un arranque posterior con el mismo pid no hereda ese estado.
+	ch, err := r.arrancar(&exec.Cmd{Path: "nuevo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ws := <-ch:
+		t.Fatalf("el arranque nuevo heredó un estado anterior: %v", ws)
+	default:
+	}
+	// Con el viejo aún vivo, el estado sigue guardado para él; al acabar, se va.
+	r.mu.Lock()
+	n := len(r.adelantados)
+	r.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("adelantados = %d con el arranque viejo en curso, quería 1", n)
+	}
+	close(suelta)
+	<-hecho
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.adelantados != nil || len(r.vivos) != 0 {
+		t.Fatalf("quedó estado: %v vivos=%d", r.adelantados, len(r.vivos))
 	}
 }

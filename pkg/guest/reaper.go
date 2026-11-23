@@ -37,12 +37,26 @@ type Reaper struct {
 	// arrancando cuenta los cmd.Start en curso (fuera del cerrojo) y
 	// adelantados guarda los estados de pids recogidos mientras tanto que
 	// aún no estaban registrados: StartTracked los reclama al registrar. Solo
-	// se guardan con arrancando > 0 y se vacían al llegar a 0, así un pid
-	// reutilizado nunca hereda un estado viejo.
+	// se guardan con arrancando > 0.
+	//
+	// Cada arranque toma un número de secuencia (secuencia) y cada estado
+	// guardado lleva el de ese momento: un arranque solo reclama estados de su
+	// secuencia o posteriores (un hijo suyo no pudo morir antes de existir), y
+	// al acabar un arranque se descartan los estados anteriores al arranque
+	// vivo más viejo. Así, con arranques solapados de continuo, la tabla no
+	// crece sin límite ni un pid reutilizado hereda un estado viejo.
 	arrancando  int
-	adelantados map[int]syscall.WaitStatus
+	secuencia   uint64
+	vivos       map[uint64]struct{}
+	adelantados map[int]adelantado
 	// iniciar es cmd.Start; variable para los tests.
 	iniciar func(*exec.Cmd) error
+}
+
+// adelantado es el estado de un hijo recogido antes de quedar registrado.
+type adelantado struct {
+	ws  syscall.WaitStatus
+	seq uint64
 }
 
 var DefaultReaper = &Reaper{tracked: map[int]chan syscall.WaitStatus{}}
@@ -62,27 +76,52 @@ func (r *Reaper) StartTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 func (r *Reaper) arrancar(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 	r.mu.Lock()
 	r.arrancando++
+	r.secuencia++
+	mi := r.secuencia
+	if r.vivos == nil {
+		r.vivos = map[uint64]struct{}{}
+	}
+	r.vivos[mi] = struct{}{}
 	r.mu.Unlock()
 	err := r.start(cmd)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.arrancando--
+	delete(r.vivos, mi)
 	var ch chan syscall.WaitStatus
 	if err == nil {
 		// Con buffer: el cosechador entrega y sigue, sin esperar a que nadie lea.
 		ch = make(chan syscall.WaitStatus, 1)
 		pid := cmd.Process.Pid
-		if ws, ok := r.adelantados[pid]; ok {
-			ch <- ws
+		if ad, ok := r.adelantados[pid]; ok && ad.seq >= mi {
+			ch <- ad.ws
 			delete(r.adelantados, pid)
 		} else {
 			r.tracked[pid] = ch
 		}
 	}
+	r.podarAdelantados()
+	return ch, err
+}
+
+// podarAdelantados descarta los estados guardados antes del arranque vivo más
+// viejo (nadie puede reclamarlos). Con el cerrojo tomado.
+func (r *Reaper) podarAdelantados() {
 	if r.arrancando == 0 {
 		r.adelantados = nil
+		return
 	}
-	return ch, err
+	viejo := r.secuencia
+	for s := range r.vivos {
+		if s < viejo {
+			viejo = s
+		}
+	}
+	for pid, ad := range r.adelantados {
+		if ad.seq < viejo {
+			delete(r.adelantados, pid)
+		}
+	}
 }
 
 func (r *Reaper) start(cmd *exec.Cmd) error {
@@ -188,9 +227,9 @@ func (r *Reaper) reapAll() {
 			if r.arrancando > 0 {
 				// Puede ser un hijo que aún se está registrando.
 				if r.adelantados == nil {
-					r.adelantados = map[int]syscall.WaitStatus{}
+					r.adelantados = map[int]adelantado{}
 				}
-				r.adelantados[pid] = ws
+				r.adelantados[pid] = adelantado{ws: ws, seq: r.secuencia}
 			}
 			log.Printf("init: orphan %d reaped (%v)", pid, ws)
 		}
