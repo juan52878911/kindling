@@ -30,9 +30,12 @@ import (
 // con sitio para el sufijo -v<n> dentro de los 64 caracteres de un snapshot.
 var deployNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,55}$`)
 
+// Sin chispa-classify: el gateway no lo admite en un bloque kind http (es la
+// réplica de kind chispa con backend microvm, que hace `kling ai chispa
+// deploy`), y el bloque escrito no cargaría.
 var deployContracts = map[string]bool{
 	aigw.ContractOpenAI: true, aigw.ContractOpenAIEmbeddings: true,
-	aigw.ContractChispaClassify: true, aigw.ContractChispaDecide: true, aigw.ContractRaw: true,
+	aigw.ContractChispaDecide: true, aigw.ContractRaw: true,
 }
 
 var deployIdle = map[string]bool{"": true, aigw.IdleRemove: true, aigw.IdlePause: true, aigw.IdleFreeze: true}
@@ -71,7 +74,7 @@ func modelsDeploy(args []string) error {
 	cfgPath := fs.String("config", aiDefault("ai.json"), "model and task registry to write the block to")
 	image := fs.String("image", "", "image with the server (required): built or imported on this daemon, its files baked in")
 	port := fs.Int("port", aigw.DefaultBackendPort, "port the server listens on inside the machine")
-	contract := fs.String("contract", "", "openai, openai-embeddings, chispa-classify, chispa-decide or raw (required)")
+	contract := fs.String("contract", "", "openai, openai-embeddings, chispa-decide or raw (required)")
 	health := fs.String("health", "", "GET path that answers when the server is ready, e.g. /healthz (default: the port accepting connections)")
 	expect := fs.Int("expect", 0, "status the -health path answers when ready (default 200)")
 	healthTimeout := fs.Duration("health-timeout", 0, "timeout of each health probe (default 5s)")
@@ -138,8 +141,10 @@ func modelDeploy(ctx context.Context, c *api.Client, o modelDeployOptions) (*mod
 	switch {
 	case !deployNameRE.MatchString(o.Name):
 		return nil, fmt.Errorf("model name %q: lowercase letters, digits, '.', '_' and '-', at most 56", o.Name)
+	case o.Contract == aigw.ContractChispaClassify:
+		return nil, errors.New("-contract chispa-classify is a classic Chispa replica: make it with kling ai chispa deploy")
 	case !deployContracts[o.Contract]:
-		return nil, fmt.Errorf("-contract %q: use openai, openai-embeddings, chispa-classify, chispa-decide or raw", o.Contract)
+		return nil, fmt.Errorf("-contract %q: use openai, openai-embeddings, chispa-decide or raw", o.Contract)
 	case o.Contract == aigw.ContractRaw && len(o.Routes) == 0:
 		return nil, errors.New("-contract raw forwards only the declared routes: add at least one -route \"POST /path\"")
 	case !deployIdle[o.Idle]:

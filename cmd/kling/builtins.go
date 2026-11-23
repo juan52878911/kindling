@@ -84,8 +84,8 @@ var aiCommands = []plugin.Command{
       [-port P] [-health /path] [-warmup f.jsonl]  versioned golden snapshot and
       [-cpus N] [-mem M] [-cpu-pct N]              its kind http block in ai.json;
       [-idle remove|pause|freeze] [-route R]...    -contract: openai, openai-
-      [-e K=V]...                                  embeddings, chispa-classify,
-                                                   chispa-decide or raw
+      [-e K=V]...                                  embeddings, chispa-decide or
+                                                   raw
   ai model roll <name> [-to n] [-drain 30s]        serves another version of the
       [-no-reload]                                 golden and drains the old
                                                    replicas
