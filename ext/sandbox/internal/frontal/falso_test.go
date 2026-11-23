@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -134,6 +135,8 @@ type falso struct {
 
 	// execCorta hace que exec mande un evento y corte la conexión.
 	execCorta bool
+	// ultimoTar son los parámetros del último PUT files?format=tar.
+	ultimoTar url.Values
 
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
@@ -734,6 +737,11 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.ficheros[clave] = b
+		if q.Get("format") == "tar" {
+			f.ultimoTar = q
+			writeJSON(w, 200, api.TarResult{Entries: 1, Files: 1, Bytes: int64(len(b))})
+			return
+		}
 		writeJSON(w, 200, api.FileStat{Path: q.Get("path"), Size: int64(len(b)), Mode: q.Get("mode")})
 	case http.MethodDelete:
 		delete(f.ficheros, clave)
