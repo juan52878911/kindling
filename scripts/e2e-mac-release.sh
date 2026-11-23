@@ -29,7 +29,7 @@
 # KLING_E2E_CACHE/passed, así que 95 puede correr después con E2E=95 y el
 # status se publica entonces.
 #
-# Variables: E2E ("92 95"), KEEP_WORK, KLING_E2E_DATA, KLING_E2E_CACHE,
+# Variables: E2E ("92 95"; con 96 añade el primer uso, opcional y fuera del status), KEEP_WORK, KLING_E2E_DATA, KLING_E2E_CACHE,
 # KLING_E2E_STATUS (1), KLING_E2E_REPO (juan52878911/kindling) y lo que
 # entienden 92 (MEM, BURST, KLING_MIN_FREE_DISK_MIB...) y 95 (OLD_TAG, OLD_DIR,
 # GITHUB_TOKEN). bash 3.2.
@@ -150,7 +150,7 @@ logs_de() { # logs_de <prueba> <código>
 # antes de correrla: una pasada anterior no tapa una que ahora falla.
 HECHO="$KLING_E2E_CACHE/passed"
 borra_marca() { [ -z "$SUCIO" ] && rm -f "$HECHO/$SHA.$1"; }
-R92=-; R95=-
+R92=-; R95=-; R96=-
 for p in $E2E; do
   case "$p" in
     92)
@@ -173,12 +173,21 @@ for p in $E2E; do
       R95=$?
       logs_de 95 "$R95"
       ;;
+    96)
+      # Opcional (E2E="92 95 96"): el primer uso de un HOME vacío con el kling
+      # de este árbol. Necesita red (install.sh baja la release publicada) y no
+      # entra en el status: solo informa.
+      say "96-e2e-primer-uso.sh (optional, not part of the status)"
+      KLING_E2E_BIN="$BIN/kling" SKIP_TRY=0 bash "$HERE/96-e2e-primer-uso.sh"
+      R96=$?
+      ;;
   esac
 done
 
 say "result"
 res() { case "$2" in -) echo "$1: not run";; 0) echo "$1: passed";; agent) echo "$1: not run (your $LABEL is in the way)";; *) echo "$1: FAILED (exit $2)";; esac; }
 res 92-e2e-mac.sh "$R92"; res 95-e2e-upgrade-mac.sh "$R95"
+[ "$R96" = - ] || res 96-e2e-primer-uso.sh "$R96"
 [ "$R95" = agent ] && explica_agente
 if [ -z "$SUCIO" ]; then
   mkdir -p "$HECHO"

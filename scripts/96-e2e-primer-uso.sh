@@ -5,6 +5,9 @@
 #   scripts/96-e2e-primer-uso.sh                 la última release estable (red)
 #   TAG=v1.0.0 scripts/96-e2e-primer-uso.sh      una concreta
 #   INSTALL_SH=scripts/install.sh ...            el install.sh a probar (por defecto el de este árbol)
+#   KLING_E2E_BIN=/ruta/a/kling ...              el kling del árbol: tras install.sh sustituye al bajado
+#                                                para el up y el try (sin él se prueba el de la release
+#                                                publicada, no el cambio que se está juzgando)
 #
 # Mide, con cronómetro, cada tramo: install.sh y `kling try -- uname -a` (que
 # arranca el daemon y baja el kernel y min). Cifra esperada en un Mac limpio con
@@ -51,6 +54,11 @@ if ! env -i HOME="$HOME_T" PATH="$BASE_PATH" SHELL=/bin/sh \
     exit 1
 fi
 [ -x "$HOME_T/bin/kling" ] || { echo "FALLO: install.sh no dejó kling" >&2; exit 1; }
+if [ -n "${KLING_E2E_BIN:-}" ]; then
+    [ -x "$KLING_E2E_BIN" ] || { echo "FALLO: KLING_E2E_BIN=$KLING_E2E_BIN no es ejecutable" >&2; exit 1; }
+    cp "$KLING_E2E_BIN" "$HOME_T/bin/kling" || { echo "FALLO: no se pudo copiar KLING_E2E_BIN" >&2; exit 1; }
+    echo "kling bajo prueba: $KLING_E2E_BIN (el de install.sh se sustituye)"
+fi
 t1="$(ahora)"
 echo "install.sh: $((t1 - t0)) s"
 
@@ -64,7 +72,13 @@ fi
 env -i HOME="$HOME_T" PATH="$HOME_T/bin:$BASE_PATH" KLING_ROOT="$KLING_ROOT" KLING_SOCKET="$KLING_SOCKET" \
     KLING_LAUNCH_AGENT_LABEL="$LABEL" KLING_LAUNCH_AGENT_PLIST="$PLIST" \
     "$HOME_T/bin/kling" up -install 2>&1 | sed 's/^/  up| /'
+# El código de salida es el de kling, no el de sed (PIPESTATUS[0]).
+RC_UP="${PIPESTATUS[0]}"
 t2="$(ahora)"
+if [ "$RC_UP" != 0 ]; then
+    echo "FALLO: kling up -install salió con $RC_UP" >&2
+    exit 1
+fi
 SALIDA="$(env -i HOME="$HOME_T" PATH="$HOME_T/bin:$BASE_PATH" KLING_ROOT="$KLING_ROOT" KLING_SOCKET="$KLING_SOCKET" \
     "$HOME_T/bin/kling" try -- uname -a 2>"$WORK/try.err")"
 RC=$?

@@ -257,6 +257,9 @@ fi
 # success que publica scripts/e2e-mac-release.sh cuando pasan los dos. Ya no
 # vale KLING_E2E_HV=<sha>: era una línea a mano que no dejaba rastro y que
 # nada comprobaba; el status queda en el commit, a la vista.
+# Opcional en esa puerta: E2E="92 95 96" scripts/e2e-mac-release.sh añade
+# 96-e2e-primer-uso.sh (install.sh y el primer `kling try` en un HOME vacío con
+# el kling del árbol); informa, no entra en el status.
 # El contexto es el de e2e-mac-release.sh: si cambia, en los dos.
 E2E_HV_CONTEXTO="e2e-mac/kling-hv"
 e2e_hv_hecho() {
