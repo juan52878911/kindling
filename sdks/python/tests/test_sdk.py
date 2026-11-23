@@ -448,7 +448,7 @@ class TestSuperficieNueva(Base):
         self.assertEqual(sb.files.read("/d/a.log", range="bytes=-3"), b"789")
         with self.assertRaises(ApiError) as cm:
             sb.files.read("/d/a.log", range=(50, None))
-        self.assertEqual((cm.exception.status, cm.exception.code), (416, "range_not_satisfiable"))
+        self.assertEqual((cm.exception.status, cm.exception.code), (416, "requested_range_not_satisfiable"))
         self.assertEqual(sb.files.search("/d", "*.log").matches, ["/d/a.log"])
         sb.files.move("/d/b.txt", "/d/c.txt")
         with self.assertRaises(NotFound):

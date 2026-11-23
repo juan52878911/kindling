@@ -388,7 +388,7 @@ export class FakeGateway {
             const [, a, b] = /^bytes=(\d*)-(\d*)$/.exec(rango)!;
             const ini = a === "" ? Math.max(f.length - Number(b), 0) : Number(a);
             const fin = a === "" || b === "" ? f.length - 1 : Math.min(Number(b), f.length - 1);
-            if (ini >= f.length) return this.err(r, 416, "range outside the file", "range_not_satisfiable", { "Content-Range": `bytes */${f.length}` });
+            if (ini >= f.length) return this.err(r, 416, "range outside the file", "requested_range_not_satisfiable", { "Content-Range": `bytes */${f.length}` });
             r.writeHead(206, { "Content-Type": "application/octet-stream", "Content-Range": `bytes ${ini}-${fin}/${f.length}` });
             return r.end(f.subarray(ini, fin + 1));
           }

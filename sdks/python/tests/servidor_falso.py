@@ -517,7 +517,7 @@ class Manejador(BaseHTTPRequestHandler):
                 else:
                     ini, fin = int(a), min(int(b) if b else len(datos) - 1, len(datos) - 1)
                 if ini >= len(datos):
-                    return self._err(416, "range outside the file", "range_not_satisfiable",
+                    return self._err(416, "range outside the file", "requested_range_not_satisfiable",
                                      {"Content-Range": "bytes */%d" % len(datos)})
                 estado, extra = 206, "bytes %d-%d/%d" % (ini, fin, len(datos))
                 datos = datos[ini:fin + 1]

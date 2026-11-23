@@ -350,7 +350,7 @@ test("ficheros: range, move, mkdir, search", async () => {
   assert.equal(await t({ range: [2, 5] }), "2345");
   assert.equal(await t({ range: [7, null] }), "789");
   assert.equal(await t({ range: "bytes=-3" }), "789");
-  await assert.rejects(t({ range: [50, null] }), (e: any) => e instanceof ApiError && e.status === 416 && e.code === "range_not_satisfiable");
+  await assert.rejects(t({ range: [50, null] }), (e: any) => e instanceof ApiError && e.status === 416 && e.code === "requested_range_not_satisfiable");
   assert.deepEqual((await sb.files.search("/d", "*.log")).matches, ["/d/a.log"]);
   await sb.files.move("/d/b.txt", "/d/c.txt");
   await assert.rejects(sb.files.stat("/d/b.txt"), NotFound);
