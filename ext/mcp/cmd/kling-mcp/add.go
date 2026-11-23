@@ -473,7 +473,7 @@ func argsSSHImport(endpoint string, args []string) (target string, sshArgs, remo
 }
 
 // shQuote entrecomilla s para una shell POSIX: entre comillas simples, y cada
-// comilla simple como '\''.
+// comilla simple de dentro se cierra, se escapa y se vuelve a abrir.
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
