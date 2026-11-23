@@ -337,6 +337,8 @@ void vq_pedir_aviso_ya(const struct vmmio *m, const struct vq *q, uint16_t *avai
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
+void vmmio_restaurado(struct vmmio *m, uint64_t feat_lo) { m->drv_features &= (feat_lo & 0xffffffffULL) | (1ULL << 32); }
+
 static void dir_lo(uint64_t *d, uint32_t v) { *d = (*d & ~0xffffffffULL) | v; }
 static void dir_hi(uint64_t *d, uint32_t v) { *d = (*d & 0xffffffffULL) | ((uint64_t)v << 32); }
 
@@ -354,9 +356,13 @@ int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_
     switch (off) {
       case 0x014: m->dev_feat_sel = v; break;
       case 0x020:
+        // Solo lo ofrecido (DeviceFeatures: feat_lo y VERSION_1): quien mira
+        // drv_features (con_event_idx, el globo) se fía de que el
+        // dispositivo lo ofreció.
         if (m->drv_feat_sel < 2) {
+          uint32_t ofrece = m->drv_feat_sel == 0 ? (uint32_t)feat_lo : 1;
           m->drv_features &= ~(0xffffffffULL << (32 * m->drv_feat_sel));
-          m->drv_features |= (uint64_t)v << (32 * m->drv_feat_sel);
+          m->drv_features |= (uint64_t)(v & ofrece) << (32 * m->drv_feat_sel);
         }
         break;
       case 0x024: m->drv_feat_sel = v; break;
@@ -1063,6 +1069,8 @@ void vblk_reafirmar(int idx) {
 void vblk_set(int idx, const struct vblk_state *s) {
   pthread_mutex_lock(&blks[idx].mu);
   blks[idx].s = *s;
+  vmmio_restaurado(&blks[idx].s.m, (1u << 2) | (1u << 5) | (1u << 9) | (1u << 13) | (1u << 14) |
+                                       (1ULL << VIRTIO_RING_F_EVENT_IDX));
   pthread_mutex_unlock(&blks[idx].mu);
 }
 
@@ -1148,8 +1156,41 @@ void vrng_reafirmar(void) {
   pthread_mutex_unlock(&r_mu);
 }
 
+// vmmio_prueba_feats: lo que queda en drv_features tras escribir lo, hi en
+// DriverFeatures (sel 0 y 1) a un dispositivo que ofrece feat_lo (pruebas).
+uint64_t vmmio_prueba_feats(uint64_t feat_lo, uint32_t lo, uint32_t hi) {
+  struct vmmio m;
+  memset(&m, 0, sizeof m);
+  struct vq q;
+  memset(&q, 0, sizeof q);
+  uint32_t cola = 0;
+  for (uint32_t sel = 0; sel < 2; sel++) {
+    uint64_t v = sel;
+    vmmio_acceso(&m, &q, 1, 4, feat_lo, 0x024, true, &v, &cola);
+    v = sel ? hi : lo;
+    vmmio_acceso(&m, &q, 1, 4, feat_lo, 0x020, true, &v, &cola);
+  }
+  return m.drv_features;
+}
+
+// vrng_prueba_feats: las drv_features de virtio-rng tras vrng_set con esas
+// (pruebas; virtio-rng no ofrece nada salvo VERSION_1).
+uint64_t vrng_prueba_feats(uint64_t f) {
+  struct vrng_state st;
+  vrng_get(&st);
+  struct vrng_state antes = st;
+  st.m.drv_features = f;
+  vrng_set(&st);
+  pthread_mutex_lock(&r_mu);
+  uint64_t r = rs.m.drv_features;
+  pthread_mutex_unlock(&r_mu);
+  vrng_set(&antes);
+  return r;
+}
+
 void vrng_set(const struct vrng_state *s) {
   pthread_mutex_lock(&r_mu);
   rs = *s;
+  vmmio_restaurado(&rs.m, 0);
   pthread_mutex_unlock(&r_mu);
 }

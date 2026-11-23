@@ -287,7 +287,14 @@ struct vmmio {
 enum { VM_NADA, VM_NOTIFY, VM_RESET, VM_ISR };
 int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_t feat_lo, uint64_t off,
                  bool escribir, uint64_t *val, uint32_t *cola);
-void vmmio_irq(struct vmmio *m, uint32_t intid);  // pasa al GIC el nivel de isr si cambió
+void vmmio_irq(struct vmmio *m, uint32_t intid);
+// vmmio_restaurado deja en drv_features de un estado restaurado solo lo que
+// el dispositivo puede ofrecer (feat_lo y VERSION_1), como vmmio_acceso al
+// negociar: el volcado viene de un fichero. feat_lo es lo que ofrece con
+// cualquier configuración, no con la de este proceso: el invitado restaurado
+// sigue con lo que negoció con el kling-hv que hizo el volcado (con EVENT_IDX
+// aunque aquí KLING_HV_EVENT_IDX=0), y quitárselo lo dejaría sin avisos.
+void vmmio_restaurado(struct vmmio *m, uint64_t feat_lo);  // pasa al GIC el nivel de isr si cambió
 // khv_spi pone la línea intid del GIC a nivel y dice si el GIC la cambió. Si
 // no, lo cuenta (khv_spi_fallos) y lo deja en stderr la primera vez: una línea
 // que no sube deja al invitado esperando su disco, su red o su consola. Es
@@ -366,6 +373,8 @@ void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
 uint64_t vblk_prueba_sincs(void);                    // sincronizaciones de los FLUSH (pruebas)
 uint64_t vblk_prueba_fullsincs(void);                // de ellas, F_FULLFSYNC (pruebas)
+uint64_t vmmio_prueba_feats(uint64_t feat_lo, uint32_t lo, uint32_t hi);  // drv_features negociadas (pruebas)
+uint64_t vrng_prueba_feats(uint64_t f);  // drv_features de virtio-rng tras restaurar f (pruebas)
 bool vblk_prueba_full_debe(int idx);                 // falta un F_FULLFSYNC por la cuota (pruebas)
 bool vblk_prueba_diferido(int idx, int ms);          // deja al hilo hacerlo; si ya no falta (pruebas)
 #define KHV_FULL_POR_S 32   // cuota de F_FULLFSYNC por disco y segundo (virtio.c)

@@ -971,6 +971,7 @@ void vsock_set(const struct vvsock_state *i) {
   pthread_mutex_lock(&mu);
   cerrar_todas();
   s = *i;
+  vmmio_restaurado(&s.m, 0);
   reset_pend = (s.m.status & 4) != 0;  // DRIVER_OK: hay un driver que lo espera
   sin_rx = false;
   pthread_mutex_unlock(&mu);

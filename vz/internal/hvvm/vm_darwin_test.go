@@ -140,6 +140,27 @@ func TestGuardarCPUDiceLosFallos(t *testing.T) {
 	}
 }
 
+// F-05: el driver solo se queda con lo que el dispositivo ofrece (y
+// VERSION_1). Un invitado que escribiera EVENT_IDX donde no se ofrece
+// (virtio-fs, o con KLING_HV_EVENT_IDX=0) haría que el dispositivo leyera y
+// escribiera los avail/used_event que el driver no mantiene.
+func TestFeaturesSoloLoOfrecido(t *testing.T) {
+	const eventIdx = 1 << 29
+	if f := featsNegociadas(1<<9, 0xffffffff, 0xffffffff); f != 1<<9|1<<32 {
+		t.Errorf("offering FLUSH, a driver writing every bit keeps %#x, want %#x", f, uint64(1<<9|1<<32))
+	}
+	if f := featsNegociadas(1<<9, eventIdx, 1); f&eventIdx != 0 {
+		t.Errorf("EVENT_IDX not offered but negotiated: %#x", f)
+	}
+	if f := featsNegociadas(1<<9|eventIdx, eventIdx|1<<9, 1); f != eventIdx|1<<9|1<<32 {
+		t.Errorf("offered bits must be kept: %#x", f)
+	}
+	// Al restaurar, lo mismo: el fichero del volcado no es de fiar.
+	if f := featsRestauradas(^uint64(0)); f != 1<<32 {
+		t.Errorf("virtio-rng restored with every bit keeps %#x, want only VERSION_1", f)
+	}
+}
+
 // Timings (GET /kling/info) da en números lo mismo que el resumen: las fases
 // que pasaron, los hitos desde que se soltó la VM y el total; nada de lo que
 // no pasó.

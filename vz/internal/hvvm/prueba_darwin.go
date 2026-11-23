@@ -134,6 +134,15 @@ func fullDebeDisco() bool { return bool(C.vblk_prueba_full_debe(0)) }
 // haga el F_FULLFSYNC pendiente; dice si ya no falta.
 func diferidoDisco(ms int) bool { return bool(C.vblk_prueba_diferido(0, C.int(ms))) }
 
+// featsNegociadas: lo que queda en drv_features tras escribir lo y hi en
+// DriverFeatures a un dispositivo que ofrece ofrece (y VERSION_1).
+func featsNegociadas(ofrece uint64, lo, hi uint32) uint64 {
+	return uint64(C.vmmio_prueba_feats(C.uint64_t(ofrece), C.uint32_t(lo), C.uint32_t(hi)))
+}
+
+// featsRestauradas: las drv_features de virtio-rng tras restaurar f.
+func featsRestauradas(f uint64) uint64 { return uint64(C.vrng_prueba_feats(C.uint64_t(f))) }
+
 // La cuota de F_FULLFSYNC de virtio.c.
 const (
 	fullPorS   = int(C.KHV_FULL_POR_S)
