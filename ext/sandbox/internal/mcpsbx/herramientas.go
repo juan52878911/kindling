@@ -75,6 +75,24 @@ var herramientas = []herramienta{
 	{"sandbox_delete", "Delete a sandbox.", esquema([]string{"id"}, map[string]any{"id": pID})},
 	{"sandbox_renew", "Extend a sandbox's lifetime.",
 		esquema([]string{"id"}, map[string]any{"id": pID, "ttl_seconds": pInt("new idle time; default keeps the current one")})},
+	{"sandbox_run_code", "Run a code snippet in a sandbox's interpreter (default Python) and wait for it. Returns ok, stdout, stderr, the value of the last expression and any exception. Pass context_id to keep variables between calls.",
+		esquema([]string{"id", "code"}, map[string]any{"id": pID, "code": pStr("source code to run"),
+			"language":        pStr("interpreter language; default python"),
+			"context_id":      pStr("reuse an existing code context (keeps state); default is a throwaway one"),
+			"timeout_seconds": pInt("kill the run after this long (default 60, max 600)")})},
+	{"sandbox_pause", "Pause a running sandbox (its memory stays; resume it with sandbox_resume).", esquema([]string{"id"}, map[string]any{"id": pID})},
+	{"sandbox_resume", "Resume a paused or frozen sandbox.", esquema([]string{"id"}, map[string]any{"id": pID})},
+	{"sandbox_list_files", "List a directory inside a sandbox (type, size, mode, name; capped).",
+		esquema([]string{"id", "path"}, map[string]any{"id": pID, "path": pStr("absolute directory path inside the sandbox")})},
+	{"sandbox_open_port", "Open a public URL to a TCP port inside a sandbox. Returns the URL and, unless public, the token that opens it.",
+		esquema([]string{"id", "port"}, map[string]any{"id": pID, "port": pInt("TCP port inside the sandbox (1-65535)"),
+			"ttl_seconds": pInt("how long the URL lasts; default set by the gateway"),
+			"public":      map[string]any{"type": "boolean", "description": "anyone with the URL can open it (no token)"}})},
+	{"sandbox_set_egress", "Change a live sandbox's outbound network policy (none, internet, or allowlist with allow_domains).",
+		esquema([]string{"id", "egress"}, map[string]any{"id": pID, "egress": pStr("egress mode: none, internet or allowlist"),
+			"allow_domains": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "domains allowed when egress is allowlist"}})},
+	{"sandbox_fork", "Fork a running sandbox into count copies that share its memory and disk state. Returns the new sandboxes.",
+		esquema([]string{"id"}, map[string]any{"id": pID, "count": pInt("number of copies (default 1)"), "ttl_seconds": pInt("idle time of each copy; default the original's")})},
 }
 
 type manejador func(ctx context.Context, api API, args json.RawMessage) (string, error)
@@ -360,6 +378,229 @@ var manejadores = map[string]manejador{
 		b, _, err := llamarJSON(ctx, a, "POST", "/v1/sandboxes/"+in.ID+"/renew", body)
 		return string(b), err
 	},
+	"sandbox_run_code": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct {
+			ID        string `json:"id"`
+			Code      string `json:"code"`
+			Language  string `json:"language"`
+			ContextID string `json:"context_id"`
+			Timeout   int    `json:"timeout_seconds"`
+		}
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(in.Code) == "" {
+			return "", errors.New("code is required")
+		}
+		if len(in.Code) > maxEscribe {
+			return "", fmt.Errorf("code is %d bytes; the limit is %d", len(in.Code), maxEscribe)
+		}
+		body := map[string]any{"code": in.Code}
+		if in.Language != "" {
+			body["language"] = in.Language
+		}
+		if in.ContextID != "" {
+			body["context_id"] = in.ContextID
+		}
+		if in.Timeout > 0 {
+			body["timeout_seconds"] = in.Timeout
+		}
+		b, _, err := llamarJSON(ctx, a, "POST", "/v1/sandboxes/"+in.ID+"/code", body)
+		if err != nil {
+			return "", err
+		}
+		var stdout, stderr []byte
+		var res, fallo strings.Builder
+		ok, hecho := "unknown", false
+		var ms int64
+		for _, l := range bytes.Split(b, []byte("\n")) {
+			if len(bytes.TrimSpace(l)) == 0 {
+				continue
+			}
+			var ev struct {
+				Type       string   `json:"type"`
+				Text       string   `json:"text"`
+				Ename      string   `json:"ename"`
+				Evalue     string   `json:"evalue"`
+				Traceback  []string `json:"traceback"`
+				OK         *bool    `json:"ok"`
+				DurationMS *int64   `json:"duration_ms"`
+				Message    string   `json:"message"`
+			}
+			if err := json.Unmarshal(l, &ev); err != nil {
+				return "", fmt.Errorf("unreadable code output: %w", err)
+			}
+			switch ev.Type {
+			case "stdout":
+				stdout = append(stdout, ev.Text...)
+			case "stderr":
+				stderr = append(stderr, ev.Text...)
+			case "result":
+				res.WriteString("result: " + ev.Text + "\n")
+			case "error":
+				fmt.Fprintf(&fallo, "error: %s: %s\n", ev.Ename, ev.Evalue)
+				if len(ev.Traceback) > 0 {
+					fallo.WriteString(strings.Join(ev.Traceback, "\n") + "\n")
+				}
+			case "done":
+				hecho = true
+				if ev.OK != nil {
+					ok = strconv.FormatBool(*ev.OK)
+				}
+				if ev.DurationMS != nil {
+					ms = *ev.DurationMS
+				}
+			}
+		}
+		var o strings.Builder
+		fmt.Fprintf(&o, "ok: %s\n", ok)
+		if ms > 0 {
+			fmt.Fprintf(&o, "duration_ms: %d\n", ms)
+		}
+		if !hecho {
+			o.WriteString("notice: the stream ended without a done event; the output may be incomplete\n")
+		}
+		o.WriteString(tope([]byte(res.String()), "result"))
+		o.WriteString(tope([]byte(fallo.String()), "error"))
+		o.WriteString("--- stdout ---\n" + tope(stdout, "stdout") + "\n--- stderr ---\n" + tope(stderr, "stderr"))
+		return o.String(), nil
+	},
+	"sandbox_pause":  accionSimple("pause"),
+	"sandbox_resume": accionSimple("resume"),
+	"sandbox_list_files": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct{ ID, Path string }
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if in.Path == "" {
+			return "", errors.New("path is required")
+		}
+		b, _, err := pedir(ctx, a, "GET", "/v1/sandboxes/"+in.ID+"/files?list=1&path="+url.QueryEscape(in.Path), nil, "")
+		if err != nil {
+			return "", err
+		}
+		var ls struct {
+			Entries []struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+				Size int64  `json:"size"`
+				Mode string `json:"mode"`
+			} `json:"entries"`
+			Truncated bool `json:"truncated"`
+		}
+		if err := json.Unmarshal(b, &ls); err != nil {
+			return "", fmt.Errorf("unreadable listing: %w", err)
+		}
+		var o strings.Builder
+		for _, e := range ls.Entries {
+			nombre := e.Name
+			if e.Type == "dir" {
+				nombre += "/"
+			}
+			fmt.Fprintf(&o, "%s\t%d\t%s\t%s\n", e.Type, e.Size, e.Mode, nombre)
+		}
+		if len(ls.Entries) == 0 {
+			o.WriteString("(empty)\n")
+		}
+		if ls.Truncated {
+			o.WriteString("notice: listing truncated by the sandbox\n")
+		}
+		return tope([]byte(o.String()), "listing"), nil
+	},
+	"sandbox_open_port": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct {
+			ID         string `json:"id"`
+			Port       int    `json:"port"`
+			TTLSeconds int    `json:"ttl_seconds"`
+			Public     bool   `json:"public"`
+		}
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if in.Port < 1 || in.Port > 65535 {
+			return "", errors.New("port must be between 1 and 65535")
+		}
+		body := map[string]any{"port": in.Port}
+		if in.TTLSeconds > 0 {
+			body["ttl_seconds"] = in.TTLSeconds
+		}
+		if in.Public {
+			body["public"] = true
+		}
+		b, _, err := llamarJSON(ctx, a, "POST", "/v1/sandboxes/"+in.ID+"/endpoints", body)
+		return string(b), err
+	},
+	"sandbox_set_egress": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct {
+			ID           string   `json:"id"`
+			Egress       string   `json:"egress"`
+			AllowDomains []string `json:"allow_domains"`
+		}
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if in.Egress == "" {
+			return "", errors.New("egress is required (none, internet or allowlist)")
+		}
+		body := map[string]any{"egress": in.Egress}
+		if len(in.AllowDomains) > 0 {
+			body["allow_domains"] = in.AllowDomains
+		}
+		b, _, err := llamarJSON(ctx, a, "PATCH", "/v1/sandboxes/"+in.ID+"/egress", body)
+		return string(b), err
+	},
+	"sandbox_fork": func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct {
+			ID         string `json:"id"`
+			Count      int    `json:"count"`
+			TTLSeconds int    `json:"ttl_seconds"`
+		}
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		if in.Count < 0 || in.TTLSeconds < 0 {
+			return "", errors.New("count and ttl_seconds can't be negative")
+		}
+		body := map[string]any{}
+		if in.Count > 0 {
+			body["count"] = in.Count
+		}
+		if in.TTLSeconds > 0 {
+			body["ttl_seconds"] = in.TTLSeconds
+		}
+		b, _, err := llamarJSON(ctx, a, "POST", "/v1/sandboxes/"+in.ID+"/fork", body)
+		return string(b), err
+	},
+}
+
+// accionSimple es una herramienta de solo id que hace POST /v1/sandboxes/{id}/{accion}.
+func accionSimple(accion string) manejador {
+	return func(ctx context.Context, a API, raw json.RawMessage) (string, error) {
+		var in struct{ ID string }
+		if err := args(raw, &in); err != nil {
+			return "", err
+		}
+		if err := validarID(in.ID); err != nil {
+			return "", err
+		}
+		b, _, err := pedir(ctx, a, "POST", "/v1/sandboxes/"+in.ID+"/"+accion, nil, "")
+		return string(b), err
+	}
 }
 
 func args(raw json.RawMessage, v any) error {

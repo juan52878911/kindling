@@ -209,10 +209,15 @@ func TestMCPPuntaAPunta(t *testing.T) {
 	for _, x := range r["result"].(map[string]any)["tools"].([]any) {
 		nombres[x.(map[string]any)["name"].(string)] = true
 	}
-	for _, n := range []string{"sandbox_create", "sandbox_list", "sandbox_exec", "sandbox_exec_background", "sandbox_process_output", "sandbox_read_file", "sandbox_write_file", "sandbox_delete", "sandbox_renew"} {
+	for _, n := range []string{"sandbox_create", "sandbox_list", "sandbox_exec", "sandbox_exec_background", "sandbox_process_output", "sandbox_read_file", "sandbox_write_file", "sandbox_delete", "sandbox_renew",
+		"sandbox_run_code", "sandbox_pause", "sandbox_resume", "sandbox_list_files", "sandbox_open_port", "sandbox_set_egress", "sandbox_fork"} {
 		if !nombres[n] {
 			t.Errorf("falta la herramienta %s", n)
 		}
+	}
+
+	if len(nombres) != 16 {
+		t.Errorf("tools/list devuelve %d herramientas, quiero 16", len(nombres))
 	}
 
 	ok := func(name string, args any, quiere string) string {
