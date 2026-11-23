@@ -106,6 +106,35 @@ try:
     with tarfile.open(fileobj=io.BytesIO(sb.files.download_tar("/paquete"))) as tf:
         igual(tf.extractfile("a.txt").read(), b"hi")
 
+    p("ficheros: chmod y replace")
+    conf = os.path.join(base, "app.conf")
+    sb.files.write(conf, "host=a\nport=1\nport=1\n")
+    sb.files.chmod(conf, 0o600)
+    igual(oct(os.stat(conf).st_mode & 0o777), "0o600")
+    igual(sb.files.replace(conf, "host=a", "host=b").replacements, 1)
+    try:
+        sb.files.replace(conf, "port=1", "port=2")
+        raise AssertionError("un old repetido sin all tenía que dar 409")
+    except Conflict:
+        pass
+    igual(sb.files.replace(conf, "port=1", "port=2", all=True).replacements, 2)
+    igual(sb.files.read_text(conf), "host=b\nport=2\nport=2\n")
+
+    p("metadata, metrics y fork")
+    igual(sb.set_metadata({"fase": "dos"}, remove=["suite"]).labels, {"fase": "dos"})
+    igual(Sandbox.connect(sb.id, **kw).info.labels, {"fase": "dos"})
+    try:
+        sb.set_metadata({"tenant": "otro"})
+        raise AssertionError("una etiqueta reservada tenía que dar 400")
+    except ApiError as e:
+        igual(e.status, 400)
+    igual(sb.metrics().id, sb.id)
+    copias = sb.fork(count=2, ttl=120)
+    igual(len(copias), 2)
+    igual(copias[0].info.labels.get("fase"), "dos")
+    for c in copias:
+        c.delete()
+
     p("code: contextos, run, run_wait, interrupt")
     ctx = sb.code.contexts.create(language="python")
     igual([c.id for c in sb.code.contexts.list()], [ctx.id])

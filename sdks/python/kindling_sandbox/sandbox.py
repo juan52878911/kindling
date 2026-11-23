@@ -4,7 +4,8 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from .client import Client
 from .models import (CodeContext, CodeEvent, CodeResult, EgressPolicy, Endpoint, ExecEvent, ExecResult, FileList,
-                     FileStat, ProcessEvent, ProcessInfo, SandboxInfo, SearchResult, Session, TarResult)
+                     FileStat, ProcessEvent, ProcessInfo, ReplaceResult, SandboxInfo, SandboxMetrics,
+                     SearchResult, Session, TarResult)
 
 
 class SandboxList(list):
@@ -68,6 +69,16 @@ class Files:
     def mkdir(self, path: str) -> FileStat:
         """Crea el directorio y los que falten (`mkdir -p`)."""
         return self._c.mkdir_file(self._id, path)
+
+    def chmod(self, path: str, mode: Union[int, str], recursive: bool = False) -> FileStat:
+        """Cambia permisos. `mode` es un entero (0o755) o una cadena octal ("755")."""
+        m = ("%o" % mode) if isinstance(mode, int) else str(mode)
+        return self._c.chmod_file(self._id, path, m, recursive)
+
+    def replace(self, path: str, old: str, new: str, all: bool = False) -> ReplaceResult:
+        """Sustituye `old` por `new` dentro del fichero. Sin `all=True`, `old` tiene que
+        aparecer una vez (si no, Conflict). `.replacements` dice cuántas veces."""
+        return self._c.replace_in_file(self._id, path, old, new, all)
 
     def search(self, path: str, glob: str) -> SearchResult:
         """Busca por NOMBRE (`*.log`) bajo `path`, recursivo; `.truncated` si se cortó."""
@@ -273,7 +284,8 @@ class Sandbox:
                client: Optional[Client] = None) -> "Sandbox":
         """`ttl` en segundos. `volumes`: [{"name", "mount", "read_only", "clone_from"}]
         con volúmenes del inquilino (ver Client.create_volume). `env`: variables de
-        entorno que ve todo exec con `session="default"`."""
+        entorno que ven `exec` y procesos sin sesión propia, `code` y `shell` (se guardan
+        como la sesión `default`, que cada uso renueva; caduca tras 24 h sin uso)."""
         c = _cliente(client, url, token, timeout)
         info = c.create_sandbox(template=template, image=image, ttl_seconds=ttl, on_ttl=on_ttl,
                                 egress=egress,
@@ -353,6 +365,22 @@ class Sandbox:
         """Cambia la política de red (`none`, `internet`, `allowlist`); `.applied`
         dice si vale ya (`live`) o en el próximo arranque."""
         return self._client.set_egress(self.id, egress, list(allow_domains) if allow_domains is not None else None)
+
+    def set_metadata(self, labels: Optional[Dict[str, str]] = None,
+                     remove: Optional[Sequence[str]] = None) -> SandboxInfo:
+        """Añade o cambia etiquetas propias (`labels`) y quita otras (`remove`). Las
+        reservadas (`kind`, `tenant`, `template`, `kling.*`) dan BadRequest."""
+        self.info = self._client.patch_metadata(self.id, labels, list(remove) if remove else None)
+        return self.info
+
+    def fork(self, count: int = 1, ttl: Optional[int] = None) -> "List[Sandbox]":
+        """Ramifica el sandbox en `count` copias (memoria, procesos y disco tal como están).
+        Son sandboxes del mismo inquilino y cuentan para su cuota (TooManyRequests si no caben)."""
+        return [Sandbox(i, self._client) for i in self._client.fork_sandbox(self.id, count, ttl)]
+
+    def metrics(self) -> SandboxMetrics:
+        """Memoria (`memory_mib`) y CPU (`cpu_seconds`, si el daemon la mide) del sandbox."""
+        return self._client.sandbox_metrics(self.id)
 
     def delete(self) -> None:
         self._client.delete_sandbox(self.id)

@@ -460,6 +460,56 @@ class TestSuperficieNueva(Base):
         self.assertEqual(sb.files.read_text("/d/c.txt"), "y")
         self.assertTrue(sb.files.mkdir("/d/sub/x").is_dir)
 
+    def test_chmod_y_replace(self):
+        sb = Sandbox.create(**self.kw)
+        sb.files.write("/d/app.conf", "host=a\nport=1\nport=1\n")
+        self.assertEqual(sb.files.chmod("/d/app.conf", 0o755).mode, "0755")
+        self.assertEqual(self.srv.estado.peticiones[-1][4], b'{"path": "/d/app.conf", "mode": "755"}')
+        self.assertEqual(sb.files.chmod("/d/app.conf", "600").mode, "0600")
+        with self.assertRaises(NotFound):
+            sb.files.chmod("/d/nada", 0o644)
+        self.assertEqual(sb.files.replace("/d/app.conf", "host=a", "host=b").replacements, 1)
+        with self.assertRaises(Conflict):
+            sb.files.replace("/d/app.conf", "port=1", "port=2")
+        self.assertEqual(sb.files.replace("/d/app.conf", "port=1", "port=2", all=True).replacements, 2)
+        self.assertEqual(sb.files.read_text("/d/app.conf"), "host=b\nport=2\nport=2\n")
+
+    def test_metadata_fork_y_metrics(self):
+        sb = Sandbox.create(labels={"env": "dev", "equipo": "x"}, **self.kw)
+        info = sb.set_metadata({"env": "prod"}, remove=["equipo"])
+        self.assertEqual(info.labels, {"env": "prod"})
+        self.assertEqual(sb.info.labels, {"env": "prod"})
+        ult = self.srv.estado.peticiones[-1]
+        self.assertEqual((ult[0], ult[1]), ("PATCH", "/v1/sandboxes/h1/m-1/metadata"))
+        self.assertEqual(json.loads(ult[4]), {"labels": {"env": "prod"}, "remove": ["equipo"]})
+        with self.assertRaises(BadRequest):
+            sb.set_metadata({"tenant": "otro"})
+        copias = sb.fork(count=2, ttl=120)
+        self.assertEqual(len(copias), 2)
+        self.assertNotEqual(copias[0].id, sb.id)
+        self.assertEqual((copias[0].info.ttl_seconds, copias[0].info.labels), (120, {"env": "prod"}))
+        self.assertEqual(json.loads(self.srv.estado.peticiones[-1][4]), {"count": 2, "ttl_seconds": 120})
+        self.assertEqual(len(sb.fork()), 1)
+        self.srv.estado.fork_cuota = 1
+        with self.assertRaises(RateLimited):
+            sb.fork(count=3)
+        m = sb.metrics()
+        self.assertEqual((m.memory_mib, m.memory_kind, m.cpu_seconds), (123, "pss", 4.5))
+
+    def test_asincrono_de_las_rutas_nuevas(self):
+        async def main():
+            async with await AsyncSandbox.create(**self.kw) as sb:
+                await sb.files.write("/d/a", "uno dos")
+                self.assertEqual((await sb.files.replace("/d/a", "uno", "tres")).replacements, 1)
+                self.assertEqual((await sb.files.chmod("/d/a", 0o700)).mode, "0700")
+                self.assertEqual((await sb.set_metadata({"k": "v"})).labels, {"k": "v"})
+                self.assertEqual((await sb.metrics()).memory_mib, 123)
+                copias = await sb.fork(2)
+                self.assertEqual(len(copias), 2)
+                for c in copias:
+                    await c.delete()
+        asyncio.run(main())
+
     def test_tar_de_subida_y_bajada(self):
         import io
         import tarfile

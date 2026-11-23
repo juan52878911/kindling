@@ -285,6 +285,26 @@ class SearchResult(_Base):
 
 
 @dataclass
+class ReplaceResult(_Base):
+    path: str = ""
+    replacements: int = 0
+    size: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SandboxMetrics(_Base):
+    """Memoria y CPU de un sandbox; los campos que el daemon no mide quedan a 0/""."""
+    id: str = ""
+    state: str = ""
+    memory_mib: int = 0
+    memory_kind: str = ""
+    cpu_seconds: float = 0.0
+    mem_limit_mib: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TarResult(_Base):
     entries: int = 0
     files: int = 0

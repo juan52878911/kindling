@@ -37,6 +37,7 @@ class Estado:
         self.fallos_503 = 0  # cuántas peticiones a /renew devolver 503 con Retry-After
         self.endpoints = {}  # (id, puerto) -> dict
         self.contextos = {}  # (id, cid) -> dict
+        self.fork_cuota = 0  # con >0, un fork de más copias da 429
         self.lote_falla_desde = 0  # en un lote, los índices >= esto fallan (500)
 
 
@@ -130,7 +131,8 @@ class Manejador(BaseHTTPRequestHandler):
             if re_ep or re_cx:
                 return self._anidados(m, re_ep, re_cx)
             for suf in ("/renew", "/exec", "/files", "/pause", "/resume", "/egress", "/endpoints", "/code",
-                        "/files/move", "/files/mkdir", "/files/search", "/code/contexts"):
+                        "/files/move", "/files/mkdir", "/files/search", "/files/chmod", "/files/replace",
+                        "/code/contexts", "/metadata", "/fork", "/metrics"):
                 if resto.endswith(suf):
                     sid, accion = resto[:-len(suf)], suf[1:]
                     break
@@ -171,7 +173,31 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._codigo(sid, json.loads(cuerpo))
             if accion == "code/contexts":
                 return self._contextos(m, sid, json.loads(cuerpo or b"{}"))
-            if accion in ("files/move", "files/mkdir", "files/search") or accion == "files":
+            if accion == "metadata" and m == "PATCH":
+                req = json.loads(cuerpo)
+                for k in req.get("remove") or []:
+                    sb["labels"].pop(k, None)
+                for k, v in (req.get("labels") or {}).items():
+                    if k in ("tenant", "kind") or k.startswith("kling."):
+                        return self._err(400, "label %r is reserved" % k, "bad_request")
+                    sb["labels"][k] = v
+                return self._json(200, sb)
+            if accion == "fork" and m == "POST":
+                req = json.loads(cuerpo or b"{}")
+                if st.fork_cuota and req.get("count", 1) > st.fork_cuota:
+                    return self._err(429, "sandbox quota exceeded", "too_many_requests", {"Retry-After": "7"})
+                copias = []
+                for _ in range(max(req.get("count", 1), 1)):
+                    st.n += 1
+                    c = dict(sb, id="h1/m-%d" % st.n, ttl_seconds=req.get("ttl_seconds", sb["ttl_seconds"]))
+                    c["labels"] = dict(sb["labels"])
+                    st.sandboxes[c["id"]] = c
+                    copias.append(c)
+                return self._json(201, {"sandboxes": copias})
+            if accion == "metrics" and m == "GET":
+                return self._json(200, {"id": sid, "state": sb["state"], "memory_mib": 123,
+                                        "memory_kind": "pss", "cpu_seconds": 4.5, "mem_limit_mib": 512})
+            if accion in ("files/move", "files/mkdir", "files/search", "files/chmod", "files/replace") or accion == "files":
                 return self._files(m, sid, q, cuerpo, accion)
         self._err(404, "no route", "not_found")
 
@@ -546,6 +572,29 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._err(409, "already exists", "conflict")
             st.ficheros[d] = st.ficheros.pop(o)
             return self._json(200, req)
+        if accion == "files/chmod" and m == "POST":
+            req = json.loads(cuerpo)
+            clave = (sid, req["path"])
+            if clave not in st.ficheros:
+                return self._err(404, "chmod failed: No such file", "not_found")
+            if not re.match(r"^[0-7]{3,4}$", req["mode"]):
+                return self._err(400, "mode must be octal", "bad_request")
+            datos, _ = st.ficheros[clave]
+            st.ficheros[clave] = (datos, "0" + req["mode"].lstrip("0") if len(req["mode"]) == 3 else req["mode"])
+            return self._json(200, {"path": req["path"], "size": len(datos), "mode": st.ficheros[clave][1]})
+        if accion == "files/replace" and m == "POST":
+            req = json.loads(cuerpo)
+            clave = (sid, req["path"])
+            if clave not in st.ficheros:
+                return self._err(404, "no such file", "not_found")
+            datos, modo = st.ficheros[clave]
+            texto = datos.decode()
+            n = texto.count(req["old"])
+            if n == 0 or (n > 1 and not req.get("all")):
+                return self._err(409, "old appears %d times" % n, "conflict")
+            nuevo = texto.replace(req["old"], req["new"])
+            st.ficheros[clave] = (nuevo.encode(), modo)
+            return self._json(200, {"path": req["path"], "replacements": n, "size": len(nuevo)})
         if accion == "files/mkdir" and m == "POST":
             req = json.loads(cuerpo)
             return self._json(201, {"path": req["path"], "size": 0, "mode": "0755", "is_dir": True})
