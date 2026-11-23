@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -812,6 +813,16 @@ func (p *PoolController) Run(ctx context.Context) error {
 		list, err := p.Kube.ListPools(ctx)
 		if err != nil {
 			p.Log.Printf("operator: sandboxpools: list: %v", err)
+			var ae *apiError
+			if errors.As(err, &ae) && ae.Code == http.StatusNotFound {
+				// El CRD SandboxPool no está aplicado: no tiene sentido
+				// reintentar cada pocos segundos.
+				p.Log.Printf("operator: sandboxpools: the SandboxPool CRD is not installed; apply deploy/crd.yaml (retrying in %s)", p.resync())
+				if !sleepCtx(ctx, p.resync()) {
+					break
+				}
+				continue
+			}
 			if !sleepCtx(ctx, backoff) {
 				break
 			}
