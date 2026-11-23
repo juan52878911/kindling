@@ -375,6 +375,9 @@ func (s *Servidor) rutas() {
 	// obligaría a repartir un segundo secreto sin ganar nada a cambio.
 	m.Handle("GET /v1/metrics", s.auth(http.HandlerFunc(s.handleMetrics)))
 	m.Handle("GET /v1/templates", s.auth(http.HandlerFunc(s.handleTemplates)))
+	// Solo admin (lo comprueba handlePool): el operador de Kubernetes fija con
+	// ella el fondo de una plantilla (SandboxPool).
+	m.Handle("PUT /v1/templates/{name}/pool", s.auth(http.HandlerFunc(s.handlePool)))
 	m.Handle("POST /v1/sandboxes", s.auth(http.HandlerFunc(s.handleCrear)))
 	m.Handle("GET /v1/sandboxes", s.auth(http.HandlerFunc(s.handleListar)))
 	// Las rutas por sandbox se despachan a mano: el id lleva una barra dentro

@@ -22,6 +22,7 @@ README = os.path.join(AQUI, "..", "README.md")
 # Operaciones que el SDK no cubre a propósito, con el motivo.
 EXCLUIDAS = {
     "POST /v1/sandboxes/{id}/shell": "interactive shell: upgrade to binary frames (kling-shell/1), out of scope",
+    "PUT /v1/templates/{name}/pool": "admin-only operator route (the Kubernetes SandboxPool controller uses it)",
 }
 
 # operación -> "Clase.método" del SDK de Python.

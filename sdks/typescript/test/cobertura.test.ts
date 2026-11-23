@@ -14,6 +14,7 @@ const README = fileURLToPath(new URL("../README.md", import.meta.url));
 /** Operaciones que el SDK no cubre a propósito, con el motivo. */
 const EXCLUIDAS: Record<string, string> = {
   "POST /v1/sandboxes/{id}/shell": "interactive shell: upgrade to binary frames (kling-shell/1), out of scope",
+  "PUT /v1/templates/{name}/pool": "admin-only operator route (the Kubernetes SandboxPool controller uses it)",
 };
 
 /** operación -> "Clase.método" del SDK de TypeScript. */

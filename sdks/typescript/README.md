@@ -99,6 +99,7 @@ nor an explicit exclusion (today only `shell`). Refresh with `KLING_UPDATE_READM
 | `GET /v1/hosts` | `Client.hosts()` |
 | `GET /v1/metrics` | `Client.metrics()` |
 | `GET /v1/templates` | `Client.templates()` |
+| `PUT /v1/templates/{name}/pool` | not covered: admin-only operator route (the Kubernetes SandboxPool controller uses it) |
 | `GET /v1/sandboxes` | `Sandbox.list()` |
 | `POST /v1/sandboxes` | `Sandbox.create()` |
 | `GET /v1/sandboxes/{id}` | `Sandbox.connect()` |

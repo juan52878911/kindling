@@ -76,6 +76,58 @@ paths:
                   $ref: "#/components/schemas/TemplateInfo"
         "401":
           $ref: "#/components/responses/Error"
+  /v1/templates/{name}/pool:
+    put:
+      tags: [ops]
+      summary: Fija el fondo precalentado de una plantilla en cada host que la tiene (solo admin)
+      description: |
+        `size` 0 lo apaga. Un host que no contesta no impide fijarlo en los
+        demás: su fallo va en `hosts[].error`, y solo si ninguno lo consigue
+        la respuesta es 502. Es la ruta que usa el operador de Kubernetes para
+        `SandboxPool`.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [size]
+              properties:
+                size: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: Fondo fijado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  template: {type: string}
+                  size: {type: integer}
+                  available: {type: integer, description: Copias despiertas y reclamables en todos los hosts}
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host: {type: string}
+                        size: {type: integer}
+                        ready: {type: integer}
+                        error: {type: string}
+                        stale: {type: string}
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes:
     get:
       tags: [sandboxes]
