@@ -352,7 +352,9 @@ IP=$(aws_ ec2 describe-instances --instance-ids "$INST" --query 'Reservations[0]
 SSH=(ssh -i "$TMP/k.pem" -o StrictHostKeyChecking=no -o UserKnownHostsFile="$TMP/kh" -o ConnectTimeout=10 -o ServerAliveInterval=30)
 for _ in $(seq 1 40); do "${SSH[@]}" "admin@$IP" true 2>/dev/null && break; sleep 5; done
 "${SSH[@]}" "admin@$IP" true || { echo "sin SSH" >&2; exit 1; }
-R() { "${SSH[@]}" "admin@$IP" sudo "$@"; }
+# ssh junta sus argumentos con espacios y la shell remota los vuelve a partir: sin
+# entrecomillar, `R sh -c "a && b"` llegaba como `sh -c a && b`. printf %q los protege.
+R() { "${SSH[@]}" "admin@$IP" "sudo $(printf '%q ' "$@")"; }
 sube() { # sube <fichero local> <ruta remota>
   "${SSH[@]}" "admin@$IP" "cat > $2" < "$1"
 }
