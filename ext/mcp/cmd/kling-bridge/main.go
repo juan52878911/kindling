@@ -888,7 +888,15 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 		// —minutos—, y sin esto un servicio con tope 1 rechaza toda reconexión
 		// durante todo ese rato. Solo se reciclan ociosas: una sesión con su stream
 		// SSE abierto o una petición en curso nunca es candidata.
-		v := b.oldestReclaimableLocked()
+		//
+		// Solo con tope 1. Con más plazas, una sesión ociosa unos segundos es una
+		// conversación viva (el modelo pensando), y el gateway ya sabe escalar a
+		// una réplica cuando recibe "session limit": reciclar aquí mataría esa
+		// conversación y le quitaría al gateway la ocasión de hacerlo.
+		var v *session
+		if b.maxSessions == 1 {
+			v = b.oldestReclaimableLocked()
+		}
 		if v == nil {
 			b.mu.Unlock()
 			return nil, false, fmt.Errorf("session limit of %d reached", b.maxSessions)
