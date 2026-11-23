@@ -40,17 +40,26 @@ func TestMontarRedAparteFalloAlEsperarDesmonta(t *testing.T) {
 	}
 }
 
-// montarRed (sincrónico) conserva la semántica de antes: espera dentro.
+// montarRed (sincrónico) conserva la semántica de antes: la comprobación va
+// dentro del montaje y, si falla, no queda nada montado ni marcado.
 func TestMontarRedEsperaLaComprobacion(t *testing.T) {
 	m := newTestManager(t)
 	oldA, oldD, oldM := montarRedHostAparte, desmontarRedHost, montarRedHost
 	t.Cleanup(func() { montarRedHostAparte, desmontarRedHost, montarRedHost = oldA, oldD, oldM })
-	montarRedHost = nil
 	montarRedHostAparte = func(*knet.Net, knet.Egress, []string, int) (func() error, error) {
-		return func() error { return errors.New("barrera caída") }, nil
+		t.Fatal("montarRed no debe usar el montaje aparte")
+		return nil, nil
 	}
-	desmontarRedHost = func(*knet.Net) {}
+	montarRedHost = func(*knet.Net, knet.Egress, []string, int) error { return errors.New("barrera caída") }
+	desmontadas := 0
+	desmontarRedHost = func(*knet.Net) { desmontadas++ }
 	if err := m.montarRed(knet.Plan(41, "ab0000000000a002"), "ab0000000000a002", knet.EgressNone, nil); err == nil {
 		t.Fatal("montarRed debe fallar si la comprobación falla")
+	}
+	if desmontadas != 1 {
+		t.Fatalf("desmontadas=%d, quería 1", desmontadas)
+	}
+	if _, ok := m.redMontada.Load("ab0000000000a002"); ok {
+		t.Fatal("la red fallida no debe constar como montada")
 	}
 }
