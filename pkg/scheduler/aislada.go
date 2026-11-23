@@ -37,6 +37,11 @@ import (
 // LabelIsolated marca la máquina propia de una sesión aislada.
 const LabelIsolated = "isolated"
 
+// LabelIsolatedOwner lleva el id estable (PoolOwner) del planificador que creó
+// la máquina de una sesión aislada: el barrido de huérfanas solo toca las
+// suyas, igual que el del fondo con LabelPoolOwner.
+const LabelIsolatedOwner = "kling.isolated.owner"
+
 // defaultSessionTTL es cuánto vive una sesión aislada sin uso. Más largo que
 // idle a propósito: congelarla es barato y conserva la sesión; destruirla la
 // pierde. Es media hora porque cada sesión abandonada ocupa en disco lo que

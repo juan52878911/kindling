@@ -360,11 +360,12 @@ func TestBarridoDeAisladasHuerfanas(t *testing.T) {
 	g, d := conDaemonAislado(t)
 	ctx := context.Background()
 	g.MachineLabels = map[string]string{"owner": "mcp"}
+	g.PoolOwner = "gw-1"
 	viva, _ := g.isolatedSession(ctx, "svc", "A", sinTenant, true)
 	vieja := time.Now().Add(-time.Hour)
 	d.mu.Lock()
 	d.maquinas["huerfana"] = &api.Machine{ID: "huerfana", State: api.StateWarm, CreatedAt: vieja,
-		Labels: map[string]string{LabelIsolated: "true", "owner": "mcp", api.LabelService: "svc"}}
+		Labels: map[string]string{LabelIsolated: "true", "owner": "mcp", api.LabelService: "svc", LabelIsolatedOwner: "gw-1"}}
 	d.maquinas["recien"] = &api.Machine{ID: "recien", State: api.StateRunning, CreatedAt: time.Now(),
 		Labels: map[string]string{LabelIsolated: "true", "owner": "mcp"}}
 	d.maquinas["ajena"] = &api.Machine{ID: "ajena", State: api.StateWarm, CreatedAt: vieja,
