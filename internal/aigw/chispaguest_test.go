@@ -120,6 +120,81 @@ func TestClassifyMicroVMEscalates(t *testing.T) {
 	}
 }
 
+// TestClassifyMicroVMTaskThresholdEscalatesWithCandidates cubre una tarea con
+// un umbral propio más alto que el del modelo: la réplica (como kling-chispa)
+// solo manda la distribución si duda con el umbral del modelo o se le pide
+// explain, así que el gateway, que decide con el de la tarea, tiene que
+// volver a pedirla antes de escalar. Sin ella, top_k deja a VON sin etiquetas
+// y la respuesta sin candidatos.
+func TestClassifyMicroVMTaskThresholdEscalatesWithCandidates(t *testing.T) {
+	var calls, explains atomic.Int64
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var req chispaGuestRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		// Umbral del modelo 0.5: con 0.6 está seguro y no manda candidatos.
+		resp := chispaGuestResponse{Label: "fix", Prob: 0.6, Threshold: 0.5, Confident: true, Decision: chispa.DecisionConfident}
+		if req.Explain {
+			explains.Add(1)
+			resp.Candidates = []chispa.ClassProb{{Label: "fix", Prob: 0.6}, {Label: "feat", Prob: 0.3}, {Label: "docs", Prob: 0.1}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(guest.Close)
+	ll := newFakeLlama(t)
+	ll.set("feat")
+	reps := &multiReplicas{byAddr: map[string]string{
+		"chispa-commits": strings.TrimPrefix(guest.URL, "http://"),
+		"von-smol":       strings.TrimPrefix(ll.srv.URL, "http://"),
+	}}
+	cfg := microVMConfig(t,
+		&ModelConfig{Kind: KindChispa, Backend: BackendMicroVM, Snapshot: "chispa-commits"},
+		&TaskConfig{Chispa: "commits", EscalateTo: "smol", EscalateForce: true, TopK: 2,
+			Thresholds: map[string]float64{"fix": 0.8}})
+	g, err := New(Options{Config: cfg, Replicas: reps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deploy = fakeDeployLookup{"chispa-commits": {Labels: []string{"fix", "feat", "docs"}}}
+	resp, err := g.Classify(context.Background(), "classify", ClassifyRequest{Task: "kind", Text: "not sure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Escalate || resp.Chispa == nil || len(resp.Chispa.Candidates) == 0 {
+		t.Fatalf("escaló sin candidatos: %+v (chispa %+v)", resp, resp.Chispa)
+	}
+	if resp.Label != "feat" || resp.Source != "von" {
+		t.Fatalf("got %+v", resp)
+	}
+	if explains.Load() != 1 {
+		t.Fatalf("la réplica recibió %d peticiones con explain (de %d)", explains.Load(), calls.Load())
+	}
+}
+
+// Con un umbral de tarea que no cambia la decisión, la réplica contesta una
+// sola vez: la segunda vuelta es solo para cuando el gateway duda y la
+// réplica no.
+func TestClassifyMicroVMTaskThresholdConfidentOneCall(t *testing.T) {
+	fj := newFakeChispaGuest(t)
+	fj.resp = chispaGuestResponse{Label: "fix", Prob: 0.9, Threshold: 0.5, Confident: true, Decision: chispa.DecisionConfident}
+	reps := &fakeReplicas{addr: strings.TrimPrefix(fj.srv.URL, "http://")}
+	cfg := microVMConfig(t, &ModelConfig{Kind: KindChispa, Backend: BackendMicroVM, Snapshot: "chispa-commits"},
+		&TaskConfig{Chispa: "commits", Thresholds: map[string]float64{"fix": 0.8}})
+	g, err := New(Options{Config: cfg, Replicas: reps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deploy = fakeDeployLookup{"chispa-commits": {Labels: []string{"fix", "feat", "docs"}}}
+	resp, err := g.Classify(context.Background(), "classify", ClassifyRequest{Task: "kind", Text: "fix the bug"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Escalate || fj.calls.Load() != 1 || fj.last.Explain {
+		t.Fatalf("escalate %v, %d llamadas, explain %v", resp.Escalate, fj.calls.Load(), fj.last.Explain)
+	}
+}
+
 // TestClassifyMicroVMWakeError comprueba que, si no hay réplica disponible
 // (el daemon no contesta, no cabe...), la tarea responde 503 y no un pánico.
 func TestClassifyMicroVMWakeError(t *testing.T) {
