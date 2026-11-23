@@ -34,6 +34,7 @@ func falsos(t *testing.T, errReloj, errEntropia error) (*time.Time, *[]byte) {
 		// Lo que /resync hace tras contestar toca estas variables: que acabe
 		// antes de reponerlas.
 		func() { resyncMu.Lock(); defer resyncMu.Unlock() }()
+		segundosVivos.Wait()
 		setClock, mixEntropy, generationFile, generation = viejoReloj, viejaEnt, viejoFichero, viejaGen
 	})
 	return &reloj, &ent

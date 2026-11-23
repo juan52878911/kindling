@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,7 +52,11 @@ func TestEmitFijaPlazoPorEventoYSeRindeTrasUnError(t *testing.T) {
 
 // /ready no se queda esperando a otra sonda si el cliente se fue.
 func TestReadyRespetaElContextoEsperandoLaSonda(t *testing.T) {
-	r := &readiness{probePath: "/bin/true", hooksDir: t.TempDir()}
+	sonda := filepath.Join(t.TempDir(), "sonda")
+	if err := os.WriteFile(sonda, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &readiness{probePath: sonda, hooksDir: t.TempDir()}
 	var corrio atomic.Bool
 	suelta := make(chan struct{})
 	r.probe = func(ctx context.Context, p string, env []string) (string, error) {

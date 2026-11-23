@@ -228,6 +228,10 @@ type origenResyncKey struct{}
 var (
 	topeSegundoTiempo  = 5 * time.Second
 	hacerSegundoTiempo = segundoTiempo
+	// segundosVivos cuenta las goroutines del segundo tiempo que siguen vivas,
+	// también las rezagadas tras el tope: los tests esperan a que acaben antes
+	// de reponer las variables que leen.
+	segundosVivos sync.WaitGroup
 )
 
 // vigilarSegundoTiempo corre el segundo tiempo con recover y un tope: si
@@ -239,7 +243,9 @@ func vigilarSegundoTiempo(restore string, gen uint64) {
 	fn, topeT := hacerSegundoTiempo, topeSegundoTiempo
 	hecho := make(chan struct{})
 	segundoVencido.Store(0) // la marca de una generación anterior ya no vale
+	segundosVivos.Add(1)
 	go func() {
+		defer segundosVivos.Done()
 		defer close(hecho)
 		defer func() {
 			if r := recover(); r != nil {
