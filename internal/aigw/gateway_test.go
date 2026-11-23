@@ -438,32 +438,6 @@ func escribirRegistro(t *testing.T, p string, modelos map[string]any, tenants []
 	}
 }
 
-// backendsDePrueba hace de Z1 mientras Config.Backends es la semilla: cada
-// modelo von es un backend con los campos del bloque tal cual.
-func backendsDePrueba(c *Config) []*Backend {
-	var out []*Backend
-	for _, n := range sortedKeys(c.Models) {
-		m := c.Models[n]
-		if m.Kind != KindVON {
-			continue
-		}
-		b := &Backend{Name: n, Snapshot: m.Snapshot, Port: m.Port, Contract: ContractOpenAI,
-			MaxInflight: m.MaxInflight, MaxReplicas: m.MaxReplicas, Idle: m.Idle}
-		if b.Port == 0 {
-			b.Port = DefaultBackendPort
-		}
-		if b.Idle == "" {
-			b.Idle = IdleRemove
-		}
-		if h := m.Health; h != nil {
-			b.Health.Path, b.Health.Expect = h.Path, h.Expect
-			b.Health.Timeout, _ = time.ParseDuration(h.Timeout)
-		}
-		out = append(out, b)
-	}
-	return out
-}
-
 // Quitar un inquilino de ai.json y recargar da 401 a su token sin reiniciar;
 // uno añadido entra; y el token principal sigue valiendo (R8-02).
 func TestReloadRevocaInquilino(t *testing.T) {
@@ -516,16 +490,15 @@ func TestReloadRechazaInquilinosLegibles(t *testing.T) {
 
 // Los ganchos del planificador salen de Backends y se recalculan en Reload:
 // puerto, en vuelo por réplica, política de ociosidad y sonda cambian sin
-// reiniciar. Un dorado que no es de ningún backend da los ceros (lo de hoy).
+// reiniciar. kind http porque port no vale para el atajo von. Un dorado que no es de ningún backend da los ceros (lo de hoy).
 func TestHooksSeRecalculanEnReload(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ai.json")
-	escribirRegistro(t, p, map[string]any{"smol": map[string]any{"kind": "von", "snapshot": "von-smol",
+	escribirRegistro(t, p, map[string]any{"smol": map[string]any{"kind": "http", "contract": "openai", "snapshot": "von-smol",
 		"port": 8090, "max_inflight": 4, "idle": "pause", "health": map[string]any{"path": "/healthz", "timeout": "2s"}}}, nil)
 	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.backends = backendsDePrueba
 	if _, err := g.Reload(); err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +519,7 @@ func TestHooksSeRecalculanEnReload(t *testing.T) {
 		t.Fatalf("ReadyFor = %+v", pr)
 	}
 
-	escribirRegistro(t, p, map[string]any{"smol": map[string]any{"kind": "von", "snapshot": "von-smol", "port": 9000}}, nil)
+	escribirRegistro(t, p, map[string]any{"smol": map[string]any{"kind": "http", "contract": "openai", "snapshot": "von-smol", "port": 9000}}, nil)
 	if _, err := g.Reload(); err != nil {
 		t.Fatal(err)
 	}
@@ -559,8 +532,8 @@ func TestHooksSeRecalculanEnReload(t *testing.T) {
 	if got := s.IdleFor("von-smol"); got != scheduler.IdleRemove {
 		t.Fatalf("IdleFor after reload = %q, want remove", got)
 	}
-	if pr := s.ReadyFor("von-smol"); pr != nil {
-		t.Fatalf("ReadyFor without health = %+v, want nil (TCP dial)", pr)
+	if pr := s.ReadyFor("von-smol"); pr == nil || pr.Path != "/health" {
+		t.Fatalf("ReadyFor without health = %+v, want the contract's /health", pr)
 	}
 	if s.PortFor("otro") != 0 || s.MaxInflightFor("otro") != 0 || s.IdleFor("otro") != scheduler.IdleDefault || s.ReadyFor("otro") != nil {
 		t.Fatal("a snapshot of no backend must get the zero values")
@@ -684,7 +657,6 @@ func TestBarridoReplicasDeModeloRetirado(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.backends = backendsDePrueba
 	g.setConfig(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -717,7 +689,6 @@ func TestCierreBorraReplicasRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.backends = backendsDePrueba
 	g.setConfig(cfg)
 	g.Close(context.Background())
 	frozen, removed := d.hecho()
@@ -739,7 +710,9 @@ func TestCierreSaltaReplicasEnVuelo(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]*ModelConfig{
 			"commits": {Kind: KindChispa, Path: trainedModel(t)},
-			"smol":    {Kind: KindVON, Snapshot: "von-smol"},
+			// freeze: el test mira que Close no congele bajo una petición
+			// en vuelo (con el defecto remove, no la borraría tampoco).
+			"smol": {Kind: KindVON, Snapshot: "von-smol", Idle: IdleFreeze},
 		},
 		Tasks: map[string]*TaskConfig{"kind": {Chispa: "commits", EscalateTo: "smol", EscalateForce: true,
 			Thresholds: map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}}},

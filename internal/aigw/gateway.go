@@ -145,9 +145,6 @@ type Gateway struct {
 	deployMu    sync.Mutex
 	deployCache map[string]deployCacheEntry
 
-	// backends expande un registro a sus backends HTTP: (*Config).Backends;
-	// los tests lo sustituyen.
-	backends func(*Config) []*Backend
 	// porDorado son los backends del registro efectivo por dorado (el
 	// "service" del planificador). Lo rehace setConfig (New y Reload) y lo
 	// leen los ganchos del planificador sin candado.
@@ -169,7 +166,6 @@ func New(o Options) (*Gateway, error) {
 		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), guests: newGuestPool(o.Idle, max(o.ProxyTimeout, o.VONTimeout)), auditSem: make(chan struct{}, 1),
 		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
 		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
-		backends: (*Config).Backends,
 	}
 	g.setConfig(cfg)
 	for _, n := range g.domainNotes(cfg) {
@@ -274,7 +270,7 @@ func (g *Gateway) backendDe(snap string) *Backend {
 // con Upstream no tienen dorado: no son del planificador.
 func (g *Gateway) indexarBackends(c *Config) {
 	m := map[string]*Backend{}
-	for _, b := range g.backends(c) {
+	for _, b := range c.Backends() {
 		if b != nil && b.Snapshot != "" {
 			m[b.Snapshot] = b
 		}

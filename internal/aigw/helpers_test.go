@@ -67,8 +67,8 @@ type fakeLlama struct {
 	bodies []map[string]any
 	auth   []string
 	calls  atomic.Int64
-	// entered y block, si están, retienen cada petición hasta que se cierre
-	// block (para tener peticiones en vuelo).
+	// entered y block, si están, retienen cada petición (salvo la sonda de
+	// salud) hasta que se cierre block (para tener peticiones en vuelo).
 	entered chan struct{}
 	block   chan struct{}
 }
@@ -76,6 +76,12 @@ type fakeLlama struct {
 func newFakeLlama(t *testing.T) *fakeLlama {
 	f := &fakeLlama{answer: "bug", status: 200}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			// La sonda de salud de von (/health) no es una petición del
+			// cliente: ni se cuenta ni se retiene.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		f.calls.Add(1)
 		if f.block != nil {
 			f.entered <- struct{}{}

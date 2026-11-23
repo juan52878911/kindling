@@ -28,6 +28,7 @@ type fakeDaemon struct {
 	runs     []api.RunRequest
 	thaws    int
 	freezes  int
+	removes  int
 }
 
 func (d *fakeDaemon) serve(t *testing.T) *api.Client {
@@ -86,6 +87,23 @@ func (d *fakeDaemon) serve(t *testing.T) *api.Client {
 	}
 	mux.HandleFunc("POST /machines/{ref}/thaw", state(api.StateRunning, &d.thaws))
 	mux.HandleFunc("POST /machines/{ref}/freeze", state(api.StateWarm, &d.freezes))
+	mux.HandleFunc("DELETE /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		id := r.PathValue("ref")
+		if d.machines[id] == nil {
+			http.Error(w, `{"error":"no such machine"}`, 404)
+			return
+		}
+		delete(d.machines, id)
+		for i, o := range d.order {
+			if o == id {
+				d.order = append(d.order[:i], d.order[i+1:]...)
+				break
+			}
+		}
+		d.removes++
+	})
 	mux.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {
 		send(w, []*api.Snapshot{{Name: "von-smol", MemMiB: 768, Labels: map[string]string{api.LabelService: "von-smol"}}})
 	})
@@ -139,7 +157,9 @@ func TestEscalaACero(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]*ModelConfig{
 			"commits": {Kind: KindChispa, Path: trainedModel(t)},
-			"smol":    {Kind: KindVON, Snapshot: "von-smol"},
+			// freeze explícito: el defecto de von es remove (lo cubre
+			// TestEscalaACeroRemove); este test sigue el camino de congelar.
+			"smol": {Kind: KindVON, Snapshot: "von-smol", Idle: IdleFreeze},
 		},
 		Tasks: map[string]*TaskConfig{"kind": {Chispa: "commits", EscalateTo: "smol", EscalateForce: true,
 			Thresholds: map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}}},
@@ -241,6 +261,73 @@ func TestEscalaACero(t *testing.T) {
 		}
 		if mc.State != api.StateWarm {
 			t.Fatalf("%s still %s after Close", id, mc.State)
+		}
+	}
+}
+
+// Con el defecto de von (idle: remove) la réplica ociosa se borra en vez de
+// congelarse, y la siguiente petición restaura otra del dorado: nunca hay un
+// thaw. La máquina ajena sigue sin tocarse.
+func TestEscalaACeroRemove(t *testing.T) {
+	ll := newFakeLlama(t)
+	d := &fakeDaemon{llama: strings.TrimPrefix(ll.srv.URL, "http://"), machines: map[string]*api.Machine{}}
+	client := d.serve(t)
+	d.machines["user1"] = &api.Machine{ID: "user1", Name: "smol-1", State: api.StateRunning, From: "von-smol",
+		Labels: map[string]string{api.LabelService: "von-smol"}, Forwards: map[string]string{"8000": d.llama}}
+	d.order = append(d.order, "user1")
+
+	cfg := &Config{
+		Models: map[string]*ModelConfig{
+			"commits": {Kind: KindChispa, Path: trainedModel(t)},
+			"smol":    {Kind: KindVON, Snapshot: "von-smol"},
+		},
+		Tasks: map[string]*TaskConfig{"kind": {Chispa: "commits", EscalateTo: "smol", EscalateForce: true,
+			Thresholds: map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}}},
+	}
+	g, err := New(Options{Client: client, Config: cfg, Idle: 300 * time.Millisecond, MaxReplicas: 2, MaxInflight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.Start(ctx)
+	h := g.Handler("")
+	ask := func() int {
+		return do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash"}).Code
+	}
+
+	if c := ask(); c != 200 {
+		t.Fatalf("first escalation: %d", c)
+	}
+	waitFor(t, "idle remove", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.removes == 1
+	})
+	if _, _, f, _ := d.counts(); f != 0 {
+		t.Fatalf("%d freezes with idle: remove", f)
+	}
+	if c := ask(); c != 200 {
+		t.Fatalf("after remove: %d", c)
+	}
+	if runs, thaws, _, _ := d.counts(); runs != 2 || thaws != 0 {
+		t.Fatalf("after remove: runs=%d thaws=%d, want a fresh restore from the golden", runs, thaws)
+	}
+	m := do(t, h, "GET", "/metrics", "", nil).Body.String()
+	if want := `kling_ai_von_wake_seconds_count{model="smol",how="restore"} 2`; !strings.Contains(m, want) {
+		t.Errorf("metrics lack %q", want)
+	}
+
+	cancel()
+	g.Close(context.Background())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if mc := d.machines["user1"]; mc == nil || mc.State != api.StateRunning {
+		t.Fatal("the gateway touched a machine it doesn't own")
+	}
+	for id, mc := range d.machines {
+		if id != "user1" && mc.State == api.StateRunning {
+			t.Fatalf("%s still running after Close", id)
 		}
 	}
 }
