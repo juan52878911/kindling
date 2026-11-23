@@ -73,6 +73,12 @@ func (g *Scheduler) sabePausar(ctx context.Context) bool {
 	return false
 }
 
+// plazoDormir acota cada pause o freeze del segador y del desalojo. Freeze
+// va por el cliente largo (volcar la memoria puede pasar del minuto) y el ctx
+// del segador no vence: sin plazo, un freeze atascado en el daemon lo paraba
+// para siempre con lo apartado tomado. Variable para las pruebas.
+var plazoDormir = 2 * time.Minute
+
 type dormida struct {
 	service, id string
 	memMiB      int
