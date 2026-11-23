@@ -870,6 +870,17 @@ func (s *Servidor) olvidar(id string) {
 			delete(s.contextos, k)
 		}
 	}
+	// La salida guardada de sus comandos (hasta maxSalidaComand cada uno) no
+	// sirve sin el sandbox.
+	orden := s.cmdOrden[:0]
+	for _, c := range s.cmdOrden {
+		if s.cmds[c] != nil && s.cmds[c].sandbox == id {
+			delete(s.cmds, c)
+			continue
+		}
+		orden = append(orden, c)
+	}
+	s.cmdOrden = orden
 }
 
 // listar pagina por page/pageSize sobre el listado por limit/cursor del gateway:

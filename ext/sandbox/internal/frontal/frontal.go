@@ -195,6 +195,9 @@ type Servidor struct {
 	// cuota con el fin de cada creación (ver reservar), y los de cada sandbox y
 	// operación. Solo están las claves en uso (ver bloquear). Bajo mu.
 	cerrojos map[string]*cerrojo
+	// cargas son los files/replace en curso por tenant (ver entrarCarga).
+	// Bajo mu.
+	cargas map[string]int
 	// trasContar, si no es nil, se llama en reservar entre contar y
 	// comprobar. Solo lo usan los tests.
 	trasContar func()

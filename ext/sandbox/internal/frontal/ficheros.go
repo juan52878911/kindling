@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -97,6 +98,39 @@ func rutaAbsoluta(campo, p string) error {
 		return fmt.Errorf("%s is longer than %d bytes", campo, maxRuta)
 	}
 	return nil
+}
+
+// maxReemplazar es el fichero más grande que acepta files/replace, y el
+// resultado más grande que escribe. Es una edición de texto: con 8 MiB sobra, y
+// el gateway llega a tener dos copias en memoria por petición.
+const maxReemplazar = 8 << 20
+
+// maxCargasPorTenant es cuántos files/replace puede tener un tenant a la vez.
+const maxCargasPorTenant = 4
+
+// entrarCarga reserva una de las cargas de fichero en memoria del tenant y
+// devuelve la función que la suelta; ok es false si ya tiene todas en curso.
+// El mapa solo guarda los tenants con alguna en curso.
+func (s *Servidor) entrarCarga(tenant string) (salir func(), ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cargas[tenant] >= maxCargasPorTenant {
+		return nil, false
+	}
+	if s.cargas == nil {
+		s.cargas = map[string]int{}
+	}
+	s.cargas[tenant]++
+	var una sync.Once
+	return func() {
+		una.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.cargas[tenant]--; s.cargas[tenant] <= 0 {
+				delete(s.cargas, tenant)
+			}
+		})
+	}, true
 }
 
 // maxRuta es PATH_MAX de Linux: una ruta más larga la rechaza el invitado de
@@ -474,6 +508,14 @@ func (s *Servidor) handleReemplazar(w http.ResponseWriter, r *http.Request, id s
 	// reemplazos sobre el mismo fichero no se pisan. Un proceso del invitado que
 	// escriba el fichero a la vez sí puede: no hay forma de impedirlo desde fuera.
 	defer s.bloquear(id + "\x00replace\x00" + req.Path)()
+	// replace es la única ruta que carga un fichero entero en el gateway:
+	// cada tenant tiene un cupo de las que van a la vez.
+	salir, ok := s.entrarCarga(tenantDe(r).Nombre)
+	if !ok {
+		fail(w, http.StatusTooManyRequests, fmt.Errorf("tenant already has %d file replacements in progress", maxCargasPorTenant))
+		return
+	}
+	defer salir()
 	st, err := h.Cliente.StatFile(r.Context(), mc.ID, req.Path)
 	if err != nil {
 		if esNoEncontrado(err) {
@@ -487,8 +529,8 @@ func (s *Servidor) handleReemplazar(w http.ResponseWriter, r *http.Request, id s
 		fail(w, http.StatusConflict, fmt.Errorf("%s is a directory", req.Path))
 		return
 	}
-	if st.Size > api.FileMaxUpload {
-		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("%s is %d bytes; replace works up to %d", req.Path, st.Size, int64(api.FileMaxUpload)))
+	if st.Size > maxReemplazar {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("%s is %d bytes; replace works up to %d", req.Path, st.Size, maxReemplazar))
 		return
 	}
 	rd, err := h.Cliente.ReadFile(r.Context(), mc.ID, req.Path)
@@ -496,17 +538,19 @@ func (s *Servidor) handleReemplazar(w http.ResponseWriter, r *http.Request, id s
 		fail(w, codigoExec(err), deHost(h, err))
 		return
 	}
-	datos, err := io.ReadAll(io.LimitReader(rd, api.FileMaxUpload+1))
+	datos, err := io.ReadAll(io.LimitReader(rd, maxReemplazar+1))
 	rd.Close()
 	if err != nil {
 		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
-	if int64(len(datos)) > api.FileMaxUpload {
-		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("%s is bigger than %d bytes", req.Path, int64(api.FileMaxUpload)))
+	if len(datos) > maxReemplazar {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("%s is bigger than %d bytes", req.Path, maxReemplazar))
 		return
 	}
-	n := strings.Count(string(datos), req.Old)
+	// Sobre []byte, sin pasar a string: cada conversión es otra copia entera.
+	viejo, nuevoTexto := []byte(req.Old), []byte(req.New)
+	n := bytes.Count(datos, viejo)
 	switch {
 	case n == 0:
 		fail(w, http.StatusConflict, errors.New("old was not found in the file"))
@@ -515,17 +559,19 @@ func (s *Servidor) handleReemplazar(w http.ResponseWriter, r *http.Request, id s
 		fail(w, http.StatusConflict, fmt.Errorf("old appears %d times: pass all to replace every one, or make it longer", n))
 		return
 	}
-	limite := 1
+	limite, veces := 1, 1
 	if req.All {
-		limite = -1
+		limite, veces = -1, n
 	}
-	nuevo := strings.Replace(string(datos), req.Old, req.New, limite)
-	if int64(len(nuevo)) > api.FileMaxUpload {
-		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the result would be %d bytes; the limit is %d", len(nuevo), int64(api.FileMaxUpload)))
+	// El tamaño se calcula antes de construir el resultado.
+	if tam := len(datos) + veces*(len(nuevoTexto)-len(viejo)); tam > maxReemplazar {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the result would be %d bytes; the limit is %d", tam, maxReemplazar))
 		return
 	}
+	nuevo := bytes.Replace(datos, viejo, nuevoTexto, limite)
+	datos = nil
 	modo, _ := strconv.ParseUint(st.Mode, 8, 32)
-	out, err := h.Cliente.WriteFile(r.Context(), mc.ID, req.Path, uint32(modo), false, strings.NewReader(nuevo))
+	out, err := h.Cliente.WriteFile(r.Context(), mc.ID, req.Path, uint32(modo), false, bytes.NewReader(nuevo))
 	if err != nil {
 		fail(w, codigoExec(err), deHost(h, err))
 		return
