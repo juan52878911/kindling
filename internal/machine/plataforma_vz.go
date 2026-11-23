@@ -1235,3 +1235,34 @@ func versionMacOS() string {
 	}
 	return v
 }
+
+// vmmsConReapuntado recuerda, por ejecutable del VMM, si anuncia
+// snapshot_repoint: un GET /kling/info por binario y vida del daemon.
+var vmmsConReapuntado sync.Map // ruta del ejecutable → bool
+
+// reapuntarDe arma las rutas de confianza para PUT /snapshot/load. Un VMM
+// anterior ignora el campo y abre las del snap.file: se manda igual (así el
+// día que se actualice ya vale) y se avisa una vez por binario. pid es el del
+// VMM, para saber su ejecutable.
+func (m *Manager) reapuntarDe(ctx context.Context, c *fc.Client, pid int, rutas func() (*fc.Repoint, error)) (*fc.Repoint, error) {
+	rp, err := rutas()
+	if err != nil {
+		return nil, err
+	}
+	exe, _ := rutaEjecutable(pid)
+	if _, ok := vmmsConReapuntado.Load(exe); ok && exe != "" {
+		return rp, nil
+	}
+	info, err := c.KlingInfo(ctx)
+	if err != nil {
+		// Sin saberlo no se cachea; el cuerpo lleva el campo igual.
+		return rp, nil
+	}
+	if exe == "" {
+		return rp, nil
+	}
+	if _, dup := vmmsConReapuntado.LoadOrStore(exe, info.SnapshotRepoint); !dup && !info.SnapshotRepoint {
+		log.Printf("warning: %s doesn't support snapshot_repoint: it will open the paths written in the snapshot (rebuild kling-vz/kling-hv)", exe)
+	}
+	return rp, nil
+}

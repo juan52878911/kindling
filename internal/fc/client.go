@@ -355,11 +355,32 @@ func (c *Client) LoadSnapshot(ctx context.Context, snapPath, memPath string, res
 	return c.LoadSnapshotTracking(ctx, snapPath, memPath, resume, false)
 }
 
+// Repoint son las rutas de confianza que el daemon manda dentro de
+// PUT /snapshot/load (kling_repoint, solo kling-vz y kling-hv): el VMM abre
+// estas y no las que el snap.file dice. Firecracker rechaza campos que no
+// conoce, así que con él se manda nil.
+type Repoint struct {
+	Kernel string                  `json:"kernel"`
+	Drives map[string]RepointDrive `json:"drives"`
+}
+
+// RepointDrive es la ruta de un disco y si va de solo lectura.
+type RepointDrive struct {
+	Path     string `json:"path"`
+	ReadOnly bool   `json:"read_only"`
+}
+
 // LoadSnapshotTracking es LoadSnapshot y, con track, KVM lleva la cuenta de
 // las páginas que el invitado escribe desde ahora: lo que hace posible un
 // SnapshotDiff después. Cuesta ciclos en cada primera escritura de una
 // página, así que solo se pide cuando se va a usar.
 func (c *Client) LoadSnapshotTracking(ctx context.Context, snapPath, memPath string, resume, track bool) error {
+	return c.LoadSnapshotRepoint(ctx, snapPath, memPath, resume, track, nil)
+}
+
+// LoadSnapshotRepoint es LoadSnapshotTracking que, con rp no nil, añade
+// kling_repoint al cuerpo. Con nil el cuerpo es el de siempre.
+func (c *Client) LoadSnapshotRepoint(ctx context.Context, snapPath, memPath string, resume, track bool, rp *Repoint) error {
 	body := map[string]any{
 		"snapshot_path": snapPath,
 		"mem_backend":   map[string]string{"backend_path": memPath, "backend_type": "File"},
@@ -367,6 +388,9 @@ func (c *Client) LoadSnapshotTracking(ctx context.Context, snapPath, memPath str
 	}
 	if track {
 		body["track_dirty_pages"] = true
+	}
+	if rp != nil {
+		body["kling_repoint"] = rp
 	}
 	return c.do(ctx, http.MethodPut, "/snapshot/load", body)
 }

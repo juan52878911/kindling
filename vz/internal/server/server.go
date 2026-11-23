@@ -268,6 +268,9 @@ type Server struct {
 	vm        VM
 	net       Network
 	statePath string
+	// estricto: el volcado se cargó con kling_repoint, así que sus rutas no se
+	// abrieron; create() rechaza además discos que sean enlaces simbólicos.
+	estricto bool
 
 	done     chan error
 	doneOnce sync.Once
@@ -1029,6 +1032,9 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 			BackendType string `json:"backend_type"`
 		} `json:"mem_backend"`
 		ResumeVM bool `json:"resume_vm"`
+		// KlingRepoint: las rutas del daemon (modo estricto). Un VMM anterior
+		// ignora el campo.
+		KlingRepoint *spec.Repoint `json:"kling_repoint"`
 	}
 	if err := decode(r, maxConfigBody, &l); err != nil {
 		fault(w, err)
@@ -1061,7 +1067,15 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("a snapshot can only be loaded into a fresh, unconfigured kling-vz"))
 		return
 	}
+	if l.KlingRepoint != nil {
+		// Antes de tocar nada: ni red ni confinamiento ven una ruta del volcado.
+		if err := loaded.Reapuntar(l.KlingRepoint); err != nil {
+			fault(w, err)
+			return
+		}
+	}
 	s.spec = loaded
+	s.estricto = l.KlingRepoint != nil
 	s.statePath = statePath
 	s.st = stPendingLoad
 	// La red se monta ya, y no al reanudar: así /kling/forwards funciona también
@@ -1069,6 +1083,7 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 	if err := s.ensureNet(); err != nil {
 		s.st = stConfiguring
 		s.spec = &spec.Spec{}
+		s.estricto = false
 		fault(w, err)
 		return
 	}
@@ -1088,7 +1103,8 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 var credentialKinds = credapi.Kinds
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
-	info := map[string]any{"backend": s.backend(), "version": s.d.Version}
+	// snapshot_repoint: sabe leer kling_repoint en PUT /snapshot/load.
+	info := map[string]any{"backend": s.backend(), "version": s.d.Version, "snapshot_repoint": true}
 	if s.d.Credentials != nil {
 		kinds := credentialKinds
 		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.
@@ -1542,6 +1558,15 @@ func (s *Server) ensureNet() error {
 func (s *Server) create() error {
 	if err := s.spec.Validate(); err != nil {
 		return err
+	}
+	if s.estricto {
+		// El overlay vive en un directorio que el VMM anterior escribía: un
+		// enlace simbólico ahí apuntaría a otra parte.
+		for _, d := range s.spec.Drives {
+			if fi, err := os.Lstat(d.PathOnHost); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("drive %q: %s is a symbolic link", d.DriveID, d.PathOnHost)
+			}
+		}
 	}
 	if err := s.ensureNet(); err != nil {
 		return err

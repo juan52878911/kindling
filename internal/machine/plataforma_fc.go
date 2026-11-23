@@ -525,3 +525,9 @@ func techoDelDaemon(vcpus int) int { return defaultCPUPct }
 
 // versionMacOS es "" fuera de macOS: el dorado no depende del sistema.
 func versionMacOS() string { return "" }
+
+// reapuntarDe: Firecracker rechaza campos que no conoce, así que el cuerpo de
+// PUT /snapshot/load es el de siempre (reapuntar.go).
+func (m *Manager) reapuntarDe(context.Context, *fc.Client, int, func() (*fc.Repoint, error)) (*fc.Repoint, error) {
+	return nil, nil
+}

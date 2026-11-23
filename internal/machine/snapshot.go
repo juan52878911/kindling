@@ -1996,9 +1996,29 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	// caché que el daemon poda (ni de un campo, ImageSnapshot, que un kling
 	// anterior no conoce).
 	enDiff := cargarConSeguimiento(ai != nil, req.OnTTL)
-	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotTracking(ctx,
+	// macOS: las rutas del daemon, para que el VMM no abra las del snap.file
+	// (reapuntar.go). En Linux, nil.
+	rp, rerr := m.reapuntarDe(ctx, c, pid, func() (*fc.Repoint, error) {
+		base, capa, err := m.imageLayer(snap.Image)
+		if err != nil {
+			return nil, err
+		}
+		discos := make([]discoDeConfianza, len(vols))
+		for i, v := range vols {
+			id := grabados[i].DriveID
+			if id == "" {
+				id = volumeDriveID(i)
+			}
+			discos[i] = discoDeConfianza{id: id, path: v.path, readOnly: v.readOnly}
+		}
+		return rutasDeConfianza(m.kernelDe(false), base, capa, overlay, discos), nil
+	})
+	if rerr != nil {
+		return abortar(rerr)
+	}
+	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotRepoint(ctx,
 		filepath.Join(snapDir, "snap.file"),
-		filepath.Join(snapDir, "mem.file"), false, enDiff); err != nil {
+		filepath.Join(snapDir, "mem.file"), false, enDiff, rp); err != nil {
 		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
 		// propagar: este error acaba en el 502 del gateway y en el CLI, y el
 		// texto crudo de Firecracker no le dice a nadie qué hacer.

@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -257,6 +258,59 @@ func (s *Spec) PatchDriveModes(id, path string, disposable *bool, sync *string) 
 		}
 	}
 	return fmt.Errorf("drive %q is not configured", id)
+}
+
+// Repoint son las rutas que el daemon manda dentro de PUT /snapshot/load
+// (kling_repoint): las únicas que el VMM abre. Las del snap.file las escribió
+// un VMM anterior, que pudo estar comprometido, y no se abren.
+type Repoint struct {
+	Kernel string                  `json:"kernel"`
+	Drives map[string]RepointDrive `json:"drives"`
+}
+
+// RepointDrive es la ruta de un disco y el modo en que el daemon espera
+// abrirlo.
+type RepointDrive struct {
+	Path     string `json:"path"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+// Reapuntar sustituye el kernel y la ruta de cada disco de s por los de rp.
+// Falla (sin dejar a s a medias) si falta el kernel, si un disco del volcado no
+// tiene entrada, o si su solo-lectura difiere del que dice el daemon. Las
+// entradas de más se ignoran. Boot_args, memoria y dispositivos no cambian.
+func (s *Spec) Reapuntar(rp *Repoint) error {
+	if rp == nil {
+		return nil
+	}
+	if rp.Kernel == "" {
+		return errors.New("kling_repoint: kernel is required")
+	}
+	if s.BootSource == nil {
+		return errors.New("kling_repoint: the snapshot has no boot source")
+	}
+	var propios, recibidos []string
+	for _, d := range s.Drives {
+		propios = append(propios, d.DriveID)
+	}
+	for id := range rp.Drives {
+		recibidos = append(recibidos, id)
+	}
+	sort.Strings(recibidos)
+	for _, d := range s.Drives {
+		e, ok := rp.Drives[d.DriveID]
+		if !ok || e.Path == "" {
+			return fmt.Errorf("kling_repoint: no path for drive %q (snapshot drives %v, received %v)", d.DriveID, propios, recibidos)
+		}
+		if e.ReadOnly != d.IsReadOnly {
+			return fmt.Errorf("kling_repoint: drive %q read_only is %v in the snapshot but %v in the request", d.DriveID, d.IsReadOnly, e.ReadOnly)
+		}
+	}
+	s.BootSource.KernelImagePath = rp.Kernel
+	for i := range s.Drives {
+		s.Drives[i].PathOnHost = rp.Drives[s.Drives[i].DriveID].Path
+	}
+	return nil
 }
 
 // ValidateVCPUs comprueba vcpu_count contra el tope del VMM (max; 0 = sin
