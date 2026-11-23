@@ -95,7 +95,9 @@ func TestRestaurarSnapshotSinVsock(t *testing.T) {
 	r := newRig(t)
 	r.srv.d.Vsock, r.srv.d.MTU = true, 16384
 	snap, mem := writeSnapshot(t, t.TempDir())
-	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":true}`)
+	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":false}`)
+	r.reapuntar("rootfs", "overlay")
+	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
 	_, s, args := r.f.last()
 	if s.Vsock || s.MTU != 0 || strings.Contains(args, "kling.vsock") {
 		t.Fatalf("restaurado con vsock=%v mtu=%d args=%q", s.Vsock, s.MTU, args)
@@ -126,7 +128,9 @@ func TestRestaurarSnapshotConVsock(t *testing.T) {
 	if err := os.WriteFile(mem, []byte("state"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":true}`)
+	r.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":false}`)
+	r.reapuntar("rootfs")
+	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
 	_, got, _ := r.f.last()
 	if !got.Vsock || got.MTU != 16384 || r.nets[0].cfg.MTU != 16384 || r.nets[0].dialer(api.GuestPort) == nil {
 		t.Fatalf("restaurado sin lo del snapshot: vsock=%v mtu=%d", got.Vsock, got.MTU)
@@ -152,7 +156,9 @@ func TestSnapshotRecuerdaAgenteSoloTCP(t *testing.T) {
 	}
 
 	r2 := newRig(t)
-	r2.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":true}`)
+	r2.must("PUT", "/snapshot/load", `{"snapshot_path":"`+snap+`","mem_backend":{"backend_path":"`+mem+`","backend_type":"File"},"resume_vm":false}`)
+	r2.reapuntar("rootfs", "overlay", "layer")
+	r2.must("PATCH", "/vm", `{"state":"Resumed"}`)
 	if r2.nets[0].dialer(api.GuestPort) == nil || !r2.nets[0].GuestOnlyTCP(api.GuestPort) {
 		t.Fatal("al restaurar no se pasó soloTCP a la red")
 	}

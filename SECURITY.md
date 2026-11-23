@@ -98,7 +98,13 @@ política viaja con el snapshot del servicio: reimportar o curar un servicio la 
 Hacia la microVM solo entran flujos nuevos que origina el host con su `HostIP` (daemon, CLI,
 proxies, publicación `-p`): el FORWARD del netns descarta lo NEW por el veth con otro origen y
 lo INVALID. Un contenedor Docker del host que llegara directo a los puertos de una microVM
-deja de llegar; el camino soportado es `-p`. Estrechar el egress y `Teardown` borran además las
+deja de llegar; el camino soportado es `-p`, que **no sustituye** el acceso directo: solo
+ata `127.0.0.1` del host, así que un contenedor Docker o un Pod del mismo host pierde el acceso
+directo a los puertos de una máquina (`kling db`, `kling.ports`) y no lo recupera por `-p`
+(el contenedor ve su propio loopback, no el del host). Es el precio de que ningún contenedor
+del host alcance una máquina por la red del netns; quien lo necesite publica el puerto
+con `-p` y llega a él por la dirección del host que corresponda (p. ej. `host.docker.internal`
+solo si el puerto escucha ahí), sabiendo que `-p` solo ata `127.0.0.1`. Estrechar el egress y `Teardown` borran además las
 entradas de conntrack del host con el NSIP de origen o destino, para que un flujo abierto no se
 recoja de nuevo ni lo herede la máquina que reutilice el índice. Los nombres DNS bloqueados que
 se muestran al operador se limitan a `[a-z0-9._-]`.
@@ -830,6 +836,20 @@ pie el `no_new_privs`, las cero capacidades y lo que es de root (bases, dorados,
 mezclar cargas de distinta confianza, y con política de autorización equivale a quitar la
 separación entre inquilinos.
 
+**En macOS no hay jailer, y el sandbox no siempre está.** `kling-vz` y `kling-hv` se confinan
+con `sandbox_init` justo antes de crear la VM (§22), y **no se confinan** (el proceso queda
+con todo lo del usuario del Mac) cuando: el daemon no les pasa `KLING_VZ_CONFINE_ROOT`
+(un `kling-vz` lanzado a mano, o un daemon anterior), cuando `KLING_VZ_NO_SANDBOX=1`, y
+en cualquier momento anterior a crear la VM (la carga del volcado, la red y la API van sin
+perfil). Cada caso queda en el log del VMM (`not confined`, `WARNING: not confined`).
+Un VMM de Mac sin sandbox es equivalente a un Firecracker con `KLING_JAILER=0`: un escape
+del invitado alcanza todo lo que alcanza el usuario. Además, ninguno de los dos se fía de lo que
+escribió otro VMM: un `snap.file` cargado no hace que se abra ninguna de las rutas de disco o de
+kernel que lleva (`PUT /snapshot/load` las marca y `create()` falla si el daemon no las ha
+reapuntado; `GET /kling/info` anuncia `snapshot_repoint`), y los binarios salen firmados con
+hardened runtime (sin JIT, sin `DYLD_*`, sin bibliotecas sin firmar) y `kling-hv` con
+`-fstack-protector-strong`.
+
 ### 12. Admisión por disco y por presión de memoria
 
 El daemon rechaza máquinas nuevas cuando queda poco disco bajo `$KLING_ROOT` o
@@ -1414,6 +1434,12 @@ y MMDS de cada invitado corren dentro de su `kling-vz`, que es un proceso del us
 Un fallo explotable ahí es código del invitado corriendo como el usuario, así que lo que
 ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
 
+- **Cuándo NO hay sandbox en Mac.** El perfil se aplica tras la carga del volcado y antes de crear
+  la VM, y solo con `KLING_VZ_CONFINE_ROOT` puesta y sin `KLING_VZ_NO_SANDBOX=1`; si no, el
+  VMM avisa en su log y corre sin él, con lo que el aislamiento entre máquinas de este apartado
+  no existe. Solo el log del VMM lo dice (`kling doctor` no lo comprueba). Por eso un `snap.file` no puede
+  decidir qué abre el VMM aunque no haya sandbox (§11): el daemon reapunta kernel y discos.
+  Y los dos VMM se firman con hardened runtime (`--options runtime`).
 - **El perfil de sandbox aísla a una máquina de las demás** (`vz/cmd/kling-vz/kling-vz.sb`,
   `internal/machine/publicar_volcado.go`). Hasta ahora dejaba a `kling-vz` leer toda la raíz, incluido
   `secrets/snapshot.key` (la clave HMAC y la maestra de la que HKDF deriva la de cada

@@ -3,7 +3,7 @@
 package hvvm
 
 /*
-#cgo CFLAGS: -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=15.2
+#cgo CFLAGS: -O2 -fstack-protector-strong -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=15.2
 #cgo LDFLAGS: -framework Hypervisor
 #include <stdlib.h>
 #include "khv.h"
