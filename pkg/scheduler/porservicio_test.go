@@ -426,3 +426,30 @@ func TestMaxInflightForNilComoSiempre(t *testing.T) {
 		t.Errorf("sin gancho las dos reservas iban a la primaria (inflight 0); fueron a %s y %s", a.machineID, b.machineID)
 	}
 }
+
+// Una instancia del fondo de un servicio con PortFor se prepara en el puerto
+// de ese servicio, no en el del planificador.
+func TestFondoUsaPortFor(t *testing.T) {
+	g, _ := conDaemonAislado(t)
+	g.PortFor = func(string) int { return 9000 }
+	var addr string
+	g.PrepareAddr = func(_ context.Context, a string) (string, error) { addr = a; return "sid", nil }
+	if _, err := g.pool.warm(context.Background(), "svc", "svc"); err != nil {
+		t.Fatal(err)
+	}
+	if addr != "172.16.0.2:9000" {
+		t.Fatalf("PrepareAddr(%q), quería el puerto 9000 del servicio", addr)
+	}
+}
+
+// Status da la dirección en el puerto de la instancia (el de PortFor al
+// crearla), no en el del planificador.
+func TestStatusUsaPuertoDeLaInstancia(t *testing.T) {
+	g, _ := conDaemonAislado(t)
+	g.mu.Lock()
+	g.services["svc"] = &entry{machineID: "m1", ip: "10.0.0.9", port: 9000, lastUse: time.Now()}
+	g.mu.Unlock()
+	if st := g.Status("svc"); st.Addr != "10.0.0.9:9000" {
+		t.Fatalf("Status.Addr = %q, quería 10.0.0.9:9000", st.Addr)
+	}
+}
