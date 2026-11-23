@@ -148,13 +148,16 @@ func TestModelDeployRechazaAntes(t *testing.T) {
 		mod func(*modelDeployOptions)
 		msg string
 	}{
-		"kind distinto":  {cfgVon, func(*modelDeployOptions) {}, "not an http backend"},
-		"contrato":       {registroBase, func(o *modelDeployOptions) { o.Contract = "grpc" }, "-contract"},
-		"raw sin rutas":  {registroBase, func(o *modelDeployOptions) { o.Contract = "raw" }, "-route"},
-		"idle":           {registroBase, func(o *modelDeployOptions) { o.Idle = "sleep" }, "-idle"},
-		"nombre":         {registroBase, func(o *modelDeployOptions) { o.Name = "Srv" }, "model name"},
-		"env secreto":    {registroBase, func(o *modelDeployOptions) { o.Env = []string{"OPENAI_API_KEY=sk"} }, "-allow-env"},
-		"health timeout": {registroBase, func(o *modelDeployOptions) { o.Health.Timeout = "pronto" }, "-health-timeout"},
+		"kind distinto": {cfgVon, func(*modelDeployOptions) {}, "not an http backend"},
+		"contrato":      {registroBase, func(o *modelDeployOptions) { o.Contract = "grpc" }, "-contract"},
+		// El gateway no acepta un bloque kind http con chispa-classify: lo
+		// que escribiría deploy no cargaría.
+		"chispa-classify": {registroBase, func(o *modelDeployOptions) { o.Contract = "chispa-classify" }, "kling ai chispa deploy"},
+		"raw sin rutas":   {registroBase, func(o *modelDeployOptions) { o.Contract = "raw" }, "-route"},
+		"idle":            {registroBase, func(o *modelDeployOptions) { o.Idle = "sleep" }, "-idle"},
+		"nombre":          {registroBase, func(o *modelDeployOptions) { o.Name = "Srv" }, "model name"},
+		"env secreto":     {registroBase, func(o *modelDeployOptions) { o.Env = []string{"OPENAI_API_KEY=sk"} }, "-allow-env"},
+		"health timeout":  {registroBase, func(o *modelDeployOptions) { o.Health.Timeout = "pronto" }, "-health-timeout"},
 	} {
 		cfg := escribeRegistro(t, caso.reg)
 		d := &daemonModelos{}
