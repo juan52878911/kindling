@@ -401,3 +401,57 @@ func TestProxyPermisosPuntoYComaCodificado(t *testing.T) {
 		t.Fatalf("el proveedor recibió %q", vistas)
 	}
 }
+
+// Con Allow se autoriza el método y la ruta de la línea de petición: las
+// cabeceras con las que algunos proveedores reescriben método o ruta no pueden
+// llegarles, o la operación que ejecutan con la clave no es la comprobada.
+func TestProxyPermisosQuitaCabecerasDeReescritura(t *testing.T) {
+	reescritura := []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override",
+		"X-Original-URL", "X-Original-Method", "X-Rewrite-URL"}
+	var vistas http.Header
+	srv, _ := proxyCon(t, func(w http.ResponseWriter, r *http.Request) {
+		vistas = r.Header.Clone()
+	}, credsConPermisos(false), nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/balance", nil)
+	req.Host = "example.com"
+	req.Header.Set("Authorization", "Bearer "+testPlace)
+	for _, h := range reescritura {
+		req.Header.Set(h, "x")
+	}
+	req.Header.Set("X-Otra", "se queda")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	for _, h := range reescritura {
+		if v := vistas.Get(h); v != "" {
+			t.Errorf("%s llegó al proveedor: %q", h, v)
+		}
+	}
+	if vistas.Get("X-Otra") != "se queda" {
+		t.Errorf("se perdió una cabecera normal: %v", vistas)
+	}
+}
+
+// Sin Allow no hay nada que proteger: el invitado manda lo que quiera.
+func TestProxySinPermisosReenviaCabecerasDeReescritura(t *testing.T) {
+	var vista string
+	srv, _ := proxyCon(t, func(w http.ResponseWriter, r *http.Request) {
+		vista = r.Header.Get("X-HTTP-Method-Override")
+	}, credsUna(), nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/a", nil)
+	req.Host = "example.com"
+	req.Header.Set("X-HTTP-Method-Override", "PATCH")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if vista != "PATCH" {
+		t.Errorf("el proveedor vio %q", vista)
+	}
+}

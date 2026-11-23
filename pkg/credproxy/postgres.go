@@ -540,14 +540,17 @@ func (s *sesionPG) servir() {
 		s.rec.Database = ":cred"
 	}
 
-	// Hacia otra máquina (maquina.go): la sesión se apunta ANTES de resolver,
-	// para que Invalidar la encuentre aunque llegue entre la resolución y el
-	// dial.
-	if cred.UpstreamMachine != "" {
+	// La sesión se apunta ANTES de marcar (maquina.go): SetCredentials la corta
+	// si su credencial se quita o se rota, y, hacia otra máquina, Invalidar la
+	// encuentra aunque llegue entre la resolución y el dial.
+	{
 		quitar, ok := p.registrarSesion(s, cred)
 		defer quitar()
 		if !ok {
-			s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
+			s.rec.Reason, s.rec.Denied = ReasonNoCredential, true
+			if cred.UpstreamMachine != "" {
+				s.rec.Reason = ReasonMachineUnavailable
+			}
 			s.fatal("08006", "the credential was withdrawn")
 			return
 		}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/internal/ext4"
@@ -263,7 +264,7 @@ func sinTocarEsIgual(ctx context.Context, file, dentro, quiero string) (existe, 
 	}
 	bin := debugfsBin()
 	if bin == "" {
-		return sinTocarEsIgualGo(file, limpio, quiero)
+		return sinTocarEsIgualGo(ctx, file, limpio, quiero)
 	}
 	im := imagenDebugfs{bin: bin, file: file}
 	e, err := im.stat(ctx, limpio)
@@ -280,9 +281,15 @@ func sinTocarEsIgual(ctx context.Context, file, dentro, quiero string) (existe, 
 	return true, err == nil && tengo == quiero
 }
 
+// plazoLeerExt4 acota la lectura en Go de una imagen escrita por el invitado:
+// el lector ya rechaza ciclos y tamaños imposibles, y el plazo cubre lo que
+// quede (una imagen grande y legítima pero lenta no debe ocupar el daemon).
+var plazoLeerExt4 = 30 * time.Second
+
 // sinTocarEsIgualGo es sinTocarEsIgual con internal/ext4. La imagen no es de
-// fiar: un pánico del lector se queda en "no es igual", no tumba el daemon.
-func sinTocarEsIgualGo(file, limpio, quiero string) (existe, igual bool) {
+// fiar: un pánico del lector se queda en "no es igual", no tumba el daemon, y
+// el plazo corta la lectura del árbol y la copia del fichero.
+func sinTocarEsIgualGo(ctx context.Context, file, limpio, quiero string) (existe, igual bool) {
 	existe = true
 	defer func() {
 		if recover() != nil {
@@ -294,7 +301,9 @@ func sinTocarEsIgualGo(file, limpio, quiero string) (existe, igual bool) {
 		return true, false
 	}
 	defer f.Close()
-	raiz, err := ext4.Read(f)
+	ctx, cancel := context.WithTimeout(ctx, plazoLeerExt4)
+	defer cancel()
+	raiz, err := ext4.ReadContext(ctx, f)
 	if err != nil {
 		return true, false
 	}

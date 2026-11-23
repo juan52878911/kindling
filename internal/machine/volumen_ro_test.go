@@ -121,6 +121,13 @@ func TestThawDeFallidaReadmiteSusVolumenes(t *testing.T) {
 	if duenos[ruta] != 4242 {
 		t.Fatalf("la failed descongelada no recuperó su volumen (dueño %d)", duenos[ruta])
 	}
+	// Mientras dura su thaw (sigue failed), su reserva la cubre.
+	if _, err := m.reservarVolumenes(api.RunRequest{Volume: "datos"}, "otra", "otra"); err == nil {
+		t.Fatal("otra máquina tomó en escritura el volumen de una failed a medio descongelar")
+	}
+	m.soltarReservas("otra")
+	// Un thaw que acaba fallido suelta la reserva y la failed deja de contar.
+	m.soltarReservas("f")
 	if _, err := m.reservarVolumenes(api.RunRequest{Volume: "datos"}, "otra", "otra"); err != nil {
 		t.Fatal(err)
 	}

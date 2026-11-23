@@ -78,17 +78,27 @@ base_trae_navegador() {
 # pkg_add instala con el gestor que tenga la base: apk en Alpine, apt en la base
 # glibc. Se decide por el binario que hay DENTRO de la imagen, no por su nombre.
 #
+# Toda orden dentro del chroot pasa por enjaula, con un PATH fijo y sin
+# /usr/local. El guion corre como root con el entorno del daemon, cuyo PATH
+# suele anteponer /usr/local/bin; y npm y pip, aunque no ejecutan los scripts
+# del paquete, sí dejan en ese directorio ejecutables con el nombre que el
+# paquete elija. Una orden posterior resuelta por el PATH heredado (rm, sh, los
+# que lancen apk o apt) ejecutaría uno de esos como root en el host. Por lo
+# mismo, las órdenes de dentro van con ruta absoluta.
+CHROOT_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+enjaula() { PATH="$CHROOT_PATH" chroot "$mnt" "$@"; }
+
 # No monta /proc ni copia resolv.conf: de eso se encargan los dos llamadores, que
 # ya lo hacian antes de que esto existiera. Hacerlo tambien aqui dejaria un bind
 # mount de mas por cada llamada.
 pkg_add() {
   [ $# -gt 0 ] || return 0
   if [ -x "$mnt/sbin/apk" ]; then
-    chroot "$mnt" /sbin/apk add --no-cache "$@"
+    enjaula /sbin/apk add --no-cache "$@"
   else
-    chroot "$mnt" env DEBIAN_FRONTEND=noninteractive sh -c \
-      "apt-get update -qq && apt-get install -y --no-install-recommends $*" \
-      && chroot "$mnt" sh -c "apt-get clean; rm -rf /var/lib/apt/lists/*" 2>/dev/null
+    enjaula /usr/bin/env DEBIAN_FRONTEND=noninteractive /bin/sh -c \
+      "/usr/bin/apt-get update -qq && /usr/bin/apt-get install -y --no-install-recommends $*" \
+      && enjaula /bin/sh -c "/usr/bin/apt-get clean; /bin/rm -rf /var/lib/apt/lists/*" 2>/dev/null
   fi
 }
 
@@ -359,8 +369,8 @@ if [ -n "$NPM" ]; then
   #
   # --omit=dev recorta lo que no hace falta en ejecución; el espacio dentro de la
   # imagen es el que más pesa en el snapshot.
-  chroot "$mnt" /usr/bin/npm install -g --ignore-scripts --omit=dev --no-fund --no-audit $NPM
-  chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
+  enjaula /usr/bin/npm install -g --ignore-scripts --omit=dev --no-fund --no-audit $NPM
+  enjaula /bin/sh -c '/bin/rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
@@ -432,19 +442,19 @@ if [ "$BUNDLE" = 1 ]; then
     # /usr/local/bin (symlink al dist/index.js del paquete).
     case "${CMD[0]}" in
       node|/usr/bin/node|/usr/local/bin/node) ENTRY="${CMD[1]}"; REST=("${CMD[@]:2}") ;;
-      *) ENTRY="$(chroot "$mnt" /usr/bin/readlink -f "/usr/local/bin/$(basename "${CMD[0]}")" 2>/dev/null)"; REST=("${CMD[@]:1}") ;;
+      *) ENTRY="$(enjaula /usr/bin/readlink -f "/usr/local/bin/$(basename "${CMD[0]}")" 2>/dev/null)"; REST=("${CMD[@]:1}") ;;
     esac
     if [ -n "$ENTRY" ] && ! valid_entry "$ENTRY"; then
       echo "AVISO: -bundle: el entry JS no es una ruta absoluta limpia; sin empaquetar" >&2
       ENTRY=""
     fi
-    if [ -n "$ENTRY" ] && chroot "$mnt" /usr/bin/test -f "$ENTRY"; then
+    if [ -n "$ENTRY" ] && enjaula /usr/bin/test -f "$ENTRY"; then
       echo "empaquetando con esbuild $ESBUILD_VERSION: $ENTRY -> /opt/$NAME.bundle.mjs"
       EB_DIR="$mnt/tmp/kling-esbuild"
       rm -rf "$EB_DIR"
       # Binario estático de Go: corre igual en musl y sin /proc. Sin shell de por
       # medio: ENTRY va como argumento y no se interpreta.
-      if fetch_esbuild "$EB_DIR" && chroot "$mnt" /tmp/kling-esbuild/esbuild "$ENTRY" --bundle --platform=node --format=esm "--outfile=/opt/$NAME.bundle.mjs"; then
+      if fetch_esbuild "$EB_DIR" && enjaula /tmp/kling-esbuild/esbuild "$ENTRY" --bundle --platform=node --format=esm "--outfile=/opt/$NAME.bundle.mjs"; then
         rm -rf "$EB_DIR"
         # EL package.json VA JUNTO AL BUNDLE. Hay servidores que leen su versión del
         # package.json EN TIEMPO DE EJECUCIÓN, no al compilar: server-sequential-thinking
@@ -671,7 +681,7 @@ if [ -n "$NPM" ]; then
   # (builtin de sh) en vez de `which`, que la imagen mínima puede no traer.
   SYS_FINAL=""
   for b in $SYS; do
-    chroot "$mnt" /bin/sh -c "command -v '$b'" >/dev/null 2>&1 || SYS_FINAL="$SYS_FINAL $b"
+    enjaula /bin/sh -c "command -v '$b'" >/dev/null 2>&1 || SYS_FINAL="$SYS_FINAL $b"
   done
   SYS="$(echo $SYS_FINAL | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' -)"
   SYSJSON="[]"
@@ -759,9 +769,9 @@ if [ -n "$PIP" ]; then
   # --only-binary=:all: por la misma razón que --ignore-scripts en npm: un
   # sdist ejecuta su setup.py durante la instalación, aquí como root sobre el
   # host. Con ruedas precompiladas no se ejecuta nada del paquete.
-  chroot "$mnt" /usr/bin/pip install --no-cache-dir --break-system-packages \
+  enjaula /usr/bin/pip install --no-cache-dir --break-system-packages \
     --only-binary=:all: $PIP
-  chroot "$mnt" /bin/sh -c 'rm -rf /root/.cache /usr/lib/python3*/site-packages/pip/_vendor/certifi/*.pem.orig' 2>/dev/null || true
+  enjaula /bin/sh -c '/bin/rm -rf /root/.cache /usr/lib/python3*/site-packages/pip/_vendor/certifi/*.pem.orig' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
@@ -870,7 +880,7 @@ fi
 # SKIP_CMD_CHECK=1 la salta, para el caso raro de un binario que llega por
 # volumen en tiempo de ejecución.
 if [ ${#CMD[@]} -gt 0 ] && [ "${SKIP_CMD_CHECK:-0}" != 1 ]; then
-  if ! chroot "$mnt" /bin/sh -c \
+  if ! enjaula /bin/sh -c \
       'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v "$1" >/dev/null' \
       sh "${CMD[0]}"; then
     echo "ERROR: el comando '${CMD[0]}' no existe dentro de la imagen." >&2

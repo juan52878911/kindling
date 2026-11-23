@@ -9,7 +9,10 @@ del código falta en la spec o sobra, o si un esquema deja de coincidir con los
 
 Todas las rutas salvo `GET /v1/health` piden `Authorization: Bearer <token>`.
 El token es el de un inquilino (sus sandboxes, grafos, plantillas y métricas) o el de
-un admin (además `GET /v1/hosts`, `/v1/tenants` y las métricas de todos). Sin token o con uno
+un admin (además `GET /v1/hosts`, `/v1/tenants` y las métricas de todos). En `GET /v1/metrics`
+un inquilino sin admin ve solo sus series de máquinas y shells; las del operador (creaciones de
+todos los inquilinos y sus tramos, el fondo precalentado, el estado de los hosts) solo las ve un
+admin, como `/v1/hosts`. Sin token o con uno
 inválido, 401 con `WWW-Authenticate: Bearer realm="kindling-sandbox"`.
 
 Los errores son JSON `{"message": "...", "code": "..."}`; el código HTTP manda y `code`
@@ -30,7 +33,7 @@ solo con token de admin (si no, 403):
 | `GET /v1/tenants`, `GET /v1/tenants/{id}` | Lista o ve; los del entorno salen con `source: env` y `read_only: true` |
 | `POST /v1/tenants` | `{name, admin, limits}`; el nombre es el id y no cambia |
 | `PATCH /v1/tenants/{id}` | `{admin, limits}`; `limits` sustituye todos los topes |
-| `DELETE /v1/tenants/{id}` | Borra el inquilino y sus claves |
+| `DELETE /v1/tenants/{id}` | Borra el inquilino y sus claves; ver abajo si aún tiene recursos |
 | `POST /v1/tenants/{id}/keys` | Crea una clave (`expires_at` opcional); la devuelve UNA vez en `key` |
 | `POST /v1/tenants/{id}/keys/{kid}/rotate` | Clave nueva; la vieja vale `grace_minutes` más (10 por defecto, 0 = ya) |
 | `DELETE /v1/tenants/{id}/keys/{kid}` | Revoca al instante |
@@ -43,6 +46,13 @@ Los topes del almacén son los mismos de `KLING_SANDBOX_TENANTS` (`max_sandboxes
 inquilinos del entorno no se pueden cambiar por la API (409) y un nombre no puede estar en
 los dos sitios (el gateway no arranca). Sin `-state-dir` las escrituras dan 501. Un admin del
 almacén no puede quitarse el rol ni borrarse (409).
+
+Borrar un inquilino que aún tiene sandboxes, grafos o volúmenes en algún host da `409` con
+cuántos le quedan de cada cosa: si no, un inquilino nuevo con el mismo nombre lo heredaría todo.
+Con `?force=true` el gateway los destruye (grafos y sandboxes primero, volúmenes después) y luego
+borra el registro; si algo no se deja destruir, `502` y el inquilino sigue. Si un host no contesta
+al listar, `503`: sin él no se sabe qué queda. Un puerto público deja de servirse en cuanto su
+inquilino no existe.
 
 CLI: `kling sbx tenant ls|show|add|set|rm` y `kling sbx key new|rotate|rm`; `key new` y
 `key rotate` imprimen la clave en stdout y nada más. SDKs: `Admin` en Python y TypeScript.
@@ -188,7 +198,8 @@ tipos de trama.
 
 `/v1/sandboxes/{id}/files?path=...`: GET descarga (o `stat=1` da metadatos, `list=1` lista, `tar=1`
 baja el directorio como tar), PUT sube (`mode` octal, `mkdir=1`, máximo 64 MiB; con `tar=1` el
-cuerpo es un tar que se extrae dentro de `path`) y DELETE borra.
+cuerpo es un tar que se extrae dentro de `path`) y DELETE borra. Toda ruta del invitado ha de ser
+absoluta y de 4096 bytes como mucho (`PATH_MAX`); si no, `400`.
 
 - **`Range`** en la descarga: `Range: bytes=a-b` (también `a-` y `-n`, un solo rango) da `206` con
   `Content-Range`; fuera del fichero, `416`. El invitado no sabe saltar: el gateway lee y descarta
@@ -200,8 +211,9 @@ cuerpo es un tar que se extrae dentro de `path`) y DELETE borra.
 - `POST …/files/chmod` `{"path","mode":"755","recursive"}` cambia permisos (modo octal de 3 o 4
   cifras; devuelve el `FileStat`), y `POST …/files/replace` `{"path","old","new","all"}` lee el
   fichero, sustituye `old` por `new` y lo reescribe con su modo (sin `all`, `old` debe aparecer
-  una vez: `409`; fichero y resultado hasta 64 MiB: `413`; no es atómico frente a un proceso
-  del invitado que escriba el mismo fichero).
+  una vez: `409`; fichero y resultado hasta 8 MiB: `413`; un inquilino tiene como mucho 4 a la
+  vez, por encima `429`; no es atómico frente a un proceso del invitado que escriba el mismo
+  fichero).
 - `POST …/files/mkdir` `{"path"}`
   crea el directorio y los que falten (`201`, con su `FileStat`), y
   `GET …/files/search?path=/dir&glob=*.log` busca por nombre (un `find` dentro del sandbox con

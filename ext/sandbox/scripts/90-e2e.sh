@@ -219,10 +219,12 @@ step "9. /v1/metrics"
 codigo=$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/metrics")
 [ "$codigo" = "401" ] && ok "/v1/metrics exige token" || bad "/v1/metrics sin token" "401" "$codigo"
 out=$(curl -s -H "Authorization: Bearer $TOKEN_B" "$URL/v1/metrics")
-if contiene "$out" "kling_sandbox_machines" && contiene "$out" "kling_sandbox_creations_total"; then
-  ok "/v1/metrics devuelve el formato de Prometheus (un token cualquiera vale)"
+# Un tenant sin admin ve sus series, no las del operador (creaciones de
+# todos, fondo, hosts).
+if contiene "$out" "kling_sandbox_machines" && ! contiene "$out" "kling_sandbox_creations_total"; then
+  ok "/v1/metrics devuelve el formato de Prometheus, sin las series del operador para un tenant"
 else
-  bad "/v1/metrics" "líneas kling_sandbox_machines y kling_sandbox_creations_total" "$out"
+  bad "/v1/metrics" "líneas kling_sandbox_machines y ninguna kling_sandbox_creations_total" "$out"
 fi
 
 # ── resumen ──────────────────────────────────────────────────────────────

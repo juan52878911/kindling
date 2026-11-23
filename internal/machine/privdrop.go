@@ -54,18 +54,32 @@ func resolvePrivileges(username string) (*Privileges, string) {
 			"-run-as/KLING_RUN_AS if it's named differently)", username, username, username)
 		return &Privileges{Motivo: motivo}, fmt.Sprintf("user %q does not exist: Firecracker will run as root", username)
 	}
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-
 	kvmGid := -1
 	if g, err := lookupGroup("kvm"); err == nil {
-		kvmGid, _ = strconv.Atoi(g.Gid)
+		if n, err := strconv.Atoi(g.Gid); err == nil {
+			kvmGid = n
+		}
 	}
 	if kvmGid < 0 {
 		motivo := "the host has no kvm group, so the unprivileged user can't open /dev/kvm " +
 			"(load the kvm module so /dev/kvm exists with group kvm, then sudo usermod -aG kvm " +
 			username + ")"
 		return &Privileges{Motivo: motivo}, "can't find kvm group: Firecracker will run as root"
+	}
+
+	// Un uid o gid que no se puede leer, o que es 0, no baja nada: darlo por
+	// habilitado haría creer al daemon que Firecracker corre sin root.
+	uid, errU := strconv.Atoi(u.Uid)
+	gid, errG := strconv.Atoi(u.Gid)
+	if errU != nil || errG != nil {
+		motivo := fmt.Sprintf("the unprivileged user %q has a non-numeric uid %q or gid %q "+
+			"(pass -run-as/KLING_RUN_AS with a regular service user)", username, u.Uid, u.Gid)
+		return &Privileges{Motivo: motivo}, fmt.Sprintf("user %q has no numeric uid/gid: Firecracker will run as root", username)
+	}
+	if uid == 0 || gid == 0 {
+		motivo := fmt.Sprintf("the unprivileged user %q resolves to root (uid %d, gid %d); "+
+			"pass -run-as/KLING_RUN_AS with a non-root service user, e.g. kindling", username, uid, gid)
+		return &Privileges{Motivo: motivo}, fmt.Sprintf("user %q is root (uid %d, gid %d): Firecracker will run as root", username, uid, gid)
 	}
 	return &Privileges{UID: uid, GID: gid, KVMGid: kvmGid, Enabled: true}, ""
 }

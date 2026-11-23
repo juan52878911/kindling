@@ -191,9 +191,13 @@ type Servidor struct {
 	// simultáneas pasarían todas la cuota.
 	mu      sync.Mutex
 	enVuelo map[string]int
-	// cerrojos: uno por tenant (la lista es fija desde Nuevo), que serializa
-	// la cuenta de la cuota con el fin de cada creación (ver reservar). Bajo mu.
-	cerrojos map[string]*sync.Mutex
+	// cerrojos: el de cuota de cada tenant, que serializa la cuenta de la
+	// cuota con el fin de cada creación (ver reservar), y los de cada sandbox y
+	// operación. Solo están las claves en uso (ver bloquear). Bajo mu.
+	cerrojos map[string]*cerrojo
+	// cargas son los files/replace en curso por tenant (ver entrarCarga).
+	// Bajo mu.
+	cargas map[string]int
 	// trasContar, si no es nil, se llama en reservar entre contar y
 	// comprobar. Solo lo usan los tests.
 	trasContar func()

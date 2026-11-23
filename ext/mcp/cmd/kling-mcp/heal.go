@@ -73,6 +73,10 @@ func argvReimportar(s *api.Snapshot, host string) []string {
 	} else {
 		args = append(args, "-ephemeral")
 	}
+	// El aislamiento vive en una anotacion, y el Commit con reemplazo del import
+	// crea un snapshot sin anotaciones: sin pasarlo, un servicio con una microVM
+	// por sesion volveria a ser compartido.
+	args = append(args, "-isolation", mcp.Isolation(s))
 	return append(args, s.Service())
 }
 

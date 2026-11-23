@@ -20,8 +20,11 @@ func gettid() uint32 { return uint32(syscall.Gettid()) }
 func touchInGuest(op synthOp, full string) {
 	switch op.ev {
 	case share.EventModify:
+		// Lstat: si la ruta es (o pasó a ser) un enlace, no se sigue. Truncate
+		// sí lo seguiría, pero synthReply contesta en local todo SETATTR de
+		// este hilo, sea del nodo que sea.
 		var st syscall.Stat_t
-		if syscall.Stat(full, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		if syscall.Lstat(full, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG {
 			return
 		}
 		_ = syscall.Truncate(full, st.Size)

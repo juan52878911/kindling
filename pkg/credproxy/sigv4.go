@@ -616,6 +616,12 @@ func cuerpoSigV4(r *http.Request, src io.Reader, f *firmaInvitado, servicio stri
 		}
 		return strings.NewReader(string(b)), int64(len(b)), hexSHA256(b), nil, nil
 	case hash == hashSinFirmar, hash == hashSinFirmarTr, hashHex(hash):
+		if length == 0 {
+			// Para net/http, ContentLength 0 con un Body que no es NoBody es
+			// longitud desconocida: saldría sin Content-Length (chunked) y S3
+			// lo rechaza en un PUT o POST vacío.
+			return http.NoBody, 0, hash, nil, nil
+		}
 		return src, length, hash, nil, nil
 	}
 	if firmado, tr := hashEsTrozos(hash); firmado {

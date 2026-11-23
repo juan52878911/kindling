@@ -97,8 +97,13 @@ k()  { "$OLDK" "$@"; }
 kn() { "$NEWK" "$@"; }
 NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
 case "$NEWV" in ""|dev) die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
+OLD_TAG_NOTA=""
 if [ -z "$OLD_TAG" ]; then
-  OLD_TAG=$(release_anterior "$NEWV")
+  OLD_TAG=$(ultima_release_anterior "$NEWV")
+  if [ -z "$OLD_TAG" ]; then
+    OLD_TAG="$RELEASE_ANTERIOR_FIJA"; OLD_TAG_NOTA=" (fixed: the GitHub API did not answer)"
+    echo "  (GitHub API did not answer: starting from $OLD_TAG)" >&2
+  fi
 fi
 case "$NEWV" in "${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\", the same as OLD_TAG";; esac
 NEWTAG="v${NEWV#v}"
@@ -452,5 +457,5 @@ contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollb
 st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" || bad "frozen" frozen "$st"
 
 echo
-echo "upgrade e2e (mac): $pass ok, $fail failed"
+echo "upgrade e2e (mac) from $OLD_TAG$OLD_TAG_NOTA: $pass ok, $fail failed"
 [ "$fail" = 0 ]

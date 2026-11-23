@@ -1489,6 +1489,11 @@ petición al dominio, como antes. La lista va con la clave: al rotar una clave h
 volver a pasar `-allow-request`, o la nueva queda sin restricciones (el CLI dice cuál de
 los dos casos aplica). `kling template credential` acepta el mismo flag.
 
+Con `-allow-request` el proxy quita además las cabeceras con las que algunos proveedores (o el
+marco sobre el que corren) cambian el método o la ruta: `X-HTTP-Method-Override`,
+`X-HTTP-Method`, `X-Method-Override`, `X-Original-URL`, `X-Original-Method` y `X-Rewrite-URL`.
+Lo comprobado es la línea de petición; con ellas el proveedor ejecutaría otra operación.
+
 Con `-allow-request` de por medio, una petición cuya ruta CRUDA sea ambigua —una barra o un
 punto codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
 parámetro de ruta con `;`, o un segmento `.`/`..` sin decodificar— recibe un 403 sin

@@ -30,7 +30,10 @@ package credproxy
 // pausar, parar, borrar o reetiquetar la copia (sin eso, una sesión abierta
 // antes de un freeze seguiría "viva" contra un invitado dormido, y la del
 // agente tras un detach seguiría hablando con la base). SetCredentials corta
-// también las sesiones cuya credencial desaparece o cambia de máquina.
+// también las sesiones cuya credencial desaparece o cambia (de máquina, de
+// clave o de cualquier otro campo); eso vale para TODAS las sesiones de base de
+// datos, Postgres y MySQL, vayan a una máquina o a un dominio (ver
+// registrarSesion).
 //
 // SIN TLS Y CON SCRAM: el tramo del proxy a la copia es el veth del propio
 // host (Linux). UpstreamTLS "disable" es obligatorio y con él solo se admite
@@ -40,6 +43,8 @@ package credproxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -180,33 +185,52 @@ func (p *Proxy) dialMaquina(ctx context.Context, cred credPG) (net.Conn, error) 
 	return p.dialMaq(ctx, "tcp", ap.String())
 }
 
-// sesionMaquina es lo que el registro de sesiones sabe de una: a qué máquina
-// va y con qué marcador entró.
-type sesionMaquina struct {
-	maquina, marcador string
+// sesionBD es lo que el registro de sesiones sabe de una sesión de base de
+// datos: a qué máquina va ("" si a un dominio) y la huella de la credencial
+// con la que entró.
+type sesionBD struct {
+	maquina string
+	huella  [sha256.Size]byte
 }
 
-// registrarSesion apunta s como sesión hacia la máquina de cred, para que
-// Invalidar y SetCredentials la puedan cortar. Se llama ANTES de resolver: así
-// una invalidación que llegue entre la resolución y el dial encuentra la
-// sesión (y ponerUp se niega). Devuelve false si la credencial ya no está en
-// el juego vigente (la quitaron entre elegirla y aquí). quitar la borra.
+// huellaCred resume la credencial entera (marcador, destino, usuario, clave,
+// base, TLS...): si cualquier campo cambia en el juego nuevo, la sesión que
+// entró con la anterior se corta. Solo se guarda el resumen, no la clave.
+func huellaCred(c credPG) [sha256.Size]byte {
+	b, _ := json.Marshal(c.Credential)
+	return sha256.Sum256(b)
+}
+
+// sesionBDDe es la entrada del registro para una sesión que entró con c.
+func sesionBDDe(c credPG) sesionBD {
+	return sesionBD{maquina: c.UpstreamMachine, huella: huellaCred(c)}
+}
+
+// registrarSesion apunta s (Postgres o MySQL, hacia una máquina o un dominio)
+// para que SetCredentials la corte si su credencial cambia o desaparece, e
+// Invalidar si va a una máquina. Se llama ANTES de resolver o marcar: así una
+// invalidación que llegue entre la resolución y el dial encuentra la sesión
+// (y ponerUp se niega). Devuelve false si la credencial ya no está en el juego
+// vigente (la quitaron entre elegirla y aquí). quitar la borra.
 func (p *Proxy) registrarSesion(s *sesionPG, cred credPG) (quitar func(), ok bool) {
+	sb := sesionBDDe(cred)
 	p.sesMu.Lock()
 	defer p.sesMu.Unlock()
 	p.mu.RLock()
 	vigente := false
-	for _, c := range p.pg {
-		if c.Placeholder == cred.Placeholder && c.UpstreamMachine == cred.UpstreamMachine {
-			vigente = true
-			break
+	for _, juego := range [][]credPG{p.pg, p.my} {
+		for _, c := range juego {
+			if c.Kind == cred.Kind && huellaCred(c) == sb.huella {
+				vigente = true
+				break
+			}
 		}
 	}
 	p.mu.RUnlock()
 	if !vigente {
 		return func() {}, false
 	}
-	p.sesiones[s] = sesionMaquina{maquina: cred.UpstreamMachine, marcador: cred.Placeholder}
+	p.sesiones[s] = sb
 	return func() {
 		p.sesMu.Lock()
 		delete(p.sesiones, s)
@@ -236,13 +260,13 @@ func (p *Proxy) SoloMaquinas() bool {
 // mitades: la del invitado y la de la copia) y devuelve cuántas. Con id "" las
 // corta todas, vayan a la máquina que vayan: el agente mismo cambió (de dueño,
 // por ejemplo). Las conexiones nuevas no las para esto sino la resolución en
-// cada dial.
+// cada dial. Las sesiones hacia un dominio no las toca.
 func (p *Proxy) Invalidar(id string) int {
 	p.sesMu.Lock()
 	defer p.sesMu.Unlock()
 	n := 0
 	for s, sm := range p.sesiones {
-		if id == "" || sm.maquina == id {
+		if sm.maquina != "" && (id == "" || sm.maquina == id) {
 			s.cerrar()
 			delete(p.sesiones, s)
 			n++
@@ -251,13 +275,15 @@ func (p *Proxy) Invalidar(id string) int {
 	return n
 }
 
-// cortarSesionesHuerfanasLocked corta las sesiones hacia una máquina cuya
-// credencial (marcador y máquina) ya no está en pg. Con p.sesMu tomado.
-func (p *Proxy) cortarSesionesHuerfanasLocked(pg []credPG) {
-	vigentes := make(map[sesionMaquina]bool, len(pg))
-	for _, c := range pg {
-		if c.UpstreamMachine != "" {
-			vigentes[sesionMaquina{maquina: c.UpstreamMachine, marcador: c.Placeholder}] = true
+// cortarSesionesHuerfanasLocked corta las sesiones de base de datos cuya
+// credencial, tal cual entraron con ella, ya no está en pg ni en my. Una
+// rotación corta así los pools abiertos con la clave anterior. Con p.sesMu
+// tomado.
+func (p *Proxy) cortarSesionesHuerfanasLocked(pg, my []credPG) {
+	vigentes := make(map[sesionBD]bool, len(pg)+len(my))
+	for _, juego := range [][]credPG{pg, my} {
+		for _, c := range juego {
+			vigentes[sesionBDDe(c)] = true
 		}
 	}
 	for s, sm := range p.sesiones {

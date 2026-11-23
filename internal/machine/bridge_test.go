@@ -2,6 +2,7 @@ package machine
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -300,20 +301,26 @@ func TestSinTocarEsIgualSinDebugfs(t *testing.T) {
 	_, igual := fichero(t, "agente\n")
 	_, otro := fichero(t, "otro\n")
 
-	if e, ok := sinTocarEsIgualGo(img, "/bin/agente", igual); !e || !ok {
+	if e, ok := sinTocarEsIgualGo(context.Background(), img, "/bin/agente", igual); !e || !ok {
 		t.Errorf("al día: existe=%v igual=%v", e, ok)
 	}
-	if e, ok := sinTocarEsIgualGo(img, "/bin/agente", otro); !e || ok {
+	if e, ok := sinTocarEsIgualGo(context.Background(), img, "/bin/agente", otro); !e || ok {
 		t.Errorf("distinto: existe=%v igual=%v", e, ok)
 	}
-	if e, ok := sinTocarEsIgualGo(img, "/bin/nada", igual); e || ok {
+	if e, ok := sinTocarEsIgualGo(context.Background(), img, "/bin/nada", igual); e || ok {
 		t.Errorf("no está: existe=%v igual=%v", e, ok)
+	}
+	// C-02: la lectura va con contexto; cortado, no se da por igual.
+	cortado, cancel := context.WithCancel(context.Background())
+	cancel()
+	if e, ok := sinTocarEsIgualGo(cortado, img, "/bin/agente", igual); !e || ok {
+		t.Errorf("contexto cortado: existe=%v igual=%v; quería negarse", e, ok)
 	}
 	basura := filepath.Join(t.TempDir(), "basura")
 	if err := os.WriteFile(basura, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if e, ok := sinTocarEsIgualGo(basura, "/bin/agente", igual); !e || ok {
+	if e, ok := sinTocarEsIgualGo(context.Background(), basura, "/bin/agente", igual); !e || ok {
 		t.Errorf("ext4 ilegible: existe=%v igual=%v; quería negarse", e, ok)
 	}
 }

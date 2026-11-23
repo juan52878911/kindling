@@ -7,11 +7,15 @@ package frontal
 // clave en claro solo viaja en la respuesta que la crea o la rota.
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/ext/sandbox/internal/inquilinos"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 type vistaClave struct {
@@ -208,11 +212,112 @@ func (s *Servidor) handleBorrarTenant(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, errors.New("an admin can't delete itself"))
 		return
 	}
+	// Lo que el tenant tiene vivo no se queda corriendo sin dueño: un tenant
+	// nuevo con el mismo nombre lo heredaría entero (sandboxes, volúmenes y
+	// puertos públicos). Sin ?force se rechaza y se dice qué queda; con él se
+	// destruye todo y luego se borra el registro.
+	if t := s.tenantNombre(id); t != nil {
+		rec, errs := s.recursosDe(r.Context(), t)
+		if len(errs) > 0 {
+			fail(w, http.StatusServiceUnavailable, fmt.Errorf("can't list what tenant %s still has: %w", id, errors.Join(errs...)))
+			return
+		}
+		if !rec.vacio() {
+			if r.URL.Query().Get("force") != "true" {
+				fail(w, http.StatusConflict, fmt.Errorf("tenant %s still has %d sandboxes, %d graphs and %d volumes: delete them first or pass ?force=true to destroy them", id, len(rec.maquinas), len(rec.grafos), len(rec.volumenes)))
+				return
+			}
+			if err := s.destruir(r.Context(), rec); err != nil {
+				fail(w, http.StatusBadGateway, fmt.Errorf("tenant %s was not deleted: %w", id, err))
+				return
+			}
+		}
+	}
 	if err := s.almacen.Borrar(id); err != nil {
 		errAlmacen(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// recursos es lo que un tenant tiene vivo en los hosts.
+type recursos struct {
+	maquinas  []maquinaEnHost
+	grafos    []grafoEnHost
+	volumenes []volEnHost
+}
+
+type maquinaEnHost struct {
+	h  *hosts.Host
+	mc *api.Machine
+}
+
+type grafoEnHost struct {
+	h  *hosts.Host
+	id string
+}
+
+func (r recursos) vacio() bool {
+	return len(r.maquinas) == 0 && len(r.grafos) == 0 && len(r.volumenes) == 0
+}
+
+// recursosDe lista los sandboxes, grafos y volúmenes del tenant en todos los
+// hosts. Un host que no contesta va en errs: sin él no se sabe qué hay.
+func (s *Servidor) recursosDe(ctx context.Context, t *Tenant) (recursos, []error) {
+	var rec recursos
+	porHost, errs := s.enCadaHost(ctx, func(ctx context.Context, h *hosts.Host) ([]*api.Machine, error) {
+		return h.Cliente.Sandboxes(ctx)
+	})
+	for h, ms := range porHost {
+		for _, mc := range ms {
+			if esSandboxDe(mc, t) {
+				rec.maquinas = append(rec.maquinas, maquinaEnHost{h, mc})
+			}
+		}
+	}
+	ins, errsG := s.instanciasEnCadaHost(ctx)
+	errs = append(errs, errsG...)
+	for h, is := range ins {
+		for _, in := range is {
+			if in.De(t.Nombre) {
+				rec.grafos = append(rec.grafos, grafoEnHost{h, in.Grafo.ID})
+			}
+		}
+	}
+	vols, errsV := s.volumenesDe(ctx, t)
+	rec.volumenes = vols
+	return rec, append(errs, errsV...)
+}
+
+// destruir borra los recursos de rec: grafos y sandboxes primero, y los
+// volúmenes después (el daemon no borra uno que esté montado).
+func (s *Servidor) destruir(ctx context.Context, rec recursos) error {
+	var errs []error
+	for _, g := range rec.grafos {
+		if err := g.h.Cliente.GraphRemove(ctx, g.id); err != nil && !esNoEncontrado(err) {
+			errs = append(errs, deHost(g.h, err))
+		}
+	}
+	for _, m := range rec.maquinas {
+		if err := m.h.Cliente.RemoveSandbox(ctx, m.mc.ID); err != nil && !esNoEncontrado(err) {
+			errs = append(errs, deHost(m.h, err))
+			continue
+		}
+		if s.ingreso != nil {
+			id := vista(m.h, m.mc).ID
+			s.ingreso.olvidar(id)
+			s.ingreso.cortar(id, 0)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	for _, v := range rec.volumenes {
+		if err := v.h.Cliente.RemoveVolume(ctx, v.v.Name); err != nil && !esNoEncontrado(err) {
+			errs = append(errs, deHost(v.h, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // claveCreada es la única respuesta que lleva una clave en claro.

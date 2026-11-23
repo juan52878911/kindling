@@ -144,6 +144,8 @@ usuario, funciona (lo comprueba la prueba `mylab`).
 - El usuario puede cambiarse la contraseña (`ALTER USER`/`SET PASSWORD` sobre sí mismo):
   no la leería, pero la clave del proxy dejaría de valer.
 - La versión del saludo es la del proxy; `SELECT VERSION()` da la real.
+- Rotar o quitar la credencial corta las sesiones abiertas con ella (como en Postgres): el
+  cliente tiene que reconectar.
 
 ### Cómo llega el invitado
 

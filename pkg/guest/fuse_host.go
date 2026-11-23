@@ -263,6 +263,7 @@ func NewHostFSFromState(dev FuseDev, name string, readOnly bool, state []byte) (
 		}
 		// Sin sesión: el primer uso lo reabre por ruta (handleCallRaw).
 		fs.files[f.FH] = &fileHandle{node: n, flags: f.Flags}
+		n.abiertos.Add(1)
 	}
 	for _, d := range st.Dirs {
 		n := t.byID[d.Node]
@@ -275,6 +276,7 @@ func NewHostFSFromState(dev FuseDev, name string, readOnly bool, state []byte) (
 			dh.entries[i] = dirEntry{name: d.Names[i], typ: d.Types[i]}
 		}
 		fs.dirs[d.FH] = dh
+		n.abiertos.Add(1)
 	}
 	// Lo pendiente vuelve como en vuelo: sale en cuanto haya sesión, y lo que
 	// el kernel pida de esos nodos espera antes a que llegue (drain).

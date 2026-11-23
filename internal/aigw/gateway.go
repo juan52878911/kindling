@@ -539,6 +539,21 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		// ignora y se decide con los mismos datos que un modelo en proceso.
 		tau, confident = guestConfident(p, tc.Thresholds)
 		labels = gl
+		// La réplica solo manda la distribución si duda con el umbral DEL
+		// MODELO (cmd/kling-chispa). Con un umbral de tarea más alto el
+		// gateway duda y ella no: se le vuelve a preguntar con explain, o la
+		// escalada saldría sin candidatos (y top_k, sin etiquetas).
+		if !confident && !req.Explain && len(p.Probs) == 0 {
+			gp, gl, err = g.classifyGuest(ctx, mc.Snapshot, in, true)
+			if err != nil {
+				reason, code, verb := guestErrReason(err)
+				g.met.vonErr("chispa:"+tc.Chispa, reason)
+				log.Printf("task %s: chispa %s (microvm): %v", req.Task, tc.Chispa, err)
+				return nil, statusf(code, "chispa model %q (backend microvm) %s: %v", tc.Chispa, verb, err)
+			}
+			p, labels = gp, gl
+			tau, confident = guestConfident(p, tc.Thresholds)
+		}
 	} else {
 		m, err := g.chispa.get(mc.Path)
 		if err != nil {
@@ -564,9 +579,8 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 
 	// Chispa duda: la distribución completa y la evidencia van en la respuesta
 	// (y en la pregunta a VON, si la plantilla las usa). En proceso hace falta
-	// pedirla aparte si no se pidió ya con Explain; una réplica en microvm ya
-	// la manda siempre que duda (ver cmd/kling-chispa), así que aquí no hay
-	// segunda vuelta que dar.
+	// pedirla aparte si no se pidió ya con Explain; a una réplica en microvm
+	// ya se le pidió arriba si dudaba el gateway y no ella.
 	resp.Escalate = true
 	if mc.Backend != BackendMicroVM && !req.Explain {
 		m, err := g.chispa.get(mc.Path)

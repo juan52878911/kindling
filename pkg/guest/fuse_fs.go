@@ -94,11 +94,14 @@ type fuseFS struct {
 	evOnce sync.Once
 	// perdidos: se perdió algún aviso del host (cola llena aquí o en la
 	// sesión). Mientras, ttls da 1 s, y el notificador lo invalida todo.
-	perdidos  atomic.Bool
-	synthTID  atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
-	synMu     sync.Mutex
-	syn       synthOp
-	touchHost func(op synthOp, full string) // provoca el evento de inotify (Linux)
+	perdidos atomic.Bool
+	// huboSesion: ya se publicó alguna sesión (bajo smu). La siguiente es una
+	// reconexión y lo que el kernel tenga en caché puede estar viejo.
+	huboSesion bool
+	synthTID   atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
+	synMu      sync.Mutex
+	syn        synthOp
+	touchHost  func(op synthOp, full string) // provoca el evento de inotify (Linux)
 
 	// afterInit corre tras contestar INIT (setReadahead; nil en los tests).
 	afterInit func(mount string)
@@ -107,6 +110,11 @@ type fuseFS struct {
 	// EIO (guarded). onReq corre al empezar handle: solo lo ponen los tests.
 	panics atomic.Uint64
 	onReq  func(req fuseReq)
+
+	// enVuelo son las peticiones interrumpibles que se están atendiendo, por
+	// unique (fuse_interrupt.go).
+	vmu     sync.Mutex
+	enVuelo map[uint64]*peticionViva
 }
 
 // cacheKey es la versión de un fichero a efectos de la caché de páginas.
@@ -210,6 +218,8 @@ func (fs *fuseFS) attach(s *shareSession) {
 	fs.smu.Lock()
 	old := fs.sess
 	fs.sess = s
+	previa := fs.huboSesion
+	fs.huboSesion = true
 	select {
 	case <-fs.ready:
 	default:
@@ -218,6 +228,14 @@ func (fs *fuseFS) attach(s *shareSession) {
 	fs.smu.Unlock()
 	if old != nil {
 		old.close()
+	}
+	if previa {
+		// Sesión que vuelve (thaw, reinicio del daemon, corte): el vigilante del
+		// host es nuevo y lo que cambió sin sesión no llegó como aviso. Se trata
+		// como avisos perdidos: caché corta hasta que el notificador lo invalida
+		// todo. El aviso vacío de olvido lo despierta aunque no llegue ninguno.
+		fs.perdidos.Store(true)
+		fs.enqueue(pushEvent{ev: eventForget})
 	}
 	go func() {
 		<-s.done
@@ -299,12 +317,22 @@ func (fs *fuseFS) call(op byte, build func(*share.Enc)) (uint32, *share.Dec) {
 // solo vale en ella). Si la operación no llegó a salir porque la sesión acababa
 // de morir, espera a la siguiente y la repite.
 func (fs *fuseFS) callS(op byte, build func(*share.Enc)) (uint32, *share.Dec, *shareSession) {
+	repetida := false
 	for retries := 0; retries < maxRetries; retries++ {
 		s := fs.session()
 		if s == nil {
 			return share.EIO, nil, nil
 		}
-		e, d := s.call(op, build)
+		e, d := s.callRepetible(op, build)
+		if e == errnoRepetir {
+			// Salió y la sesión se cortó; es de solo lectura: una vez más.
+			if repetida {
+				return share.EIO, nil, nil
+			}
+			repetida = true
+			fs.dropSession(s)
+			continue
+		}
 		if e == errnoRetry {
 			fs.dropSession(s)
 			continue
@@ -348,9 +376,15 @@ func (fs *fuseFS) serve() {
 			continue
 		}
 		fs.inflight <- struct{}{}
+		// Se apunta aquí, antes de la goroutine: el INTERRUPT de esta petición
+		// se lee después en este mismo bucle y tiene que encontrarla.
+		p := fs.apuntar(req)
 		go func() {
 			defer func() { <-fs.inflight }()
 			out, _ := fs.guarded(req, func(req fuseReq) ([]byte, bool) { return fs.handle(req), true })
+			if p != nil && !fs.despachar(req.unique, p) {
+				out = nil // ya se contestó EINTR
+			}
 			if out != nil {
 				fs.write(out)
 			}
@@ -377,8 +411,10 @@ func (fs *fuseFS) inline(req fuseReq) (out []byte, done bool) {
 		fs.batchForget(req.arg)
 		return nil, true
 	case opInterrupt:
-		// Sin respuesta: la operación interrumpida contestará sola, con su
-		// resultado o con EIO, y el kernel lo acepta en cualquier orden.
+		// El INTERRUPT no lleva respuesta. La petición interrumpida, si es de
+		// solo lectura y sigue esperando, se contesta ya con EINTR; si no,
+		// contestará sola, con su resultado o con EIO.
+		fs.interrumpir(req.arg)
 		return nil, true
 	case opDestroy:
 		return reply(req.unique, 0), true
@@ -911,7 +947,10 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			return fail(share.EINVAL)
 		}
 		fs.hmu.Lock()
-		delete(fs.dirs, le.Uint64(a[0:]))
+		if dh := fs.dirs[le.Uint64(a[0:])]; dh != nil {
+			delete(fs.dirs, le.Uint64(a[0:]))
+			dh.node.abiertos.Add(-1)
+		}
 		fs.hmu.Unlock()
 		return fail(0)
 
@@ -1184,6 +1223,7 @@ func (fs *fuseFS) opendir(u uint64, n *node) []byte {
 	}
 	fs.nextFH++
 	fs.dirs[fs.nextFH] = &dirHandle{node: n, entries: entries, at: at}
+	n.abiertos.Add(1)
 	return reply(u, 0, openOut(fs.nextFH))
 }
 
@@ -1278,6 +1318,7 @@ func (fs *fuseFS) addFile(h *fileHandle) (uint64, uint32) {
 	}
 	fs.nextFH++
 	fs.files[fs.nextFH] = h
+	h.node.abiertos.Add(1)
 	return fs.nextFH, 0
 }
 
@@ -1291,7 +1332,10 @@ func (fs *fuseFS) dropFile(fh uint64) *fileHandle {
 	fs.hmu.Lock()
 	defer fs.hmu.Unlock()
 	h := fs.files[fh]
-	delete(fs.files, fh)
+	if h != nil {
+		delete(fs.files, fh)
+		h.node.abiertos.Add(-1)
+	}
 	return h
 }
 
@@ -1300,7 +1344,7 @@ func (fs *fuseFS) dropFile(fh uint64) *fileHandle {
 // daemon no lo conoce, se reabre por ruta y se reintenta una vez.
 func (fs *fuseFS) handleCall(h *fileHandle, op byte, args func(*share.Enc)) (uint32, *share.Dec) {
 	return fs.handleCallRaw(h, func(s *shareSession, dh uint64) (uint32, *share.Dec) {
-		return s.call(op, func(e *share.Enc) {
+		return s.callRepetible(op, func(e *share.Enc) {
 			e.U64(dh)
 			if args != nil {
 				args(e)
@@ -1310,6 +1354,7 @@ func (fs *fuseFS) handleCall(h *fileHandle, op byte, args func(*share.Enc)) (uin
 }
 
 func (fs *fuseFS) handleCallRaw(h *fileHandle, do func(*shareSession, uint64) (uint32, *share.Dec)) (uint32, *share.Dec) {
+	repetida := false
 	for attempt, retries := 0, 0; attempt < 2 && retries < maxRetries; retries++ {
 		s := fs.session()
 		if s == nil {
@@ -1329,6 +1374,15 @@ func (fs *fuseFS) handleCallRaw(h *fileHandle, do func(*shareSession, uint64) (u
 		dh := h.dh
 		h.mu.Unlock()
 		errno, d := do(s, dh)
+		if errno == errnoRepetir {
+			// Como en callS: una lectura que se cortó en vuelo, una vez más.
+			if repetida {
+				return share.EIO, nil
+			}
+			repetida = true
+			fs.dropSession(s)
+			continue
+		}
 		if errno == errnoRetry {
 			// No salió: la sesión acababa de morir. Con la siguiente, y sin
 			// gastar intento.

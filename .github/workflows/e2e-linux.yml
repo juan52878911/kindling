@@ -10,7 +10,10 @@
 #
 # Todo se construye en el job (kernel, min, binarios): los dorados no son
 # portables entre CPUs, así que nada viene de otra máquina. El kernel se
-# guarda en caché por el hash de sus fuentes fijadas.
+# guarda en caché por el hash de sus fuentes fijadas. Con images_artifact
+# (release.yml), el kernel y min son los de ese artefacto del mismo run
+# (vmlinux-amd64.zst y min-amd64.ext4.zst, los que se publican y baja
+# `kling try` en el primer uso): la release arranca lo que firma.
 #
 # release.yml lo llama (workflow_call) sobre el commit de la etiqueta y su job
 # release depende de él: ahí no hay aviso que valga, sin /dev/kvm falla
@@ -32,6 +35,10 @@ on:
     inputs:
       ref:
         description: 'commit o etiqueta que probar (vacío: el del evento)'
+        type: string
+        default: ''
+      images_artifact:
+        description: 'artefacto de este run con vmlinux-amd64.zst y min-amd64.ext4.zst (vacío: se construyen aquí)'
         type: string
         default: ''
       parts:
@@ -180,7 +187,7 @@ jobs:
           echo "firma=$fd" >> "$GITHUB_OUTPUT"
 
       - name: caché del kernel
-        if: steps.kvm.outputs.ok == 'true'
+        if: steps.kvm.outputs.ok == 'true' && inputs.images_artifact == ''
         id: kcache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -188,11 +195,11 @@ jobs:
           key: kernel-amd64-${{ hashFiles('scripts/builders/kernel/**', 'scripts/check-kernel-config.sh') }}
 
       - name: kernel
-        if: steps.kvm.outputs.ok == 'true' && steps.kcache.outputs.cache-hit != 'true'
+        if: steps.kvm.outputs.ok == 'true' && inputs.images_artifact == '' && steps.kcache.outputs.cache-hit != 'true'
         run: TARGET_ARCH=amd64 OUT="$PWD/kout" bash scripts/builders/kernel/build.sh
 
       - name: imagen min
-        if: steps.kvm.outputs.ok == 'true'
+        if: steps.kvm.outputs.ok == 'true' && inputs.images_artifact == ''
         id: img
         run: |
           set -euo pipefail
@@ -203,6 +210,27 @@ jobs:
           sudo env KLING_ROOT="$RUNNER_TEMP/minroot" ALPINE_ARCH=x86_64 BRIDGE="$RUNNER_TEMP/kling-bridge" \
             bash scripts/70-build-minimal-image.sh min
           sudo cp "$RUNNER_TEMP/minroot/images/min.ext4" "$img/min.ext4"
+          ls -la "$img"
+          echo "dir=$img" >> "$GITHUB_OUTPUT"
+
+      # Los de la release: los mismos ficheros que van a SHA256SUMS, sin
+      # recompilar nada (un min roto por el kling-bridge horneado o por la
+      # compresión sale aquí, no en el primer `kling try` de alguien).
+      - name: imágenes publicadas (images_artifact)
+        if: steps.kvm.outputs.ok == 'true' && inputs.images_artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.images_artifact }}
+          path: ${{ runner.temp }}/dist
+
+      - name: kernel y min publicados
+        if: steps.kvm.outputs.ok == 'true' && inputs.images_artifact != ''
+        id: imgdist
+        run: |
+          set -euo pipefail
+          img="$RUNNER_TEMP/images"; mkdir -p "$img"
+          zstd -q -d -o "$img/vmlinux" "$RUNNER_TEMP/dist/vmlinux-amd64.zst"
+          zstd -q -d -o "$img/min.ext4" "$RUNNER_TEMP/dist/min-amd64.ext4.zst"
           ls -la "$img"
           echo "dir=$img" >> "$GITHUB_OUTPUT"
 
@@ -223,7 +251,7 @@ jobs:
         env:
           NEW_DIR: ${{ steps.bin.outputs.dir }}
           KLING_E2E_FIRMA: ${{ steps.bin.outputs.firma }}
-          IMAGES: ${{ steps.img.outputs.dir }}
+          IMAGES: ${{ steps.img.outputs.dir || steps.imgdist.outputs.dir }}
           DB_BIN: ${{ runner.temp }}/kling-db
           PARTS: ${{ inputs.parts || 'e2e db diff upgrade' }}
           KLING_E2E_HTTPBIN: ${{ inputs.httpbin || 'httpbin.org' }}

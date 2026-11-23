@@ -98,3 +98,26 @@ func TestElCosechadorSoloCorreComoPID1(t *testing.T) {
 		t.Fatal("run() no retornó fuera de PID 1: estaría cosechando hijos ajenos")
 	}
 }
+
+// Si el estado de un hijo ya recogido no llega nunca al canal, WaitFor no puede
+// darlo por una salida limpia: un comando fallido se contestaría como exit 0.
+// Hoy el cosechador envía en la misma sección crítica que su wait4, pero la
+// garantía la tiene que dar WaitFor y no depender de eso.
+func TestElEstadoPerdidoNoEsSalidaLimpia(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 3")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Recoger al hijo a mano, como haría el cosechador, sin enviar su estado.
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(cmd.Process.Pid, &ws, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	err := WaitFor(cmd, make(chan syscall.WaitStatus, 1))
+	if err == nil {
+		t.Fatal("un estado de salida perdido se reportó como salida limpia")
+	}
+	if code, ok := ExitCodeOf(err); ok && code == 0 {
+		t.Fatalf("un estado de salida perdido dio código 0: %v", err)
+	}
+}

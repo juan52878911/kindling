@@ -1,6 +1,7 @@
 package aigw
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"math"
@@ -216,8 +217,17 @@ func (m *metrics) addInflight(d int64) {
 type replicaCount struct{ running, warm int }
 
 // write vuelca todo. replicas y extra los calcula quien llama (sin el candado
-// de las métricas: preguntar al daemon no puede ocurrir con él tomado).
+// de las métricas: preguntar al daemon no puede ocurrir con él tomado). Se
+// compone en memoria con el candado y se escribe a w sin él: un lector lento
+// de /metrics no puede dejar esperando a las peticiones que cuentan.
 func (m *metrics) write(w io.Writer, js chispaStats, samples map[string]int, replicas map[string]replicaCount, ls learnSnap) {
+	var buf bytes.Buffer
+	m.render(&buf, js, samples, replicas, ls)
+	_, _ = w.Write(buf.Bytes())
+}
+
+// render es write sobre un búfer, con el candado tomado.
+func (m *metrics) render(w *bytes.Buffer, js chispaStats, samples map[string]int, replicas map[string]replicaCount, ls learnSnap) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

@@ -37,6 +37,11 @@ import (
 // LabelIsolated marca la máquina propia de una sesión aislada.
 const LabelIsolated = "isolated"
 
+// LabelIsolatedOwner lleva el id estable (PoolOwner) del planificador que creó
+// la máquina de una sesión aislada: el barrido de huérfanas solo toca las
+// suyas, igual que el del fondo con LabelPoolOwner.
+const LabelIsolatedOwner = "kling.isolated.owner"
+
 // defaultSessionTTL es cuánto vive una sesión aislada sin uso. Más largo que
 // idle a propósito: congelarla es barato y conserva la sesión; destruirla la
 // pierde. Es media hora porque cada sesión abandonada ocupa en disco lo que
@@ -209,7 +214,11 @@ func (g *Scheduler) isolatedSession(ctx context.Context, service, key string, tn
 	var creada string
 	e, err := g.buildEntryWith(ctx, service, tnt, func(tr *WakeTrace) (*api.Machine, string, error) {
 		t := time.Now()
-		mc, err := g.runFreshWith(ctx, service, map[string]string{LabelIsolated: "true"})
+		etiquetas := map[string]string{LabelIsolated: "true"}
+		if g.PoolOwner != "" {
+			etiquetas[LabelIsolatedOwner] = g.PoolOwner
+		}
+		mc, err := g.runFreshWith(ctx, service, etiquetas)
 		tr.Wake += time.Since(t)
 		if err != nil {
 			return nil, "", err
@@ -480,7 +489,19 @@ func (g *Scheduler) tocaBarrerLocked() bool {
 // recoge la que un destruirAislada no llegó a borrar. Solo las que llevan las
 // etiquetas de este planificador (MachineLabels): otro producto sobre el mismo
 // daemon tiene las suyas.
+//
+// Y solo las que llevan SU id (LabelIsolatedOwner = PoolOwner): MachineLabels
+// es el mismo para todos los gateways de un producto, y dos sobre un daemon se
+// barrían las microVM de sesión el uno al otro (B-07). Sin PoolOwner no se
+// sabe qué es de quién y no se barre; las de antes de la etiqueta tampoco: se
+// quedan congeladas por su TTL hasta que alguien las borre.
 func (g *Scheduler) barrerAisladas(ctx context.Context) {
+	if g.PoolOwner == "" {
+		g.mu.Lock()
+		g.podarCandadosLocked()
+		g.mu.Unlock()
+		return
+	}
 	ms, err := g.client.List(ctx)
 	if err != nil {
 		return
@@ -492,7 +513,7 @@ func (g *Scheduler) barrerAisladas(ctx context.Context) {
 	}
 	var huerfanas []*aislada
 	for _, m := range ms {
-		if m.Labels[LabelIsolated] != "true" || suyas[m.ID] || g.adquiriendo[m.ID] {
+		if m.Labels[LabelIsolated] != "true" || m.Labels[LabelIsolatedOwner] != g.PoolOwner || suyas[m.ID] || g.adquiriendo[m.ID] {
 			continue
 		}
 		ajena := false

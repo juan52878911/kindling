@@ -84,8 +84,11 @@ func correrRelease(t *testing.T, e escenario) (string, bool) {
 			t.Fatal(err)
 		}
 	}
-	for _, f := range []string{"release.sh", "release-notes.sh"} {
+	for _, f := range []string{"release.sh", "release-notes.sh", "e2e-hv-estado.sh"} {
 		b, err := os.ReadFile(f)
+		if os.IsNotExist(err) && f == "e2e-hv-estado.sh" {
+			continue // sin él, release.sh no encuentra el estado y bloquea
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -311,12 +314,15 @@ func TestReleaseObligatoriosSonLosJobsDeCI(t *testing.T) {
 	}
 }
 
-// El job del e2e del Mac (e2e-mac.yml) que release.sh acepta en success.
+// El job del e2e del Mac (e2e-mac.yml), tal como sale en las check runs.
 const e2eMacJob = "microVMs (kling-hv, Hypervisor.framework)"
 
 // Sin runner del Mac, e2e-mac.yml deja el e2e de kling-hv saltado y su aviso
-// (sin-runner) en verde: ninguno de los dos abre la puerta de una 1.x.
-func TestReleaseE2EMacSinRunnerBloquea(t *testing.T) {
+// (sin-runner) en verde: ninguno de los dos abre la puerta de una 1.x. Y el
+// job en success tampoco: con parts=upgrade sale verde sin haber corrido 92.
+// Solo cuenta el commit status e2e-mac/kling-hv, que el job publica cuando
+// corrieron y pasaron los dos.
+func TestReleaseE2EMacSoloCuentaElStatus(t *testing.T) {
 	out, ok := correrRelease(t, escenario{runs: runsVerdes(
 		checkRun{e2eMacJob, "completed", "skipped"},
 		checkRun{"microVMs (kling-hv) not run", "completed", "success"},
@@ -327,37 +333,78 @@ func TestReleaseE2EMacSinRunnerBloquea(t *testing.T) {
 	if !strings.Contains(out, "kling-hv e2e not run") {
 		t.Errorf("no dice qué falta:\n%s", out)
 	}
-	// Y el mismo job en success sí la abre.
-	if out, ok := correrRelease(t, escenario{runs: runsVerdes(checkRun{e2eMacJob, "completed", "success"})}); !ok {
-		t.Fatalf("el e2e del Mac en verde no abrió la puerta:\n%s", out)
+	if out, ok := correrRelease(t, escenario{runs: runsVerdes(checkRun{e2eMacJob, "completed", "success"})}); ok {
+		t.Fatalf("el job del Mac en verde sin commit status abrió la puerta:\n%s", out)
+	}
+	if out, ok := correrRelease(t, escenario{runs: runsVerdes(checkRun{e2eMacJob, "completed", "success"}), statusHV: "success"}); !ok {
+		t.Fatalf("el commit status en success no abrió la puerta:\n%s", out)
 	}
 }
 
-// release.sh busca el job del e2e del Mac por su nombre: si e2e-mac.yml lo
-// renombra, la puerta solo se abriría con el commit status, nunca con el job
-// en verde.
-func TestReleaseNombreDelE2EMacEsElDelWorkflow(t *testing.T) {
-	wf, err := os.ReadFile("../.github/workflows/e2e-mac.yml")
+// pasosDeJob parte un job en sus pasos (los «- » con seis espacios).
+func pasosDeJob(job string) []string { return strings.Split(job, "\n      - ") }
+
+// idDePaso: el id: de un paso, o "".
+func idDePaso(p string) string {
+	m := regexp.MustCompile(`(?m)^\s+id:\s*(\S+)\s*$`).FindStringSubmatch(p)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// El job e2e de e2e-mac.yml publica el commit status que mira release.sh (y
+// el job release de release.yml), con el mismo contexto, y en success solo si
+// los pasos de 92 y 95 corrieron y pasaron: un paso saltado no es un success.
+func TestE2EMacWorkflowPublicaElStatus(t *testing.T) {
+	est, err := os.ReadFile("e2e-hv-estado.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rel, err := os.ReadFile("release.sh")
+	m := regexp.MustCompile(`(?m)^CONTEXTO="([^"]+)"`).FindStringSubmatch(string(est))
+	if m == nil {
+		t.Fatal("e2e-hv-estado.sh sin CONTEXTO=")
+	}
+	contexto := m[1]
+	rel, err := os.ReadFile("e2e-mac-release.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	i := strings.Index(string(wf), "\n  e2e:\n")
-	if i < 0 {
+	if !strings.Contains(string(rel), `CONTEXTO="`+contexto+`"`) {
+		t.Errorf("e2e-mac-release.sh no publica el contexto %q", contexto)
+	}
+	jobs := jobsDeWorkflow(t, "../.github/workflows/e2e-mac.yml")
+	e2e, ok := jobs["e2e"]
+	if !ok {
 		t.Fatal("e2e-mac.yml sin job e2e")
 	}
-	m := regexp.MustCompile(`(?m)^    name: (.+)$`).FindStringSubmatch(string(wf[i:]))
-	if m == nil {
-		t.Fatal("el job e2e de e2e-mac.yml sin name:")
+	if !regexp.MustCompile(`(?m)^      statuses:\s*write\s*$`).MatchString(e2e) {
+		t.Error("job e2e de e2e-mac.yml sin permissions statuses: write")
 	}
-	if m[1] != e2eMacJob {
-		t.Errorf("el job e2e de e2e-mac.yml se llama %q, y este test espera %q", m[1], e2eMacJob)
+	var id92, id95, publica string
+	for _, p := range pasosDeJob(e2e) {
+		switch {
+		case strings.Contains(p, "bash scripts/92-e2e-mac.sh"):
+			id92 = idDePaso(p)
+		case strings.Contains(p, "bash scripts/95-e2e-upgrade-mac.sh"):
+			id95 = idDePaso(p)
+		case strings.Contains(p, "/statuses/"):
+			publica = p
+		}
 	}
-	if !strings.Contains(string(rel), `select(.name == "`+m[1]+`" and .conclusion == "success")`) {
-		t.Errorf("release.sh no busca el job %q de e2e-mac.yml en success", m[1])
+	if id92 == "" || id95 == "" {
+		t.Fatalf("los pasos de 92 y 95 sin id (92 %q, 95 %q)", id92, id95)
+	}
+	if publica == "" {
+		t.Fatal("job e2e de e2e-mac.yml: ningún paso publica el commit status")
+	}
+	if !strings.Contains(publica, contexto) {
+		t.Errorf("el paso que publica no usa el contexto %q:\n%s", contexto, publica)
+	}
+	for _, id := range []string{id92, id95} {
+		if !strings.Contains(publica, "steps."+id+".outcome == 'success'") {
+			t.Errorf("el paso que publica no exige steps.%s.outcome == 'success':\n%s", id, publica)
+		}
 	}
 }
 
@@ -400,6 +447,7 @@ func correrVeredicto(t *testing.T, r92, r95 int, previas ...string) (string, boo
 HERE=` + here + `; TOP=` + raiz + `; E2E="92 95"; KLING_E2E_CACHE=` + cache + `
 WORK=` + filepath.Join(raiz, "work") + `; BIN=$WORK/bin; IMGS=$WORK/images
 SHA=` + sha + `; SUCIO=""; AGENTE=0; LABEL=dev.kindling.daemon
+VMLINUX_SHA=aaaaaaaaaaaa; MIN_SHA=bbbbbbbbbbbb; OLD_TAG=v9.9.9; OLD_TAG_NOTA=""
 say() { :; }; explica_agente() { :; }
 `
 	escribir(t, filepath.Join(raiz, "veredicto.sh"), preludio+string(b[i:]), 0o755)
@@ -503,5 +551,66 @@ func TestReleaseSeNiegaConElPinDelREADMEDistinto(t *testing.T) {
 				t.Errorf("el rechazo no nombra el README:\n%s", out)
 			}
 		})
+	}
+}
+
+// H-18: el commit status dice con qué kernel y qué min se ganó (sus sha256
+// cortos): sin eso, nadie puede ver si el e2e del Mac arrancó los de esta
+// versión o unos viejos del daemon del desarrollador.
+func TestE2EMacReleaseStatusDiceKernelEImagen(t *testing.T) {
+	out, ok, gh, _ := correrVeredicto(t, 0, 0)
+	if !ok || !strings.Contains(gh, "state=success") {
+		t.Fatalf("con 92 y 95 en verde no publicó success (ok=%v):\n%s\n%s", ok, gh, out)
+	}
+	for _, w := range []string{"vmlinux aaaaaaaaaaaa", "min bbbbbbbbbbbb"} {
+		if !strings.Contains(gh, w) {
+			t.Errorf("la descripción del status no lleva %q:\n%s", w, gh)
+		}
+	}
+}
+
+// H-18: un vmlinux que no es el de kernel.pin de este commit no gana el sello
+// (el del daemon de quien lo corre, o el de la release anterior, puede ser de
+// otra versión). kernel_del_pin lee la cadena «Linux version» del binario.
+func TestKernelDelPin(t *testing.T) {
+	dir := t.TempDir()
+	pin := filepath.Join(dir, "kernel.pin")
+	escribir(t, pin, "# comentario\nKERNEL_VERSION=6.1.140\nKERNEL_SHA256=00\n", 0o644)
+	vm := func(nombre, banner string) string {
+		p := filepath.Join(dir, nombre)
+		b := append([]byte{0x7f, 0, 1, 2, 0xff}, []byte(banner)...)
+		b = append(b, 0, 0xfe, 3)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	correr := func(vmlinux string) (string, bool) {
+		cmd := exec.Command("bash", "-c", `. ./lib-e2e-upgrade.sh && kernel_del_pin "$1" "$2"`, "x", vmlinux, pin)
+		out, err := cmd.CombinedOutput()
+		return string(out), err == nil
+	}
+	if out, ok := correr(vm("bueno", "Linux version 6.1.140-kindling (kindling@kindling) #1 SMP")); !ok {
+		t.Errorf("el kernel del pin no pasó:\n%s", out)
+	}
+	for n, b := range map[string]string{
+		"viejo":   "Linux version 6.1.139-kindling (kindling@kindling) #1 SMP",
+		"prefijo": "Linux version 6.1.1400-kindling (kindling@kindling) #1 SMP",
+		"otro":    "Linux version 6.1.140 (builder@ci) #1 SMP",
+		"nada":    "no banner here",
+	} {
+		if out, ok := correr(vm(n, b)); ok {
+			t.Errorf("%s: aceptado un kernel que no es el del pin:\n%s", n, out)
+		}
+	}
+	// Y los dos caminos del e2e del Mac lo comprueban.
+	for _, f := range []string{"e2e-mac-release.sh", "../.github/workflows/e2e-mac.yml"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "kernel_del_pin ") {
+			t.Errorf("%s no comprueba el kernel con kernel_del_pin", f)
+		}
 	}
 }

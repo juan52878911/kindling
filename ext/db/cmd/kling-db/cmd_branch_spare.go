@@ -191,20 +191,32 @@ func (a *app) settleSpare(ctx context.Context, ri *repoInfo, owner string) error
 		if fp, err = a.fingerprint(ctx, parent); err != nil {
 			return err
 		}
-		kept := false
+		var kept *api.Machine
 		for _, c := range cands {
-			if !kept && c.Labels[labelSpareFP] == fp && len(spareCandidates([]*api.Machine{c}, owner)) == 1 {
-				kept = true
+			if kept == nil && c.Labels[labelSpareFP] == fp && len(spareCandidates([]*api.Machine{c}, owner)) == 1 {
+				kept = c
 				continue
 			}
 			a.dropSpare(ctx, ri, c.ID, key, owner)
 		}
-		if kept {
+		if kept != nil {
+			// Lista no quiere decir congelada: si quien la sacó murió entre el
+			// fork y el freeze, sigue en marcha ocupando la RAM de una copia.
+			if kept.State == api.StateRunning {
+				return a.freezeSpare(ctx, ri, kept.ID, key, owner)
+			}
 			return nil
 		}
 	case api.StateWarm, api.StatePaused:
 		if len(cands) > 0 {
-			return nil // su huella se mira al adoptarla
+			// Su huella se mira al adoptarla; pero ninguna se queda en marcha.
+			var errs []error
+			for _, c := range cands {
+				if c.State == api.StateRunning {
+					errs = append(errs, a.freezeSpare(ctx, ri, c.ID, key, owner))
+				}
+			}
+			return errors.Join(errs...)
 		}
 		if parent, err = a.k.Thaw(ctx, parent.ID); err != nil {
 			return err
@@ -222,12 +234,17 @@ func (a *app) settleSpare(ctx context.Context, ri *repoInfo, owner string) error
 	if err != nil {
 		return err
 	}
-	// Congelada no gasta RAM; si alguien la adoptó ya, es suya y sigue en marcha.
-	return a.withSpare(ctx, ri, cs[0].ID, key, owner, func(sp *api.Machine) error {
-		if sp.State != api.StateRunning {
+	return a.freezeSpare(ctx, ri, cs[0].ID, key, owner)
+}
+
+// freezeSpare congela la reserva id si sigue siéndolo y está en marcha.
+// Congelada no gasta RAM; si alguien la adoptó ya, es suya y sigue en marcha.
+func (a *app) freezeSpare(ctx context.Context, ri *repoInfo, id, key, owner string) error {
+	return a.withSpare(ctx, ri, id, key, owner, func(cur *api.Machine) error {
+		if cur.State != api.StateRunning {
 			return nil
 		}
-		_, err := a.k.Run(ctx, nil, "freeze", sp.ID)
+		_, err := a.k.Run(ctx, nil, "freeze", cur.ID)
 		return err
 	})
 }
@@ -243,6 +260,17 @@ func (a *app) withSpare(ctx context.Context, ri *repoInfo, id, key, owner string
 	defer un()
 	cur, err := a.inspect(ctx, id)
 	if err != nil {
+		// Que ya no exista es "nada que hacer"; que no se sepa cómo está, no:
+		// tragárselo dejaba en marcha (o sin borrar) una reserva que sigue ahí.
+		all, lerr := a.machines(ctx)
+		if lerr != nil {
+			return err
+		}
+		for _, mc := range all {
+			if mc != nil && mc.ID == id {
+				return err
+			}
+		}
 		return nil
 	}
 	if cur.Labels[labelBranch] != "" || cur.Labels[labelSpare] != key || !ri.is(cur.Labels[labelRepo]) || owned(cur, owner) != nil {

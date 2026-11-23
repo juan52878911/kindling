@@ -214,6 +214,12 @@ func (im imagenDebugfs) stat(ctx context.Context, p string) (entrada, error) {
 		if e.enlace == "" {
 			return entrada{}, fmt.Errorf("cannot read the symlink %s in %s", p, filepath.Base(im.file))
 		}
+		// El destino lo escribió la imagen (o un invitado en su capa), y
+		// resolverDir lo convierte en componentes que van a órdenes de
+		// debugfs: se valida como una ruta del llamador.
+		if err := nombreDebugfs(e.enlace); err != nil {
+			return entrada{}, fmt.Errorf("symlink %s in %s: %w", p, filepath.Base(im.file), err)
+		}
 	}
 	return e, nil
 }
@@ -447,10 +453,14 @@ func (m *Manager) putDebugfsEn(ctx context.Context, image, dentroPath, src, quie
 	if err != nil {
 		return false, err
 	}
-	if err := nombreDebugfs(real); err != nil {
-		return false, err
-	}
 	destino := path.Join(append([]string{real}, append(faltan, nombre)...)...)
+	// Todo lo que va entre comillas en una orden, no solo lo que pidió el
+	// llamador: real y faltan pueden venir del destino de un enlace.
+	for _, p := range append([]string{real, destino, destino + ".nuevo"}, faltan...) {
+		if err := nombreDebugfs(p); err != nil {
+			return false, err
+		}
+	}
 	var viejo entrada
 	if len(faltan) == 0 {
 		if viejo, err = im.stat(ctx, destino); err != nil {

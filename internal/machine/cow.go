@@ -959,6 +959,13 @@ func (a *almacenCoW) preparar(ctx context.Context, gib int) error {
 	if a.errFatal != nil {
 		return a.errFatal
 	}
+	// Crear y montar el almacén es del daemon, no de la petición que llegó
+	// primero: con su contexto, un cliente que corta a medias mataba el
+	// formateo o el montaje, y ese error quedaba fijado abajo hasta reiniciar
+	// (todas las altas a copia completa). Con un plazo propio, eso sí, para
+	// que una orden colgada no retenga a.mu para siempre.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazoPrepararAlmacen)
+	defer cancel()
 	err := func() error {
 		if !a.existe() {
 			_, libre, err := a.libreEn(a.root)
@@ -974,11 +981,21 @@ func (a *almacenCoW) preparar(ctx context.Context, gib int) error {
 		return a.asegurarMontado(ctx)
 	}()
 	if err != nil {
-		a.errFatal = fmt.Errorf("%w: %v", errAlmacenNoDisponible, err)
-		return a.errFatal
+		e := fmt.Errorf("%w: %v", errAlmacenNoDisponible, err)
+		// Un plazo vencido no dice que el almacén esté roto: el siguiente
+		// alta lo vuelve a intentar.
+		if ctx.Err() == nil {
+			a.errFatal = e
+		}
+		return e
 	}
 	return nil
 }
+
+// plazoPrepararAlmacen acota crear (reservar y formatear) y montar el almacén.
+// Reservar 16 GiB y formatearlos lleva segundos; esto solo corta una orden
+// colgada.
+const plazoPrepararAlmacen = 5 * time.Minute
 
 // margenRaizAlmacen es lo que el almacén deja libre en la raíz al crearse o
 // crecer, como minFreeDiskMiB.
