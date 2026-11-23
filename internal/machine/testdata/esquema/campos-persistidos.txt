@@ -80,6 +80,7 @@ state.json api.Machine ttl_at *time.Time
 state.json api.Machine ttl_seconds int
 state.json api.Machine vcpus int
 state.json api.Machine vmm string ignorable
+state.json api.Machine vmm_started_at *time.Time ignorable
 state.json api.Machine volume_wait bool effect:3
 state.json api.Machine volumes []api.VolumeAttachment
 state.json api.Machine wake *api.WakePhases

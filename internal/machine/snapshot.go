@@ -2177,7 +2177,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	now := time.Now()
 	mc.PID = pid
 	mc.State = api.StateRunning
-	mc.StartedAt = &now
+	mc.StartedAt, mc.VMMStartedAt = &now, &now
 	mc.VMM = m.origenActual().vmm
 	mc.ThawMS = elapsed
 	mc.CredentialDomains, mc.CredentialAnyDatabase = dominiosCred, anyDBCred

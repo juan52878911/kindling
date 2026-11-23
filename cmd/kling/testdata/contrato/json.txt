@@ -152,6 +152,7 @@ kling inspect m1:  ttl_at string
 kling inspect m1:  ttl_seconds number
 kling inspect m1:  vcpus number
 kling inspect m1:  vmm string
+kling inspect m1:  vmm_started_at string
 kling inspect m1:  volume_wait bool
 kling inspect m1:  volumes[].drive_id string
 kling inspect m1:  volumes[].mount string
@@ -271,6 +272,7 @@ kling ps -a -json:  [].ttl_at string
 kling ps -a -json:  [].ttl_seconds number
 kling ps -a -json:  [].vcpus number
 kling ps -a -json:  [].vmm string
+kling ps -a -json:  [].vmm_started_at string
 kling ps -a -json:  [].volume_wait bool
 kling ps -a -json:  [].volumes[].drive_id string
 kling ps -a -json:  [].volumes[].mount string
@@ -379,6 +381,7 @@ kling sandbox ls -json:  [].ttl_at string
 kling sandbox ls -json:  [].ttl_seconds number
 kling sandbox ls -json:  [].vcpus number
 kling sandbox ls -json:  [].vmm string
+kling sandbox ls -json:  [].vmm_started_at string
 kling sandbox ls -json:  [].volume_wait bool
 kling sandbox ls -json:  [].volumes[].drive_id string
 kling sandbox ls -json:  [].volumes[].mount string

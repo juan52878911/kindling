@@ -54,6 +54,7 @@ func (mc *Machine) Clone() *Machine {
 
 	out.StartedAt = clonarFecha(mc.StartedAt)
 	out.FrozenAt = clonarFecha(mc.FrozenAt)
+	out.VMMStartedAt = clonarFecha(mc.VMMStartedAt)
 	out.FailedAt = clonarFecha(mc.FailedAt)
 	out.StoppedAt = clonarFecha(mc.StoppedAt)
 	out.DiskErrorAt = clonarFecha(mc.DiskErrorAt)

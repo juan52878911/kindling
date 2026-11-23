@@ -103,14 +103,21 @@ func (s *Server) objetivoConAgente(ctx context.Context, ref string) (*api.Machin
 var maxAgentesVistos = 4096
 
 // firmaAgente identifica la vida de VMM en la que se vio escuchar al agente
-// de mc: su PID y cuándo arrancó. Un freeze y thaw, un stop y start o un VMM
-// nuevo cambian el PID, y con él la firma. "" = no se sabe decir (sin PID o
+// de mc: su PID y cuándo se lanzó ese proceso (VMMStartedAt). Un freeze y
+// thaw, un stop y start o un VMM nuevo cambian las dos cosas, y con ellas la
+// firma. Pausar y reanudar no (G-08): es el mismo proceso con el mismo
+// agente, aunque StartedAt se reescriba al reanudar. Un estado de antes de
+// VMMStartedAt usa StartedAt, como siempre. "" = no se sabe decir (sin PID o
 // sin arranque): entonces no se recuerda nada.
 func firmaAgente(mc *api.Machine) string {
-	if mc.PID <= 0 || mc.StartedAt == nil {
+	desde := mc.VMMStartedAt
+	if desde == nil {
+		desde = mc.StartedAt
+	}
+	if mc.PID <= 0 || desde == nil {
 		return ""
 	}
-	return strconv.Itoa(mc.PID) + "@" + strconv.FormatInt(mc.StartedAt.UnixNano(), 10)
+	return strconv.Itoa(mc.PID) + "@" + strconv.FormatInt(desde.UnixNano(), 10)
 }
 
 // agenteVisto dice si el agente de mc ya contestó en esta misma vida de su

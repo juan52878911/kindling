@@ -78,6 +78,10 @@ type Machine struct {
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	FrozenAt  *time.Time `json:"frozen_at,omitempty"`
+	// VMMStartedAt es cuándo se lanzó (o se readoptó al despertar) el proceso
+	// VMM que corre ahora. A diferencia de StartedAt, reanudar una pausada no
+	// lo toca: es el mismo proceso. Con el PID identifica esa vida del VMM.
+	VMMStartedAt *time.Time `json:"vmm_started_at,omitempty"`
 
 	// FailedAt es cuándo pasó a failed. Es lo que permite recogerla después de
 	// un tiempo de gracia: una failed sin fecha no se puede envejecer, y las

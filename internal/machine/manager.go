@@ -2363,7 +2363,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	now := time.Now()
 	mc.PID = pid
 	mc.State = api.StateRunning
-	mc.StartedAt = &now
+	mc.StartedAt, mc.VMMStartedAt = &now, &now
 	mc.VMM = m.origenActual().vmm
 	mc.BootMS = time.Since(start).Milliseconds()
 	m.persist()
@@ -3973,7 +3973,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		now := time.Now()
 		cur.State = api.StateRunning
 		cur.PID = pid
-		cur.StartedAt = &now
+		cur.StartedAt, cur.VMMStartedAt = &now, &now
 		cur.FrozenAt = nil
 		cur.CPUPct = techo
 		m.socket[mc.ID] = sock
@@ -4397,7 +4397,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	now := time.Now()
 	cur.State = api.StateRunning
-	cur.StartedAt = &now
+	cur.StartedAt, cur.VMMStartedAt = &now, &now
 	cur.FrozenAt = nil
 	cur.FailedAt, cur.LastErr = nil, "" // si venía de failed
 	cur.VMM = m.origenActual().vmm

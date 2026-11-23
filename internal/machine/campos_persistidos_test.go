@@ -115,6 +115,8 @@ var clasesCampos = map[string]claseCampo{
 		"freezes never depend on the snapshot (no diff freeze)"},
 	"state.json api.Machine overlay_max_bytes": {porque: "an older kling never reads it; the next daemon that lacks it takes the cap " +
 		"from the disk size, or from the file as it is then, as before"},
+	"state.json api.Machine vmm_started_at": {porque: "only keys the daemon's in-memory \"agent seen\" cache; without it the next " +
+		"exec probes the agent once, as before"},
 	"state.json api.WakePhases creds_ms":       {porque: "a measurement of the last wake, for kling inspect; the next wake writes it again"},
 	"state.json api.Machine create":            {porque: "a measurement of the last creation from a snapshot, for kling inspect; the next one writes it again"},
 	"state.json api.CreatePhases checks_ms":    {porque: "only inside create (see above)"},
