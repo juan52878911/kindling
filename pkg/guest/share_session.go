@@ -38,7 +38,7 @@ type shareSession struct {
 	// corta con ellos ya enviados (callRepetible).
 	repetibles map[uint64]bool
 	done       chan struct{}
-	closed  bool
+	closed     bool
 	// retired: llegó share.Bye. Lo que quede pendiente al cerrar recibe
 	// errnoRetry y no EIO: el daemon dijo que no lo ejecutó.
 	retired bool

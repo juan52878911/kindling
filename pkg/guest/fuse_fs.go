@@ -110,6 +110,11 @@ type fuseFS struct {
 	// EIO (guarded). onReq corre al empezar handle: solo lo ponen los tests.
 	panics atomic.Uint64
 	onReq  func(req fuseReq)
+
+	// enVuelo son las peticiones interrumpibles que se están atendiendo, por
+	// unique (fuse_interrupt.go).
+	vmu     sync.Mutex
+	enVuelo map[uint64]*peticionViva
 }
 
 // cacheKey es la versión de un fichero a efectos de la caché de páginas.
@@ -371,9 +376,15 @@ func (fs *fuseFS) serve() {
 			continue
 		}
 		fs.inflight <- struct{}{}
+		// Se apunta aquí, antes de la goroutine: el INTERRUPT de esta petición
+		// se lee después en este mismo bucle y tiene que encontrarla.
+		p := fs.apuntar(req)
 		go func() {
 			defer func() { <-fs.inflight }()
 			out, _ := fs.guarded(req, func(req fuseReq) ([]byte, bool) { return fs.handle(req), true })
+			if p != nil && !fs.despachar(req.unique, p) {
+				out = nil // ya se contestó EINTR
+			}
 			if out != nil {
 				fs.write(out)
 			}
@@ -400,8 +411,10 @@ func (fs *fuseFS) inline(req fuseReq) (out []byte, done bool) {
 		fs.batchForget(req.arg)
 		return nil, true
 	case opInterrupt:
-		// Sin respuesta: la operación interrumpida contestará sola, con su
-		// resultado o con EIO, y el kernel lo acepta en cualquier orden.
+		// El INTERRUPT no lleva respuesta. La petición interrumpida, si es de
+		// solo lectura y sigue esperando, se contesta ya con EINTR; si no,
+		// contestará sola, con su resultado o con EIO.
+		fs.interrumpir(req.arg)
 		return nil, true
 	case opDestroy:
 		return reply(req.unique, 0), true
