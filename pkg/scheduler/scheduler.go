@@ -1598,7 +1598,17 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 	// Sale del registro de pausadas solo si el thaw sale bien: si falla, sigue
 	// pausada en el daemon, y fuera del registro nadie la congelaría (RAM sin
 	// dueño). Mientras dura el thaw la aparta g.adquiriendo.
-	if m := pick(api.StatePaused); m != nil {
+	//
+	// Un thaw que falla por la máquina (volcado dañado, el daemon no la puede
+	// reanudar) la descarta y se sigue con la siguiente, y al final con el
+	// dorado: devolver el error tal cual hacía que el siguiente acquire la
+	// eligiera otra vez y el servicio quedaba en 502 hasta que alguien la
+	// borrara (B-06).
+	for {
+		m := pick(api.StatePaused)
+		if m == nil {
+			break
+		}
 		t := time.Now()
 		th, err := g.client.Thaw(ctx, m.ID)
 		tr.Wake += time.Since(t)
@@ -1613,6 +1623,11 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		}
 		g.mu.Unlock()
 		if err != nil {
+			if thawDescartable(ctx, err) {
+				log.Printf("%s: could not resume %s, trying another: %v", service, short(m.ID), err)
+				descartadas[m.ID] = true
+				continue
+			}
 			return nil, "", err
 		}
 		// El TTL se renueva después y en segundo plano: una pausada cuenta como
@@ -1628,7 +1643,11 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 	// renueva ANTES de despertarla: una vuelta del vigilante del daemon entre
 	// el thaw y la renovación la volvería a congelar, y una congelada también
 	// se puede renovar.
-	if m := pick(api.StateWarm); m != nil {
+	for {
+		m := pick(api.StateWarm)
+		if m == nil {
+			break
+		}
 		t := time.Now()
 		g.renovarTTL(ctx, m.ID)
 		tr.Renew += time.Since(t)
@@ -1643,6 +1662,11 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 			g.mu.Lock()
 			delete(g.adquiriendo, m.ID)
 			g.mu.Unlock()
+			if thawDescartable(ctx, err) {
+				log.Printf("%s: could not thaw %s, trying another: %v", service, short(m.ID), err)
+				descartadas[m.ID] = true
+				continue
+			}
 			return nil, "", err
 		}
 		return th, "thaw", nil
@@ -1661,6 +1685,22 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 	g.adquiriendo[mc.ID] = true
 	g.mu.Unlock()
 	return mc, "restore", nil
+}
+
+// thawDescartable dice si un thaw fallido es culpa de la máquina y merece
+// probar con otra: el daemon contestó con un error que no es de capacidad
+// (probar otra pediría la misma memoria o el mismo hueco) y el ctx sigue
+// vivo. Un fallo de transporte no cuenta: el thaw pudo llegar a hacerse, y
+// restaurar otra dejaría dos.
+func thawDescartable(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	if api.IsInsufficientMemory(err) || api.IsMachineLimit(err) {
+		return false
+	}
+	var se *api.StatusError
+	return errors.As(err, &se)
 }
 
 // port es el puerto del invitado al que se habla (ver Port).
