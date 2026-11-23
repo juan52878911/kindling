@@ -4458,6 +4458,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			finReloj()
 		}
 	}
+	// El desglose del VMM (solo macOS), en segundo plano: quien despierta
+	// no lo espera (K-03).
+	m.tiemposVMMTrasDespertar(c, mc.ID, fases)
 	return &out, nil
 }
 

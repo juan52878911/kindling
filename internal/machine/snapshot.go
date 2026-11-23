@@ -2217,6 +2217,8 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	m.persist()
 	out := *mc
 	m.mu.Unlock()
+	// El desglose del VMM (solo macOS), después de crearla (K-03).
+	m.tiemposVMMTrasCrear(c, id, creacion)
 	log.Printf("%s from snapshot %s: %s", mc.Name, req.From, notaCreacion(creacion))
 	// Las carpetas vivas, como en el arranque en frío: el agente de la copia
 	// las espera para lanzar el servicio.

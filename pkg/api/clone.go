@@ -62,10 +62,12 @@ func (mc *Machine) Clone() *Machine {
 
 	if mc.Wake != nil {
 		w := *mc.Wake
+		w.VMM = mc.Wake.VMM.Clone()
 		out.Wake = &w
 	}
 	if mc.Create != nil {
 		c := *mc.Create
+		c.VMM = mc.Create.VMM.Clone()
 		out.Create = &c
 	}
 	if mc.Agent != nil {

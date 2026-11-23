@@ -55,6 +55,9 @@ const restaurarComparteMemoria = true
 // globoSinEstadisticas: Firecracker sí da las estadísticas del invitado.
 const globoSinEstadisticas = false
 
+// vmmDaTiempos: Firecracker no tiene GET /kling/info (tiempos_vmm.go).
+const vmmDaTiempos = false
+
 // auditoriaEnElDaemon: en Linux el registro de auditoría del proxy lo escribe
 // el daemon (root) y vive fuera del directorio de la máquina, que es del
 // usuario sin privilegios del VMM (ver credaudit.go). Variable y no constante

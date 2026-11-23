@@ -260,6 +260,10 @@ var restaurarComparteMemoria = false
 // memoria del invitado; squeeze aprieta a ciegas (ver objetivoSinEstadisticas).
 const globoSinEstadisticas = true
 
+// vmmDaTiempos: kling-vz y kling-hv dan su desglose en GET /kling/info
+// (tiempos_vmm.go).
+const vmmDaTiempos = true
+
 // e2fsprogs no viene con macOS; Homebrew lo instala "keg-only", fuera del
 // PATH, en uno de estos dos prefijos (Apple Silicon e Intel).
 var dirsE2fsExtra = []string{

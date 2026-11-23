@@ -90,6 +90,15 @@ kling inspect m1:  create.resume_ms number
 kling inspect m1:  create.resync_ms number
 kling inspect m1:  create.start_ms number
 kling inspect m1:  create.total_ms number
+kling inspect m1:  create.vmm.create_ms number
+kling inspect m1:  create.vmm.kind string
+kling inspect m1:  create.vmm.net_ms number
+kling inspect m1:  create.vmm.restore_ms number
+kling inspect m1:  create.vmm.resume_ms number
+kling inspect m1:  create.vmm.sandbox_ms number
+kling inspect m1:  create.vmm.start_ms number
+kling inspect m1:  create.vmm.total_ms number
+kling inspect m1:  create.vmm.vmm {}
 kling inspect m1:  create.vmm_ms number
 kling inspect m1:  created_at string
 kling inspect m1:  credential_any_database[] string
@@ -174,6 +183,15 @@ kling inspect m1:  wake.spawn_ms number
 kling inspect m1:  wake.store_ms number
 kling inspect m1:  wake.tier string
 kling inspect m1:  wake.total_ms number
+kling inspect m1:  wake.vmm.create_ms number
+kling inspect m1:  wake.vmm.kind string
+kling inspect m1:  wake.vmm.net_ms number
+kling inspect m1:  wake.vmm.restore_ms number
+kling inspect m1:  wake.vmm.resume_ms number
+kling inspect m1:  wake.vmm.sandbox_ms number
+kling inspect m1:  wake.vmm.start_ms number
+kling inspect m1:  wake.vmm.total_ms number
+kling inspect m1:  wake.vmm.vmm {}
 kling inspect m1:  wake.wait_ms number
 kling machine credential -json -rm m1 -env K:  = kling inspect m1
 kling machine resize -json -mem 512M m1:  = kling inspect m1
@@ -210,6 +228,15 @@ kling ps -a -json:  [].create.resume_ms number
 kling ps -a -json:  [].create.resync_ms number
 kling ps -a -json:  [].create.start_ms number
 kling ps -a -json:  [].create.total_ms number
+kling ps -a -json:  [].create.vmm.create_ms number
+kling ps -a -json:  [].create.vmm.kind string
+kling ps -a -json:  [].create.vmm.net_ms number
+kling ps -a -json:  [].create.vmm.restore_ms number
+kling ps -a -json:  [].create.vmm.resume_ms number
+kling ps -a -json:  [].create.vmm.sandbox_ms number
+kling ps -a -json:  [].create.vmm.start_ms number
+kling ps -a -json:  [].create.vmm.total_ms number
+kling ps -a -json:  [].create.vmm.vmm {}
 kling ps -a -json:  [].create.vmm_ms number
 kling ps -a -json:  [].created_at string
 kling ps -a -json:  [].credential_any_database[] string
@@ -294,6 +321,15 @@ kling ps -a -json:  [].wake.spawn_ms number
 kling ps -a -json:  [].wake.store_ms number
 kling ps -a -json:  [].wake.tier string
 kling ps -a -json:  [].wake.total_ms number
+kling ps -a -json:  [].wake.vmm.create_ms number
+kling ps -a -json:  [].wake.vmm.kind string
+kling ps -a -json:  [].wake.vmm.net_ms number
+kling ps -a -json:  [].wake.vmm.restore_ms number
+kling ps -a -json:  [].wake.vmm.resume_ms number
+kling ps -a -json:  [].wake.vmm.sandbox_ms number
+kling ps -a -json:  [].wake.vmm.start_ms number
+kling ps -a -json:  [].wake.vmm.total_ms number
+kling ps -a -json:  [].wake.vmm.vmm {}
 kling ps -a -json:  [].wake.wait_ms number
 kling rm -json m1:  id string
 kling rm -json m1:  name string
@@ -319,6 +355,15 @@ kling sandbox ls -json:  [].create.resume_ms number
 kling sandbox ls -json:  [].create.resync_ms number
 kling sandbox ls -json:  [].create.start_ms number
 kling sandbox ls -json:  [].create.total_ms number
+kling sandbox ls -json:  [].create.vmm.create_ms number
+kling sandbox ls -json:  [].create.vmm.kind string
+kling sandbox ls -json:  [].create.vmm.net_ms number
+kling sandbox ls -json:  [].create.vmm.restore_ms number
+kling sandbox ls -json:  [].create.vmm.resume_ms number
+kling sandbox ls -json:  [].create.vmm.sandbox_ms number
+kling sandbox ls -json:  [].create.vmm.start_ms number
+kling sandbox ls -json:  [].create.vmm.total_ms number
+kling sandbox ls -json:  [].create.vmm.vmm {}
 kling sandbox ls -json:  [].create.vmm_ms number
 kling sandbox ls -json:  [].created_at string
 kling sandbox ls -json:  [].credential_any_database[] string
@@ -403,6 +448,15 @@ kling sandbox ls -json:  [].wake.spawn_ms number
 kling sandbox ls -json:  [].wake.store_ms number
 kling sandbox ls -json:  [].wake.tier string
 kling sandbox ls -json:  [].wake.total_ms number
+kling sandbox ls -json:  [].wake.vmm.create_ms number
+kling sandbox ls -json:  [].wake.vmm.kind string
+kling sandbox ls -json:  [].wake.vmm.net_ms number
+kling sandbox ls -json:  [].wake.vmm.restore_ms number
+kling sandbox ls -json:  [].wake.vmm.resume_ms number
+kling sandbox ls -json:  [].wake.vmm.sandbox_ms number
+kling sandbox ls -json:  [].wake.vmm.start_ms number
+kling sandbox ls -json:  [].wake.vmm.total_ms number
+kling sandbox ls -json:  [].wake.vmm.vmm {}
 kling sandbox ls -json:  [].wake.wait_ms number
 kling save -force -json m1 tpl:  allow_domains[] string
 kling save -force -json m1 tpl:  allow_exec bool
