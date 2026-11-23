@@ -24,6 +24,10 @@ import (
 // este constructor: solo se sobrescribe una base que lo lleve.
 const BaseBuilder = "android-base"
 
+// maxOCIBytes es el tope de lo comprimido de cada imagen OCI que se baja
+// (oci.Client.MaxBytes).
+const maxOCIBytes = 4 << 30
+
 type builder struct {
 	spec     Spec
 	name     string
@@ -101,7 +105,12 @@ func Build(dir string, log io.Writer) error {
 		}
 	}
 	b.cache = filepath.Join(b.root, "cache")
-	b.oci = &oci.Client{Cache: filepath.Join(b.cache, "oci"), Log: log}
+	// Con Unpack, cada capa se descomprime una vez (no al recorrerla y otra
+	// al escribir los datos) y se comprueba su diff_id al hacerlo; con
+	// MaxBytes, una bomba no llena el disco (lo descomprimido, hasta 8 veces
+	// eso). Las imágenes de Redroid rondan 1-2 GiB comprimidas.
+	b.oci = &oci.Client{Cache: filepath.Join(b.cache, "oci"), Log: log,
+		Unpack: filepath.Join(dir, "oci-layers"), MaxBytes: maxOCIBytes}
 	b.baseName = spec.BaseName
 	if b.baseName == "" {
 		b.baseName = req.Base
@@ -240,4 +249,7 @@ func (b *builder) emptyExt4(mib int) (string, error) {
 	return p, f.Close()
 }
 
-func (b *builder) cleanTemp() { os.Remove(filepath.Join(b.work, "data.ext4")) }
+func (b *builder) cleanTemp() {
+	os.Remove(filepath.Join(b.work, "data.ext4"))
+	os.RemoveAll(b.oci.Unpack)
+}

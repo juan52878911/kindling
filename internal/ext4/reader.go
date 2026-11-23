@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"os"
 	"time"
 )
 
@@ -18,7 +20,34 @@ import (
 // directorios lineales o con índice, datos en línea, enlaces rápidos y
 // atributos en el inodo o en bloque. No entiende ficheros de mapa de bloques
 // de ext2/ext3 (sin extents): da error.
-func Read(r io.ReaderAt) (*Node, error) {
+//
+// La imagen puede ser hostil (la de un sistema Android que se importa, una
+// que se compara): lo que no cuadre da error, sin pánico, y lo que se lee o
+// se pide de memoria queda acotado por el tamaño de la imagen.
+func Read(r io.ReaderAt) (root *Node, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			root, err = nil, fmt.Errorf("corrupt ext4 image: %v", p)
+		}
+	}()
+	return read(r)
+}
+
+// Topes del lector, además de los que pone el tamaño de la imagen.
+const (
+	// maxNodosExtent y maxTramos son los nodos de índice y los tramos del
+	// árbol de extents de un inodo: un árbol de 5 niveles de 340 índices al
+	// mismo bloque eran 340^4 lecturas sobre una imagen de KiB.
+	maxNodosExtent = 4096
+	maxTramos      = 1 << 20
+	// maxEnlace y maxDirectorio son lo que se lee a memoria de un enlace y de
+	// un directorio: los huecos se leen como ceros, y uno que decía medir TiB
+	// se leía entero.
+	maxEnlace     = 4096
+	maxDirectorio = 64 << 20
+)
+
+func read(r io.ReaderAt) (*Node, error) {
 	sb := make([]byte, 1024)
 	if _, err := r.ReadAt(sb, 1024); err != nil {
 		return nil, err
@@ -63,6 +92,12 @@ func Read(r io.ReaderAt) (*Node, error) {
 	case ds < 32 || ds > blockSize || ds&(ds-1) != 0:
 		return nil, fmt.Errorf("corrupt superblock: group descriptor size %d", ds)
 	}
+	// Los bloques que declara tienen que estar en la imagen: sin esto, un
+	// superbloque de 2^40 bloques pedía GiB para los descriptores de grupo.
+	if err := enLaImagen(r, blocks); err != nil {
+		return nil, err
+	}
+	rd.blocks = blocks
 	rd.groups = int((blocks - rd.firstData + bpg - 1) / bpg)
 	if inodes := uint64(le.Uint32(sb[0:])); uint64(rd.groups)*uint64(rd.ipg) != inodes {
 		return nil, fmt.Errorf("corrupt superblock: %d inodes for %d groups of %d", inodes, rd.groups, rd.ipg)
@@ -88,9 +123,45 @@ type reader struct {
 	ipg, isz  uint32
 	incompat  uint32
 	groups    int
+	blocks    uint64
 	firstData uint64
 	itable    []uint64
 	inodes    map[uint32]*Node
+	// nodos y tramos son los nodos de índice y los tramos de extents leídos
+	// en toda la imagen: en una sana no pasan de sus bloques (cada uno ocupa
+	// o cubre al menos uno), así que lo que se guarda de memoria queda
+	// acotado por el tamaño de la imagen aunque muchos inodos repitan el
+	// mismo árbol.
+	nodos, tramos uint64
+}
+
+// enLaImagen comprueba que los blocks bloques que declara el superbloque
+// caben en r: con el tamaño si r lo dice, y si no, leyendo el último byte.
+func enLaImagen(r io.ReaderAt, blocks uint64) error {
+	if blocks > math.MaxInt64/blockSize {
+		return fmt.Errorf("corrupt superblock: %d blocks", blocks)
+	}
+	need := int64(blocks * blockSize)
+	var size int64 = -1
+	switch v := r.(type) {
+	case interface{ Size() int64 }:
+		size = v.Size()
+	case interface{ Stat() (os.FileInfo, error) }:
+		if fi, err := v.Stat(); err == nil && fi.Mode().IsRegular() {
+			size = fi.Size()
+		}
+	}
+	if size < 0 {
+		var b [1]byte
+		if _, err := r.ReadAt(b[:], need-1); err != nil {
+			return fmt.Errorf("corrupt superblock: %d blocks, but the image ends before (%v)", blocks, err)
+		}
+		return nil
+	}
+	if need > size {
+		return fmt.Errorf("corrupt superblock: %d blocks (%d bytes) in an image of %d bytes", blocks, need, size)
+	}
+	return nil
 }
 
 func (rd *reader) inode(ino uint32) ([]byte, error) {
@@ -129,11 +200,25 @@ func (rd *reader) node(ino uint32) (*Node, []byte, error) {
 	if rd.isz > 128 {
 		extra = int(le.Uint16(b[128:]))
 	}
+	// Los campos extra solo si caben en el inodo: con s_inode_size = 128 no
+	// hay ninguno (se leían igual, fuera del inodo: pánico).
+	if 128+extra > len(b) {
+		return nil, nil, fmt.Errorf("inode %d: %d extra bytes in a %d-byte inode", ino, extra, len(b))
+	}
 	has := func(off int) bool { return extra >= off-128+4 }
-	n.Atime = decTime(le.Uint32(b[8:]), le.Uint32(b[140:]), has(140))
-	n.Ctime = decTime(le.Uint32(b[12:]), le.Uint32(b[132:]), has(132))
-	n.Mtime = decTime(le.Uint32(b[16:]), le.Uint32(b[136:]), has(136))
+	extraU32 := func(off int) uint32 {
+		if !has(off) {
+			return 0
+		}
+		return le.Uint32(b[off:])
+	}
+	n.Atime = decTime(le.Uint32(b[8:]), extraU32(140), has(140))
+	n.Ctime = decTime(le.Uint32(b[12:]), extraU32(132), has(132))
+	n.Mtime = decTime(le.Uint32(b[16:]), extraU32(136), has(136))
 	n.Size = int64(uint64(le.Uint32(b[4:])) | uint64(le.Uint32(b[108:]))<<32)
+	if n.Size < 0 {
+		return nil, nil, fmt.Errorf("inode %d: negative size", ino)
+	}
 	xs := map[string][]byte{}
 	if extra > 0 && 128+extra+4 <= len(b) && le.Uint32(b[128+extra:]) == xattrMagic {
 		if err := parseXattrs(b[128+extra+4:], 0, 0, xs); err != nil {
@@ -175,18 +260,20 @@ func (rd *reader) node(ino uint32) (*Node, []byte, error) {
 			n.Data = &Extents{r: rd.r, runs: runs}
 		}
 	case ModeLink:
+		if n.Size > maxEnlace {
+			return nil, nil, fmt.Errorf("inode %d: symlink of %d bytes", ino, n.Size)
+		}
 		switch {
 		case flags&flagInlineData != 0:
 			d := append(append([]byte{}, iblock...), inline...)
+			if int64(len(d)) < n.Size {
+				return nil, nil, fmt.Errorf("inode %d: short inline data", ino)
+			}
 			n.Target = string(d[:n.Size])
 		case flags&flagExtents == 0 && n.Size < 60:
 			n.Target = string(iblock[:n.Size])
 		default:
-			runs, err := rd.extents(iblock, flags)
-			if err != nil {
-				return nil, nil, fmt.Errorf("inode %d: %w", ino, err)
-			}
-			d, err := (&Node{Size: n.Size, Data: &Extents{r: rd.r, runs: runs}}).ReadAll()
+			d, err := rd.leerEntero(ino, iblock, flags, n.Size)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -210,11 +297,10 @@ func (rd *reader) node(ino uint32) (*Node, []byte, error) {
 		if flags&flagInlineData != 0 {
 			data = append(append([]byte{}, iblock...), inline...)
 		} else {
-			runs, err := rd.extents(iblock, flags)
-			if err != nil {
-				return nil, nil, fmt.Errorf("inode %d: %w", ino, err)
+			if n.Size > maxDirectorio {
+				return nil, nil, fmt.Errorf("directory inode %d: %d bytes", ino, n.Size)
 			}
-			data, err = (&Node{Size: n.Size, Data: &Extents{r: rd.r, runs: runs}}).ReadAll()
+			data, err = rd.leerEntero(ino, iblock, flags, n.Size)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -223,6 +309,24 @@ func (rd *reader) node(ino uint32) (*Node, []byte, error) {
 		return n, data, nil
 	}
 	return n, nil, nil
+}
+
+// leerEntero lee a memoria los datos de un enlace o un directorio (size
+// bytes, ya acotado por quien llama), que no pueden pasar de lo que cubren
+// sus extents: lo de más serían ceros de un hueco.
+func (rd *reader) leerEntero(ino uint32, iblock []byte, flags uint32, size int64) ([]byte, error) {
+	runs, err := rd.extents(iblock, flags)
+	if err != nil {
+		return nil, fmt.Errorf("inode %d: %w", ino, err)
+	}
+	var fin uint64
+	for _, r := range runs {
+		fin = max(fin, r.logical+r.n)
+	}
+	if uint64(size) > fin*blockSize {
+		return nil, fmt.Errorf("inode %d: %d bytes, but its extents cover %d", ino, size, fin*blockSize)
+	}
+	return (&Node{Size: size, Data: &Extents{r: rd.r, runs: runs}}).ReadAll()
 }
 
 func parseXattrs(region []byte, entryOff, base int, out map[string][]byte) error {
@@ -265,6 +369,7 @@ func (rd *reader) extents(iblock []byte, flags uint32) ([]run, error) {
 		return nil, errors.New("block-mapped (non-extent) files are not supported")
 	}
 	var runs []run
+	var nodos int
 	var walk func(b []byte, depth int) error
 	walk = func(b []byte, lvl int) error {
 		le := binary.LittleEndian
@@ -275,6 +380,12 @@ func (rd *reader) extents(iblock []byte, flags uint32) ([]run, error) {
 		depth := int(le.Uint16(b[6:]))
 		if 12+12*n > len(b) || lvl > 5 {
 			return errors.New("corrupt extent node")
+		}
+		if depth == 0 {
+			rd.tramos += uint64(n)
+			if len(runs)+n > maxTramos || rd.tramos > rd.blocks {
+				return errors.New("too many extents")
+			}
 		}
 		for i := 0; i < n; i++ {
 			e := b[12+12*i:]
@@ -287,6 +398,11 @@ func (rd *reader) extents(iblock []byte, flags uint32) ([]run, error) {
 				}
 				runs = append(runs, run{uint64(le.Uint32(e[0:])), phys, l})
 				continue
+			}
+			nodos++
+			rd.nodos++
+			if nodos > maxNodosExtent || rd.nodos > rd.blocks {
+				return errors.New("too many extent index nodes")
 			}
 			leaf := uint64(le.Uint32(e[4:])) | uint64(le.Uint16(e[8:]))<<32
 			blk := make([]byte, blockSize)
