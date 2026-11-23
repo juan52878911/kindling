@@ -500,10 +500,19 @@ func (s *Servidor) tenantsTodos() []Tenant {
 	return out
 }
 
-// tenantNombre busca un tenant por nombre.
+// tenantNombre busca un tenant por nombre, en el mismo orden que tenantsTodos
+// (primero los fijos), pero sin copiar el almacén entero con sus claves: el
+// ingress lo llama en cada petición (D-06).
 func (s *Servidor) tenantNombre(n string) *Tenant {
-	for _, t := range s.tenantsTodos() {
-		if t.Nombre == n {
+	for i := range s.tenants {
+		if s.tenants[i].Nombre == n {
+			t := s.tenants[i]
+			return &t
+		}
+	}
+	if s.almacen != nil {
+		if q, err := s.almacen.Obtener(n); err == nil {
+			t := s.deAlmacen(q)
 			return &t
 		}
 	}

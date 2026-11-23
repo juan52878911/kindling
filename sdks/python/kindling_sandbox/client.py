@@ -3,8 +3,10 @@
 import http.client
 import json
 import os
+import select
 import socket
 import ssl
+import threading
 import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterator, List, Optional
@@ -36,8 +38,30 @@ def _retry_after(valor: Optional[str]) -> Optional[float]:
         return None
 
 
+# Errores de una conexión reutilizada que el servidor cerró justo al usarla (por
+# inactividad). Solo se repiten los métodos idempotentes: un POST que pudo
+# llegar a procesarse no se manda dos veces.
+_CONEXION_CADUCADA = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError,
+                      ConnectionAbortedError)
+_IDEMPOTENTES = ("GET", "HEAD", "PUT", "DELETE", "OPTIONS")
+
+
+def _viva(conn) -> bool:
+    """Una conexión ociosa que el servidor ya cerró se lee como legible (EOF):
+    esa no se reutiliza."""
+    if conn.sock is None:
+        return False
+    try:
+        legible, _, _ = select.select([conn.sock], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    return not legible
+
+
 class Client:
-    """Conexión al gateway. Una conexión TCP por petición (simple y sin estado)."""
+    """Conexión al gateway. Cada hilo guarda una conexión abierta (keep-alive) y
+    la reutiliza mientras el servidor la mantenga; con HTTPS, el contexto TLS
+    se carga una vez por cliente."""
 
     def __init__(self, url: Optional[str] = None, token: Optional[str] = None,
                  timeout: Optional[float] = 60.0, retries: int = 0, max_retry_wait: float = 30.0):
@@ -58,6 +82,27 @@ class Client:
         self.retries = max(0, int(retries))
         self.max_retry_wait = max_retry_wait
         self._dormir = time.sleep
+        # Un solo contexto TLS por cliente: crearlo carga el almacén de CAs.
+        self._tls = ssl.create_default_context() if self._https else None
+        self._local = threading.local()
+        # Todas las conexiones guardadas, de cualquier hilo: close() las cierra
+        # aunque se guardaran en hilos de un ejecutor (la capa asíncrona).
+        self._cerrojo = threading.Lock()
+        self._ociosas: Dict[int, Any] = {}
+
+    def close(self) -> None:
+        """Cierra las conexiones guardadas (de todos los hilos)."""
+        with self._cerrojo:
+            ociosas, self._ociosas = self._ociosas, {}
+        for conn, pid in ociosas.values():
+            if pid == os.getpid():
+                conn.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # al recoger el objeto no hay a quién avisar
+            pass
 
     def __repr__(self) -> str:
         return "Client(url=%r, token=%s)" % (self.url, "<oculto>" if self._token else "None")
@@ -66,11 +111,40 @@ class Client:
 
     # ---- bajo nivel
 
-    def _conectar(self, timeout):
+    def _conectar(self, timeout, reutilizar: bool = True):
+        """Devuelve (conn, reutilizada). La guardada en el hilo se toma (y deja
+        de estar guardada) solo si es de este proceso: tras un fork, la del
+        padre no se comparte."""
+        conn = getattr(self._local, "conn", None) if reutilizar else None
+        if conn is not None:
+            self._local.conn = None
+            with self._cerrojo:
+                guardada = self._ociosas.pop(id(conn), None)
+            if guardada is not None and guardada[1] == os.getpid():
+                if _viva(conn):
+                    conn.timeout = timeout
+                    conn.sock.settimeout(timeout)
+                    return conn, True
+                conn.close()
         if self._https:
             return http.client.HTTPSConnection(self._host, self._port, timeout=timeout,
-                                               context=ssl.create_default_context())
-        return http.client.HTTPConnection(self._host, self._port, timeout=timeout)
+                                               context=self._tls), False
+        return http.client.HTTPConnection(self._host, self._port, timeout=timeout), False
+
+    def _devolver(self, conn, resp) -> None:
+        """Guarda conn para la siguiente petición de este hilo si la respuesta
+        se leyó entera y el servidor no pidió cerrar; si no, la cierra."""
+        if resp.will_close or not resp.isclosed():
+            conn.close()
+            return
+        vieja = getattr(self._local, "conn", None)
+        self._local.conn = conn
+        with self._cerrojo:
+            self._ociosas[id(conn)] = (conn, os.getpid())
+            if vieja is not None and vieja is not conn:
+                self._ociosas.pop(id(vieja), None)
+        if vieja is not None and vieja is not conn:
+            vieja.close()
 
     def _limpia(self, texto: str) -> str:
         if self._token and self._token in texto:
@@ -107,20 +181,30 @@ class Client:
             cab["Content-Type"] = content_type
         if cabeceras:
             cab.update(cabeceras)
-        conn = self._conectar(timeout)
-        try:
-            conn.request(metodo, destino, body=cuerpo, headers=cab)
-            resp = conn.getresponse()
-        except (OSError, http.client.HTTPException) as e:
-            conn.close()
-            raise TransportError(self._limpia("%s %s: %s" % (metodo, ruta, e))) from None
+        # Un cuerpo en flujo no se puede repetir: va siempre por una conexión nueva.
+        repetible = cuerpo is None or isinstance(cuerpo, (bytes, bytearray))
+        conn, reutilizada = self._conectar(timeout, repetible)
+        while True:
+            try:
+                conn.request(metodo, destino, body=cuerpo, headers=cab)
+                resp = conn.getresponse()
+                break
+            except _CONEXION_CADUCADA as e:
+                conn.close()
+                if not reutilizada or metodo not in _IDEMPOTENTES:
+                    raise TransportError(self._limpia("%s %s: %s" % (metodo, ruta, e))) from None
+                conn, reutilizada = self._conectar(timeout, False)
+            except (OSError, http.client.HTTPException) as e:
+                conn.close()
+                raise TransportError(self._limpia("%s %s: %s" % (metodo, ruta, e))) from None
         if resp.status >= 300:
             try:
                 datos = resp.read()
             except (OSError, http.client.HTTPException):
                 datos = b""
-            finally:
                 conn.close()
+            else:
+                self._devolver(conn, resp)
             msg, code = "", None
             try:
                 j = json.loads(datos)
@@ -133,11 +217,12 @@ class Client:
 
     def _leer(self, conn, resp, ruta: str) -> bytes:
         try:
-            return resp.read()
+            datos = resp.read()
         except (OSError, http.client.HTTPException) as e:
-            raise TransportError(self._limpia("%s: %s" % (ruta, e))) from None
-        finally:
             conn.close()
+            raise TransportError(self._limpia("%s: %s" % (ruta, e))) from None
+        self._devolver(conn, resp)
+        return datos
 
     def _json(self, metodo: str, ruta: str, query=None, cuerpo: Optional[dict] = None,
               timeout: Any = "defecto", auth: bool = True):
@@ -331,6 +416,9 @@ class Client:
         return self._eventos(conn, resp, ruta)
 
     def _eventos(self, conn, resp, ruta: str, tipo=ExecEvent) -> Iterator[Any]:
+        # Solo un flujo leído hasta el final deja la conexión reutilizable; uno
+        # que se abandona a medias (o que falla) la cierra.
+        entero = False
         try:
             while True:
                 try:
@@ -338,6 +426,7 @@ class Client:
                 except (OSError, http.client.HTTPException) as e:
                     raise TransportError(self._limpia("%s: flujo cortado: %s" % (ruta, e))) from None
                 if not linea:
+                    entero = True
                     return
                 linea = linea.strip()
                 if not linea:
@@ -347,7 +436,10 @@ class Client:
                 except ValueError:
                     raise TransportError("%s: línea NDJSON inválida" % ruta) from None
         finally:
-            conn.close()
+            if entero:
+                self._devolver(conn, resp)
+            else:
+                conn.close()
 
     # ---- procesos de fondo y sesiones
 
