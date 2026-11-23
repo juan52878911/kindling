@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/panico"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
@@ -55,6 +56,9 @@ type Router struct {
 	// segunda petición a otro la rompería aunque el servicio exista en varios.
 	sessMu      sync.Mutex
 	sessionHost map[string]*fijada
+
+	// mapa recuerda qué servicios tiene cada host (ver router_mapa.go).
+	mapa mapaHosts
 }
 
 // fijada es a qué host va una sesión y cuándo se usó por última vez. La hora es
@@ -198,15 +202,22 @@ func (r *Router) handleServices(w http.ResponseWriter, req *http.Request) {
 // hostsFor devuelve los hosts que tienen `service` en su catálogo (microVM o
 // enlace externo). Un host inalcanzable no es candidato: no hay a quién
 // preguntarle si lo tiene.
+//
+// Sale del mapa recordado; si ahí no está, se relee una vez por si se acaba de
+// importar.
 func (r *Router) hostsFor(ctx context.Context, service string) []*RouterHost {
+	out := r.hostsConServicio(r.catalogos(ctx, false), service)
+	if len(out) == 0 {
+		out = r.hostsConServicio(r.catalogos(ctx, true), service)
+	}
+	return out
+}
+
+func (r *Router) hostsConServicio(cs []catalogoHost, service string) []*RouterHost {
 	var out []*RouterHost
-	for _, h := range r.hosts {
-		names, err := h.GW.agg.cat.services(ctx)
-		if err != nil {
-			continue
-		}
-		if contains(names, service) {
-			out = append(out, h)
+	for i, c := range cs {
+		if i < len(r.hosts) && contains(c.nombres, service) {
+			out = append(out, r.hosts[i])
 		}
 	}
 	return out
@@ -225,14 +236,25 @@ func (r *Router) byAvailableMemory(ctx context.Context, hosts []*RouterHost) []*
 		mib int64
 		ok  bool
 	}
+	// A todos a la vez: en serie, un host lento sumaba su retraso a cada
+	// petición sin sesión.
 	rs := make([]ranked, len(hosts))
+	var wg sync.WaitGroup
 	for i, h := range hosts {
-		ps, err := h.GW.Client().ProcStats(ctx)
-		rs[i] = ranked{h: h, ok: err == nil}
-		if err == nil {
-			rs[i].mib = ps.AvailableMiB
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rs[i] = ranked{h: h}
+			panico.Contener("gateway.router.procstats", func() {
+				ps, err := h.GW.Client().ProcStats(ctx)
+				rs[i].ok = err == nil
+				if err == nil {
+					rs[i].mib = ps.AvailableMiB
+				}
+			})
+		}()
 	}
+	wg.Wait()
 	// SliceStable: entre empatados (o igual de inalcanzables), se conserva el
 	// orden de -hosts, que es lo único predecible que se le puede ofrecer al
 	// operador cuando el desempate por memoria no dice nada.
@@ -316,7 +338,12 @@ func (r *Router) handleProxy(w http.ResponseWriter, req *http.Request) {
 		// Probarlo aparte solo serviría para despertar la instancia DOS veces
 		// (una en el sondeo, otra dentro de routes()) sin nada que ganar, ya
 		// que no hay un candidato más al que pasar si también falla.
-		if i < len(candidates)-1 {
+		//
+		// Un servicio que aísla cada sesión no se sondea: Ensure despertaría
+		// una instancia compartida que ese servicio no debe tener (ver
+		// aislamiento.go). Si no cabe, el fallo sale al crear su sesión. Sin
+		// poder saber si aísla, tampoco: el host lo resuelve cerrando.
+		if i < len(candidates)-1 && !aislaOIncierto(ctx, h.GW, service) {
 			if _, err := h.GW.Ensure(ctx, service); err != nil {
 				// Falta de sitio en este host (memoria, tope de máquinas o, desde
 				// kindling v0.8, disco): otro host puede tener.
@@ -568,20 +595,28 @@ func (ra *routerAgg) dispatch(ctx context.Context, s *routerSession, method stri
 	}
 }
 
+// aislaOIncierto dice si el servicio da una microVM a cada sesión en ese host,
+// o si no se puede saber.
+func aislaOIncierto(ctx context.Context, g *Gateway, service string) bool {
+	ais, err := g.aislado(ctx, service)
+	return err != nil || ais
+}
+
 // serviceHosts combina el catálogo de todos los hosts en un único mapa
 // servicio -> host dueño. Un mismo nombre en dos hosts —importado dos veces
 // por error— se queda con el primero por orden de -hosts, que es predecible,
 // en vez de con el que respondiera antes por azar.
-func (ra *routerAgg) serviceHosts(ctx context.Context) map[string]*RouterHost {
+//
+// Sale del mapa recordado (ver router_mapa.go); forzar lo relee.
+func (ra *routerAgg) serviceHosts(ctx context.Context, forzar bool) map[string]*RouterHost {
 	out := map[string]*RouterHost{}
-	for _, h := range ra.r.hosts {
-		names, err := h.GW.agg.cat.services(ctx)
-		if err != nil {
-			continue
+	for i, c := range ra.r.catalogos(ctx, forzar) {
+		if i >= len(ra.r.hosts) {
+			break
 		}
-		for _, n := range names {
+		for _, n := range c.nombres {
 			if _, dup := out[n]; !dup {
-				out[n] = h
+				out[n] = ra.r.hosts[i]
 			}
 		}
 	}
@@ -593,7 +628,8 @@ func (ra *routerAgg) instructions(ctx context.Context, s *routerSession) string 
 		return "Tools from several MCP servers across hosts, with service.tool names."
 	}
 
-	byHost := ra.serviceHosts(ctx)
+	// Una vez por conversación: se relee para que vea lo recién importado.
+	byHost := ra.serviceHosts(ctx, true)
 	services := make([]string, 0, len(byHost))
 	for n := range byHost {
 		services = append(services, n)
@@ -626,7 +662,7 @@ func (ra *routerAgg) listTools(ctx context.Context, s *routerSession) (any, *rpc
 		return map[string]any{"tools": metaToolsList()}, nil
 	}
 
-	byHost := ra.serviceHosts(ctx)
+	byHost := ra.serviceHosts(ctx, false)
 	var out []map[string]any
 	for svc, h := range byHost {
 		tools, err := h.GW.agg.cat.toolsOf(ctx, svc)
@@ -688,7 +724,7 @@ func (ra *routerAgg) doFindTools(ctx context.Context, args json.RawMessage) (any
 	}
 	_ = json.Unmarshal(args, &p)
 
-	byHost := ra.serviceHosts(ctx)
+	byHost := ra.serviceHosts(ctx, false)
 	if p.Service != "" {
 		h, ok := byHost[p.Service]
 		if !ok {
@@ -776,8 +812,11 @@ func (ra *routerAgg) lookup(ctx context.Context, name string) (*Tool, *RouterHos
 	if !ok {
 		return nil, nil, &rpcFault{-32602, "use the qualified name service.tool, not " + name}
 	}
-	byHost := ra.serviceHosts(ctx)
-	h, ok := byHost[service]
+	h, ok := ra.serviceHosts(ctx, false)[service]
+	if !ok {
+		// Quizá recién importado: se relee una vez antes de decir que no está.
+		h, ok = ra.serviceHosts(ctx, true)[service]
+	}
 	if !ok {
 		return nil, nil, &rpcFault{-32602, "service not available: " + service}
 	}

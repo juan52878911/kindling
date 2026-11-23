@@ -384,6 +384,9 @@ func (b *bridge) closeAll() {
 	if warm != nil {
 		warm.discard()
 	}
+	// Un caliente que se estuviera reponiendo ve el gen nuevo y se descarta
+	// solo; se le espera para no dejarlo suelto al salir.
+	b.esperarReposicion()
 
 	// Aquí SÍ se espera, al contrario que en el cosechador de ociosas: después
 	// de esto se sueltan los volúmenes y el proceso sale. En paralelo para que
@@ -453,6 +456,9 @@ type bridge struct {
 	// (ver warm.go). Protegido por mu. A propósito NO vive en sessions: no
 	// cuenta para maxSessions ni puede cosecharlo el reaper de ociosas.
 	warm *warmChild
+	// reponiendo se cierra cuando acaba el reponerCaliente en curso; nil si no
+	// hay ninguno. Bajo mu.
+	reponiendo chan struct{}
 	// spawning cuenta las sesiones con plaza reservada que se están lanzando
 	// FUERA del candado (ver resolve). Cuentan para maxSessions: sin esto, N
 	// initialize simultáneos verían el mismo hueco y lo superarían entre todos.
@@ -982,7 +988,7 @@ func (b *bridge) spawn() (*session, error) {
 
 	// Entorno base del puente MÁS los secretos comunes que MMDS traiga (los
 	// mismos para todas las sesiones). Sin MMDS, es exactamente b.env.
-	env, secrets := b.sessionEnv(id)
+	env, _ := b.sessionEnv(id)
 
 	// El Chromium que ensureBrowser acaba de asegurar. Si ya murió, la sesión
 	// nacería atada a un navegador muerto que vigilarNavegador ya no verá.
@@ -996,8 +1002,14 @@ func (b *bridge) spawn() (*session, error) {
 	// que anulaba la ventaja del snapshot dorado. Ver warm.go. spawn corre sin
 	// b.mu (ver resolve): se toma solo para mirar el caliente.
 	b.mu.Lock()
-	adopted := b.adoptWarmLocked(id, secrets)
+	gastado := b.warm != nil
+	adopted := b.adoptWarmLocked(id, env)
 	b.mu.Unlock()
+	if gastado {
+		// Se gastó el caliente (adoptado o descartado): otro para la sesión
+		// siguiente, si cabe. Ver reponerCaliente.
+		b.reponerCaliente()
+	}
 	if adopted != nil {
 		adopted.navegador = nav
 		return adopted, nil

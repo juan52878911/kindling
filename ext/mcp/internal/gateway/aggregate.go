@@ -145,7 +145,9 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	// Un solo GET /snapshots por petición, por muchos servicios que toque
+	// (ver listados.go).
+	ctx := conMemoListados(r.Context())
 	// Una notificación sin sesión no abre conversación: nadie volverá con un id
 	// que nunca recibió, y acuñarla solo dejaba basura hasta el segador.
 	notificacion := len(req.ID) == 0 || string(req.ID) == "null"
@@ -1156,7 +1158,7 @@ func (a *aggregator) isStateful(ctx context.Context, service string) bool {
 		return v
 	}
 
-	snaps, err := a.gw.Client().Snapshots(ctx)
+	snaps, err := listarSnapshots(ctx, a.gw.Client())
 	if err != nil {
 		return false
 	}
