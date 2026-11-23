@@ -448,7 +448,7 @@ func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request,
 		fail(w, http.StatusBadRequest, fmt.Errorf("invalid port %q", puerto))
 		return
 	}
-	h, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+	h, _, err := s.buscar(r.Context(), tenantDe(r), id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return
@@ -458,7 +458,8 @@ func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request,
 	c := g.s.cerrojoDe(id + "\x00endpoints")
 	c.Lock()
 	defer c.Unlock()
-	if _, mc, err = s.buscar(r.Context(), tenantDe(r), id); err != nil {
+	_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return
 	}
