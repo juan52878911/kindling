@@ -209,3 +209,22 @@ func TestAIUpURLAndBanner(t *testing.T) {
 		t.Errorf("banner with env token:\n%s", buf.String())
 	}
 }
+
+// Los ejemplos de la ayuda tienen que poder teclearse: `-chispa-mem` es un
+// entero en MiB, no un tamaño con sufijo.
+func TestChispaMemEjemploEsEntero(t *testing.T) {
+	for _, c := range builtinExtensions()[0].Manifest.Commands {
+		i := strings.Index(c.Usage, "-chispa-mem ")
+		if i < 0 {
+			continue
+		}
+		v := strings.Fields(c.Usage[i+len("-chispa-mem "):])[0]
+		v = strings.TrimRight(v, "]")
+		for _, r := range v {
+			if r < '0' || r > '9' {
+				t.Errorf("%s: el ejemplo «-chispa-mem %s» no es un entero en MiB", c.Name, v)
+				break
+			}
+		}
+	}
+}
