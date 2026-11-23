@@ -31,6 +31,20 @@ func daemonQueSePasa(tb testing.TB) *Client {
 	return clienteDePrueba(tb, mux)
 }
 
+// Client.Exec no guarda más del tope pedido aunque el otro extremo mande más,
+// y lo marca como truncado.
+func TestExecNoPasaDelTopeAunqueElDaemonSiga(t *testing.T) {
+	c := daemonQueSePasa(t)
+	res, err := c.Exec(context.Background(), "m", ExecRequest{Cmd: []string{"x"}, MaxOutputBytes: topeDePrueba}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Stdout) != topeDePrueba || len(res.Stderr) != topeDePrueba || !res.Truncated {
+		t.Fatalf("stdout %d, stderr %d, truncated %v; quería %d, %d y true",
+			len(res.Stdout), len(res.Stderr), res.Truncated, topeDePrueba, topeDePrueba)
+	}
+}
+
 // BenchmarkExecSalidaDeMas mide cuánta salida acumula Client.Exec (sin
 // onOutput) cuando el otro extremo manda el doble del tope pedido (B-16), en
 // veces el tope.

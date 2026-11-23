@@ -328,13 +328,22 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 	// callado las retrasa hasta acabar. Se esperan lo mismo que el cuerpo, su
 	// timeout más execBodyGrace, no los plazoCabeceras (5 min) de siempre.
 	ctx = conPlazoCabeceras(ctx, execBodyTimeout(req))
+	// B-16: además del plazo de inactividad del cuerpo, uno TOTAL con el mismo
+	// valor desde que se pide. Un agente que gotee líneas vacías o eventos de
+	// un flujo desconocido no deja nunca de dar señales de vida, y retendría la
+	// goroutine, la conexión y la plaza del inquilino mientras quien llama siga
+	// conectado. El agente mata el comando en su timeout y manda el evento
+	// final; execBodyGrace cubre eso.
+	ctx, cancel := context.WithTimeout(ctx, execBodyTimeout(req))
 	greq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec/stream", bytes.NewReader(body))
 	if err != nil {
+		cancel()
 		return nil, http.StatusInternalServerError, err
 	}
 	greq.Header.Set("Content-Type", "application/json")
 	resp, err := guestClient.Do(greq)
 	if err != nil {
+		cancel()
 		return nil, http.StatusBadGateway, fmt.Errorf("talking to the guest agent: %w", err)
 	}
 	if resp.StatusCode == http.StatusOK {
@@ -344,8 +353,9 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		// compilación, `npm ci`) puede callar legítimamente hasta su propio
 		// timeout, y el agente ya lo mata al llegar ahí y manda el evento
 		// final. Se le da ese timeout más execBodyGrace de margen.
-		return wrapGuestBodyCon(resp.Body, execBodyTimeout(req)), 0, nil
+		return cuerpoConPlazo{wrapGuestBodyCon(resp.Body, execBodyTimeout(req)), cancel}, 0, nil
 	}
+	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, http.StatusNotImplemented, errors.New("the guest agent has no exec streaming")
@@ -358,6 +368,18 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		return nil, http.StatusTooManyRequests, invitadoOcupado(msg)
 	}
 	return nil, http.StatusBadGateway, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
+}
+
+// cuerpoConPlazo suelta el plazo total del flujo de exec al cerrarlo.
+type cuerpoConPlazo struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cuerpoConPlazo) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // errInvitadoOcupado: el agente del invitado contestó 429 porque ya corre

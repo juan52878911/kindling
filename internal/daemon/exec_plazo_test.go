@@ -58,6 +58,18 @@ func duracionFlujoGoteando(tb testing.TB, durante time.Duration) (time.Duration,
 	return time.Since(t0), ultimo
 }
 
+// Un agente que no calla pero nunca acaba se corta en timeout+execBodyGrace
+// desde la petición, con un evento de error, no cuando él quiera.
+func TestExecFlujoGoteandoTienePlazoTotal(t *testing.T) {
+	d, ultimo := duracionFlujoGoteando(t, 5*time.Second)
+	if d > 3*time.Second {
+		t.Fatalf("el flujo duró %s; el plazo total era 1,2 s", d)
+	}
+	if ultimo.Error == "" || ultimo.Exit != nil {
+		t.Fatalf("último evento = %+v; quería un error", ultimo)
+	}
+}
+
 // BenchmarkExecFlujoGoteando mide cuánto retiene el daemon un exec cuyo
 // agente gotea líneas vacías durante 3 s con un timeout de 1 s (B-16).
 func BenchmarkExecFlujoGoteando(b *testing.B) {
