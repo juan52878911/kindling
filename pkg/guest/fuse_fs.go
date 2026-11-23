@@ -90,8 +90,11 @@ type fuseFS struct {
 	kcMu      sync.Mutex // guarda node.openKey/openSeen
 
 	// Avisos de cambios del host (fuse_notify.go).
-	evq       chan pushEvent
-	evOnce    sync.Once
+	evq    chan pushEvent
+	evOnce sync.Once
+	// perdidos: se perdió algún aviso del host (cola llena aquí o en la
+	// sesión). Mientras, ttls da 1 s, y el notificador lo invalida todo.
+	perdidos  atomic.Bool
 	synthTID  atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
 	synMu     sync.Mutex
 	syn       synthOp
@@ -224,6 +227,13 @@ func (fs *fuseFS) attach(s *shareSession) {
 		for {
 			select {
 			case ev := <-s.events:
+				if s.perdido.Load() {
+					// Primero el de fs y luego se borra el de la sesión: ttls
+					// mira los dos y no hay un momento sin ninguno. Va antes del
+					// enqueue, que despierta al notificador.
+					fs.perdidos.Store(true)
+					s.perdido.Store(false)
+				}
 				fs.enqueue(ev)
 			case <-s.done:
 				return
@@ -516,7 +526,15 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		te, ta := fs.ttls()
 		if errno == share.ENOENT {
 			// Entrada negativa: el kernel recuerda que no existe y no vuelve a
-			// preguntar hasta que caduque o el host avise de que apareció.
+			// preguntar hasta que caduque o el host avise de que apareció. La
+			// larga solo bajo un padre que no sea la raíz: si el daemon deja de
+			// vigilar el padre, o se pierden avisos, se invalida la entrada del
+			// padre y el kernel tira con ella sus negativas (d_invalidate poda
+			// los hijos). La raíz no tiene entrada que invalidar y sus negativas
+			// no se pueden tirar sin saber los nombres: van con 1 s.
+			if n == fs.nodes.root {
+				te = cacheSeconds
+			}
 			return reply(u, 0, entryOutT(0, fattr{}, te, 0))
 		}
 		if errno != 0 {
@@ -1016,7 +1034,10 @@ func (fs *fuseFS) ttls() (entry, attr uint64) {
 	fs.smu.Lock()
 	s := fs.sess
 	fs.smu.Unlock()
-	if s == nil || !s.watching.Load() {
+	if s == nil || !s.watching.Load() || s.perdido.Load() || fs.perdidos.Load() {
+		// Sin vigilancia, o con avisos perdidos que aún no se han compensado
+		// invalidándolo todo (fuse_notify.go): lo que se dé ahora no tiene
+		// quien lo invalide.
 		return cacheSeconds, cacheSeconds
 	}
 	if fs.readOnly {

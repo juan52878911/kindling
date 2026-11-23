@@ -71,6 +71,28 @@ var (
 	maxEcho = 8192
 )
 
+// EventForget es el aviso «deja de fiarte de esta ruta»: el daemon ya no la
+// vigila (se expulsó por el tope) y lo que el kernel del invitado tenga de
+// ella, o de lo que cuelga de ella, no lo invalidará ningún aviso. El agente la
+// saca de la caché del kernel. Con la ruta vacía, todo.
+//
+// Por qué así y no otra cosa. Con OpWatch el agente da a entradas y
+// atributos 30 s de caché (pkg/guest/fuse_fs.go, ttls) en vez de 1 s, y eso
+// solo vale para una ruta que, si cambia en el host, recibirá un aviso. Una
+// ruta expulsada deja de cumplirlo sin que el agente lo sepa. Se descartó que
+// el agente adivinase qué vigila el daemon (tendría que replicar su LRU
+// exacta) y que el daemon mandase un EventModify de la expulsada (el agente
+// lo convierte en un IN_MODIFY sintético: un vite o un nodemon recompilando
+// por nada cada vez que el tope rota). Un aviso aparte, que solo invalida,
+// cierra el hueco sin efectos para los vigilantes del invitado; la próxima
+// vez que el kernel pregunte por la ruta el stat la vuelve a vigilar. Un agente
+// anterior lo salta (ErrUnknownEvent), como cualquier aviso que no conoce.
+//
+// Vive aquí y no en shareproto porque ParsePush rechaza los tipos que no
+// conoce: el agente lo repite (pkg/guest, eventForget) y un test comprueba
+// que coinciden.
+const EventForget byte = 4
+
 // errNoWatch: este sistema no tiene con qué vigilar.
 var errNoWatch = errors.New("no host file watching on this system")
 
@@ -171,6 +193,11 @@ type watcher struct {
 	timer     *time.Timer
 	// resync: se perdieron eventos; el próximo flush lo repasa todo.
 	resync bool
+	// olvidos son las rutas expulsadas de las que aún no se ha avisado al
+	// invitado (EventForget); olvidoTodo, que eran tantas que se le dice que
+	// lo olvide todo (acota olvidos si flush no corre: un invitado que no lee).
+	olvidos    []string
+	olvidoTodo bool
 	// flushing: hay un flush en marcha; again, llegaron eventos mientras y
 	// toca otro al acabar. Sin esto, cada watchDebounce con eventos era una
 	// goroutine más esperando en la escritura a un invitado que no lee.
@@ -254,7 +281,15 @@ func (w *watcher) note(rel string, dir bool) {
 		w.dropLocked(e)
 	}
 	for len(w.entries) >= maxWatchesPerSession {
-		w.dropLocked(w.lru.Back().Value.(*watchEntry))
+		v := w.lru.Back().Value.(*watchEntry)
+		if v.rel == "" && w.lru.Len() > 1 {
+			// La raíz no se expulsa: olvidarla es que el invitado tire toda
+			// su caché, y con el tope rotando sería cada pocos miles de rutas.
+			w.lru.MoveToFront(v.el)
+			continue
+		}
+		w.dropLocked(v)
+		w.olvidarLocked(v.rel)
 	}
 	if !w.polling && w.kernel >= maxKernelWatches {
 		w.aSondeoLocked()
@@ -294,6 +329,55 @@ func (w *watcher) note(rel string, dir bool) {
 	w.mu.Lock()
 	if !w.closed && w.entries[rel] == e && e.snap == nil {
 		w.setSnapLocked(e, snap, id, ok, desde)
+	}
+}
+
+// olvidarLocked apunta que hay que decirle al invitado que rel ya no se vigila
+// (EventForget), en el flush siguiente.
+func (w *watcher) olvidarLocked(rel string) {
+	switch {
+	case w.olvidoTodo:
+		return
+	case len(w.olvidos) >= maxWatchesPerSession:
+		w.olvidos, w.olvidoTodo = nil, true
+	default:
+		w.olvidos = append(w.olvidos, rel)
+	}
+	if len(w.olvidos) == 1 || w.olvidoTodo {
+		// Solo con el primero: con el tope rotando, cada note expulsa una y
+		// reprogramar cada vez aplazaría el flush mientras dure la ráfaga.
+		w.programarLocked()
+	}
+}
+
+// programarLocked arma (o rearma) el flush tras watchDebounce.
+func (w *watcher) programarLocked() {
+	if w.timer == nil {
+		w.timer = time.AfterFunc(watchDebounce, w.flush)
+	} else {
+		w.timer.Reset(watchDebounce)
+	}
+}
+
+// notePadre refresca rel (el padre de algo que el invitado buscó y no
+// existe): el invitado guarda la entrada negativa con la caché larga, y solo
+// se le avisa de que el nombre apareció si el padre se vigila. Si ya se
+// vigilaba sube en la LRU; si no (se expulsó), se vuelve a vigilar.
+func (w *watcher) notePadre(rel string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if e := w.entries[rel]; e != nil || w.closed {
+		if e != nil {
+			w.lru.MoveToFront(e.el)
+		}
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+	if fi, err := w.srv.root.Lstat(relPath(rel)); err == nil && fi.IsDir() {
+		w.note(rel, true)
 	}
 }
 
@@ -534,6 +618,15 @@ func (w *watcher) flush() {
 	}()
 	pend := w.pend
 	w.pend = map[string]rawEvent{}
+	var out []pushMsg
+	if w.olvidoTodo {
+		out = append(out, pushMsg{EventForget, ""})
+	} else {
+		for _, r := range w.olvidos {
+			out = append(out, pushMsg{EventForget, r})
+		}
+	}
+	w.olvidos, w.olvidoTodo = nil, false
 	if w.resync {
 		w.resync, w.resyncSondeo = false, false
 		w.resyncLocked(pend, false)
@@ -545,7 +638,6 @@ func (w *watcher) flush() {
 	w.purgeEchoLocked(now)
 	isEcho := func(r string) bool { t, ok := w.echo[r]; return ok && now.Sub(t) <= guestEcho }
 
-	var out []pushMsg
 	sent := map[pushMsg]bool{}
 	add := func(ev byte, r string) {
 		m := pushMsg{ev, r}

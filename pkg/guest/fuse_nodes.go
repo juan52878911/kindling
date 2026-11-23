@@ -110,6 +110,29 @@ func (t *nodeTable) pathLocked(n *node) (string, bool) {
 	return strings.Join(parts, "/"), true
 }
 
+// entrada es lo que el kernel tiene de un nodo: el id y su nombre en el padre
+// (parent 0 en la raíz y en los huérfanos).
+type entrada struct {
+	id, parent uint64
+	name       string
+}
+
+// entradas es la foto de la tabla, para invalidarlo todo sin tener el cerrojo
+// mientras se escribe en /dev/fuse.
+func (t *nodeTable) entradas() []entrada {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]entrada, 0, len(t.byID))
+	for _, n := range t.byID {
+		e := entrada{id: n.id, name: n.name}
+		if n.parent != nil {
+			e.parent = n.parent.id
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // parentID es el id del padre de n (el propio n en la raíz o si está huérfano).
 func (t *nodeTable) parentID(n *node) uint64 {
 	t.mu.Lock()
