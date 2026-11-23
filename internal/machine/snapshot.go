@@ -1784,7 +1784,7 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 	// plantado en su sitio no lleva el chown a un fichero de fuera (B-4).
 	err = m.priv.Own(dir)
 	if err == nil && modoCoW != cowModoStore {
-		err = cederSinSeguirEnlaces(m.priv, overlay)
+		err = m.priv.OwnNoFollow(overlay)
 	}
 	if err != nil {
 		m.desmontarRed(netcfg, id)
@@ -2404,23 +2404,4 @@ func (m *Manager) cerrarClonYRed(dir string, n *knet.Net, id, modo string, errCl
 		return modo, fmt.Errorf("copying golden overlay: %w", errClon)
 	}
 	return modo, fmt.Errorf("setting up network: %w", errRed)
-}
-
-// cederSinSeguirEnlaces cede path a Firecracker con fchown sobre un descriptor
-// abierto con O_NOFOLLOW: si path es un enlace simbólico (plantado donde debía
-// estar el overlay), falla en vez de entregar el fichero al que apunta. Un
-// fichero que no existe no es un fallo, como en Privileges.Own.
-func cederSinSeguirEnlaces(p *Privileges, path string) error {
-	if !p.Enabled {
-		return nil
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("granting %s: %w", path, err)
-	}
-	defer f.Close()
-	return p.OwnFile(f)
 }

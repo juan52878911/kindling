@@ -1,8 +1,10 @@
 package machine
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -62,5 +64,40 @@ func TestEstadoYPrevioRotosVanACuarentena(t *testing.T) {
 	m.load()
 	if !m.barridoBloqueado() {
 		t.Fatal("con los dos estados rotos el daemon no entró en modo protegido")
+	}
+}
+
+// Sin enlaces duros (o sin foto anterior, la primera vez) no hay de dónde
+// recuperar: persistirYa escribe con fsync, como antes de A-1. Más lento, no
+// menos seguro.
+func TestPersistirYaSinEnlacesEscribeConFsync(t *testing.T) {
+	m := newTestManager(t)
+	var completas atomic.Int32
+	prevE, prevL := escribirEstado, enlazarEstadoPrevio
+	escribirEstado = func(ruta string, datos []byte, perm os.FileMode) error {
+		completas.Add(1)
+		return prevE(ruta, datos, perm)
+	}
+	t.Cleanup(func() { escribirEstado, enlazarEstadoPrevio = prevE, prevL })
+
+	// La primera: no hay foto que enlazar.
+	m.addForTest("aa00000000000011")
+	if err := m.persistirYa(); err != nil {
+		t.Fatal(err)
+	}
+	if completas.Load() != 1 {
+		t.Fatalf("la primera foto, sin anterior, se escribió sin fsync (%d con fsync)", completas.Load())
+	}
+	// Un sistema de ficheros sin enlaces duros.
+	enlazarEstadoPrevio = func(string) error { return errors.New("operation not supported") }
+	m.addForTest("aa00000000000012")
+	if err := m.persistirYa(); err != nil {
+		t.Fatal(err)
+	}
+	if completas.Load() != 2 {
+		t.Fatalf("sin enlaces duros se escribió sin fsync (%d con fsync)", completas.Load())
+	}
+	if _, err := os.Stat(m.statePath() + sufijoPrevio); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quedó un .prev sin poder enlazarlo: %v", err)
 	}
 }

@@ -11,6 +11,14 @@ import (
 // camino de quien lanza el VMM; el fsync lo hace la escritura con debounce.
 func TestPersistirYaNoHaceFsyncYLoDejaParaElDebounce(t *testing.T) {
 	m := newTestManager(t)
+	// Una foto ya asentada: sin ella no hay de dónde recuperar un state.json
+	// roto y persistirYa escribe con fsync (R3-1).
+	m.mu.Lock()
+	m.persist()
+	m.mu.Unlock()
+	if err := m.writePending(); err != nil {
+		t.Fatal(err)
+	}
 	var completas, fsyncs atomic.Int32
 	prevE, prevF := escribirEstado, fsyncEstado
 	escribirEstado = func(ruta string, datos []byte, perm os.FileMode) error {

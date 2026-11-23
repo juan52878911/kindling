@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -168,12 +169,16 @@ func TestReconcileCommitCortadoConVolumenesLosDevuelve(t *testing.T) {
 	}
 }
 
-// R6-I2 (R29): «ocupado» o sin contestar es un VMM volcando; un rechazo claro no.
-func TestVMMOcupado(t *testing.T) {
-	if !vmmOcupado(context.DeadlineExceeded) || !vmmOcupado(errors.New("Resource busy")) {
+// R6-I2 (R29): un VMM que contesta «ocupado» está volcando; un rechazo claro
+// no. Un plazo vencido tampoco (R3-5): no se sabe si vuelca o está colgado.
+func TestVMMContestaOcupado(t *testing.T) {
+	if !vmmContestaOcupado(errors.New("firecracker PATCH /drives/overlay: 400 Bad Request: Resource busy")) {
 		t.Fatal("un VMM ocupado no se reconoció")
 	}
-	if vmmOcupado(errors.New("PATCH /drives/overlay: 400: no")) {
+	if vmmContestaOcupado(errors.New("firecracker PATCH /drives/overlay: 400 Bad Request: no")) {
 		t.Fatal("un rechazo claro se tomó por ocupado")
+	}
+	if vmmContestaOcupado(fmt.Errorf("firecracker PATCH /drives/overlay: %w", context.DeadlineExceeded)) {
+		t.Fatal("un plazo vencido se tomó por un VMM que contesta ocupado")
 	}
 }

@@ -779,8 +779,17 @@ func (m *Manager) load() {
 		list, err = decodificarEstado(b, version)
 	}
 	if err != nil {
-		m.ponerEnCuarentena(err)
-		return
+		var ok bool
+		if list, version, ok = m.recuperarEstadoPrevio(err); !ok {
+			m.ponerEnCuarentena(err)
+			return
+		}
+	} else if ferr := fsyncEstado(m.statePath()); ferr != nil {
+		// La pudo publicar sin fsync un daemon que murió (persistirYa): hasta
+		// asentarla no sirve de foto anterior (escribirFoto).
+		m.escrituraMu.Lock()
+		m.sinFsync = true
+		m.escrituraMu.Unlock()
 	}
 	m.versionPrevia, m.hayPrevia = version, true
 	if version < versionEstado {
@@ -936,6 +945,56 @@ func comprobarEstadoV013(ruta string, b []byte) error {
 
 // sufijoCuarentena es lo que lleva el nombre de un state.json apartado.
 const sufijoCuarentena = ".corrupt-"
+
+// sufijoPrevio es la última foto asentada (con fsync) de state.json, que
+// escribirFoto enlaza antes de publicar una sin fsync (R3-1).
+const sufijoPrevio = ".prev"
+
+// sufijoRoto es lo que lleva un state.json ilegible cuando se pudo recuperar
+// la foto anterior: se guarda para el diagnóstico y, a diferencia de
+// sufijoCuarentena, no deja al daemon en modo protegido.
+const sufijoRoto = ".torn-"
+
+// recuperarEstadoPrevio carga state.json.prev cuando state.json no se pudo
+// leer (causa): lo que deja un corte de luz entre el rename sin fsync de
+// persistirYa y el fsync con debounce, en un sistema de ficheros que no
+// asienta los datos al renombrar (XFS, ext4 con noauto_da_alloc). Devuelve
+// false si tampoco hay foto anterior legible: entonces va a cuarentena.
+//
+// La foto anterior se vuelve a poner como state.json (con fsync) y el roto se
+// aparta a state.json.torn-<ns>. Se pierden, como mucho, las altas y bajas de
+// los últimos ~250 ms antes del corte, no el inventario entero.
+func (m *Manager) recuperarEstadoPrevio(causa error) ([]*api.Machine, int, bool) {
+	previo := m.statePath() + sufijoPrevio
+	b, err := os.ReadFile(previo)
+	if err != nil {
+		return nil, 0, false
+	}
+	version, err := esquema.Comprobar(previo, b, versionEstadoMax)
+	if err != nil {
+		return nil, 0, false
+	}
+	list, err := decodificarEstado(b, version)
+	if err != nil {
+		return nil, 0, false
+	}
+	roto := m.statePath() + sufijoRoto + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if rerr := os.Rename(m.statePath(), roto); rerr != nil {
+		roto = "(could not set it aside: " + rerr.Error() + ")"
+	}
+	if werr := escribirEstado(m.statePath(), b, 0o600); werr != nil {
+		// Sin poder reponerla, state.json no es una foto asentada: la
+		// siguiente escritura rápida no debe enlazarlo como anterior.
+		m.escrituraMu.Lock()
+		m.sinFsync = true
+		m.escrituraMu.Unlock()
+		log.Printf("warning: state: couldn't put the previous state back as %s: %v", m.statePath(), werr)
+	}
+	log.Printf("state: %s is unreadable (%v), probably torn by a host crash; loaded the last settled "+
+		"state from %s (%d machine(s)); changes from the last moments before the crash may be missing. "+
+		"The unreadable file is at %s", m.statePath(), causa, previo, len(list), roto)
+	return list, version, true
+}
 
 // ponerEnCuarentena aparta el state.json que no se pudo leer. Si ni siquiera
 // se puede renombrar, se bloquea además su escritura: persist lo pisaría con
@@ -1106,11 +1165,14 @@ func (m *Manager) ultimaEscritura(plazo time.Duration) {
 var escribirEstado = durable.Escribir
 
 // escribirEstadoRapido es escribirEstado sin fsync: temporal, write y rename.
-// La publicación es atómica (un lector ve la foto vieja o la nueva entera),
-// pero hasta el fsync que hace la escritura con debounce (≤ ~250 ms) una
-// caída del HOST puede dejar la vieja: se pierde el registro de una máquina
-// cuyo VMM también murió con el host. Una caída del daemon, no: el rename ya
-// está en el page cache del kernel. Variable para los tests.
+// La publicación es atómica para un lector (ve la foto vieja o la nueva
+// entera), pero no ante una caída del HOST antes del fsync que hace la
+// escritura con debounce (≤ ~250 ms): un sistema de ficheros que no asienta
+// los datos al renombrar (XFS, ext4 con noauto_da_alloc) puede dejar
+// state.json vacío o a medias. Por eso escribirFoto enlaza antes la última
+// foto asentada como state.json.prev, y load la recupera de ahí (R3-1). Una
+// caída del daemon no lo rompe: el rename ya está en el page cache del kernel.
+// Variable para los tests.
 var escribirEstadoRapido = func(ruta string, datos []byte, perm os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(ruta), filepath.Base(ruta)+".*.tmp")
 	if err != nil {
@@ -1130,6 +1192,27 @@ var escribirEstadoRapido = func(ruta string, datos []byte, perm os.FileMode) err
 	}
 	if err := os.Rename(tmp, ruta); err != nil {
 		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// enlazarEstadoPrevio deja la foto que hay en ruta (asentada) como
+// ruta+sufijoPrevio: un enlace duro a un temporal y un rename, dos llamadas al
+// sistema sin fsync. El inodo enlazado no se vuelve a escribir (toda
+// escritura de state.json es temporal+rename), así que sus datos siguen
+// asentados; y el journal ordena el enlace antes del rename de la foto nueva.
+// Falla si no hay foto (la primera) o si el sistema de ficheros no tiene
+// enlaces duros: escribirFoto escribe entonces con fsync. Variable para los
+// tests.
+var enlazarEstadoPrevio = func(ruta string) error {
+	tmp := ruta + sufijoPrevio + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.Link(ruta, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, ruta+sufijoPrevio); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil
@@ -1193,10 +1276,10 @@ func (m *Manager) escribirPendiente(rapido bool) error {
 	if gen <= m.escritoGen {
 		return nil // ya se escribió una foto más nueva
 	}
-	err := m.escribirFoto(list, gen, rapido)
+	sinFsync, err := m.escribirFoto(list, gen, rapido)
 	if err == nil {
 		m.fallosEstado = 0
-		m.sinFsync = rapido
+		m.sinFsync = sinFsync
 		return nil
 	}
 	// La foto no llegó a disco: se repone, salvo que ya haya otra más nueva
@@ -1224,11 +1307,11 @@ func (m *Manager) escribirPendiente(rapido bool) error {
 }
 
 // escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
-func (m *Manager) escribirFoto(list []api.Machine, gen uint64, rapido bool) error {
+func (m *Manager) escribirFoto(list []api.Machine, gen uint64, rapido bool) (sinFsync bool, err error) {
 	schema := esquemaParaEscribir(list)
 	b, err := serializarFoto(list, schema)
 	if err != nil {
-		return fmt.Errorf("could not serialize it: %w", err)
+		return false, fmt.Errorf("could not serialize it: %w", err)
 	}
 	// Un esquema mayor que el que dejó el binario anterior (1→2 con la
 	// primera copia en diferencial, →3 con el primer campo de necesitaV3):
@@ -1238,7 +1321,7 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64, rapido bool) erro
 	// Respaldar no pisa una que ya exista: la buena es la primera.
 	if m.hayPrevia && schema > m.versionPrevia {
 		if err := esquema.Respaldar(m.statePath(), m.versionPrevia); err != nil {
-			return fmt.Errorf("not writing schema %d, because the schema %d copy could not be made: %w", schema, m.versionPrevia, err)
+			return false, fmt.Errorf("not writing schema %d, because the schema %d copy could not be made: %w", schema, m.versionPrevia, err)
 		}
 	}
 
@@ -1247,15 +1330,22 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64, rapido bool) erro
 	// mal en el otro, que es lo que pasaba con links.json.
 	// 0600: es el inventario entero (IPs, reenvíos, dueños, nombres de
 	// variables), y solo lo lee el daemon (M8).
+	//
+	// Sin fsync solo si queda de dónde recuperar (R3-1): la foto en disco ya
+	// asentada se enlaza antes como state.json.prev. Si la de disco es a su
+	// vez una sin fsync (sinFsync), el .prev de entonces sigue siendo la
+	// última asentada y no se toca. Sin foto anterior o sin enlaces duros, con
+	// fsync: más lento, no menos seguro.
 	escribir := escribirEstado
-	if rapido {
+	sinFsync = rapido && (m.sinFsync || enlazarEstadoPrevio(m.statePath()) == nil)
+	if sinFsync {
 		escribir = escribirEstadoRapido
 	}
 	if err := escribir(m.statePath(), b, 0o600); err != nil {
-		return fmt.Errorf("could not persist it: %w", err)
+		return false, fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
-	return nil
+	return sinFsync, nil
 }
 
 // serializarFoto es el state.json de la foto list con esquema schema: los
@@ -1362,10 +1452,16 @@ func (m *Manager) persistirYa() error {
 	return fmt.Errorf("state not saved to disk: %w", err)
 }
 
-// cederArranqueFrio cede al VMM de un arranque en frío su directorio y su
-// overlay.
+// cederArranqueFrio cede al VMM de un arranque en frío su overlay y su
+// directorio (R3-4). El overlay va primero y por descriptor con O_NOFOLLOW:
+// cedido el directorio, otro VMM con el mismo uid y sin jailer podría cambiar
+// overlay.ext4 por un enlace, y un chown por ruta (Own) le daría el fichero al
+// que apunta.
 func (m *Manager) cederArranqueFrio(dir, overlay string) error {
-	return m.priv.Own(dir, overlay)
+	if err := m.priv.OwnNoFollow(overlay); err != nil {
+		return err
+	}
+	return m.priv.Own(dir)
 }
 
 // cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de

@@ -21,7 +21,7 @@ func TestCederOverlayNoSigueEnlaces(t *testing.T) {
 	if err := os.Symlink(ajeno, overlay); err != nil {
 		t.Fatal(err)
 	}
-	err := cederSinSeguirEnlaces(p, overlay)
+	err := p.OwnNoFollow(overlay)
 	if err == nil || !errors.Is(err, syscall.ELOOP) {
 		t.Fatalf("con un enlace en el sitio del overlay, err = %v; quería ELOOP", err)
 	}
@@ -30,13 +30,13 @@ func TestCederOverlayNoSigueEnlaces(t *testing.T) {
 	if err := os.WriteFile(real, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cederSinSeguirEnlaces(p, real); err != nil {
+	if err := p.OwnNoFollow(real); err != nil {
 		t.Fatal(err)
 	}
-	if err := cederSinSeguirEnlaces(p, filepath.Join(dir, "no-esta")); err != nil {
+	if err := p.OwnNoFollow(filepath.Join(dir, "no-esta")); err != nil {
 		t.Fatalf("un fichero que falta no es un fallo: %v", err)
 	}
-	if err := cederSinSeguirEnlaces(&Privileges{}, overlay); err != nil {
+	if err := (&Privileges{}).OwnNoFollow(overlay); err != nil {
 		t.Fatalf("sin privilegios no hace nada: %v", err)
 	}
 }

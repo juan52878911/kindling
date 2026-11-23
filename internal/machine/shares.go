@@ -566,11 +566,13 @@ func (m *Manager) placeCopies(dir string, shares []resolvedShare) ([]resolvedVol
 			continue
 		}
 		dst := shareImagePath(dir, i)
+		// Se cede antes de moverla al directorio de la máquina, que ya es del
+		// VMM: ahí un chown por ruta seguiría un enlace plantado en dst (R3-4).
+		if err := m.priv.OwnNoFollow(s.upload); err != nil {
+			return nil, err
+		}
 		if err := os.Rename(s.upload, dst); err != nil {
 			return nil, fmt.Errorf("taking upload for %s: %w", s.att.Mount, err)
-		}
-		if err := m.priv.Own(dst); err != nil {
-			return nil, err
 		}
 		out = append(out, resolvedVolume{path: dst, mount: s.att.Mount, readOnly: true})
 	}
