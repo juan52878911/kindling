@@ -26,7 +26,7 @@ in the repo: [`docs/`](docs/README.md), starting with the [full guide](docs/guid
 **Linux with KVM** (amd64 or arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v1.0.0-rc.2 sh
 kling up            # checks KVM, nftables, the kindling user and the images; prints what needs sudo
 sudo kling up -install   # writes the systemd unit; kling up then downloads the kernel and min
 kling try -- uname -a
@@ -44,7 +44,7 @@ run as a systemd service on a remote host, deployed from a checkout:
 **Mac with Apple Silicon** (macOS 14+, native `vz` backend, no root):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v1.0.0-rc.2 sh
 kling try -- uname -a
 ```
 

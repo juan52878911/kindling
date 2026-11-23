@@ -26,7 +26,7 @@ en el repo: [`docs/`](docs/README.md), empezando por la [guía completa](docs/gu
 **Linux con KVM** (amd64 o arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v1.0.0-rc.2 sh
 kling up            # comprueba KVM, nftables, el usuario kindling y las imágenes; imprime lo que pide sudo
 ```
 
@@ -41,7 +41,7 @@ red.
 **Mac con Apple Silicon** (macOS 14+, backend nativo `vz`, sin root):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v1.0.0-rc.2 sh
 brew install e2fsprogs
 kling up -check
 kling image copy min -from ssh://usuario@host-linux-arm64   # las imágenes se construyen en Linux

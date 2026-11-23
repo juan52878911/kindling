@@ -99,8 +99,12 @@ verificados contra el `SHA256SUMS` de la release de ese `kling`, igual que
 min`; para el resto de imágenes, ver [Conseguir imágenes](#conseguir-imágenes).
 Lo mismo hace `kling try` si no encuentra ninguna imagen, y también deja en
 `lib/kling-guest` el agente de invitado que necesitan `toolchain` y las imágenes
-de Docker (`install.sh` lo instala igual). No hace falta `minisign`: `install.sh`
-comprueba la firma con el `kling` recién bajado.
+de Docker (`install.sh` lo instala igual). Con `minisign` instalado, `install.sh` comprueba la
+firma de la release; sin él usa `ssh-keygen -Y verify` si la release trae
+`SHA256SUMS.sshsig`, y si no, solo puede comprobar el sha256 y pedirle al `kling`
+recién bajado que se compruebe a sí mismo, que no es una firma independiente
+(lo dice al instalar). Mientras la última estable sea una 0.x sin firma, el
+one-liner fija `KLING_VERSION`.
 
 `kling-vz` vive en este repositorio, en `vz/`, como **módulo Go aparte**
 (`github.com/juan52878911/kindling/vz`): necesita cgo y dependencias que el
