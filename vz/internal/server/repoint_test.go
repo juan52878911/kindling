@@ -125,3 +125,16 @@ func TestInfoAnunciaSnapshotRepoint(t *testing.T) {
 		t.Fatalf("info = %v", info)
 	}
 }
+
+func TestRepointRechazaEnlaceSimbolico(t *testing.T) {
+	r := newRig(t)
+	snap, mem := snapshotAjeno(t)
+	dir := t.TempDir()
+	enlace := filepath.Join(dir, "overlay.ext4")
+	if err := os.Symlink("/etc/shadow", enlace); err != nil {
+		t.Fatal(err)
+	}
+	r.must("PUT", "/kling/network", `{"egress":"none"}`)
+	r.mustFail("PUT", "/snapshot/load", cargaConRepoint(snap, mem,
+		`{"kernel":"/k/vmlinux","drives":{"rootfs":{"path":"/i/min.ext4","read_only":true},"overlay":{"path":"`+enlace+`"}}}`), "symbolic link")
+}
