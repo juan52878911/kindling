@@ -242,7 +242,13 @@ var (
 func vigilarSegundoTiempo(restore string, gen uint64) {
 	fn, topeT := hacerSegundoTiempo, topeSegundoTiempo
 	hecho := make(chan struct{})
-	segundoVencido.Store(0) // la marca de una generación anterior ya no vale
+	if gen != 0 {
+		// Numeración nueva (solo pasa si el contador se reinicia): una marca de
+		// la misma cifra ya no es de esta generación. Las de cifras anteriores
+		// no se tocan: el rezagado de la N sigue viéndose vencido con la N+1.
+		segundoVencido.CompareAndSwap(gen, 0)
+		generacionEnCurso.Store(gen)
+	}
 	segundosVivos.Add(1)
 	go func() {
 		defer segundosVivos.Done()
@@ -267,10 +273,21 @@ func vigilarSegundoTiempo(restore string, gen uint64) {
 	resyncMu.Unlock()
 }
 
-// segundoVencido es la generación cuyo segundo tiempo pasó su tope: la puerta
-// ya se abrió y entraron exec nuevos, así que lo que quede de él no debe
-// cortar nada ni publicar una generación vieja.
-var segundoVencido atomic.Uint64
+// segundoVencido es la última generación cuyo segundo tiempo pasó su tope: la
+// puerta ya se abrió y entraron exec nuevos, así que lo que quede de él no debe
+// cortar nada ni publicar una generación vieja. generacionEnCurso es la del
+// resync más reciente: un rezagado de una anterior está vencido aunque su
+// propia marca la haya pisado otro resync.
+var (
+	segundoVencido    atomic.Uint64
+	generacionEnCurso atomic.Uint64
+)
+
+// segundoVigente dice si el segundo tiempo de gen puede seguir: es la
+// generación en curso y no venció.
+func segundoVigente(gen uint64) bool {
+	return gen == 0 || (generacionEnCurso.Load() == gen && segundoVencido.Load() != gen)
+}
 
 // segundoTiempo es lo que se hace tras contestar. Se llama con resyncMu
 // tomado y la puerta cerrada. Primero lo que es solo memoria (cortar execs y
@@ -278,7 +295,7 @@ var segundoVencido atomic.Uint64
 func segundoTiempo(restore string, gen uint64) {
 	ini := time.Now()
 	var t ResyncTiempos
-	vencido := func() bool { return gen != 0 && segundoVencido.Load() == gen }
+	vencido := func() bool { return !segundoVigente(gen) }
 	// Una copia de un dorado no es la misma máquina. Al descongelar la misma
 	// máquina no se toca nada de esto.
 	if restore == api.ResyncInstance {
@@ -350,8 +367,9 @@ var (
 	generationFile = api.GuestGenerationFile
 )
 
-func writeGeneration(p string, n uint64) error {
-	return writeGenerationSi(p, n, func() bool { return true })
+// tmpGeneracion es el temporal de la generación n de p.
+func tmpGeneracion(p string, n uint64) string {
+	return p + "." + strconv.FormatUint(n, 10) + ".tmp"
 }
 
 // writeGenerationSi escribe el fichero y solo lo publica (rename) si vigente
@@ -360,7 +378,9 @@ func writeGenerationSi(p string, n uint64, vigente func() bool) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
+	// La generación va en el nombre: dos segundos tiempos solapados no comparten
+	// el temporal.
+	tmp := tmpGeneracion(p, n)
 	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(n, 10)+"\n"), 0o644); err != nil {
 		return err
 	}
