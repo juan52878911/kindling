@@ -704,8 +704,12 @@ func (g *ingreso) autorizar(mc *api.Machine, id string, puerto int, tok string) 
 	no := func() (int, error) { return http.StatusUnauthorized, errors.New("this endpoint needs a valid token") }
 	if tok == "" {
 		// Sin token solo entra un puerto público y vigente.
+		// El tenant de la etiqueta tiene que existir: un público no sigue
+		// abierto tras borrar a su dueño.
 		if exp, ok := publicosDe(mc.Labels[LabelPublico], time.Now())[puerto]; ok && exp > 0 && mc.Labels[LabelTenant] != "" {
-			return 0, nil
+			if t := g.s.tenantNombre(mc.Labels[LabelTenant]); t != nil && esSandboxDe(mc, t) {
+				return 0, nil
+			}
 		}
 		return no()
 	}
