@@ -430,6 +430,10 @@ func (s *Servidor) handleBorrar(w http.ResponseWriter, r *http.Request, id strin
 		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
+	if s.ingreso != nil {
+		s.ingreso.olvidar(id)
+		s.ingreso.cortar(id, 0) // las conexiones abiertas por el ingress no sobreviven al sandbox
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -538,6 +542,19 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	// Con clones, contar y clonar van bajo el cerrojo de volúmenes del tenant
+	// (el mismo de POST /v1/volumes): dos peticiones no pasan juntas el tope.
+	desbloquear := func() {}
+	for _, v := range pet.Volumes {
+		if v.CloneFrom != "" {
+			ct := s.cerrojoDe(t.Nombre + "\x00vol")
+			ct.Lock()
+			var una sync.Once
+			desbloquear = func() { una.Do(ct.Unlock) }
+			defer desbloquear()
+			break
+		}
+	}
 	plan, err := s.resolverVolumenes(r.Context(), t, pet.Volumes)
 	if err != nil {
 		fail(w, codigoVolumen(err), err)
@@ -565,6 +582,7 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// Los clones se hacen con la cuota ya reservada: un lote rechazado no deja
 	// volúmenes detrás.
 	hVol, clonados, err := s.clonar(r.Context(), plan)
+	desbloquear()
 	if err != nil {
 		s.metricas.registrar(resultadoDe(err), 0)
 		fail(w, codigoVolumen(err), err)

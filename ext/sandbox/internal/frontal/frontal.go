@@ -343,6 +343,11 @@ func Nuevo(o Opciones) (*Servidor, error) {
 	if s.log == nil {
 		s.log = log.Default()
 	}
+	for _, t := range s.tenantsTodos() {
+		if t.MaxSandboxes == 0 && t.MaxMemTotalMiB == 0 {
+			s.log.Printf("frontal: warning: tenant %q has neither MaxSandboxes nor MaxMemTotalMiB: its sandboxes are limited only per request, so it can fill the hosts", t.Nombre)
+		}
+	}
 	s.rutas()
 	ing, err := nuevoIngreso(s, o.Ingreso)
 	if err != nil {

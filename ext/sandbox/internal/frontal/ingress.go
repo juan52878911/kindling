@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,6 +104,15 @@ type ingreso struct {
 	mu    sync.Mutex
 	cache map[string]*entrada
 	conns map[string]int
+	// vivas: peticiones en curso (también WebSocket) por (sandbox, puerto),
+	// para cortarlas al revocar el puerto o borrar el sandbox.
+	vivas   map[claveViva]map[uint64]context.CancelFunc
+	sigViva uint64
+}
+
+type claveViva struct {
+	id     string
+	puerto int
 }
 
 // entrada es lo último que se sabe de un sandbox, durante vidaCache.
@@ -161,6 +171,7 @@ func nuevoIngreso(s *Servidor, o IngresoOpciones) (*ingreso, error) {
 			IdleConnTimeout:       30 * time.Second,
 		},
 		cache: map[string]*entrada{}, conns: map[string]int{},
+		vivas: map[claveViva]map[uint64]context.CancelFunc{},
 	}, nil
 }
 
@@ -260,6 +271,16 @@ func (s *Servidor) handleEndpoint(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	exp := time.Now().Add(ttl)
+	if pet.Public {
+		// Leer etiquetas, calcular y escribir, bajo el cerrojo del sandbox.
+		c := g.s.cerrojoDe(id + "\x00endpoints")
+		c.Lock()
+		defer c.Unlock()
+		if _, mc, err = s.buscar(r.Context(), t, id); err != nil {
+			fail(w, codigoBuscar(err), err)
+			return
+		}
+	}
 	out := Endpoint{
 		URL:  g.o.Esquema + "://" + etiqueta + g.sufijo + "/",
 		Port: pet.Port, Public: pet.Public, ExpiresAt: exp.UTC().Truncate(time.Second),
@@ -301,6 +322,15 @@ func publicosDe(etiqueta string, ahora time.Time) map[int]int64 {
 	return m
 }
 
+// marcaTodos es la clave de revocadosDe para la entrada "*:<µs>": revoca todo
+// lo emitido antes de esa marca, de cualquier puerto. El puerto 0 no existe.
+const marcaTodos = 0
+
+// maxRevocadosBytes es el tamaño de la etiqueta de revocados a partir del cual
+// se compacta a una sola marca. El daemon rechaza etiquetas de más de 4 KiB
+// entre todas (api.MaxLabelsBytes); queda sitio para las demás.
+const maxRevocadosBytes = 2 << 10
+
 // revocadosDe lee LabelRevocados sin las entradas ya inútiles.
 func revocadosDe(etiqueta string, ahora time.Time) map[int]int64 {
 	m := map[int]int64{}
@@ -308,6 +338,9 @@ func revocadosDe(etiqueta string, ahora time.Time) map[int]int64 {
 	for _, par := range strings.Split(etiqueta, ",") {
 		p, e, ok := strings.Cut(par, ":")
 		n, err1 := strconv.Atoi(p)
+		if p == "*" {
+			n, err1 = marcaTodos, nil
+		}
 		x, err2 := strconv.ParseInt(e, 10, 64)
 		if ok && err1 == nil && err2 == nil && x > limite {
 			m[n] = x
@@ -316,15 +349,45 @@ func revocadosDe(etiqueta string, ahora time.Time) map[int]int64 {
 	return m
 }
 
+// revocado dice si un token del puerto emitido en iat (µs) está revocado.
+func revocado(m map[int]int64, puerto int, iat int64) bool {
+	if x, ok := m[marcaTodos]; ok && iat <= x {
+		return true
+	}
+	x, ok := m[puerto]
+	return ok && iat <= x
+}
+
 func revocadosCon(actual string, puerto int, ahora time.Time) string {
 	m := revocadosDe(actual, ahora)
 	m[puerto] = ahora.UnixMicro()
-	var l []string
-	for p, e := range m {
-		l = append(l, strconv.Itoa(p)+":"+strconv.FormatInt(e, 10))
+	if x, ok := m[marcaTodos]; ok { // lo anterior a la marca ya está cubierto
+		for p, e := range m {
+			if p != marcaTodos && e <= x {
+				delete(m, p)
+			}
+		}
 	}
-	sort.Strings(l)
-	return strings.Join(l, ",")
+	for intento := 0; intento < 2; intento++ {
+		l := make([]string, 0, len(m))
+		n := 0
+		for p, e := range m {
+			k := strconv.Itoa(p)
+			if p == marcaTodos {
+				k = "*"
+			}
+			par := k + ":" + strconv.FormatInt(e, 10)
+			l = append(l, par)
+			n += len(par) + 1
+		}
+		if n <= maxRevocadosBytes || intento == 1 {
+			sort.Strings(l)
+			return strings.Join(l, ",")
+		}
+		// Demasiado larga: una marca que revoca todo lo emitido hasta ahora.
+		m = map[int]int64{marcaTodos: ahora.UnixMicro()}
+	}
+	return ""
 }
 
 // despachaEndpoints atiende /v1/sandboxes/{id}/endpoints[/{port}].
@@ -385,7 +448,17 @@ func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request,
 		fail(w, http.StatusBadRequest, fmt.Errorf("invalid port %q", puerto))
 		return
 	}
-	h, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+	h, _, err := s.buscar(r.Context(), tenantDe(r), id)
+	if err != nil {
+		fail(w, codigoBuscar(err), err)
+		return
+	}
+	// Leer etiquetas, calcular y escribir, bajo el cerrojo del sandbox: dos
+	// revocaciones a la vez no se pisan.
+	c := g.s.cerrojoDe(id + "\x00endpoints")
+	c.Lock()
+	defer c.Unlock()
+	_, mc, err := s.buscar(r.Context(), tenantDe(r), id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return
@@ -407,6 +480,7 @@ func (s *Servidor) handleEndpointRevocar(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	g.olvidar(id)
+	g.cortar(id, p)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -477,6 +551,10 @@ func (g *ingreso) servir(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, err)
 		return
 	}
+	// Antes de autorizar: una revocación que llegue entre medias corta también esta.
+	ctx, baja := g.registrar(r.Context(), id, puerto)
+	defer baja()
+	r = r.WithContext(ctx)
 	if code, err := g.autorizar(e.mc, id, puerto, tok); err != nil {
 		if code == http.StatusUnauthorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="kindling-sandbox-endpoint"`)
@@ -574,7 +652,7 @@ func (g *ingreso) autorizar(mc *api.Machine, id string, puerto int, tok string) 
 		if !ok || c.ID != id || c.Puerto != puerto {
 			return no()
 		}
-		if rev, ok := revocadosDe(mc.Labels[LabelRevocados], time.Now())[puerto]; ok && c.Iat <= rev {
+		if revocado(revocadosDe(mc.Labels[LabelRevocados], time.Now()), puerto, c.Iat) {
 			return no()
 		}
 		dueno = c.Tenant
@@ -608,6 +686,49 @@ func limpiar(r *http.Request) {
 }
 
 // ---- conexiones por sandbox
+
+// registrar apunta una petición en curso de (id, puerto) y devuelve su
+// contexto, que cortar cancela, y cómo darla de baja. El ReverseProxy cierra
+// la conexión al servidor y la del cliente (incluso la secuestrada de un
+// WebSocket) cuando el contexto de la petición se cancela.
+func (g *ingreso) registrar(ctx context.Context, id string, puerto int) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	k := claveViva{id, puerto}
+	g.mu.Lock()
+	g.sigViva++
+	n := g.sigViva
+	if g.vivas[k] == nil {
+		g.vivas[k] = map[uint64]context.CancelFunc{}
+	}
+	g.vivas[k][n] = cancel
+	g.mu.Unlock()
+	return ctx, func() {
+		g.mu.Lock()
+		delete(g.vivas[k], n)
+		if len(g.vivas[k]) == 0 {
+			delete(g.vivas, k)
+		}
+		g.mu.Unlock()
+		cancel()
+	}
+}
+
+// cortar cancela las peticiones en curso de (id, puerto); puerto 0 corta todas las del sandbox.
+func (g *ingreso) cortar(id string, puerto int) {
+	g.mu.Lock()
+	var cs []context.CancelFunc
+	for k, m := range g.vivas {
+		if k.id == id && (puerto == 0 || k.puerto == puerto) {
+			for _, c := range m {
+				cs = append(cs, c)
+			}
+		}
+	}
+	g.mu.Unlock()
+	for _, c := range cs {
+		c()
+	}
+}
 
 func (g *ingreso) tomar(id string) bool {
 	g.mu.Lock()
@@ -842,6 +963,12 @@ func (g *ingreso) proxy(w http.ResponseWriter, r *http.Request, e *entrada, id s
 			pr.Out.URL.Host = destino
 			pr.SetXForwarded()
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			for i, v := range resp.Header.Values("Set-Cookie") {
+				resp.Header["Set-Cookie"][i] = quitarDominio(v)
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			g.olvidar(id)
 			g.s.log.Printf("ingress %s:%d -> %s: %v", id, puerto, destino, err)
@@ -894,6 +1021,9 @@ func (g *ingreso) porGuest(w http.ResponseWriter, r *http.Request, e *entrada, p
 		return
 	}
 	for k, v := range res.Headers {
+		if http.CanonicalHeaderKey(k) == "Set-Cookie" {
+			v = quitarDominio(v)
+		}
 		w.Header().Set(k, v)
 	}
 	w.WriteHeader(res.Status)
@@ -907,3 +1037,10 @@ func saltoAGuest(k string) bool {
 	}
 	return false
 }
+
+var reDominio = regexp.MustCompile(`(?i);\s*domain\s*=[^;,]*`)
+
+// quitarDominio quita el atributo Domain de un Set-Cookie (o de varios unidos
+// con ", "): la cookie del invitado queda ligada a su subdominio y no puede
+// fijarse para el dominio de ingress, que comparten todos los sandboxes.
+func quitarDominio(v string) string { return reDominio.ReplaceAllString(v, "") }

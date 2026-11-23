@@ -77,8 +77,11 @@ corre.
   Sin ellos devuelve la lista entera. Con `limit` la respuesta es una página por id y, si hay más,
   `X-Kindling-Next-Cursor` trae el `cursor` de la siguiente (el último id devuelto).
 - `POST /v1/sandboxes` acepta `env: {"CLAVE": "valor"}` (hasta 64 variables, 32 KiB): se guarda
-  como la sesión `default` del sandbox (24 h de inactividad), así que un `exec` con
-  `"session":"default"` las ve. No va junto con `count`.
+  como la sesión `default` del sandbox. **Solo la ven** los `exec` y procesos de fondo con
+  `"session":"default"`: un `exec` sin `session`, `/code` y `/shell` no las tienen (pásalas en el
+  `env` de cada petición, o crea la sesión y úsala). La sesión caduca tras 24 h sin usarse
+  (cada uso de `default` renueva el plazo); caducada, las variables se pierden y se recrea con
+  `POST …/sessions` (`id: "default"`). Cuenta para `max_sessions`. No va junto con `count`.
 - `POST /v1/volumes` `{name, size_mib?, clone_from?, host?}` crea uno vacío o clon de otro
   propio (en su host); `GET /v1/volumes`, `GET /v1/volumes/{name}` y
   `DELETE /v1/volumes/{name}` (409 si está montado). Nombres `[a-z0-9_-]`, hasta 41.
@@ -89,7 +92,11 @@ corre.
   `clone_from`.
 - Dueño: el nombre en el daemon lleva un prefijo derivado del tenant y la etiqueta `tenant`.
   El núcleo no copia etiquetas al clonar, así que un clon se reconoce por el prefijo solo.
-- `MaxVolumenes` por tenant (429) y `MaxVolumenMiB` global acotan lo que se crea.
+  El prefijo nuevo lleva 8 bytes del hash del tenant (`v<16 hex>-`); los volúmenes de antes
+  (4 bytes) se siguen viendo, pero uno sin etiqueta con prefijo corto que comparten dos tenants
+  conocidos no se atribuye a ninguno.
+- `MaxVolumenes` por tenant (429) y `MaxVolumenMiB` global acotan lo que se crea, también los
+  clones de `volumes[].clone_from` al crear un sandbox: si no caben, 429 y no se crea ninguno.
 
 ## Streaming de exec
 
@@ -208,7 +215,11 @@ antes de que caduque salvo con `DELETE …/endpoints/{port}`, que revoca los tok
 emitidos hasta ese momento (una lista de revocaciones por sandbox en una etiqueta interna, que
 `autorizar` comprueba; los tokens nuevos valen) y quita el puerto de los públicos. Con
 `"public": true` no hay token: cualquiera con la URL entra hasta que caduque o se revoque.
-`GET …/endpoints` lista los públicos vigentes; los de token no se listan (no hay estado).
+Revocar también **corta las conexiones ya abiertas** por ese puerto (WebSocket, SSE, descargas
+largas), y borrar el sandbox corta todas las suyas: un 204 significa que nadie entra ya. Las
+revocaciones concurrentes se serializan por sandbox. Si la lista de revocaciones pasa de 2 KiB
+se compacta a una marca que revoca todo lo emitido hasta ese momento, de cualquier puerto
+(los tokens emitidos después valen). `GET …/endpoints` lista los públicos vigentes; los de token no se listan (no hay estado).
 
 **Autorización.** En el subdominio vale el Bearer del tenant dueño, o el token del endpoint
 (solo para ese sandbox y ese puerto) por `Authorization: Bearer`, `X-Kling-Endpoint-Token`
@@ -216,7 +227,11 @@ o `?kling_token=`. Este último, pensado para abrir la URL en un navegador, se c
 una cookie `kling_ep` HttpOnly del subdominio y una redirección 303 sin el parámetro. El
 token del tenant solo se acepta por cabecera. Sin credencial, 401 (igual para un sandbox
 que no existe); credencial válida de quien no es dueño, 404. El invitado nunca recibe
-`Authorization`, el token de endpoint ni la cookie `kling_ep` (las demás cookies pasan).
+`Authorization`, el token de endpoint ni la cookie `kling_ep` (las demás cookies pasan). Un `Set-Cookie` del invitado llega **sin el atributo `Domain`**: la
+cookie queda ligada al subdominio del sandbox y no puede fijarse para el dominio de todos
+(una aplicación no puede compartir cookies entre sus propios puertos). Conviene registrar el
+dominio de ingress como sufijo público (Public Suffix List) o usar uno dedicado. Al arrancar,
+el gateway avisa en el log de cada tenant sin `MaxSandboxes` ni `MaxMemTotalMiB`.
 
 **Transporte.** Si el daemon del host anuncia `tcp-tunnel` (sea local o `ssh://`), el
 gateway hace de proxy inverso sobre `api.DialTCP` (`GET /machines/{ref}/tcp`, upgrade
