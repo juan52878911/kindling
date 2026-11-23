@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -67,5 +69,104 @@ func BenchmarkSesionesTrasRestaurar(b *testing.B) {
 	}
 	for i, d := range suma {
 		b.ReportMetric(float64(d.Milliseconds())/float64(b.N), fmt.Sprintf("ms_sesion%d", i+1))
+	}
+}
+
+// esperarCaliente espera a que reponerCaliente deje un caliente en el puente.
+func esperarCaliente(t *testing.T, b *bridge) *warmChild {
+	t.Helper()
+	for range 250 {
+		b.mu.Lock()
+		w := b.warm
+		b.mu.Unlock()
+		if w != nil {
+			return w
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no se repuso el hijo caliente tras gastar el que había")
+	return nil
+}
+
+// Tras adoptar el caliente se repone otro, y la sesión siguiente lo adopta en
+// vez de lanzar un proceso.
+func TestSeReponeElCalienteTrasAdoptarlo(t *testing.T) {
+	sinMMDS(t)
+	b := testBridge()
+	t.Cleanup(b.closeAll)
+	if err := b.replenishWarm(); err != nil {
+		t.Fatal(err)
+	}
+	_, s1 := initializeSesion(t, b)
+	w := esperarCaliente(t, b)
+	_, s2 := initializeSesion(t, b)
+	if s2.cmd.Process.Pid != w.cmd.Process.Pid {
+		t.Fatalf("la segunda sesión lanzó un proceso (pid %d) en vez de adoptar el repuesto (pid %d)",
+			s2.cmd.Process.Pid, w.cmd.Process.Pid)
+	}
+	if s1.cmd.Process.Pid == s2.cmd.Process.Pid {
+		t.Fatal("dos sesiones comparten proceso")
+	}
+}
+
+// Sin plaza para otra sesión no se repone: el caliente ocuparía la memoria de
+// una sesión que no cabe.
+func TestNoSeReponeSinPlaza(t *testing.T) {
+	sinMMDS(t)
+	b := testBridge()
+	b.maxSessions = 1
+	t.Cleanup(b.closeAll)
+	if err := b.replenishWarm(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = initializeSesion(t, b)
+	time.Sleep(3 * arranqueFalsoMs * time.Millisecond)
+	b.mu.Lock()
+	w, rep := b.warm, b.reponiendo
+	b.mu.Unlock()
+	if w != nil || rep != nil {
+		t.Fatalf("con tope 1 y la plaza ocupada se repuso un caliente (warm=%v, reponiendo=%v)", w != nil, rep != nil)
+	}
+}
+
+// Con secretos en MMDS el caliente del dorado no vale (no los lleva), pero el
+// repuesto se lanza con ellos y la sesión siguiente sí lo adopta. Y un /reset
+// no deja ese caliente con secretos para el dorado: lo cambia por uno con el
+// entorno base.
+func TestCalienteRepuestoConSecretosYReset(t *testing.T) {
+	store := &guest.MMDSStore{Env: map[string]string{"SECRETO_FALSO": "s3"}}
+	conMMDS(t, &store)
+	b := testBridge()
+	// Con entorno base explícito, como en la microVM: si no, el entorno de
+	// MMDS sería SOLO el secreto y el hijo no sabría que es el servidor falso.
+	b.env = os.Environ()
+	t.Cleanup(b.closeAll)
+	if err := b.replenishWarm(); err != nil {
+		t.Fatal(err)
+	}
+	dorado := b.warm
+	_, s1 := initializeSesion(t, b)
+	if s1.cmd.Process.Pid == dorado.cmd.Process.Pid {
+		t.Fatal("la sesión con secretos adoptó el caliente lanzado sin ellos")
+	}
+	w := esperarCaliente(t, b)
+	env, _ := b.sessionEnv("abcdef0123456789")
+	if w.huella != huellaEnv(env) {
+		t.Fatal("el repuesto no lleva el entorno de MMDS")
+	}
+	_, s2 := initializeSesion(t, b)
+	if s2.cmd.Process.Pid != w.cmd.Process.Pid {
+		t.Fatalf("la sesión con secretos no adoptó el repuesto que los lleva (pid %d, repuesto %d)",
+			s2.cmd.Process.Pid, w.cmd.Process.Pid)
+	}
+
+	// Otro repuesto con secretos, y un /reset: el dorado no debe llevárselo.
+	conSecretos := esperarCaliente(t, b)
+	b.handleReset(httptest.NewRecorder(), httptest.NewRequest("POST", "/reset", nil))
+	b.mu.Lock()
+	tras := b.warm
+	b.mu.Unlock()
+	if tras == nil || tras == conSecretos || tras.huella != huellaEnv(b.env) {
+		t.Fatal("tras /reset el caliente no es uno nuevo con el entorno base")
 	}
 }
