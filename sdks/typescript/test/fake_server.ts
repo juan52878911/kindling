@@ -20,6 +20,14 @@ export class FakeGateway {
   /** Trozos del flujo NDJSON de exec; cada uno se escribe por separado (puede partir líneas). */
   streamChunks: string[] = [];
   rateLimitNext = 0;
+  /** Cuántas peticiones siguientes devuelven 503 con Retry-After: 2. */
+  unavailableNext = 0;
+  /** Cuerpo del último POST /v1/sandboxes (lastBody lo pisa cualquier otra llamada). */
+  createBody: any = null;
+  codeBody: any = null;
+  interrupted: string[] = [];
+  endpoints = new Map<string, Record<string, any>>();
+  contexts = new Map<string, Record<string, any>>();
   requests: { method: string; url: string; auth?: string }[] = [];
   server: http.Server;
   url = "";
@@ -168,6 +176,10 @@ export class FakeGateway {
       this.rateLimitNext--;
       return this.err(r, 429, "cuota superada", "quota_exceeded", { "Retry-After": "7" });
     }
+    if (this.unavailableNext > 0) {
+      this.unavailableNext--;
+      return this.err(r, 503, "busy", "service_unavailable", { "Retry-After": "2" });
+    }
     const p = u.pathname.split("/").filter(Boolean); // v1 sandboxes {id} {sub}
     if (p[1] === "tenants") return this.tenantsApi(q, r, p.slice(2), q.headers.authorization === `Bearer ${TOKEN}`);
     if (p[1] === "volumes") {
@@ -189,6 +201,7 @@ export class FakeGateway {
       if (q.method === "POST") {
         const req = JSON.parse((await this.body(q)).toString() || "{}");
         this.lastBody = req;
+        this.createBody = req;
         if (req.count !== undefined) {
           const ok: unknown[] = [], errors: unknown[] = [];
           for (let i = 0; i < req.count; i++) {
@@ -212,7 +225,21 @@ export class FakeGateway {
         this.sandboxes.set(id, { id, files: new Map(), info, procs: new Map(), sessions: new Map() });
         return this.json(r, 201, info);
       }
-      if (q.method === "GET") return this.json(r, 200, [...this.sandboxes.values()].map((s) => s.info), { "X-Kindling-Partial": "host2" });
+      if (q.method === "GET") {
+        let lista = [...this.sandboxes.values()].map((s) => s.info as Record<string, any>).sort((a, b) => (a.id < b.id ? -1 : 1));
+        const estado = u.searchParams.get("state");
+        if (estado) lista = lista.filter((i) => i.state === estado);
+        for (const par of u.searchParams.getAll("label")) {
+          const [k, ...v] = par.split("=");
+          lista = lista.filter((i) => i.labels?.[k] === v.join("="));
+        }
+        const cab: Record<string, string> = { "X-Kindling-Partial": "host2" };
+        const cur = u.searchParams.get("cursor");
+        if (cur) lista = lista.filter((i) => i.id > cur);
+        const limit = Number(u.searchParams.get("limit") ?? 0);
+        if (limit && lista.length > limit) { lista = lista.slice(0, limit); cab["X-Kindling-Next-Cursor"] = lista[lista.length - 1].id; }
+        return this.json(r, 200, lista, cab);
+      }
     }
     if (p[1] === "sandboxes" && p.length >= 3) {
       const s = this.sandboxes.get(p[2]);
@@ -239,11 +266,108 @@ export class FakeGateway {
         for (const c of this.streamChunks) { r.write(c); await new Promise((ok) => setTimeout(ok, 5)); }
         return r.end();
       }
+      if ((sub === "pause" || sub === "resume") && q.method === "POST") {
+        s.info = { ...s.info, state: sub === "pause" ? "paused" : "running" };
+        return this.json(r, 200, s.info);
+      }
+      if (sub === "egress" && q.method === "PATCH") {
+        const req = JSON.parse((await this.body(q)).toString());
+        this.lastBody = req;
+        return this.json(r, 200, { egress: req.egress, allow_domains: req.allow_domains ?? [], applied: "live", narrowed: false, connections_closed: false });
+      }
+      if (sub === "endpoints") {
+        if (p[4] !== undefined) {
+          if (q.method !== "DELETE" || !this.endpoints.has(`${s.id}:${p[4]}`)) return this.err(r, 404, "no such endpoint", "not_found");
+          this.endpoints.delete(`${s.id}:${p[4]}`);
+          r.writeHead(204); return r.end();
+        }
+        if (q.method === "POST") {
+          const req = JSON.parse((await this.body(q)).toString());
+          this.lastBody = req;
+          const ep: Record<string, any> = { url: `https://${req.port}-x.example.test`, port: req.port, public: Boolean(req.public), expires_at: "2026-01-01T00:00:00Z" };
+          if (!ep.public) ep.token = "tok-ep";
+          this.endpoints.set(`${s.id}:${req.port}`, ep);
+          return this.json(r, 201, ep);
+        }
+        return this.json(r, 200, [...this.endpoints].filter(([k]) => k.startsWith(`${s.id}:`)).map(([, v]) => v));
+      }
+      if (sub === "code" && p[4] === undefined && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString());
+        this.codeBody = req;
+        const evs: Record<string, unknown>[] = [{ type: "stdout", text: "hola\n" }];
+        const ok = !req.code.includes("fallo");
+        evs.push(ok ? { type: "result", text: "2", results: { "text/plain": "2" }, execution_count: 1 }
+          : { type: "error", ename: "NameError", evalue: "fallo", traceback: ["t1"] });
+        evs.push({ type: "done", ok, duration_ms: 3, execution_count: 1 });
+        r.writeHead(200, { "Content-Type": "application/x-ndjson" });
+        return r.end(evs.map((e) => JSON.stringify(e) + "\n").join(""));
+      }
+      if (sub === "code" && p[4] === "contexts") {
+        if (p[5] === undefined) {
+          if (q.method === "POST") {
+            const req = JSON.parse((await this.body(q)).toString() || "{}");
+            const c = { id: (this.contexts.size + 1).toString(16).padStart(12, "0"), language: req.language ?? "python", pid: 100 + this.contexts.size, cwd: req.cwd ?? "", started_at: "2026-01-01T00:00:00Z" };
+            this.contexts.set(`${s.id}:${c.id}`, c);
+            return this.json(r, 201, c);
+          }
+          return this.json(r, 200, [...this.contexts].filter(([k]) => k.startsWith(`${s.id}:`)).map(([, v]) => v));
+        }
+        const c = this.contexts.get(`${s.id}:${p[5]}`);
+        if (!c) return this.err(r, 404, "no such context", "not_found");
+        if (p[6] === "execution" && q.method === "DELETE") { this.interrupted.push(c.id); r.writeHead(204); return r.end(); }
+        if (q.method === "GET") return this.json(r, 200, c);
+        if (q.method === "DELETE") { this.contexts.delete(`${s.id}:${c.id}`); r.writeHead(204); return r.end(); }
+      }
+      if (sub === "files" && p[4] === "move" && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString());
+        const f = s.files.get(req.from);
+        if (!f) return this.err(r, 404, "move failed: No such file", "not_found");
+        if (s.files.has(req.to) && !req.overwrite) return this.err(r, 409, "already exists", "conflict");
+        s.files.delete(req.from); s.files.set(req.to, f);
+        return this.json(r, 200, req);
+      }
+      if (sub === "files" && p[4] === "mkdir" && q.method === "POST") {
+        const req = JSON.parse((await this.body(q)).toString());
+        return this.json(r, 201, { path: req.path, size: 0, mode: "0755", is_dir: true, mod_time: "2026-01-01T00:00:00Z" });
+      }
+      if (sub === "files" && p[4] === "search" && q.method === "GET") {
+        const raiz = u.searchParams.get("path")!, glob = u.searchParams.get("glob")!;
+        const re = new RegExp("^" + glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$");
+        const matches = [...s.files.keys()].filter((f) => f.startsWith(raiz) && re.test(f.split("/").pop()!)).sort();
+        return this.json(r, 200, { path: raiz, glob, matches, truncated: false });
+      }
       if (sub === "processes") return this.processes(q, r, u, s, p.slice(4));
       if (sub === "sessions") return this.sessions(q, r, s, p.slice(4));
       if (sub === "files") {
         const path = u.searchParams.get("path");
         if (!path) return this.err(r, 400, "falta path");
+        if (q.method === "PUT" && u.searchParams.get("tar") === "1") {
+          // Un tar de un solo fichero basta: nombre en los primeros 100 bytes, tamaño en octal en 124.
+          const b = await this.body(q);
+          let n = 0;
+          for (let o = 0; o + 512 <= b.length && b[o] !== 0; ) {
+            const nombre = b.subarray(o, o + 100).toString().replace(/\0.*$/, "");
+            const tam = parseInt(b.subarray(o + 124, o + 135).toString(), 8);
+            s.files.set(path.replace(/\/+$/, "") + "/" + nombre, Buffer.from(b.subarray(o + 512, o + 512 + tam)));
+            o += 512 + Math.ceil(tam / 512) * 512;
+            n++;
+          }
+          return this.json(r, 200, { entries: n, files: n, bytes: b.length });
+        }
+        if (q.method === "GET" && u.searchParams.get("tar") === "1") {
+          const pref = path.replace(/\/+$/, "") + "/";
+          const trozos: Buffer[] = [];
+          for (const [p2, d] of s.files) {
+            if (!p2.startsWith(pref)) continue;
+            const cab = Buffer.alloc(512);
+            cab.write(p2.slice(pref.length), 0);
+            cab.write(d.length.toString(8).padStart(11, "0"), 124);
+            trozos.push(cab, d, Buffer.alloc((512 - (d.length % 512)) % 512));
+          }
+          trozos.push(Buffer.alloc(1024));
+          r.writeHead(200, { "Content-Type": "application/x-tar" });
+          return r.end(Buffer.concat(trozos));
+        }
         if (q.method === "PUT") {
           const b = await this.body(q);
           s.files.set(path, b);
@@ -259,6 +383,15 @@ export class FakeGateway {
         if (!f) return this.err(r, 404, `no existe ${path}`, "not_found");
         if (q.method === "GET") {
           if (u.searchParams.get("stat") === "1") return this.json(r, 200, { path, size: f.length, mode: "0644", is_dir: false, mod_time: "2026-01-01T00:00:00Z" });
+          const rango = q.headers.range;
+          if (rango) {
+            const [, a, b] = /^bytes=(\d*)-(\d*)$/.exec(rango)!;
+            const ini = a === "" ? Math.max(f.length - Number(b), 0) : Number(a);
+            const fin = a === "" || b === "" ? f.length - 1 : Math.min(Number(b), f.length - 1);
+            if (ini >= f.length) return this.err(r, 416, "range outside the file", "range_not_satisfiable", { "Content-Range": `bytes */${f.length}` });
+            r.writeHead(206, { "Content-Type": "application/octet-stream", "Content-Range": `bytes ${ini}-${fin}/${f.length}` });
+            return r.end(f.subarray(ini, fin + 1));
+          }
           r.writeHead(200, { "Content-Type": "application/octet-stream" });
           return r.end(f);
         }

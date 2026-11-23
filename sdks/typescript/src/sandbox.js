@@ -95,8 +95,19 @@ export class Sessions {
 export class Files {
   #c; #id;
   constructor(client, id) { this.#c = client; this.#id = id; }
-  read(path) { return this.#c.readFile(this.#id, path); }
-  async readText(path) { return utf8(await this.read(path)); }
+  /** `range`: `[inicio, fin]` (inclusivos; `fin` null = hasta el final) o `"bytes=-n"`: solo ese trozo. */
+  read(path, { range } = {}) { return this.#c.readFile(this.#id, path, range); }
+  async readText(path, opts) { return utf8(await this.read(path, opts)); }
+  /** Mueve o renombra. Un destino que existe da Conflict salvo `overwrite: true`. */
+  move(from, to, { overwrite = false } = {}) { return this.#c.moveFile(this.#id, from, to, overwrite); }
+  /** Crea el directorio y los que falten (`mkdir -p`). */
+  mkdir(path) { return this.#c.mkdirFile(this.#id, path); }
+  /** Busca por NOMBRE (`*.log`) bajo `path`, recursivo; `truncated` si se cortó. */
+  search(path, glob) { return this.#c.searchFiles(this.#id, path, glob); }
+  /** Extrae un tar dentro del directorio `path` del sandbox. */
+  uploadTar(path, data, { mkdir = false } = {}) { return this.#c.uploadTar(this.#id, path, data, { mkdir }); }
+  /** Baja el directorio `path` como tar. */
+  downloadTar(path) { return this.#c.downloadTar(this.#id, path); }
   /** `mode` es un entero (0o644); `mkdir: true` crea los directorios que falten. */
   write(path, data, { mode, mkdir = false } = {}) {
     return this.#c.writeFile(this.#id, path, typeof data === "string" ? new TextEncoder().encode(data) : data, { mode, mkdir });
@@ -104,6 +115,54 @@ export class Files {
   delete(path) { return this.#c.deleteFile(this.#id, path); }
   stat(path) { return this.#c.statFile(this.#id, path); }
   list(path) { return this.#c.listFiles(this.#id, path); }
+}
+
+/** Puertos publicados de un sandbox: `await sb.endpoints.create(8000)`. */
+export class Endpoints {
+  #c; #id;
+  constructor(client, id) { this.#c = client; this.#id = id; }
+  /** `ttl` en segundos (hasta 7 días); `public: true` no pide token. */
+  create(port, { ttl, public: publico = false } = {}) {
+    return this.#c.createEndpoint(this.#id, { port, ttl_seconds: ttl, public: publico });
+  }
+  list() { return this.#c.listEndpoints(this.#id); }
+  revoke(port) { return this.#c.revokeEndpoint(this.#id, port); }
+}
+
+/** Contextos de código: guardan el estado entre ejecuciones. */
+export class CodeContexts {
+  #c; #id;
+  constructor(client, id) { this.#c = client; this.#id = id; }
+  create({ language, cwd } = {}) { return this.#c.createCodeContext(this.#id, { language, cwd }); }
+  list() { return this.#c.listCodeContexts(this.#id); }
+  get(cid) { return this.#c.getCodeContext(this.#id, cid); }
+  delete(cid) { return this.#c.deleteCodeContext(this.#id, cid); }
+}
+
+/** Ejecución de código: `for await (const ev of sb.code.run("1+1"))`. */
+export class Code {
+  #c; #id;
+  constructor(client, id) { this.#c = client; this.#id = id; this.contexts = new CodeContexts(client, id); }
+  /** Iterador asíncrono de eventos; el último es siempre `done`. Un error del código llega como evento `error`. */
+  async *run(code, { language, context, timeout } = {}) {
+    const it = await this.#c.runCode(this.#id, { code, language, context_id: context, timeout_seconds: timeout });
+    for await (const ev of it) yield ev;
+  }
+  /** Como `run`, agregado: `{ ok, stdout, stderr, result, error, results, events }`. */
+  async runWait(code, opts) {
+    const r = { ok: false, stdout: "", stderr: "", result: null, error: null, results: {}, events: [] };
+    for await (const ev of this.run(code, opts)) {
+      r.events.push(ev);
+      if (ev.type === "stdout") r.stdout += ev.text ?? "";
+      else if (ev.type === "stderr") r.stderr += ev.text ?? "";
+      else if (ev.type === "result") { r.result = ev; r.results = ev.results ?? {}; }
+      else if (ev.type === "error") r.error = ev;
+      else if (ev.type === "done") r.ok = Boolean(ev.ok);
+    }
+    return r;
+  }
+  /** Interrumpe la ejecución en curso de un contexto (el contexto sigue). */
+  interrupt(context) { return this.#c.interruptCode(this.#id, context); }
 }
 
 export class Sandbox {
@@ -114,6 +173,8 @@ export class Sandbox {
     this.files = new Files(client, info.id);
     this.processes = new Processes(client, info.id);
     this.sessions = new Sessions(client, info.id);
+    this.endpoints = new Endpoints(client, info.id);
+    this.code = new Code(client, info.id);
   }
   get id() { return this.info.id; }
   toString() { return `Sandbox(id=${JSON.stringify(this.info.id)}, state=${JSON.stringify(this.info.state)})`; }
@@ -125,13 +186,17 @@ export class Sandbox {
   }
 
   /** `ttl` en segundos. */
-  /** `volumes`: [{ name, mount, read_only, clone_from }] de volúmenes del inquilino (Client.createVolume). */
-  static async create({ template, ttl, image, on_ttl, egress, allow_domains, mem_mib, vcpus, labels, volumes, ...conn } = {}) {
+  /**
+   * `volumes`: [{ name, mount, read_only, clone_from }] de volúmenes del inquilino (Client.createVolume).
+   * `env`: objeto con las variables que ve todo exec con `session: "default"`.
+   */
+  static async create({ template, ttl, image, on_ttl, egress, allow_domains, mem_mib, vcpus, labels, volumes, env, ...conn } = {}) {
     const c = Sandbox.#cliente(conn);
     const info = await c.createSandbox({
       template, image, ttl_seconds: ttl, on_ttl, egress,
       allow_domains: allow_domains?.length ? [...allow_domains] : undefined, mem_mib, vcpus, labels,
       volumes: volumes?.length ? volumes.map((v) => ({ ...v })) : undefined,
+      env: env && Object.keys(env).length ? { ...env } : undefined,
     });
     return new Sandbox(info, c);
   }
@@ -153,16 +218,29 @@ export class Sandbox {
     const c = Sandbox.#cliente(conn);
     return new Sandbox(await c.getSandbox(id), c);
   }
-  /** Array de Sandbox; `.partial` trae X-Kindling-Partial (hosts caídos) o null. */
-  static async list(conn = {}) {
+  /**
+   * Array de Sandbox; `.partial` trae X-Kindling-Partial (hosts caídos) o null.
+   * Filtros: `state`, `label` (`{k: v}`), `limit` (página) y `cursor`; con `limit`,
+   * `.nextCursor` es el cursor de la siguiente página (null en la última).
+   */
+  static async list({ state, label, limit, cursor, ...conn } = {}) {
     const c = Sandbox.#cliente(conn);
-    const { sandboxes, partial } = await c.listSandboxes();
-    return Object.assign(sandboxes.map((i) => new Sandbox(i, c)), { partial });
+    const { sandboxes, partial, nextCursor } = await c.listSandboxes({ state, label, limit, cursor });
+    return Object.assign(sandboxes.map((i) => new Sandbox(i, c)), { partial, nextCursor });
   }
 
   async refresh() { this.info = await this.#client.getSandbox(this.id); return this; }
   /** Renueva el TTL (segundos; sin valor, el del sandbox). */
   async renew(ttl) { this.info = await this.#client.renewSandbox(this.id, ttl); return this.info; }
+  /** Pausa un sandbox en marcha sin volcar su memoria. */
+  async pause() { this.info = await this.#client.pauseSandbox(this.id); return this.info; }
+  /** Reanuda un sandbox pausado o congelado. */
+  async resume() { this.info = await this.#client.resumeSandbox(this.id); return this.info; }
+  /** Cambia la política de red (`none`, `internet`, `allowlist`); `applied` dice si vale ya (`live`). */
+  setEgress(egress, allowDomains) {
+    return this.#client.setEgress(this.id, { egress, allow_domains: allowDomains });
+  }
+  set_egress(egress, allowDomains) { return this.setEgress(egress, allowDomains); }
   delete() { return this.#client.deleteSandbox(this.id); }
   kill() { return this.delete(); }
 
