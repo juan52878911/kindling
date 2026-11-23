@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -69,9 +70,13 @@ func (s *Servidor) despachaFicheros(w http.ResponseWriter, r *http.Request, id s
 		s.handleMover(w, r, id)
 	case resto[0] == "mkdir" && r.Method == http.MethodPost:
 		s.handleMkdir(w, r, id)
+	case resto[0] == "chmod" && r.Method == http.MethodPost:
+		s.handleChmod(w, r, id)
+	case resto[0] == "replace" && r.Method == http.MethodPost:
+		s.handleReemplazar(w, r, id)
 	case resto[0] == "search" && r.Method == http.MethodGet:
 		s.handleBuscar(w, r, id)
-	case resto[0] == "move" || resto[0] == "mkdir" || resto[0] == "search":
+	case resto[0] == "move" || resto[0] == "mkdir" || resto[0] == "search" || resto[0] == "chmod" || resto[0] == "replace":
 		nomala()
 	default:
 		noRuta(w, r)
@@ -361,4 +366,164 @@ func rangoNoSatisfecho(w http.ResponseWriter, size int64) bool {
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
 	fail(w, http.StatusRequestedRangeNotSatisfiable, errors.New("the range is outside the file"))
 	return true
+}
+
+// ChmodPeticion es el cuerpo de POST .../files/chmod.
+type ChmodPeticion struct {
+	Path string `json:"path"`
+	// Mode es octal, de 3 o 4 cifras ("755", "0644", "2775").
+	Mode string `json:"mode"`
+	// Recursive aplica el modo a todo lo que cuelga de Path.
+	Recursive bool `json:"recursive,omitempty"`
+}
+
+var modoOctal = regexp.MustCompile(`^[0-7]{3,4}$`)
+
+func (s *Servidor) handleChmod(w http.ResponseWriter, r *http.Request, id string) {
+	var req ChmodPeticion
+	if err := leerJSON(r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := rutaAbsoluta("path", req.Path); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if !modoOctal.MatchString(req.Mode) {
+		fail(w, http.StatusBadRequest, errors.New("mode must be octal with 3 or 4 digits, like 755 or 0644"))
+		return
+	}
+	h, mc, err := s.buscarEjecutable(r.Context(), tenantDe(r), id)
+	if err != nil {
+		fail(w, codigoBuscar(err), err)
+		return
+	}
+	// argv, sin shell: el modo es solo cifras y la ruta absoluta no parece una opción.
+	cmd := []string{"chmod"}
+	if req.Recursive {
+		cmd = append(cmd, "-R")
+	}
+	cmd = append(cmd, req.Mode, req.Path)
+	res, err := h.Cliente.Exec(r.Context(), mc.ID, api.ExecRequest{Cmd: cmd, TimeoutSeconds: 30, MaxOutputBytes: 64 << 10}, nil)
+	if err != nil {
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	if res.ExitCode != 0 {
+		msg := strings.TrimSpace(string(res.Stderr))
+		code := http.StatusConflict
+		if strings.Contains(msg, "No such file") {
+			code = http.StatusNotFound
+		}
+		fail(w, code, fmt.Errorf("chmod failed: %s", msg))
+		return
+	}
+	st, err := h.Cliente.StatFile(r.Context(), mc.ID, req.Path)
+	if err != nil {
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// ReemplazarPeticion es el cuerpo de POST .../files/replace.
+type ReemplazarPeticion struct {
+	Path string `json:"path"`
+	// Old es el texto a sustituir (no vacío) y New por lo que se sustituye.
+	Old string `json:"old"`
+	New string `json:"new"`
+	// All sustituye todas las apariciones; sin él, Old tiene que aparecer una
+	// sola vez (si no, 409).
+	All bool `json:"all,omitempty"`
+}
+
+// ReemplazarRespuesta dice cuántas veces se sustituyó.
+type ReemplazarRespuesta struct {
+	Path         string `json:"path"`
+	Replacements int    `json:"replacements"`
+	Size         int64  `json:"size"`
+}
+
+func (s *Servidor) handleReemplazar(w http.ResponseWriter, r *http.Request, id string) {
+	var req ReemplazarPeticion
+	if err := leerJSON(r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := rutaAbsoluta("path", req.Path); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Old == "" {
+		fail(w, http.StatusBadRequest, errors.New("old is required"))
+		return
+	}
+	h, mc, err := s.buscarEjecutable(r.Context(), tenantDe(r), id)
+	if err != nil {
+		fail(w, codigoBuscar(err), err)
+		return
+	}
+	// Leer, sustituir y escribir bajo el cerrojo del sandbox y la ruta: dos
+	// reemplazos sobre el mismo fichero no se pisan. Un proceso del invitado que
+	// escriba el fichero a la vez sí puede: no hay forma de impedirlo desde fuera.
+	c := s.cerrojoDe(id + "\x00replace\x00" + req.Path)
+	c.Lock()
+	defer c.Unlock()
+	st, err := h.Cliente.StatFile(r.Context(), mc.ID, req.Path)
+	if err != nil {
+		if esNoEncontrado(err) {
+			fail(w, http.StatusNotFound, fmt.Errorf("no such file: %s", req.Path))
+			return
+		}
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	if st.IsDir {
+		fail(w, http.StatusConflict, fmt.Errorf("%s is a directory", req.Path))
+		return
+	}
+	if st.Size > api.FileMaxUpload {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("%s is %d bytes; replace works up to %d", req.Path, st.Size, int64(api.FileMaxUpload)))
+		return
+	}
+	rd, err := h.Cliente.ReadFile(r.Context(), mc.ID, req.Path)
+	if err != nil {
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	datos, err := io.ReadAll(io.LimitReader(rd, api.FileMaxUpload+1))
+	rd.Close()
+	if err != nil {
+		fail(w, http.StatusBadGateway, deHost(h, err))
+		return
+	}
+	if int64(len(datos)) > api.FileMaxUpload {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("%s is bigger than %d bytes", req.Path, int64(api.FileMaxUpload)))
+		return
+	}
+	n := strings.Count(string(datos), req.Old)
+	switch {
+	case n == 0:
+		fail(w, http.StatusConflict, errors.New("old was not found in the file"))
+		return
+	case n > 1 && !req.All:
+		fail(w, http.StatusConflict, fmt.Errorf("old appears %d times: pass all to replace every one, or make it longer", n))
+		return
+	}
+	limite := 1
+	if req.All {
+		limite = -1
+	}
+	nuevo := strings.Replace(string(datos), req.Old, req.New, limite)
+	if int64(len(nuevo)) > api.FileMaxUpload {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the result would be %d bytes; the limit is %d", len(nuevo), int64(api.FileMaxUpload)))
+		return
+	}
+	modo, _ := strconv.ParseUint(st.Mode, 8, 32)
+	out, err := h.Cliente.WriteFile(r.Context(), mc.ID, req.Path, uint32(modo), false, strings.NewReader(nuevo))
+	if err != nil {
+		fail(w, codigoExec(err), deHost(h, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, ReemplazarRespuesta{Path: req.Path, Replacements: n, Size: out.Size})
 }

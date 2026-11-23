@@ -144,7 +144,7 @@ func vista(h *hosts.Host, mc *api.Machine) Sandbox {
 		}
 	}
 	for k, v := range mc.Labels {
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, prefijoReservado) {
+		if !etiquetaDeUsuario(k) || v == "" {
 			continue
 		}
 		if sb.Labels == nil {
@@ -390,6 +390,12 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.handleReanudar(w, r, id)
 	case accion == "egress" && r.Method == http.MethodPatch:
 		s.handleEgress(w, r, id)
+	case accion == "metadata" && r.Method == http.MethodPatch:
+		s.handleMetadatos(w, r, id)
+	case accion == "fork" && r.Method == http.MethodPost:
+		s.handleFork(w, r, id)
+	case accion == "metrics" && r.Method == http.MethodGet:
+		s.handleMetricas(w, r, id)
 	case accion == "exec" && r.Method == http.MethodPost:
 		s.handleExec(w, r, id)
 	case accion == "shell" && r.Method == http.MethodPost:
@@ -404,7 +410,8 @@ func (s *Servidor) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		s.despachaSesiones(w, r, id, partes[3:])
 	case accion == "code":
 		s.despachaCodigo(w, r, id, partes[3:])
-	case accion == "" || accion == "renew" || accion == "pause" || accion == "resume" || accion == "egress" || accion == "exec" || accion == "shell":
+	case accion == "" || accion == "renew" || accion == "pause" || accion == "resume" || accion == "egress" || accion == "exec" || accion == "shell" ||
+		accion == "metadata" || accion == "fork" || accion == "metrics":
 		fail(w, http.StatusMethodNotAllowed, fmt.Errorf("%s is not allowed on this route", r.Method))
 	default:
 		noRuta(w, r)

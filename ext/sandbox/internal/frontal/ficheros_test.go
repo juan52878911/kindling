@@ -249,3 +249,86 @@ func TestMoverCarreraYDirectorios(t *testing.T) {
 		t.Errorf("el origen quedó anidado dentro del destino")
 	}
 }
+
+// chmod corre de verdad (chmod de esta máquina) por el daemon real del banco.
+func TestChmodDeVerdad(t *testing.T) {
+	b := montarCodigo(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "run.sh")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "d")
+	_ = os.MkdirAll(sub, 0o755)
+	_ = os.WriteFile(filepath.Join(sub, "z"), []byte("z"), 0o644)
+	url := b.base + "/files/chmod"
+	resp := pide(t, b.srv, tokenAlice, "POST", url, ChmodPeticion{Path: p, Mode: "755"})
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o755 {
+		t.Errorf("modo = %v, quería 0755", fi.Mode().Perm())
+	}
+	resp = pide(t, b.srv, tokenAlice, "POST", url, ChmodPeticion{Path: sub, Mode: "0700", Recursive: true})
+	esperaCodigo(t, resp, 200)
+	resp.Body.Close()
+	if fi, _ := os.Stat(filepath.Join(sub, "z")); fi.Mode().Perm() != 0o700 {
+		t.Errorf("recursivo: %v", fi.Mode().Perm())
+	}
+	resp = pide(t, b.srv, tokenAlice, "POST", url, ChmodPeticion{Path: filepath.Join(dir, "nada"), Mode: "644"})
+	esperaCodigo(t, resp, 404)
+	resp.Body.Close()
+	for _, malo := range []ChmodPeticion{{Path: p, Mode: "u+x"}, {Path: p, Mode: "-R"}, {Path: p, Mode: "8888"}, {Path: p, Mode: "77"}, {Path: "rel", Mode: "755"}, {Mode: "755"}} {
+		esperaCodigo(t, pide(t, b.srv, tokenAlice, "POST", url, malo), 400)
+	}
+	esperaCodigo(t, pide(t, b.srv, tokenBob, "POST", url, ChmodPeticion{Path: p, Mode: "777"}), 404)
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o755 {
+		t.Errorf("Bob cambió el modo: %v", fi.Mode().Perm())
+	}
+}
+
+func TestReemplazarEnFichero(t *testing.T) {
+	f := nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	sb := crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
+	ref := sb.ID[len("a/"):]
+	url := "/v1/sandboxes/" + sb.ID + "/files/replace"
+	f.mu.Lock()
+	f.ficheros[ref+":/etc/app.conf"] = []byte("host=a\nport=1\nport=1\n")
+	f.mu.Unlock()
+	leer := func() string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return string(f.ficheros[ref+":/etc/app.conf"])
+	}
+	// Una aparición: se sustituye.
+	resp := pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "host=a", New: "host=b"})
+	esperaCodigo(t, resp, 200)
+	r := decodifica[ReemplazarRespuesta](t, resp)
+	if r.Replacements != 1 || leer() != "host=b\nport=1\nport=1\n" {
+		t.Errorf("tras reemplazar: %+v %q", r, leer())
+	}
+	// Dos apariciones sin all: 409 y el fichero no cambia.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "port=1", New: "port=2"}), 409)
+	if leer() != "host=b\nport=1\nport=1\n" {
+		t.Errorf("el 409 cambió el fichero: %q", leer())
+	}
+	resp = pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "port=1", New: "port=2", All: true})
+	esperaCodigo(t, resp, 200)
+	if r := decodifica[ReemplazarRespuesta](t, resp); r.Replacements != 2 || leer() != "host=b\nport=2\nport=2\n" {
+		t.Errorf("con all: %+v %q", r, leer())
+	}
+	// No está, no existe, vacío, relativo, ajeno.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "zzz", New: "y"}), 409)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/nada", Old: "a", New: "b"}), 404)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "", New: "b"}), 400)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "etc/app.conf", Old: "a", New: "b"}), 400)
+	esperaCodigo(t, pide(t, srv, tokenBob, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "host=b", New: "x"}), 404)
+	// Tope: un fichero que pasa del tope de subida no se lee entero.
+	f.mu.Lock()
+	f.tamanoStat = api.FileMaxUpload + 1
+	f.mu.Unlock()
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", url, ReemplazarPeticion{Path: "/etc/app.conf", Old: "host", New: "x"}), 413)
+	f.mu.Lock()
+	f.tamanoStat = 0
+	f.mu.Unlock()
+}

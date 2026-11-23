@@ -156,6 +156,20 @@ type falso struct {
 	// dirs son los directorios que el falso conoce (clave ref:ruta).
 	dirs map[string]bool
 
+	// forks guarda lo pedido a POST /sandboxes/{ref}/fork; forkEspera, si no es
+	// nil, retiene el fork hasta que se cierre (antes cierra forkEmpezado);
+	// forkCodigo hace que el fork falle con ese estado; forkHereda hace que las
+	// copias hereden también las etiquetas del original (como un snapshot).
+	forks        []api.ForkRequest
+	forkEspera   chan struct{}
+	forkEmpezado chan struct{}
+	forkCodigo   int
+	forkHereda   bool
+	// procMaquinas es lo que GET /procstats dice de cada máquina.
+	procMaquinas []api.ProcStat
+	procKind     string
+	procLlamadas int
+
 	// ing es el estado de la entrada a puertos (ingress_test.go).
 	ing ingresoFalso
 }
@@ -205,8 +219,13 @@ func (f *falso) rutas() http.Handler {
 	})
 	m.HandleFunc("POST /sandboxes/claim", f.reclamar)
 	m.HandleFunc("GET /procstats", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, api.ProcStats{AvailableMiB: f.libreMiB})
+		f.mu.Lock()
+		f.procLlamadas++
+		out := api.ProcStats{AvailableMiB: f.libreMiB, Machines: append([]api.ProcStat(nil), f.procMaquinas...), MemoryKind: f.procKind}
+		f.mu.Unlock()
+		writeJSON(w, 200, out)
 	})
+	m.HandleFunc("POST /sandboxes/{ref}/fork", f.fork)
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.snapLista++
@@ -1220,4 +1239,61 @@ func (f *falso) empaquetarLocked(ref, path string) ([]byte, bool) {
 	}
 	_ = tw.Close()
 	return buf.Bytes(), true
+}
+
+// fork hace de daemon: crea Count copias del original con las etiquetas
+// pedidas más kind=sandbox y kling.fork-of.
+func (f *falso) fork(w http.ResponseWriter, r *http.Request) {
+	var req api.ForkRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	f.mu.Lock()
+	f.forks = append(f.forks, req)
+	espera, empezado, codigo, hereda := f.forkEspera, f.forkEmpezado, f.forkCodigo, f.forkHereda
+	f.mu.Unlock()
+	if empezado != nil {
+		select {
+		case <-empezado:
+		default:
+			close(empezado)
+		}
+	}
+	if espera != nil {
+		select {
+		case <-espera:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if codigo != 0 {
+		failDaemon(w, codigo, fmt.Errorf("fork refused"))
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	src, ok := f.maquinas[r.PathValue("ref")]
+	if !ok {
+		failDaemon(w, 404, fmt.Errorf("no sandbox"))
+		return
+	}
+	n := max(req.Count, 1)
+	res := api.ForkResult{Snapshot: "fork-tmp"}
+	for i := 0; i < n; i++ {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		c := &api.Machine{ID: hex.EncodeToString(b), State: api.StateRunning, Image: src.Image, MemMiB: src.MemMiB,
+			TTLSeconds: src.TTLSeconds, CreatedAt: time.Now(),
+			Labels: api.MergeLabels(nil, req.Labels)}
+		if req.TTLSeconds > 0 {
+			c.TTLSeconds = req.TTLSeconds
+		}
+		if hereda {
+			c.Labels = api.MergeLabels(src.Labels, c.Labels)
+			c.Labels[LabelPublico] = src.Labels[LabelPublico]
+		}
+		c.Labels = api.MergeLabels(c.Labels, map[string]string{api.LabelForkOf: src.ID, api.LabelKind: api.KindSandbox})
+		f.maquinas[c.ID] = c
+		cc := *c
+		res.Sandboxes = append(res.Sandboxes, &cc)
+	}
+	writeJSON(w, 201, res)
 }
