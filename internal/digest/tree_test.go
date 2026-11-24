@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -106,6 +108,75 @@ func TestMatches(t *testing.T) {
 	}
 	if _, _, err := Matches(p, "blake9:abc"); err == nil {
 		t.Error("an unknown algorithm has to be an error, not a mismatch")
+	}
+}
+
+// TreeFile con un gancho tiene que dar lo mismo que Tree: el gancho ve cada
+// trozo con datos entero (para perforar sus páginas a cero en el mismo pase,
+// C9-02), pero el hash sale del mismo contenido. Y no ve más de lo que hay.
+func TestTreeFileConGanchoIgualQueTree(t *testing.T) {
+	casos := map[string]struct {
+		size  int64
+		datos map[int64]string
+	}{
+		"vacío":            {0, nil},
+		"todo hueco":       {32 << 20, nil},
+		"datos sueltos":    {32 << 20, map[int64]string{0: "ext4", 10<<20 + 7: "x", 31<<20 + 5: "fin"}},
+		"cruza dos trozos": {16 << 20, map[int64]string{treeChunk - 2: "abcd"}},
+		"último a medias":  {10<<20 + 123, map[int64]string{10<<20 + 100: "cola"}},
+		"ceros escritos":   {16 << 20, map[int64]string{4 << 20: strings.Repeat("\x00", treeChunk), 9 << 20: "y"}},
+	}
+	for nombre, c := range casos {
+		p := disperso(t, c.size, c.datos)
+		want, err := Tree(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var vistos atomic.Int64
+		got, err := TreeFile(f, func(off int64, b []byte) error {
+			if off%treeChunk != 0 || int64(len(b)) != min(treeChunk, c.size-off) {
+				t.Errorf("%s: trozo en %d de %d bytes", nombre, off, len(b))
+			}
+			vistos.Add(int64(len(b)))
+			return nil
+		})
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s: TreeFile = %s, Tree %s", nombre, got, want)
+		}
+		if want != referencia(t, p) {
+			t.Errorf("%s: Tree no coincide con la referencia", nombre)
+		}
+		if vistos.Load() > c.size {
+			t.Errorf("%s: el gancho vio %d bytes de %d", nombre, vistos.Load(), c.size)
+		}
+	}
+}
+
+// Un error del gancho corta el digest: no se devuelve el hash de un pase a
+// medias.
+func TestTreeFileErrorDelGancho(t *testing.T) {
+	p := disperso(t, 12<<20, map[int64]string{0: "a", 5 << 20: "b", 9 << 20: "c"})
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	roto := errors.New("roto")
+	if _, err := TreeFile(f, func(off int64, b []byte) error {
+		if off == treeChunk {
+			return roto
+		}
+		return nil
+	}); !errors.Is(err, roto) {
+		t.Errorf("err = %v, quería el del gancho", err)
 	}
 }
 
