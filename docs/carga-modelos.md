@@ -87,3 +87,37 @@ páginas de 4 KiB / 2 MiB de la EPT (debugfs de KVM) y bytes escritos.
 
 Pendientes: la línea base con el banco arreglado se corre antes de fusionar las zonas Z1-Z6 de la ronda 9,
 y otra vez después, en la misma instancia y con el mismo disco.
+
+## Cifras medidas en EC2 (ronda 9)
+
+c8i.4xlarge con virtualización anidada, spot, us-east-1, gp3 60 GB a 125 MiB/s. Mismo banco
+(`scripts/bench/ec2.sh ia`, P1+P2+P3) con los binarios de la ronda 8 («antes») y los de esta rama
+(«después»); cada pasada en una instancia distinta, así que diferencias de ±7 % son de la instancia (el mismo
+chispa-server directo en el host bajó un 7 % entre las dos).
+
+| | Antes | Después |
+|---|---|---|
+| Fabricar el dorado Qwen2.5-1.5B Q4_K_M | 99,7 s | 47,2 s |
+| Fabricar el dorado Q8_0 (1,8 GiB) | falla a los 5 min (OOM del invitado en bucle, sin causa visible) | 77,4 s |
+| Fabricar los dos dorados de chispa-server | 207 s | 145 s |
+| Gateway recién arrancado, caché fría → primera respuesta (VON Q4) | 7425 ms (1036 MiB leídos del disco) | 1055 ms (0 MiB: precalentado al arrancar) |
+| Réplica ociosa → primera respuesta, `idle: remove` | 1018 ms | 88 ms con `spare: 1` (+393 MiB de PSS por el repuesto) |
+| Entregar un secreto por MMDS tras restaurar | — | 4-8 ms |
+| Restaurar con caché fría → primera respuesta (VON Q4) | 7478 ms | 7683 ms |
+| Restaurar con caché fría → primera decisión (chispa) | 1503 ms | 1835 ms |
+| Restaurar con caché caliente → primera respuesta (VON Q4) | 955 ms | 1027 ms |
+| chispa, 16 clientes, 4 réplicas | 898 dec/s | 822 dec/s (directo en el host: 446 → 414) |
+
+Desglose del commit del dorado Q4 (después): volcado 12,6 s, pase único (huecos + digest) 12,0 s, total
+24,7 s. El volcado va al ritmo del gp3; el pase único relee el fichero del disco en vez de la caché del host,
+y es lo siguiente que hay que atacar.
+
+La causa del Q8 la dio el registro del banco: `Out of memory: Killed process … (llama-server) … anon-rss
+~2,3 GB` cada 14 s con una plantilla de 2368 MiB. La memoria por defecto de los modelos Q8 deja ahora margen
+para la sobrecarga de carga de llama-server, y el fabricante corta al segundo reinicio con el motivo.
+
+Sin resolver: con una sola réplica y 16 clientes, chispa por el gateway pasa de 408 a 355 dec/s (−13 %,
+frente al −7 % de la instancia). En el Mac las dos ramas dan lo mismo; queda medirlo en la misma instancia con
+las dos ramas y, si sigue, con `KLING_DIFF_FREEZE=0` para descartar la carga sin seguimiento de páginas sucias
+de las réplicas `idle: remove` (C9-09).
+
