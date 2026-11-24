@@ -79,19 +79,40 @@ func TestFaseIAEnDryRun(t *testing.T) {
 	}
 }
 
-// En metal no hay virtualización anidada que pedir: --cpu-options sobra (y
-// AWS la rechaza en un .metal).
+// La cuenta no tiene cupo para un .metal (16 vCPU bajo demanda, < 48 spot):
+// ec2.sh se niega antes de llamar a aws y dice por qué. Fuera de las
+// familias 8i tampoco se pide NestedVirtualization (AWS la rechaza).
 func TestFaseIAMetalSinAnidada(t *testing.T) {
-	dir := t.TempDir()
-	log := awsFalso(t, dir)
-	out, err := ec2(t, dir, []string{"EC2_TYPE=c7i.metal-24xl", "TOPE_MIN=120"}, "--dry-run", "ia")
-	if err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	sinLlamadas(t, log)
-	if strings.Contains(out, "NestedVirtualization") {
-		t.Errorf("metal no lleva NestedVirtualization:\n%s", out)
-	}
+	t.Run("metal se niega", func(t *testing.T) {
+		dir := t.TempDir()
+		log := awsFalso(t, dir)
+		out, err := ec2(t, dir, []string{"EC2_TYPE=c7i.metal-24xl", "TOPE_MIN=120", "EC2_MAX_VCPU=192"}, "--dry-run", "ia")
+		if err == nil || !strings.Contains(out, "se niega") || !strings.Contains(out, ".metal") {
+			t.Fatalf("un .metal debía negarse con un mensaje claro: err=%v\n%s", err, out)
+		}
+		sinLlamadas(t, log)
+	})
+	t.Run("fuera de 8i sin anidada", func(t *testing.T) {
+		dir := t.TempDir()
+		log := awsFalso(t, dir)
+		out, err := ec2(t, dir, []string{"EC2_TYPE=c7i.4xlarge", "EC2_PRECIO_USD_H=0.3"}, "--dry-run", "ia")
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		sinLlamadas(t, log)
+		if strings.Contains(out, "NestedVirtualization") {
+			t.Errorf("c7i no lleva NestedVirtualization:\n%s", out)
+		}
+	})
+	t.Run("más vCPU que el cupo se niega", func(t *testing.T) {
+		dir := t.TempDir()
+		log := awsFalso(t, dir)
+		out, err := ec2(t, dir, []string{"EC2_TYPE=c8i.8xlarge", "EC2_PRECIO_USD_H=0.4"}, "--dry-run", "ia")
+		if err == nil || !strings.Contains(out, "EC2_MAX_VCPU") {
+			t.Fatalf("32 vCPU con cupo 16 debía negarse: err=%v\n%s", err, out)
+		}
+		sinLlamadas(t, log)
+	})
 }
 
 // El tope de gasto se comprueba antes de nada, también en seco: el peor caso
@@ -101,7 +122,7 @@ func TestFaseIARespetaElPresupuesto(t *testing.T) {
 	t.Run("una sola instancia demasiado cara", func(t *testing.T) {
 		dir := t.TempDir()
 		log := awsFalso(t, dir)
-		out, err := ec2(t, dir, []string{"EC2_TYPE=c7i.metal-24xl", "TOPE_MIN=720"}, "--dry-run", "ia")
+		out, err := ec2(t, dir, []string{"EC2_PRECIO_USD_H=1", "TOPE_MIN=720"}, "--dry-run", "ia")
 		if err == nil || !strings.Contains(out, "presupuesto") {
 			t.Fatalf("debía negarse por presupuesto: err=%v\n%s", err, out)
 		}
@@ -123,7 +144,7 @@ func TestFaseIARespetaElPresupuesto(t *testing.T) {
 	t.Run("tipo sin precio conocido", func(t *testing.T) {
 		dir := t.TempDir()
 		log := awsFalso(t, dir)
-		out, err := ec2(t, dir, []string{"EC2_TYPE=x9z.huge"}, "--dry-run", "ia")
+		out, err := ec2(t, dir, []string{"EC2_TYPE=x9z.4xlarge"}, "--dry-run", "ia")
 		if err == nil || !strings.Contains(out, "EC2_PRECIO_USD_H") {
 			t.Fatalf("sin precio debía pedir EC2_PRECIO_USD_H: err=%v\n%s", err, out)
 		}
@@ -200,7 +221,10 @@ case "$1 $2" in
 "status -v") echo '{"backend":"falso"}' ;;
 "image ls") echo '[{"name":"img","disk_bytes":1048576}]' ;;
 "ps -a") printf '['; s=""; for f in "$D"/m/*; do [ -e "$f" ] || continue; printf '%s' "$s"; maquina "$(basename "$f")"; s=,; done; echo ']' ;;
-"top -json") printf '{"available_mib":1000,"machines":['; s=""; for f in "$D"/m/*; do [ -e "$f" ] || continue; [ "$(cat "$f")" = running ] || continue; printf '%s{"name":"%s","pid":%d,"pss_mib":10,"disk_read_bytes":4096,"state":"running"}' "$s" "$(basename "$f")" "$$"; s=,; done; echo ']}' ;;
+"top -json") # las máquinas que casan con KFALSO_DISCO (patrón de case) leyeron 4096 bytes de disco; el resto, 0
+  printf '{"available_mib":1000,"machines":['; s=""; for f in "$D"/m/*; do [ -e "$f" ] || continue; [ "$(cat "$f")" = running ] || continue
+    n=$(basename "$f"); dr=0; [ -n "${KFALSO_DISCO:-}" ] && case $n in $KFALSO_DISCO) dr=4096 ;; esac
+    printf '%s{"name":"%s","pid":%d,"pss_mib":10,"disk_read_bytes":%d,"state":"running"}' "$s" "$n" "$$" "$dr"; s=,; done; echo ']}' ;;
 "ai serve") shift 2; exec python3 -I "$KFALSO_GW" "$@" ;;
 "ai model") echo '{"request_ms":3,"response":{"choices":[{"message":{"content":"x"}}],"timings":{"prompt_per_second":100,"predicted_per_second":10,"prompt_n":5,"predicted_n":8}}}' ;;
 *)
@@ -213,6 +237,29 @@ case "$1 $2" in
   esac ;;
 esac
 `
+
+// corridaFalsa deja en res lo que remoto/ia.sh guarda junto a los JSON y que
+// ia.py exige desde la ronda 9 (C9-12): corrida.json con el journal del
+// daemon y, por dorado fabricado, el desglose del commit y su service.log.
+func corridaFalsa(t *testing.T, res, dorado string) {
+	t.Helper()
+	ficheros := map[string]string{
+		"journal-kt-bench.log":              "nov 23 10:00:00 kling[1]: commit " + dorado + "-golden -> " + dorado + ": overlay 80 ms (total 900 ms)\n",
+		"dorado-" + dorado + "/service.log": "listo\n",
+		"corrida.json": `{"esquema":"ia-corrida/1","journal":{"unidad":"kt-bench","fichero":"journal-kt-bench.log"},` +
+			`"dorados":[{"dorado":"` + dorado + `","rc":0,"fabricar_ms":40000,"commit":{"overlay":80,"total":900},` +
+			`"service_log":"dorado-` + dorado + `/service.log"}]}`,
+	}
+	for f, c := range ficheros {
+		p := filepath.Join(res, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 // 96-von-bench.sh saca un JSON con todas las claves aunque se salten
 // secciones (las saltadas dicen por qué), y ia.py lo valida y lo resume.
@@ -230,7 +277,7 @@ func TestVonBenchSacaJSON(t *testing.T) {
 	salida := filepath.Join(dir, "von.json")
 	cmd := exec.Command("bash", "96-von-bench.sh", "von-falso")
 	cmd.Env = append(os.Environ(), "KLING="+k, "KFALSO="+filepath.Join(dir, "estado"), "JSON_OUT="+salida,
-		"RUNS=2", "REPLICAS=2", "CYCLES=2", "GATEWAY=0", "DROP_CACHES=0", "IA_BENCH=/nonexistent",
+		"RUNS=2", "REPLICAS=2", "CYCLES=2", "GATEWAY=0", "DROP_CACHES=0", "IA_BENCH=/nonexistent", "KFALSO_DISCO=*-p1-rc-0",
 		"SECCIONES=restaurar primera memoria ociosa carga")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -270,9 +317,20 @@ func TestVonBenchSacaJSON(t *testing.T) {
 	if ms, _ := filepath.Glob(filepath.Join(dir, "estado", "m", "*")); len(ms) != 0 {
 		t.Errorf("quedaron máquinas: %v", ms)
 	}
+	// El primer intento de la primera muestra caliente leyó disco (KFALSO_DISCO): se aparta y se repite.
+	if ap, _ := pr["calientes_con_disco"].(map[string]any); ap == nil {
+		t.Errorf("falta primera.calientes_con_disco: %v", pr)
+	} else if n := len(ap["restaurar_caliente"].([]any)) + len(ap["descongelar_caliente"].([]any)); n != 1 {
+		t.Errorf("quería 1 muestra caliente apartada por leer disco, hay %d: %v", n, ap)
+	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		return
 	}
+	// Sin corrida.json (journal, desglose, service.log) ia.py rechaza la corrida.
+	if out, err := exec.Command("python3", "-I", "bench/ia.py", "--validar", salida).CombinedOutput(); err == nil || !strings.Contains(string(out), "corrida.json") {
+		t.Errorf("ia.py --validar sin corrida.json debía rechazarla: %v\n%s", err, out)
+	}
+	corridaFalsa(t, dir, "von-falso")
 	if out, err := exec.Command("python3", "-I", "bench/ia.py", "--validar", salida).CombinedOutput(); err != nil {
 		t.Errorf("ia.py --validar: %v\n%s", err, out)
 	}
