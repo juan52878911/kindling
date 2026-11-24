@@ -214,7 +214,8 @@ func (m *metrics) addInflight(d int64) {
 }
 
 // replicaCount es cuántas réplicas de un modelo hay en cada estado.
-type replicaCount struct{ running, warm int }
+// spare son los repuestos (kling.spare): restaurados pero sin servir aún.
+type replicaCount struct{ running, warm, spare int }
 
 // write vuelca todo. replicas y extra los calcula quien llama (sin el candado
 // de las métricas: preguntar al daemon no puede ocurrir con él tomado). Se
@@ -298,6 +299,9 @@ func (m *metrics) render(w *bytes.Buffer, js chispaStats, samples map[string]int
 	for _, mo := range sortedKeys(replicas) {
 		fmt.Fprintf(w, "kling_ai_von_replicas{model=%q,state=\"running\"} %d\n", mo, replicas[mo].running)
 		fmt.Fprintf(w, "kling_ai_von_replicas{model=%q,state=\"warm\"} %d\n", mo, replicas[mo].warm)
+		if replicas[mo].spare > 0 {
+			fmt.Fprintf(w, "kling_ai_von_replicas{model=%q,state=\"spare\"} %d\n", mo, replicas[mo].spare)
+		}
 	}
 	fmt.Fprintf(w, "# HELP kling_ai_samples Recorded VON answers available for recalibration.\n# TYPE kling_ai_samples gauge\n")
 	for _, t := range sortedKeys(samples) {

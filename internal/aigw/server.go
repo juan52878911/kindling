@@ -398,6 +398,11 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	g.met.write(w, g.chispa.stats(), samples, reps, g.learnSnapshot())
 }
 
+// labelSpare es la etiqueta con la que el planificador marca un repuesto
+// (ronda 9, C9-08). Es el mismo texto que pone Z4; en la integración debe
+// pasar a ser su constante.
+const labelSpare = "kling.spare"
+
 // replicaCounts cuenta las réplicas de cada modelo por estado, preguntando al
 // daemon como mucho cada 5 s: List recorre el disco de todas las máquinas, y
 // un Prometheus que raspa cada segundo no debe notarse.
@@ -429,6 +434,12 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 			continue
 		}
 		c := out[name]
+		if m.Labels[labelSpare] != "" {
+			// Un repuesto no sirve tráfico todavía: aparte, no como réplica.
+			c.spare++
+			out[name] = c
+			continue
+		}
 		switch m.State {
 		case api.StateRunning:
 			c.running++
