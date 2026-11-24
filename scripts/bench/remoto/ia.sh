@@ -34,7 +34,7 @@ preparar() {
   paso apt
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq jq perl curl zstd python3 iptables ipset conntrack e2fsprogs xfsprogs >/dev/null || exit 1
+  apt-get install -y -qq jq perl curl zstd python3 iptables ipset conntrack e2fsprogs xfsprogs debootstrap >/dev/null || exit 1
   paso firecracker
   local F=v1.17.0
   bajar "https://github.com/firecracker-microvm/firecracker/releases/download/$F/firecracker-$F-x86_64.tgz" fc.tgz || exit 1
