@@ -210,13 +210,27 @@ proceso local (y root) del host puede hablar con la réplica sin pasar por el
 gateway. Los secretos de salida (credencial del proxy) y los que el proceso
 necesita en claro (`secrets`, abajo) no sustituyen a la clave de entrada.
 
-**`secrets`.** Un `kind http` con `snapshot` puede declarar los secretos que
-su servidor necesita, con el valor en un fichero 0600 (relativo al
-`ai.json`), nunca en el bloque: `deliver: credential` para una clave de
-**salida** (el proxy de credenciales la pone; la réplica solo lleva un
-marcador, `env`, `domain` y `allow` obligatorios) y `deliver: mmds` para uno
-que el proceso necesita **en claro** (se entrega a cada réplica tras
-restaurarla; exige `idle` `remove` o `pause`).
+**Tres clases de secreto.** Ninguna sustituye a otra:
+
+| Clase | Qué protege | Cómo se declara | Dónde vive |
+|---|---|---|---|
+| de **entrada** | quién puede hablar con la réplica | `auth` (`{header, scheme, file}`) con `replica_auth: key` | el gateway la añade en cada petición; el dorado lleva solo el verificador. Rotarla pide dorado nuevo |
+| de **salida** | la clave con la que el backend llama a un tercero | `secrets[]` con `deliver: credential` (`env`, `domain` y `allow` obligatorios) | en el proxy de credenciales del daemon; la réplica solo lleva un marcador y la clave nunca entra en el invitado. Se rota cambiando el fichero y recargando |
+| **en memoria** | lo que el proceso necesita en claro | `secrets[]` con `deliver: mmds` | se entrega a cada réplica tras restaurarla, por un gancho que corre antes de la sonda y de darla por lista (también a los repuestos, antes de calentarlos) |
+
+En `secrets` el valor va siempre en un fichero 0600 (relativo al `ai.json`),
+nunca en el bloque. Una réplica con secretos en memoria queda marcada y **nunca
+se congela** (ni se bifurca: el volcado llevaría el secreto), así que exige
+`idle` `remove` o `pause`.
+
+**`spare` y `pin`.** `spare: N` mantiene N repuestos por modelo: réplicas ya
+restauradas, con sus secretos y tocadas con la petición de calentamiento del
+contrato, fuera del camino de la petición; la siguiente petición reclama uno
+en vez de restaurar, y el gateway lo repone. Un repuesto no cuenta como
+réplica en marcha (en `/metrics` sale con `state="spare"`) y nunca cambia de
+inquilino: el dorado es por bloque. `pin: true` pide al daemon que ancle en RAM
+el volcado del dorado, para que la primera restauración no lea de disco; con o
+sin `pin`, el gateway precalienta la caché de los dorados de `ai.json`.
 
 **Un dorado por inquilino (Chispa).** chispa-server elige sus bancos por el texto de la pregunta, sin mirar quién
 pregunta: dos inquilinos en el mismo proceso comparten bancos. Mientras eso no
