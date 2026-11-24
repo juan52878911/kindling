@@ -87,13 +87,20 @@ func (g *Gateway) rutas() http.Handler {
 }
 
 // alServir es lo que toca al empezar a servir un registro (al montar el
-// handler y en /v1/admin/reload): avisar de la frontera de las réplicas y
-// lanzar la sonda de carga de los upstreams. Devuelve los avisos.
+// handler): avisar en el log de la frontera de las réplicas y lanzar la sonda
+// de carga de los upstreams. Devuelve los avisos.
 func (g *Gateway) alServir() []string {
-	notas := g.config().BackendNotes(runtime.GOOS)
+	notas := g.avisosAlServir()
 	for _, n := range notas {
 		log.Print("warning: " + n)
 	}
+	return notas
+}
+
+// avisosAlServir es alServir sin el log: Reload (SIGHUP y /v1/admin/reload)
+// devuelve los avisos a quien recarga, que los imprime él.
+func (g *Gateway) avisosAlServir() []string {
+	notas := g.config().BackendNotes(runtime.GOOS)
 	g.prepararUpstreams()
 	return notas
 }
@@ -381,8 +388,8 @@ func (g *Gateway) handleReload(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	// "cascades" es la lista de avisos que imprime `kling ai reload`.
-	notes = append(notes, g.alServir()...)
+	// "cascades" es la lista de avisos que imprime `kling ai reload`; Reload
+	// ya trae los de alServir.
 	writeJSON(w, map[string]any{"reloaded": true, "cascades": notes})
 }
 

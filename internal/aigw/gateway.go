@@ -394,7 +394,9 @@ func (g *Gateway) Reload() ([]string, error) {
 		g.calentarDorados(ctx)
 		g.llenarRepuestos(ctx)
 	}
-	return notes, nil
+	// Como al empezar a servir: los avisos de los backends y la sonda de los
+	// upstreams nuevos, también con SIGHUP (que no pasa por el handler).
+	return append(notes, g.avisosAlServir()...), nil
 }
 
 // Start pone en marcha el segador (congela réplicas ociosas, mantiene el

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -933,5 +934,49 @@ func TestGatewayToleraDaemonSinWarm(t *testing.T) {
 			t.Errorf("%d: reload: %v", code, err)
 		}
 		cancel()
+	}
+}
+
+// Un reload (SIGHUP o /v1/admin/reload, los dos pasan por Reload) hace lo
+// mismo que arrancar a servir: avisa de las notas de los backends y lanza la
+// sonda de carga de los upstreams nuevos. Antes solo lo hacía el handler de
+// /v1/admin/reload, y un SIGHUP dejaba el upstream sin sondear hasta la
+// primera petición.
+func TestReloadSondeaUpstreamsYDevuelveSusNotas(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ai.json")
+	if err := os.WriteFile(filepath.Join(dir, "vllm.key"), []byte("k-0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sondas := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sondas <- r.URL.Path:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	escribirRegistro(t, p, nil, nil)
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	escribirRegistro(t, p, map[string]any{
+		"gpu":   map[string]any{"kind": "http", "contract": "openai", "upstream": srv.URL},
+		"claro": map[string]any{"kind": "http", "contract": "openai", "upstream": "http://198.51.100.7:8000", "auth": map[string]any{"header": "Authorization", "scheme": "Bearer", "file": "vllm.key"}},
+	}, nil)
+	notas, err := g.Reload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(notas, "\n"), "in clear") {
+		t.Errorf("las notas del reload no avisan del upstream http:// con credencial: %q", notas)
+	}
+	select {
+	case <-sondas:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tras el reload no se sondeó el upstream nuevo")
 	}
 }
