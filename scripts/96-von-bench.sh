@@ -64,6 +64,10 @@ CLIENTES="${CLIENTES:-1 4 16}"
 CARGA_S="${CARGA_S:-20}"
 DROP_CACHES="${DROP_CACHES:-auto}"
 HIGIENE="${HIGIENE:-0}"
+KLING_ROOT="${KLING_ROOT:-}"
+UMBRAL_CALIENTE_BYTES="${UMBRAL_CALIENTE_BYTES:-0}"
+REINTENTOS_CALIENTE="${REINTENTOS_CALIENTE:-2}"
+case $UMBRAL_CALIENTE_BYTES$REINTENTOS_CALIENTE in *[!0-9]*) echo "UMBRAL_CALIENTE_BYTES and REINTENTOS_CALIENTE must be integers" >&2; exit 1 ;; esac
 TODAS="restaurar primera tps memoria ociosa semillas carga"
 [ "$COLD" = 1 ] && TODAS="frio $TODAS"
 SECCIONES="${SECCIONES:-$TODAS}"
@@ -277,6 +281,64 @@ if pide restaurar; then
     --argjson r "$(arr ${req[@]+"${req[@]}"})" '{thaw_ms:$t, hasta_primera_ms:$f, peticion_ms:$r}')"
 else omit restaurar "no pedida en SECCIONES"; fi
 
+# ── calentar (C9-14) ──────────────────────────────────────────────────────────
+# Una muestra «caliente» solo lo es si su VMM no leyó nada del disco. Antes de cada una se trae el
+# dorado a la caché por todas las vías que haya: la API del daemon (POST /snapshots/<n>/warm, Z1; un
+# daemon sin ella contesta 404/501 y se sigue), los ficheros del dorado y de su imagen si KLING_ROOT es
+# legible, y una restauración descartada con su petición (toca lo mismo que la muestra).
+CAL_USADOS=""
+usado() { case " $CAL_USADOS " in *" $1 "*) ;; *) CAL_USADOS="$CAL_USADOS $1" ;; esac; }
+calentado_por() { echo "$CAL_USADOS"; }
+# leer_a_cache <ruta>...: lee ficheros (o directorios enteros, siguiendo enlaces) a la caché de página.
+leer_a_cache() {
+  local f
+  for f in "$@"; do
+    [ -e "$f" ] || continue
+    find -L "$f" -type f -exec cat {} + >/dev/null 2>&1
+  done
+  return 0
+}
+warm_api() { # warm_api: 0 si el daemon trajo el dorado a la caché (y esperó a tenerlo entero)
+  local s c
+  case ${KLING_HOST:-} in unix://*) s=${KLING_HOST#unix://} ;; *) return 1 ;; esac
+  [ -S "$s" ] || return 1
+  c="$(curl -s -o "$D/warm.json" -w '%{http_code}' --max-time 300 --unix-socket "$s" -H 'Content-Type: application/json' \
+       -X POST --data '{"wait":true}' "http://kling/snapshots/$SNAP/warm" 2>/dev/null)"
+  [ "$c" = 200 ]
+}
+calentar_dorado() {
+  warm_api && usado api
+  if [ -n "$KLING_ROOT" ] && [ -r "$KLING_ROOT/snapshots/$SNAP" ]; then
+    leer_a_cache "$KLING_ROOT/snapshots/$SNAP" "$KLING_ROOT/images/$image".* && usado ficheros
+  fi
+  return 0
+}
+# calentar_maquina <nombre>: los ficheros de una máquina congelada (su volcado y su overlay).
+calentar_maquina() {
+  local id
+  [ -n "$KLING_ROOT" ] || return 0
+  id="$("$KLING" ps -a -json 2>/dev/null | jq -r --arg n "$1" '[.[]? | select(.name==$n) | .id][0] // empty')"
+  [ -n "$id" ] && [ -r "$KLING_ROOT/machines/$id" ] && leer_a_cache "$KLING_ROOT/machines/$id" && usado congelada
+  return 0
+}
+# caliente <restaurar_una|descongelar_una> <rc|dc> <nombre>: una muestra caliente de verdad. Si aun
+# calentada su VMM leyó del disco más de UMBRAL_CALIENTE_BYTES, la muestra se aparta (p-<k>-disco, va
+# al JSON en primera.calientes_con_disco) y se repite, hasta REINTENTOS_CALIENTE veces. Donde no se
+# sabe lo leído (null: no es Linux) se queda como está.
+caliente() {
+  local f="$D/p-$2-intento.jsonl" n=0 dr
+  while :; do
+    : > "$f"
+    CALENTAR=1 "$1" "$f" "$3-$n" 0 || return 1
+    [ -s "$f" ] || return 1
+    dr="$(jq -r '.disco_leido_bytes // "null"' "$f")"
+    if [ "$dr" = null ] || [ "$dr" -le "$UMBRAL_CALIENTE_BYTES" ]; then cat "$f" >> "$D/p-$2.jsonl"; return 0; fi
+    jq -c --argjson n "$n" '. + {intento:$n}' "$f" >> "$D/p-$2-disco.jsonl"
+    n=$((n + 1))
+    [ "$n" -le "$REINTENTOS_CALIENTE" ] || { echo "  $3: still reading the disk after $n warm-ups" >&2; return 1; }
+  done
+}
+
 # ── 3. primera petición (P1) ──────────────────────────────────────────────────
 # muestra <fichero> <máquina> <json de run/thaw> <t0>: hace la petición y apunta una muestra.
 muestra() {
@@ -289,8 +351,14 @@ muestra() {
     '{total_ms:$tot, peticion_ms:$r, thaw_ms:($w.thaw_ms // null), resync_ms:($w.wake.resync_ms // null),
       load_ms:($w.wake.load_ms // null), fallos:$f, disco_leido_bytes:$dr}' >> "$1"
 }
-restaurar_una() { # restaurar_una <fichero> <nombre> <fría 0|1>
+restaurar_una() { # restaurar_una <fichero> <nombre> <fría 0|1>; con CALENTAR=1, ver caliente
   local out t0
+  if [ "${CALENTAR:-0}" = 1 ]; then
+    calentar_dorado
+    # La restauración descartada toca lo mismo que la muestra, también lo que no es del dorado.
+    if "$KLING" run -from "$SNAP" -name "$2-cal" >/dev/null 2>&1 && pedido "$2-cal" >/dev/null; then usado descartada; fi
+    "$KLING" rm -f "$2-cal" >/dev/null 2>&1
+  fi
   [ "$3" = 1 ] && soltar_cache
   t0=$(now_ms)
   out="$("$KLING" run -from "$SNAP" -name "$2" -json 2>/dev/null)" || { echo "  run -from $2 FAILED" >&2; return 1; }
@@ -299,8 +367,10 @@ restaurar_una() { # restaurar_una <fichero> <nombre> <fría 0|1>
 }
 descongelar_una() { # descongelar_una <fichero> <nombre> <fría 0|1>
   local out t0
-  "$KLING" run -from "$SNAP" -name "$2" -json >/dev/null 2>&1 && pedido "$2" >/dev/null && "$KLING" freeze -json "$2" >/dev/null 2>&1 \
-    || { echo "  preparing frozen $2 FAILED" >&2; "$KLING" rm -f "$2" >/dev/null 2>&1; return 1; }
+  if ! { "$KLING" run -from "$SNAP" -name "$2" -json >/dev/null 2>&1 && pedido "$2" >/dev/null && "$KLING" freeze -json "$2" >/dev/null 2>&1; }; then
+    echo "  preparing frozen $2 FAILED" >&2; "$KLING" rm -f "$2" >/dev/null 2>&1; return 1
+  fi
+  if [ "${CALENTAR:-0}" = 1 ]; then calentar_dorado; calentar_maquina "$2"; fi
   [ "$3" = 1 ] && soltar_cache
   t0=$(now_ms)
   out="$("$KLING" thaw -json "$2" 2>/dev/null)" || { echo "  thaw $2 FAILED" >&2; "$KLING" rm -f "$2" >/dev/null 2>&1; return 1; }
@@ -310,29 +380,41 @@ descongelar_una() { # descongelar_una <fichero> <nombre> <fría 0|1>
 if pide primera; then
   step "3. First response after restore and after thaw, warm page cache and after drop_caches ($RUNS runs)"
   [ "$DROP_OK" = 1 ] || row "cold page cache" "skipped: $DROP_MOTIVO"
-  # Una restauración descartada: la caché caliente es caliente también en la primera vuelta.
+  # C9-14. Calientes primero y todas juntas; las frías (cada una tras drop_caches) después: en la
+  # ronda 8 el orden mezclado dejaba la mitad de las «calientes» detrás de un drop_caches.
   restaurar_una "$D/descartada" "$PREFIX-p0" 0 >/dev/null 2>&1
   for i in $(seq "$RUNS"); do
     # A/B alternado: las vueltas impares restauran primero; las pares descongelan primero.
     if [ $((i % 2)) = 1 ]; then orden="r d"; else orden="d r"; fi
     for k in $orden; do
-      if [ "$k" = r ]; then
-        restaurar_una "$D/p-rc.jsonl" "$PREFIX-p$i-rc" 0
-        [ "$DROP_OK" = 1 ] && restaurar_una "$D/p-rf.jsonl" "$PREFIX-p$i-rf" 1
-      else
-        descongelar_una "$D/p-dc.jsonl" "$PREFIX-p$i-dc" 0
-        [ "$DROP_OK" = 1 ] && descongelar_una "$D/p-df.jsonl" "$PREFIX-p$i-df" 1
-      fi
+      if [ "$k" = r ]; then caliente restaurar_una rc "$PREFIX-p$i-rc"
+      else caliente descongelar_una dc "$PREFIX-p$i-dc"; fi
     done
   done
+  if [ "$DROP_OK" = 1 ]; then
+    for i in $(seq "$RUNS"); do
+      if [ $((i % 2)) = 1 ]; then orden="r d"; else orden="d r"; fi
+      for k in $orden; do
+        if [ "$k" = r ]; then restaurar_una "$D/p-rf.jsonl" "$PREFIX-p$i-rf" 1
+        else descongelar_una "$D/p-df.jsonl" "$PREFIX-p$i-df" 1; fi
+      done
+    done
+  fi
   for k in rc:restore,warm rf:restore,cold dc:thaw,warm df:thaw,cold; do
     f="$D/p-${k%%:*}.jsonl"
     [ -s "$f" ] && row "${k#*:} to first response, p50" "$(jq -r .total_ms "$f" | stats) ms (request $(jq -r .peticion_ms "$f" | stats))"
   done
+  for k in rc dc; do
+    [ -s "$D/p-$k-disco.jsonl" ] && row "  warm samples set aside ($k: read the disk)" "$(wc -l < "$D/p-$k-disco.jsonl" | tr -d ' ')"
+  done
   fria() { if [ "$DROP_OK" = 1 ]; then jsonl "$1"; else jq -nc --arg r "$DROP_MOTIVO" '{omitida:$r}'; fi; }
   put primera "$(jq -nc --argjson rc "$(jsonl "$D/p-rc.jsonl")" --argjson rf "$(fria "$D/p-rf.jsonl")" \
     --argjson dc "$(jsonl "$D/p-dc.jsonl")" --argjson df "$(fria "$D/p-df.jsonl")" \
-    '{restaurar_caliente:$rc, restaurar_fria:$rf, descongelar_caliente:$dc, descongelar_fria:$df}')"
+    --argjson arc "$(jsonl "$D/p-rc-disco.jsonl")" --argjson adc "$(jsonl "$D/p-dc-disco.jsonl")" \
+    --argjson u "$UMBRAL_CALIENTE_BYTES" --argjson rep "$REINTENTOS_CALIENTE" --arg cal "$(calentado_por)" \
+    '{restaurar_caliente:$rc, restaurar_fria:$rf, descongelar_caliente:$dc, descongelar_fria:$df,
+      calientes_con_disco:{restaurar_caliente:$arc, descongelar_caliente:$adc},
+      umbral_caliente_bytes:$u, reintentos_caliente:$rep, calentado_por:($cal|split(" ")|map(select(.!="")))}')"
 else omit primera "no pedida en SECCIONES"; fi
 
 # ── 4. tokens/s ───────────────────────────────────────────────────────────────
