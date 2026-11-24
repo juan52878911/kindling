@@ -272,6 +272,47 @@ func TestCapaLLMCortadaNoDejaFichero(t *testing.T) {
 	})
 }
 
+// Lo que se clonaría con FICLONERANGE tiene que ser exactamente el modelo:
+// cada tramo, leído de la imagen, son los mismos bytes que en el GGUF en ese
+// desplazamiento, y entre todos cubren sus bloques enteros que no son huecos.
+func TestBloquesDeMapeaElModelo(t *testing.T) {
+	dir := t.TempDir()
+	gguf := append(datosAleatorios(5*ext4.BlockSize+100), make([]byte, 4*ext4.BlockSize)...)
+	gguf = append(gguf, datosAleatorios(3*ext4.BlockSize)...)
+	rootfs, agent, _ := rootfsDePrueba(t, dir, gguf)
+	out := filepath.Join(dir, "out")
+	if _, err := construirCapaLLM(capaLLM{Name: "m", BaseImg: baseDePrueba(t, dir), Agent: agent, Rootfs: rootfs,
+		Service: "/etc/von/run.sh", Out: out, T: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(out, "m.layer.ext4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	runs, err := bloquesDe(f, "/upper/models/m.gguf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cubiertos := int64(0)
+	for _, r := range runs {
+		b := make([]byte, r.n*ext4.BlockSize)
+		if _, err := f.ReadAt(b, r.imagen*ext4.BlockSize); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(b, gguf[r.fichero*ext4.BlockSize:(r.fichero+r.n)*ext4.BlockSize]) {
+			t.Fatalf("el tramo %+v no son los bytes del modelo", r)
+		}
+		cubiertos += r.n
+	}
+	// 5 bloques de datos + el que va a medias (100 bytes, no entero: fuera) +
+	// 4 de ceros (hueco) + 3 de datos -> 8 enteros con datos... el de 100
+	// bytes de datos más ceros sí es entero y con datos.
+	if cubiertos != 9 {
+		t.Fatalf("%d bloques cubiertos; quería 9 (los enteros que no son huecos)", cubiertos)
+	}
+}
+
 // Tras construir, el GGUF de la caché se borra (la capa ya lo lleva y el
 // dorado, en su mem.file): tres copias por modelo eran 3,4 GiB por GiB. Se
 // queda con keep_cache, si lo convirtió kindling (no se puede volver a bajar)
