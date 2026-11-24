@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // R8-05: un cuerpo JSON null decodifica sin error a un mapa nil; con un único
@@ -184,7 +185,7 @@ func TestReplicaCountsRepuestosAparte(t *testing.T) {
 	for id, spare := range map[string]bool{"r1": false, "r2": true, "r3": true} {
 		lb := map[string]string{api.LabelService: "von-smol", LabelGateway: "default"}
 		if spare {
-			lb[labelSpare] = "true"
+			lb[scheduler.LabelSpare] = "true"
 		}
 		d.machines[id] = &api.Machine{ID: id, State: api.StateRunning, From: "von-smol", Labels: lb}
 		d.order = append(d.order, id)
