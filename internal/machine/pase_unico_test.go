@@ -245,6 +245,37 @@ func TestCommitDevuelveTimings(t *testing.T) {
 	}
 }
 
+// C9-11: tras el commit de un dorado cuya capa pasa de 256 MiB (la de un
+// modelo), la caché de la capa se suelta: los pesos viven ya en el mem.file,
+// y era 1,1 GiB de caché compitiendo con él. Una capa pequeña (la de un MCP)
+// se queda: la releen los arranques en frío.
+func TestSoltarCacheCapaGrande(t *testing.T) {
+	var soltadas []string
+	antes := soltarCache
+	soltarCache = func(p string) { soltadas = append(soltadas, p) }
+	t.Cleanup(func() { soltarCache = antes })
+
+	dir := t.TempDir()
+	pequeña, grande := filepath.Join(dir, "p.layer.ext4"), filepath.Join(dir, "g.layer.ext4")
+	if err := os.WriteFile(pequeña, make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(grande)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(capaSoltarMinBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for _, p := range []string{pequeña, grande, filepath.Join(dir, "no-esta"), ""} {
+		soltarCacheCapa(p)
+	}
+	if len(soltadas) != 1 || soltadas[0] != grande {
+		t.Errorf("soltadas %v, quería solo %s", soltadas, grande)
+	}
+}
+
 // BenchmarkPerforarYDigest mide lo que el commit hace tras el volcado con la
 // memoria: hoy dos pases (fallocate --dig-holes y digest.Tree), y el pase
 // único. En macOS no se perfora (los dos caminos son digest.Tree), así que la
