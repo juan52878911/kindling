@@ -696,6 +696,62 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     daemon no manda una credencial MySQL a un `kling-vz` que no anuncie `mysql`.
   - `kling db attach` (upstream que es otra máquina) no se admite con MySQL: sin prueba
     del servidor, una resolución equivocada llevaría el scramble a otro invitado.
+- **Credencial HTTP con `-upstream` fijado por el operador** (`pkg/credproxy/upstream.go`).
+  Es la salida de una réplica de modelo hacia un destino privado sin abrirle ruta IP: la
+  réplica habla HTTP con un nombre reservado (`l3.kindling.internal`, por ejemplo) que su
+  resolver desvía al proxy; el proxy cambia el marcador por la clave y marca **la
+  dirección fijada**, nunca el dominio. Topología prevista: réplica → proxy de
+  credenciales de su máquina → gateway de IA en el loopback del host (con un token de
+  inquilino acotado a `POST /v1/chat/completions`, su cuota y sus `limits`) → vLLM (con
+  `auth` desde fichero y TLS). La clave del vLLM no sale del gateway y la réplica ni
+  siquiera tiene el token: lleva un marcador.
+  - **Los mismos vetos que Postgres**, al validar y al marcar: metadatos y todo el
+    link-local, «esta red», multicast, los rangos internos de kindling (enlace del
+    invitado y veth del host) y, en el loopback, el rango de reenvíos
+    (`ForwardPortMin`-`ForwardPortMax`). Un nombre se resuelve al marcar y basta una IP
+    prohibida entre sus respuestas para no marcar ninguna.
+  - **`-allow-request` obligatorio.** El proxy es un oráculo de la clave; hacia un
+    servicio del host o de la VPC solo lo acota la lista de peticiones. El razonamiento
+    que hacía inocuo el loopback en Postgres (un servicio HTTP no completa SCRAM) aquí no
+    vale: lo que protege el resto del loopback es el rango de reenvíos vetado y `allow`.
+  - **`-upstream-tls disable` solo hacia el loopback del host** (una IP de loopback o
+    `localhost`; un nombre no, porque no se sabe al validar a dónde resolverá): la clave
+    va en una cabecera y fuera del host cruzaría la red en claro. Hacia la VPC, TLS
+    verificado contra `-tls-server-name` o el dominio (nunca contra la IP del upstream),
+    con las raíces del sistema más `-ca-file`.
+  - **Un destino por dominio**: todas las credenciales HTTP de un dominio comparten
+    upstream y TLS (el proxy elige la salida por el `Host`).
+  - **El invitado no ve la dirección fijada**, ni en un error (va al log del daemon y al
+    registro de auditoría, campo `upstream`).
+  - **El almacén sube a la v4** (`KLCS 4`) en cuanto hay una así: un kling anterior que
+    no la entendiera mandaría la clave al dominio. Las copias `.vN.bak` anteriores no la
+    llevan (tras volver atrás falta y hay que darla otra vez: fallar cerrado). Sin
+    upstream, una credencial HTTP no cambia.
+  - **Lo que no resuelve**: el texto de varios inquilinos hacia un vLLM compartido pasa
+    por superficie común (caché de prefijos, logs del vLLM); kindling no lo separa.
+- **Tres clases de secreto, y ninguna sustituye a las otras.**
+
+  | Clase | Qué es | Dónde vive | Quién lo ve |
+  |---|---|---|---|
+  | A · clave de entrada de una réplica | lo que una réplica exige a quien le habla (`auth` del bloque del modelo, modo `replica_auth: key`) | el dorado lleva solo su verificador (SHA-256); el gateway añade la clave desde `auth.file` | el gateway |
+  | B · secreto de salida | credencial del proxy (`secrets[].deliver: credential`, `kling template credential`) | cifrado en el almacén del daemon | nadie dentro: el invitado lleva un marcador |
+  | C · secreto en claro | lo que el servicio necesita leer (`deliver: mmds`, `kling machine secret`) | MMDS de la máquina viva, tras restaurar; la réplica queda marcada y con `idle: remove` o `pause` | el invitado, y quien lo comprometa |
+
+- **Los dos modos de `replica_auth`** (el puerto de una réplica no lo alcanza otra
+  microVM ni la LAN, pero en Linux lo alcanza **cualquier proceso local del host, de
+  cualquier uid**, y en macOS es un reenvío en `127.0.0.1` que alcanza cualquier proceso
+  del Mac):
+  - `network`: la réplica no exige clave y autentica el gateway. Solo para un host
+    **dedicado** a kindling (nadie más ejecuta código en él) o desarrollo en el Mac.
+  - `key`: la réplica exige su clave de entrada (clase A). Para un host compartido o
+    multiusuario, macOS fuera de desarrollo y cualquier backend que sirva datos de un
+    inquilino. Rotarla pide dorado nuevo.
+  - Vacío se deduce del bloque: `key` si lleva `auth`, `network` si no. `key` sin `auth`
+    y `network` con `auth` son errores; `network` en macOS, o en Linux con inquilinos, es
+    un aviso al cargar.
+  - **No se promete**: frente a root del host, nada; en modo `network`, frente a
+    cualquier proceso local que abra una conexión al puerto de la réplica. Acotarlo por
+    uid en el daemon está fuera de esta versión.
 
 ### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
 

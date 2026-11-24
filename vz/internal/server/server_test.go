@@ -930,6 +930,35 @@ func TestKlingCredentials(t *testing.T) {
 	}
 }
 
+// Una credencial HTTP con upstream fijado (la réplica que habla con el
+// gateway de IA del Mac): se acepta con allow, su nombre se desvía a la
+// pasarela como cualquier otro, y las mismas reglas que en Linux la rechazan
+// sin allow, sin TLS fuera del loopback o hacia los reenvíos de kindling.
+func TestKlingCredentialsHTTPUpstream(t *testing.T) {
+	r := newRig(t)
+	gw := netip.MustParseAddr("172.16.0.1")
+	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
+	r.srv.d.CredIP = gw
+	r.must("PUT", "/kling/network", `{"egress":"allowlist","allow_domains":["other.org"]}`)
+	cred := func(extra string) string {
+		return `{"credentials":[{"env":"L3_TOKEN","domain":"l3.kindling.internal","placeholder":"kling-cred-l3","secret":"tok-clave-de-prueba"` + extra + `}]}`
+	}
+	if out := r.must("PUT", "/kling/credentials", cred(`,"upstream":"127.0.0.1:8080","upstream_tls":"disable","allow":["POST /v1/chat/completions"]`)); !strings.Contains(out, `"domains":["l3.kindling.internal"]`) {
+		t.Fatalf("PUT /kling/credentials (http upstream) = %s", out)
+	}
+	if ip, ok := r.srv.d.Policy.CredHost("l3.kindling.internal"); !ok || ip != gw {
+		t.Fatal("the upstream credential's name is not diverted to the gateway")
+	}
+	r.mustFail("PUT", "/kling/credentials", cred(`,"upstream":"127.0.0.1:8080"`), "allow-request")
+	r.mustFail("PUT", "/kling/credentials", cred(`,"upstream":"10.0.0.5:8080","upstream_tls":"disable","allow":["POST /v1/chat/completions"]`), "loopback")
+	r.mustFail("PUT", "/kling/credentials", cred(`,"upstream":"127.0.0.1:29001","allow":["POST /v1/chat/completions"]`), "reserved forward range")
+	r.mustFail("PUT", "/kling/credentials", cred(`,"upstream":"169.254.169.254:80","allow":["POST /v1/chat/completions"]`), "forbidden")
+	// Un rechazo no toca el juego anterior.
+	if _, ok := r.srv.d.Policy.CredHost("l3.kindling.internal"); !ok {
+		t.Fatal("a rejected set dropped the previous one")
+	}
+}
+
 // PUT /kling/graph y las credenciales hacia otra máquina: solo con el broker
 // del daemon (Deps.Graph). Con él se anuncia graph-link, los nombres de las
 // aristas resuelven a la pasarela en cualquier modo, la red recibe las

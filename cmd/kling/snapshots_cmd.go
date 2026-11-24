@@ -89,7 +89,7 @@ func snapshotsCredential(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
-		return errUso("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
+		return errUso("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-upstream host:port [-upstream-tls verify-full|disable] [-tls-server-name N] [-ca-file ca.pem]] [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling template credential <template> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling template credential <template> -type sigv4 -domain s3.eu-west-1.amazonaws.com -access-key-id AKIA... -region eu-west-1 [-service s3] [-allow-request 'GET /bucket/**']... -env AWS_ACCESS_KEY_ID [-f secretkeyfile]\n" +
 			"       kling template credential <template> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
@@ -129,8 +129,12 @@ func snapshotsCredential(args []string) error {
 		fmt.Printf("      running instances are not changed (kling machine credential does that)\n")
 		return nil
 	}
-	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to https://%s through its proxy\n",
-		s.Name, spec.Env, strings.ToLower(spec.Domain))
+	destino := "https://" + strings.ToLower(spec.Domain)
+	if spec.Upstream != "" {
+		destino = "upstream " + spec.Upstream
+	}
+	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to %s through its proxy\n",
+		s.Name, spec.Env, destino)
 	fmt.Printf("      %s\n", describirAllow(spec.Allow))
 	fmt.Printf("      %s\n", describirSitios(spec))
 	fmt.Printf("      point the SDK at http://%s; running instances are not changed (kling machine credential does that)\n",
@@ -163,10 +167,10 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c.user = fs.String("user", "", "postgres/mysql: the role or user the password belongs to (the guest must connect as it)")
 	c.database = fs.String("database", "", "postgres/mysql: the only database the guest may connect to (required unless -any-database; in mysql it is the default database, the GRANTs are the boundary)")
 	c.anyDatabase = fs.Bool("any-database", false, "postgres/mysql: let the guest connect to any database the role has access to (instead of -database)")
-	c.caFile = fs.String("ca-file", "", "postgres/mysql: PEM CA added to the system roots to verify the server")
-	c.upstream = fs.String("upstream", "", "postgres/mysql: host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database)")
-	c.upstreamTLS = fs.String("upstream-tls", "", "postgres/mysql: verify-full (default) or disable (only with -upstream; queries travel unencrypted; postgres: SCRAM-SHA-256 only; mysql: only methods that do not send the password)")
-	c.tlsServerName = fs.String("tls-server-name", "", "postgres/mysql: name the server certificate is verified against (default: -domain)")
+	c.caFile = fs.String("ca-file", "", "PEM CA added to the system roots to verify the server (postgres/mysql, or an http -upstream)")
+	c.upstream = fs.String("upstream", "", "host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database; http: needs -allow-request)")
+	c.upstreamTLS = fs.String("upstream-tls", "", "verify-full (default) or disable (only with -upstream; http: host loopback only; postgres: SCRAM-SHA-256 only, queries travel unencrypted; mysql: only methods that do not send the password)")
+	c.tlsServerName = fs.String("tls-server-name", "", "name the upstream's certificate is verified against (default: -domain)")
 	c.accessKeyID = fs.String("access-key-id", "", "sigv4: the real, long-term access key id (AKIA…; temporary ASIA… keys are rejected; the secret key goes in -f or stdin; the guest only sees a placeholder access key id in -env)")
 	c.region = fs.String("region", "", "sigv4: the region requests are signed for (us-east-1, auto for R2…)")
 	c.service = fs.String("service", "", "sigv4: the signing service (default s3)")
@@ -199,9 +203,40 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 		}
 		s.Type, s.AccessKeyID, s.Region, s.Service = credproxy.KindSigV4, *c.accessKeyID, *c.region, *c.service
 	case "", "http":
-		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
-			*c.upstream != "" || *c.upstreamTLS != "" || *c.tlsServerName != "" {
-			return s, errors.New("-port, -user, -database, -any-database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres or mysql")
+		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase {
+			return s, errors.New("-port, -user, -database and -any-database are only for -type postgres or mysql")
+		}
+		// -upstream en HTTP: la dirección a la que marca el proxy (el gateway
+		// de IA del host, un servicio de la VPC). El daemon valida lo mismo.
+		if *c.upstream == "" {
+			if *c.upstreamTLS != "" || *c.tlsServerName != "" || *c.caFile != "" {
+				return s, errors.New("-upstream-tls, -tls-server-name and -ca-file on an HTTP credential need -upstream")
+			}
+			break
+		}
+		if len(*c.allow) == 0 {
+			return s, errors.New("an HTTP credential with -upstream needs -allow-request (the only requests that may carry the key there)")
+		}
+		s.Upstream, s.TLSServerName = *c.upstream, *c.tlsServerName
+		switch *c.upstreamTLS {
+		case "", credproxy.UpstreamTLSVerifyFull:
+		case credproxy.UpstreamTLSDisable:
+			if !credproxy.UpstreamLoopback(*c.upstream) {
+				return s, fmt.Errorf("-upstream-tls disable on an HTTP credential is only for the host's loopback (an IP or localhost): the key would cross the network unencrypted to %s", *c.upstream)
+			}
+			if *c.tlsServerName != "" || *c.caFile != "" {
+				return s, errors.New("-tls-server-name and -ca-file make no sense with -upstream-tls disable")
+			}
+			s.UpstreamTLS = credproxy.UpstreamTLSDisable
+		default:
+			return s, fmt.Errorf("unknown -upstream-tls %q (verify-full or disable)", *c.upstreamTLS)
+		}
+		if *c.caFile != "" {
+			b, err := os.ReadFile(*c.caFile)
+			if err != nil {
+				return s, err
+			}
+			s.CAPEM = string(b)
 		}
 	case credproxy.KindPostgres, credproxy.KindMySQL:
 		if len(*c.allow) > 0 {
@@ -341,7 +376,18 @@ func describirSitios(s api.CredentialSpec) string {
 	if s.Body {
 		sitios += " and the BODY (unsafe if the provider echoes what it gets)"
 	}
-	return "the placeholder is swapped only in " + sitios
+	out := "the placeholder is swapped only in " + sitios
+	if s.Upstream != "" {
+		switch {
+		case s.UpstreamTLS == credproxy.UpstreamTLSDisable:
+			out += "; requests go to upstream " + s.Upstream + " unencrypted (host loopback only)"
+		case s.TLSServerName != "":
+			out += "; requests go to upstream " + s.Upstream + " over TLS verified as " + s.TLSServerName
+		default:
+			out += "; requests go to upstream " + s.Upstream + " over TLS verified as " + strings.ToLower(s.Domain)
+		}
+	}
+	return out
 }
 
 // leerClave lee la clave de un fichero o de stdin, sin espacios alrededor.

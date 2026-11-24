@@ -41,3 +41,24 @@ func TestUpstreamProhibidoCubreLaRedDeKindling(t *testing.T) {
 		}
 	}
 }
+
+// Lo mismo para una credencial HTTP con upstream (la réplica que habla con el
+// gateway de IA por el proxy): ni el enlace del invitado ni los veth del host,
+// donde están el propio proxy y los invitados de otras máquinas.
+func TestUpstreamHTTPNoApuntaALaRedDeKindling(t *testing.T) {
+	cred := func(up string) credproxy.Credential {
+		return credproxy.Credential{Env: "L3_TOKEN", Domain: "l3.kindling.internal", Placeholder: "kling-cred-0011",
+			Secret: "tok_inquilino_0123", Upstream: up, Allow: []string{"POST /v1/chat/completions"}}
+	}
+	for _, idx := range []int{0, 7, 16383} {
+		n := Plan(idx, "abcdef0123")
+		for _, ip := range []string{GuestIP, GuestGW, n.HostIP} {
+			if err := credproxy.ValidarCredenciales([]credproxy.Credential{cred(ip + ":8080")}); err == nil {
+				t.Errorf("upstream HTTP a %s (red de kindling): aceptado", ip)
+			}
+		}
+	}
+	if err := credproxy.ValidarCredenciales([]credproxy.Credential{cred("127.0.0.1:8080")}); err != nil {
+		t.Errorf("upstream HTTP al gateway en el loopback: %v", err)
+	}
+}
