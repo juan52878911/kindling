@@ -140,6 +140,14 @@ http` con los campos ya puestos (`von` = contrato `openai` en el puerto 8000,
 | `auth` | `{header, scheme, file}`: la credencial que **añade el gateway**, leída del fichero (0600, relativo al `ai.json`) en cada petición, así que rotarla no pide recargar; la del cliente no llega nunca al backend |
 | `limits` | `{max_tokens, n}` del contrato `openai`: `max_tokens`, `max_completion_tokens` y `n_predict` se recortan al tope (y si no viene ninguno se pone `max_tokens`); un `n` o `best_of` mayor es 400 |
 | `tenants` | inquilinos que pueden usar el modelo; vacío = todos. Otro recibe 403 (el token principal siempre entra) |
+| `replica_auth` | `network` o `key`: quién protege el puerto de la réplica (abajo). Vacío = `key` si el bloque lleva `auth`, `network` si no (lo de siempre). Solo con `snapshot` |
+| `spare` | réplicas de repuesto ya restauradas y tocadas con el calentamiento, fuera del camino de la petición; 0 a `max_replicas` (o a 64). Solo con `snapshot` |
+| `pin` | pide al daemon que ancle en RAM el volcado del dorado. Solo con `snapshot` |
+| `load_wait` | plazo de carga del modelo al fabricar o rehacer su dorado (`kling ai prime`, `kling ai up`), p. ej. `"20m"`; vacío = automático por tamaño; hasta 6 h. El gateway no lo usa |
+| `alias`, `shared` | publicar los bloques de varios inquilinos bajo un nombre común, y compartir a sabiendas un dorado `chispa-decide` (abajo, «Un dorado por inquilino») |
+| `ca_file` | PEM (relativo al `ai.json`) con el que se verifica el TLS de un `upstream` `https://` firmado por una CA propia; vacío = raíces del sistema |
+| `health.grace` | cuánto se tolera, tras cargar o recargar, que un `upstream` aún no conteste (un vLLM tarda minutos en cargar); hasta 1 h |
+| `limits` (ronda 9) | además, `top_logprobs` (también el `logprobs` entero de completions) y `prompt_logprobs` de vLLM: por encima del tope, o negativos, 400; y `timeout`, el plazo de una petición a ese modelo en vez del `-proxy-timeout` (hasta 1 h; vale en cualquier contrato; con un dorado no alarga la espera a las cabeceras de la réplica, que sigue siendo el `-proxy-timeout`) |
 
 `von` y `embed` admiten `health`, `max_inflight`, `idle` y `tenants` (y `von`,
 `limits`); un campo que un atajo no usa es un error al cargar, no algo que se
@@ -163,6 +171,90 @@ abren y desde ahí cada petición recibe 503 con `Retry-After` al instante hasta
 que una sonda pase. Las sondas van a remolque del tráfico (una petición que
 encuentra la última sonda más vieja que `health.every` lanza otra en segundo
 plano), así que un upstream sin tráfico no cuesta nada.
+
+Al arrancar y en cada `kling ai reload`, el gateway lanza además una **sonda de
+carga** por upstream. Si el bloque tiene `upstream_model`, mira también `GET
+/v1/models` del upstream: si no lista ese modelo (un vLLM arrancado con otro
+rechazaría cada petición), el circuito se abre ya, con un aviso en el log, y
+se cierra cuando una sonda lo vea. Que la sonda de carga no tenga respuesta
+solo se avisa: no cuenta como fallo. Con `health.grace`, mientras ninguna sonda
+haya pasado y dure la gracia, el upstream «está cargando»: cada petición recibe
+503 con `Retry-After` al instante, sin reenviarse, y los fallos no abren el
+circuito; pasada la gracia, lo de siempre.
+
+**Destinos vetados.** Un `upstream` no puede apuntar a link-local ni a los
+metadatos del cloud (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`), a la red
+propia de kindling (`172.16.0.0/30`, `172.30.0.0/16`) ni, en el loopback, al
+rango de los reenvíos de las máquinas (puertos 29000-29999): son las mismas
+reglas que el proxy de credenciales aplica a un upstream fijado. Una IP
+literal se rechaza al cargar; un nombre se comprueba en cada conexión, ya
+resuelto. Una VPC (`10.0.0.0/8`…) y el loopback en otro puerto valen. Un
+`upstream` `http://` fuera del loopback que lleva `auth` da un aviso al cargar:
+la clave cruza la red en claro.
+
+**`replica_auth`: quién protege el puerto de una réplica.** El puerto de una
+réplica no lo alcanza otra microVM ni la LAN. Pero **en Linux lo alcanza
+cualquier proceso local del host, de cualquier usuario**, y **en macOS es un
+reenvío en `127.0.0.1`** que alcanza cualquier proceso del Mac. Por eso hay
+dos modos, los dos soportados:
+
+| Modo | Qué es | Cuándo usarlo | Coste |
+|---|---|---|---|
+| `network` | la réplica corre sin clave de entrada; autentica el gateway | host **dedicado** a kindling (nadie más ejecuta código en él: ni otros usuarios, ni CI, ni contenedores ajenos); desarrollo en el Mac | ninguno; se calienta y se usa con repuesto sin más |
+| `key` | la réplica exige una clave de entrada; el dorado lleva solo su verificador y el gateway añade la clave con `auth.file` | host compartido o multiusuario; macOS fuera de desarrollo; cualquier backend que sepa autenticar y sirva datos de un inquilino | rotar la clave pide un dorado nuevo; para calentar hace falta la clave de calentamiento |
+
+`key` sin `auth` y `network` con `auth` son errores (contradicciones). El
+gateway avisa al cargar (no falla) de cada modelo en `network` en macOS, y en
+Linux si `ai.json` declara inquilinos. Lo que `network` no promete, escrito: un
+proceso local (y root) del host puede hablar con la réplica sin pasar por el
+gateway. Los secretos de salida (credencial del proxy) y los que el proceso
+necesita en claro (`secrets`, abajo) no sustituyen a la clave de entrada.
+
+**`secrets`.** Un `kind http` con `snapshot` puede declarar los secretos que
+su servidor necesita, con el valor en un fichero 0600 (relativo al
+`ai.json`), nunca en el bloque: `deliver: credential` para una clave de
+**salida** (el proxy de credenciales la pone; la réplica solo lleva un
+marcador, `env`, `domain` y `allow` obligatorios) y `deliver: mmds` para uno
+que el proceso necesita **en claro** (se entrega a cada réplica tras
+restaurarla; exige `idle` `remove` o `pause`).
+
+**Un dorado por inquilino (Chispa).** chispa-server elige sus bancos por el texto de la pregunta, sin mirar quién
+pregunta: dos inquilinos en el mismo proceso comparten bancos. Mientras eso no
+cambie, el aislamiento es el proceso: **un dorado por inquilino**, cada uno con
+sus bancos dentro, y un `alias` común para que todos usen la misma URL.
+
+```json
+{
+  "tenants": [{"name": "acme", "token": "cambia-este-token-de-acme"},
+              {"name": "globex", "token": "cambia-este-token-de-globex"}],
+  "models": {
+    "chispa-acme":   {"kind": "http", "snapshot": "chispa-acme-v3", "port": 8090, "contract": "chispa-decide",
+                      "tenants": ["acme"], "alias": "chispa", "idle": "remove"},
+    "chispa-globex": {"kind": "http", "snapshot": "chispa-globex-v1", "port": 8090, "contract": "chispa-decide",
+                      "tenants": ["globex"], "alias": "chispa", "idle": "remove"}
+  }
+}
+```
+
+`POST /v1/m/chispa/v1/decide` con el token de acme llega a `chispa-acme`, y con
+el de globex a `chispa-globex`. Un inquilino sin bloque bajo el alias recibe el
+mismo 404 que un modelo que no existe (no se revela que el alias lo usan
+otros); el token principal no es de ningún inquilino y recibe 400 con los
+nombres concretos, que sigue pudiendo usar. Las métricas cuentan el modelo
+concreto, no el alias.
+
+Reglas al cargar, por defecto cerradas: con inquilinos declarados, un
+`chispa-decide` con dorado sirve a **exactamente un** inquilino, salvo
+`"shared": true` (quien lo pone asume bancos comunes, y queda escrito en el
+fichero). Dentro de un alias cada inquilino aparece una vez, todo bloque dice a
+quién sirve, el alias no puede ser el nombre de un modelo, y dos bloques no
+comparten dorado con inquilinos distintos. `alias` es para los contratos de
+`/v1/m` (`chispa-decide`, `raw`).
+
+**Coste.** Los dorados de inquilinos distintos no comparten páginas: con las
+cifras de EC2, ≈ 160 MiB de memoria (PSS) por inquilino activo (su primera
+réplica) y ≈ 20-30 MiB por cada réplica más del mismo inquilino. Con `idle:
+remove`, un inquilino inactivo cuesta disco (el volcado de su dorado), no RAM.
 
 **`idle`: qué se hace con una réplica ociosa.**
 
