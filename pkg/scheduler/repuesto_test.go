@@ -3,6 +3,12 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,5 +183,68 @@ func TestRepuestoCalentadoAntesDeListo(t *testing.T) {
 	esperarQue(t, 3*time.Second, "el repuesto que no se calentó, borrado", func() bool { return !d.existe("r1") })
 	if n := repuestosDe(g, "svc"); n != 0 {
 		t.Errorf("un repuesto cuyo calentamiento falló quedó disponible (%d)", n)
+	}
+}
+
+// gwBanco es gwServicio para un benchmark: el daemon de mentira en un socket
+// unix y el invitado srv detrás de PortFor.
+func gwBanco(b *testing.B, d *daemonServicio, srv *httptest.Server) *Scheduler {
+	b.Helper()
+	dir, err := os.MkdirTemp("/tmp", "sch")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { os.RemoveAll(dir) })
+	ln, err := net.Listen("unix", filepath.Join(dir, "d.sock"))
+	if err != nil {
+		b.Skipf("sin sockets unix: %v", err)
+	}
+	hs := &http.Server{Handler: d}
+	go hs.Serve(ln)
+	b.Cleanup(func() { hs.Close() })
+	g := New(api.NewClient("unix://"+filepath.Join(dir, "d.sock")), time.Minute, false, 0)
+	g.Port = puertoCerrado
+	_, ps, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	p, _ := strconv.Atoi(ps)
+	g.PortFor = func(string) int { return p }
+	return g
+}
+
+// BenchmarkDespertarIdleRemove mide lo que paga la petición que llega a un
+// servicio idle remove sin instancia: restaurar (POST /machines, esperar el
+// puerto y la sonda) frente a reclamar un repuesto. Contra el daemon de
+// mentira solo mide el planificador y sus vueltas al daemon, no la
+// restauración real (eso es ec2.sh ia P2). Cuenta además las llamadas al
+// daemon en el camino de la petición (sin el renew, que va aparte).
+func BenchmarkDespertarIdleRemove(b *testing.B) {
+	for _, spare := range []int{0, 1} {
+		b.Run(map[int]string{0: "sin-repuesto", 1: "con-repuesto"}[spare], func(b *testing.B) {
+			d := nuevoDaemonServicio()
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			defer srv.Close()
+			g := gwBanco(b, d, srv)
+			g.IdleFor = func(string) IdlePolicy { return IdleRemove }
+			g.ReadyFor = func(string) *Probe { return &Probe{Path: "/health", Timeout: 2 * time.Second} }
+			g.SpareFor = func(string) int { return spare }
+			defer g.DrainSpares(context.Background())
+			ctx := context.Background()
+			g.FillSpares(ctx, "svc")
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				for spare > 0 && repuestosDe(g, "svc") < spare {
+					time.Sleep(time.Millisecond)
+				}
+				b.StartTimer()
+				e, err := g.ensure(ctx, "svc")
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				g.olvidarInstancia("svc", e.machineID)
+				_ = g.borrarConPlazo(ctx, e.machineID)
+				b.StartTimer()
+			}
+		})
 	}
 }
