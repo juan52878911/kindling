@@ -133,9 +133,36 @@ func TestPaseUnicoPerforaCeros(t *testing.T) {
 	}
 }
 
-// Un volcado que cambia de tamaño a mitad no es este caso, pero uno que no
-// se puede abrir para escribir (perforar necesita escribir) es un error, no
-// un digest de lo que se pudo leer.
+// perforarCeros pide una perforación por tirada de páginas a cero, en
+// coordenadas del fichero, y ninguna para una página con un byte distinto de
+// cero ni para la cola de menos de una página. Corre en todas partes con un
+// perforador falso: en macOS el de verdad es nil.
+func TestPerforarCerosTiradas(t *testing.T) {
+	b := make([]byte, 10*pagina+100)
+	b[2*pagina+5] = 1 // página 2 con datos
+	copy(b[5*pagina:6*pagina], paginaDe('a'))
+	b[len(b)-1] = 0 // la cola, a cero, no se perfora
+	type rango struct{ off, n int64 }
+	var got []rango
+	if err := perforarCeros(nil, 8<<20, b, func(_ *os.File, off, n int64) error {
+		got = append(got, rango{off, n})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := int64(8 << 20)
+	want := []rango{{base, 2 * pagina}, {base + 3*pagina, 2 * pagina}, {base + 6*pagina, 4 * pagina}}
+	if len(got) != len(want) {
+		t.Fatalf("perforaciones %v, quería %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("perforación %d: %v, quería %v", i, got[i], want[i])
+		}
+	}
+}
+
+// Un volcado que no se puede abrir es un error, no un digest vacío.
 func TestPaseUnicoSinFichero(t *testing.T) {
 	if _, err := paseUnico(context.Background(), filepath.Join(t.TempDir(), "no-esta")); err == nil {
 		t.Error("el pase de un volcado que no existe no dio error")

@@ -439,6 +439,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		goldDst = rutaEnDir(dj, "overlay.ext4")
 	}
 
+	// Lo que tardó el apretón, para el desglose de la respuesta (C9-12).
+	var apreton time.Duration
+
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
 	// corriendo: un invitado pausado no atiende HTTP.
 	//
@@ -462,9 +465,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// Con la plantilla aún en marcha: que suelte lo que no usa, y el
 		// dorado lleve solo lo que está en uso (apreton_volcado.go). Es el
 		// mem.file que mapearán todas las copias.
+		t0 := time.Now()
 		if n := apretarAntesDeVolcar(ctx, c, mc); n > 0 {
 			log.Printf("commit %s: the guest handed back ~%d MiB before the dump", mc.Name, n)
 		}
+		apreton = time.Since(t0)
 
 		pausaPedida = true
 		if err := c.Pause(ctx); err != nil {
@@ -472,7 +477,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		}
 		pausada = true
 	}
-	t := nuevosTiempos()
+	t := nuevoCronoCommit(apreton)
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
@@ -571,10 +576,24 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// Con limpio: el volcado ya está completo y la plantilla reanudada, y un
 	// cliente que se desconecte aquí tiraba un dorado entero por un perforado
 	// cortado.
-	if out, err := perforarHuecos(limpio, memPath); err != nil {
-		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
+	//
+	// Un dorado perfora y hashea su memoria en un solo pase (paseUnico,
+	// C9-02): el digest es el mismo que daban fallocate y digest.Tree. El
+	// temporal de un fork no graba digest de memoria (ver abajo): solo
+	// perfora, como antes.
+	var memDigest string
+	if deFork {
+		if out, err := perforarHuecos(limpio, memPath); err != nil {
+			return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
+		}
+		t.marca("holes")
+	} else {
+		var err error
+		if memDigest, err = paseUnico(limpio, memPath); err != nil {
+			return nil, fmt.Errorf("punching holes in and hashing the memory dump: %w", err)
+		}
+		t.marca("pass")
 	}
-	t.marca("holes")
 
 	// A disco antes del meta, con la plantilla ya reanudada: el meta es
 	// durable y sin esto, tras un corte, daba por bueno un volcado que seguía
@@ -605,7 +624,8 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// para ese fichero (verifyIntegrity lo salta); el de snap.file, que es
 	// pequeño, se sigue grabando y comprobando.
 	// El de la memoria, por lo mismo que el del overlay, tampoco en un fork.
-	var rootfsDigest, memDigest, imgDigest, baseDigest string
+	// El de la memoria ya salió del pase único.
+	var rootfsDigest, imgDigest, baseDigest string
 	if !deFork {
 		// El disco de solo lectura sobre el que se congela (disco_base.go):
 		// cacheado, solo se lee la primera vez que se usa la imagen. Sin
@@ -617,9 +637,6 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		}
 		if rootfsDigest, err = digest.Tree(goldOverlay); err != nil {
 			return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
-		}
-		if memDigest, err = digest.Tree(memPath); err != nil {
-			return nil, fmt.Errorf("computing digest of the memory dump: %w", err)
 		}
 	}
 	snapSHA, err := digest.File(snapPath)
