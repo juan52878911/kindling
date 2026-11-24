@@ -146,6 +146,7 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	st := ServiceStatus{Prewarmed: g.pool.stats()[service]}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	st.Spares = len(g.repuestos[service])
 	if e, ok := g.services[service]; ok {
 		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(g.puertoDe(e)), time.Since(e.lastUse)
 		for _, rt := range g.routes {

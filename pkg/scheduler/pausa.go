@@ -128,6 +128,17 @@ func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apar
 			porServicio[v.service] = g.idleFor(v.service)
 		}
 	}
+	// Las marcadas (secretos en claro) no se congelan nunca: congelar
+	// volcaría su RAM a disco. Se pausan si toca (la RAM no se mueve) y, si
+	// no, se borran, con cualquier política.
+	marcadas := map[string]bool{}
+	g.mu.Lock()
+	for _, v := range victims {
+		if e := g.entryByMachineLocked(v.service, v.id); e != nil && e.marcada {
+			marcadas[v.id] = true
+		}
+	}
+	g.mu.Unlock()
 	politica := func(v dormida) IdlePolicy {
 		if v.aislada != "" {
 			return IdleDefault
@@ -183,7 +194,7 @@ func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apar
 		if g.pausadas == nil {
 			g.pausadas = map[string]pausada{}
 		}
-		g.pausadas[v.id] = pausada{service: v.service, memMiB: v.memMiB, at: time.Now(), aislada: v.aislada}
+		g.pausadas[v.id] = pausada{service: v.service, memMiB: v.memMiB, at: time.Now(), aislada: v.aislada, marcada: marcadas[v.id]}
 		g.mu.Unlock()
 		hecho(v, true)
 		log.Printf("%s: paused due to inactivity", v.service)
@@ -200,7 +211,7 @@ func (g *Scheduler) dormirApartando(ctx context.Context, victims []dormida, apar
 		// y descongelarla después es lo que deja a la réplica sin compartir
 		// la memoria del dorado (R8-01).
 		dormirla, hechoTxt := congelar, "frozen"
-		if sinCongelar(politica(v)) {
+		if sinCongelar(politica(v)) || marcadas[v.id] {
 			dormirla, hechoTxt = func(id string) error { return g.borrarConPlazo(ctx, id) }, "removed"
 		}
 		if err := dormirla(v.id); err != nil {
@@ -457,7 +468,7 @@ func (g *Scheduler) congelarPausada(ctx context.Context, id string, p pausada) b
 		congelar = func(id string) error { return g.congelarConPlazo(ctx, id) }
 	}
 	que := "freeze"
-	if p.aislada == "" && sinCongelar(g.idleFor(p.service)) {
+	if p.marcada || (p.aislada == "" && sinCongelar(g.idleFor(p.service))) {
 		congelar, que = func(id string) error { return g.borrarConPlazo(ctx, id) }, "remove"
 	}
 	if err := congelar(id); err != nil {

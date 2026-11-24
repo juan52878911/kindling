@@ -55,7 +55,7 @@ func TestRepuestoSeMantieneYSeRepone(t *testing.T) {
 	if n := calentados.Load(); n != 1 {
 		t.Fatalf("WarmSpare se llamó %d veces; quería 1 (antes de darlo por listo)", n)
 	}
-	antes := d.contar("POST /machines")
+	antes := len(d.pedidasCopia())
 	e, err := g.ensure(ctx, "svc")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
@@ -67,7 +67,7 @@ func TestRepuestoSeMantieneYSeRepone(t *testing.T) {
 		t.Fatalf("instancia %s; quería el repuesto r1", e.machineID)
 	}
 	esperarQue(t, 3*time.Second, "el repuesto repuesto", func() bool { return repuestosDe(g, "svc") == 1 })
-	if got := d.contar("POST /machines") - antes; got != 1 {
+	if got := len(d.pedidasCopia()) - antes; got != 1 {
 		t.Errorf("POST /machines tras reclamar = %d; quería 1 (la reposición, fuera de la petición)", got)
 	}
 }
@@ -123,7 +123,7 @@ func TestRepuestoSeBorraAlDrenar(t *testing.T) {
 	// Cerrado, no se repone nada.
 	g.FillSpares(ctx, "svc")
 	time.Sleep(50 * time.Millisecond)
-	if n := d.contar("POST /machines"); n != 2 {
+	if n := len(d.pedidasCopia()); n != 2 {
 		t.Errorf("POST /machines = %d tras drenar; no debía restaurarse nada más", n)
 	}
 }

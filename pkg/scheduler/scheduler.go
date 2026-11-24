@@ -276,6 +276,19 @@ type Scheduler struct {
 	// está naciendo: cuentan para el tope como las ya registradas. Aparte de
 	// creando, que es de las réplicas compartidas. Se toca con mu.
 	creandoAisladas map[string]int
+	// repuestos son, por servicio, las instancias de repuesto listas
+	// (repuesto.go); reponiendo, las que están naciendo; conRepuesto, los
+	// servicios a los que el segador mantiene el número de repuestos;
+	// retiros, cuántas veces se retiró cada servicio (Retire). Todo con mu.
+	repuestos        map[string][]*repuesto
+	reponiendo       map[string]int
+	conRepuesto      map[string]bool
+	retiros          map[string]int
+	repuestosCerrado bool
+	// repuestoWG cuenta las reposiciones en vuelo, para que DrainSpares las
+	// espere.
+	repuestoWG sync.WaitGroup
+
 	// barridoAt es la última vez que se buscaron máquinas aisladas huérfanas
 	// (ver barrerAisladas). Se toca con mu.
 	barridoAt time.Time
@@ -426,6 +439,9 @@ type entry struct {
 	// marcada: la máquina recibió secretos en claro (api.Machine.HasSecrets,
 	// AfterRestore). No se congela nunca; ociosa o desalojada, se borra.
 	marcada bool
+	// retirada: Retire la sacó del mapa con peticiones en vuelo; la última en
+	// acabar (end) la borra. Se toca con g.mu.
+	retirada bool
 }
 
 // vigenteLocked sigue la cadena de sucesoras hasta la entrada que representa
@@ -458,6 +474,12 @@ func (g *Scheduler) end(e *entry) {
 	e = e.vigenteLocked()
 	if e.inflight > 0 {
 		e.inflight--
+	}
+	// Retirada (Retire) con su última petición acabando: ya no está en el
+	// mapa y nadie más la va a usar.
+	if e.retirada && e.inflight == 0 {
+		e.retirada = false
+		go g.borrarApartadas(context.Background(), "", []string{e.machineID}, "retired")
 	}
 	// La petición que acaba puede no ser la que reservó (no llevan nombre),
 	// pero soltar antes de tiempo solo deja pasar a otra al puente, que la
@@ -1132,7 +1154,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		// lo que se puede destruir sin perder trabajo de nadie es el fondo de
 		// precalentadas.
 		if api.IsMachineLimit(err) {
-			if g.pool == nil || !g.pool.evictOne(ctx) {
+			if (g.pool == nil || !g.pool.evictOne(ctx)) && !g.evictRepuesto(ctx, service) {
 				break
 			}
 			log.Printf("%s: at the daemon's machine limit; dropped a prewarmed instance", service)
@@ -1181,17 +1203,30 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 	// primera petición recibiría el error (R8-08). El plazo de la sonda acota
 	// las dos esperas; al adoptar, con el candado del servicio tomado, se
 	// recorta a adoptReadyTimeout.
+	//
+	// Un repuesto (how "spare", repuesto.go) ya pasó por todo esto, y por
+	// AfterRestore y WarmSpare, antes de quedar disponible.
 	port := g.portFor(service)
-	if how != "resume" {
+	if how != "resume" && how != "spare" {
 		sonda := g.readyFor(service)
 		if how != "restore" && how != "adopt" {
 			sonda = nil
 		}
 		espera := plazoListo(sonda, how)
 		hasta := time.Now().Add(espera)
+		// La generación de retiro se lee antes del gancho: si un Retire del
+		// servicio (rotación de un secreto en claro) llega mientras esta
+		// arranca, lo que el gancho le entregó puede ser lo de antes.
+		retiro := g.retiroDe(service)
 		err := g.esperarListoEn(ctx, mc, port, espera)
+		if err == nil && how == "restore" {
+			err = g.despuesDeRestaurar(ctx, service, mc)
+		}
 		if err == nil && sonda != nil {
 			err = esperarSonda(ctx, mc.Addr(port), sonda, hasta)
+		}
+		if err == nil && how == "restore" && g.AfterRestore != nil && g.retiroDe(service) != retiro {
+			err = errRetiradaAlNacer
 		}
 		if err != nil {
 			g.soltarSinEscuchar(ctx, service, mc.ID, how)
@@ -1228,6 +1263,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		memMiB:      mc.MemMiB,
 		port:        port,
 		proxy:       proxyInvitado(target),
+		marcada:     mc.HasSecrets,
 	}
 	e.wake.Store(tr)
 	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
@@ -1590,6 +1626,11 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		if m.Labels["pool"] == "true" || m.Labels["ephemeral"] == "true" {
 			return false
 		}
+		// Un repuesto es del planificador que lo creó y se reclama por
+		// tomarRepuesto, nunca adoptándolo (repuesto.go).
+		if m.Labels[LabelSpare] == "true" {
+			return false
+		}
 		// Y las de una sesión aislada son de esa sesión: adoptar o descongelar
 		// una para otra le entregaría el disco y la memoria de la anterior.
 		if m.Labels[LabelIsolated] == "true" {
@@ -1609,11 +1650,32 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 	// ninguno adopta una que ya es instancia de este servicio.
 	// descartadas son las que este acquire ya eligió y no le sirvieron.
 	descartadas := map[string]bool{}
+	// ajenas son máquinas con secretos en claro (HasSecrets) que este
+	// planificador no tiene como instancia ni como pausada suya: las dejó un
+	// proceso anterior, o salieron del mapa tras un fallo. No se sabe qué
+	// generación de secretos llevan, así que no se adoptan ni se reanudan: se
+	// borran aparte, sin retrasar esta petición, y se restaura otra.
+	var ajenas []string
+	defer func() {
+		if len(ajenas) > 0 {
+			go g.borrarApartadas(context.WithoutCancel(ctx), service, ajenas, "with secrets of an unknown generation")
+		}
+	}()
 	pick := func(state api.State) *api.Machine {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		for _, m := range machines {
 			if !match(m) || m.State != state || descartadas[m.ID] || g.adquiriendo[m.ID] || g.entryByMachineLocked(service, m.ID) != nil {
+				continue
+			}
+			if _, suya := g.pausadas[m.ID]; m.HasSecrets && !(state == api.StatePaused && suya) {
+				if m.Transition == "" {
+					if g.adquiriendo == nil {
+						g.adquiriendo = map[string]bool{}
+					}
+					g.adquiriendo[m.ID] = true
+					ajenas = append(ajenas, m.ID)
+				}
 				continue
 			}
 			// A medio congelar, parar o borrar (por el TTL del daemon, un
@@ -1706,6 +1768,12 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		// perdería; y no hay por qué esperar esa vuelta (0,2 ms de 2 medidos).
 		go g.renovarTTL(context.WithoutCancel(ctx), m.ID)
 		return th, "resume", nil
+	}
+	// 2b) un repuesto (repuesto.go): ya restaurado, tocado y sondeado. Sirve
+	// también al scale-out: es una máquina nueva que nadie usa. Va antes del
+	// thaw porque no cuesta nada y comparte la memoria del dorado.
+	if mc := g.tomarRepuesto(ctx, service); mc != nil {
+		return mc, "spare", nil
 	}
 	// 3) alguna congelada: ~30 ms. Salvo con IdlePause o IdleRemove: una
 	// réplica descongelada no comparte la memoria del dorado (R8-01), así
@@ -1814,9 +1882,19 @@ func (g *Scheduler) runFreshWith(ctx context.Context, service string, extra map[
 	if g.NamePrefix != "" {
 		name = g.NamePrefix + service + "-" + NewSessionKey()[:6]
 	}
+	// C9-09: un servicio que nunca congela (IdleRemove, IdlePause) pide
+	// OnTTL remove. El daemon carga entonces la copia sin seguimiento de
+	// páginas sucias (una salida de EPT menos por primera escritura a cada
+	// página), y el TTL de seguridad la borra en vez de congelarla. Las de una
+	// sesión aislada guardan la sesión: siguen como siempre.
+	var onTTL string
+	if extra[LabelIsolated] != "true" && sinCongelar(g.idleFor(service)) {
+		onTTL = api.OnTTLRemove
+	}
 	return g.client.Run(ctx, api.RunRequest{
-		Name: name,
-		From: snap.Name,
+		Name:  name,
+		From:  snap.Name,
+		OnTTL: onTTL,
 		// La política de salida viaja con el snapshot. Sin esto, un servicio
 		// importado con -egress internet despierta sin red y cada llamada suya
 		// al exterior falla con un "fetch failed" que no señala a ninguna parte.
@@ -2359,6 +2437,7 @@ func (g *Scheduler) prewarmBudget(ctx context.Context) (budget int, coste func(s
 func (g *Scheduler) Drain(ctx context.Context) {
 	g.pop.fold() // deja el historial de popularidad en disco antes de irse
 	g.pool.drain(ctx)
+	g.DrainSpares(ctx)
 	g.soltarAisladas(ctx)
 }
 
@@ -2578,6 +2657,10 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			g.pool.barrerHuerfanas(ctx)
 		}
 	}
+	// Los repuestos: latido de su TTL con el mismo umbral y reposición de los
+	// que falten (los que se reclamaron y no se pudieron reponer, o los que
+	// el desalojo por memoria quitó).
+	g.mantenerRepuestos(ctx, umbral)
 }
 
 // ensureLock devuelve el candado de aprovisionamiento de un servicio.
@@ -2738,7 +2821,7 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		}
 		// Una aislada guarda la sesión en su máquina: se congela siempre.
 		dormirla := freeze
-		if victima.aislada == "" && sinCongelar(g.idleFor(elegido)) {
+		if victima.marcada || (victima.aislada == "" && sinCongelar(g.idleFor(elegido))) {
 			dormirla = func(id string) error { return g.borrarConPlazo(ctx, id) }
 		}
 		err := dormirla(id)
@@ -2770,6 +2853,12 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// ese servicio, mientras que congelar una instancia ociosa solo le cuesta un
 	// thaw de milisegundos a la suya.
 	if g.pool != nil && g.pool.evictOne(ctx) {
+		return evictedPool
+	}
+	// Tercero: los repuestos de OTROS servicios. Son lo mismo que una
+	// precalentada (RAM sin nadie dentro), pero su servicio los pidió por
+	// algo: van al final. El segador los repone cuando vuelva a caber.
+	if g.evictRepuesto(ctx, salvo) {
 		return evictedPool
 	}
 	return ""
