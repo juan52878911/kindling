@@ -22,6 +22,14 @@
 #            memoria del dorado.
 #   abierto  chispa-server -abierto sin api_keys (la frontera es el gateway) y dorado calentado con
 #            tres peticiones reales (-warmup). Sirve para medir cuánto vale el calentamiento.
+#   l3       (ronda 9, «L3 por credencial»; no va por defecto) como abierto, con el L3 de chispa-server
+#            apuntando a https://l3.kindling.internal: la réplica llama al proxy de credenciales del
+#            daemon, que pone la clave y reenvía a un `upstream` fijado (un vLLM de mentira en
+#            127.0.0.1:18080 del host, con upstream_tls disable). La clave nunca entra en el invitado:
+#            el banco comprueba que el vLLM la recibió y que no está en el mem.file del dorado. La
+#            config de L3 de chispa-server la da P3_L3_CONFIG (JSON que se mezcla en la config; sin
+#            ella la variante se omite y lo dice) y, para el directo, P3_L3_CONFIG_DIRECTO (por defecto
+#            la misma con http://127.0.0.1:18080). P3_VLLM_MS: latencia del vLLM de mentira (0).
 #
 # Entorno: KB (/opt/kbench), P3_DIR ($KB/p3), RES ($KB/res), KLING (kling), IA_BENCH, HIGIENE,
 #   CHISPA_REPO (https://github.com/juan52878911/chispa), CHISPA_COMMIT (42f8650f…, sha completo),
@@ -57,7 +65,64 @@ TAREA=p3
 paso() { echo "== $(date +%T) p3: $*"; }
 ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
 falla() { echo "p3: $*" >&2; exit 1; }
-modelo_de() { case $1 in claves) echo chispa-p3 ;; abierto) echo chispa-p3a ;; *) return 1 ;; esac; }
+modelo_de() { case $1 in claves) echo chispa-p3 ;; abierto) echo chispa-p3a ;; l3) echo chispa-p3l ;; *) return 1 ;; esac; }
+L3_DOMINIO=l3.kindling.internal
+PUERTO_VLLM=18080
+# Sin P3_L3_CONFIG la variante l3 no se puede montar: se quita de la lista y se apunta por qué.
+if [ -z "${P3_L3_CONFIG:-}" ] && [ "${P3_VARIANTES#*l3}" != "$P3_VARIANTES" ]; then
+  P3_VARIANTES=$(echo " $P3_VARIANTES " | sed "s/ l3 / /g")
+  L3_OMITIDA="sin P3_L3_CONFIG (la config de L3 de chispa-server que apunte a https://$L3_DOMINIO)"
+fi
+
+# vllm_falso_arriba / vllm_falso_abajo: un servidor OpenAI de mentira en 127.0.0.1:$PUERTO_VLLM que exige
+# «Authorization: Bearer <la clave de $P3/l3.token>» y cuenta lo que recibe (GET /stats). Es el
+# `upstream` de la credencial de la variante l3 y el L3 del directo.
+vllm_falso_arriba() {
+  python3 -I - "$P3/l3.token" "$PUERTO_VLLM" "${P3_VLLM_MS:-0}" > "$RES/p3-vllm-falso.log" 2>&1 <<'PY' &
+import http.server, json, sys, threading, time
+tok = open(sys.argv[1]).read().strip()
+puerto, espera = int(sys.argv[2]), int(sys.argv[3]) / 1000.0
+cuenta = {"peticiones": 0, "con_clave": 0, "sin_clave": 0}
+cerrojo = threading.Lock()
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def _json(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def do_GET(self):
+        if self.path == "/stats":
+            with cerrojo:
+                return self._json(200, cuenta)
+        if self.path.startswith("/v1/models"):
+            return self._json(200, {"object": "list", "data": [{"id": "falso", "object": "model"}]})
+        self._json(404, {"error": "no"})
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        ok = self.headers.get("Authorization") == "Bearer " + tok
+        with cerrojo:
+            cuenta["peticiones"] += 1
+            cuenta["con_clave" if ok else "sin_clave"] += 1
+        if not ok:
+            return self._json(401, {"error": "clave"})
+        if espera:
+            time.sleep(espera)
+        self._json(200, {"id": "falso", "object": "chat.completion", "model": "falso",
+                         "choices": [{"index": 0, "message": {"role": "assistant", "content": "no_odio"}, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11}})
+http.server.ThreadingHTTPServer(("127.0.0.1", puerto), H).serve_forever()
+PY
+  VPID=$!
+  for _ in $(seq 1 50); do curl -fs -o /dev/null "http://127.0.0.1:$PUERTO_VLLM/stats" && return 0; sleep 0.1; done
+  echo "el vLLM de mentira no arrancó: $(tail -3 "$RES/p3-vllm-falso.log")" >&2; return 1
+}
+vllm_falso_stats() { curl -fs "http://127.0.0.1:$PUERTO_VLLM/stats" 2>/dev/null || echo null; }
+vllm_falso_abajo() { [ -n "${VPID:-}" ] && { kill "$VPID" 2>/dev/null; wait "$VPID" 2>/dev/null; }; VPID=""; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 # etapa <nombre> <orden…>: corre la orden y apunta cuánto tardó en $P3/tiempos.jsonl (para dimensionar
@@ -236,6 +301,17 @@ config() {
   # rps alto: el cubo por clave no debe ser el cuello del banco.
   jq --arg h "$h" '{api_keys:[{id:"banco-p3", hash_sha256:$h, rps:100000, rafaga:100000}]} + .' \
     "$CTX/config-abierta.json" > "$CTX/config-claves.json"
+  if [ -n "${P3_L3_CONFIG:-}" ]; then
+    umask 077
+    [ -s "$P3/l3.token" ] || od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$P3/l3.token"
+    # La credencial del proxy para el fabricante (-credential de deploy, Z3) con el upstream de Z6.
+    jq -n --arg d "$L3_DOMINIO" --arg s "$(cat "$P3/l3.token")" --arg u "127.0.0.1:$PUERTO_VLLM" \
+      '{domain:$d, env:"L3_API_KEY", secret:$s, allow:["POST /v1/chat/completions"], upstream:$u, upstream_tls:"disable"}' > "$P3/l3-cred.json"
+    umask 022
+    jq --argjson l "$P3_L3_CONFIG" '. * $l' "$CTX/config-abierta.json" > "$CTX/config-l3.json" || return 1
+    if [ -n "${P3_L3_CONFIG_DIRECTO:-}" ]; then jq --argjson l "$P3_L3_CONFIG_DIRECTO" '. * $l' "$CTX/config-abierta.json" > "$CTX/config-l3-directo.json"
+    else sed "s#https://$L3_DOMINIO#http://127.0.0.1:$PUERTO_VLLM#g" "$CTX/config-l3.json" > "$CTX/config-l3-directo.json"; fi
+  fi
   peticion "Detesto a los vecinos de la otra calle." > "$P3/peticion.json"
   local s
   : > "$P3/warmup.jsonl"
@@ -244,6 +320,7 @@ config() {
   done
   # La clave no puede acabar en la imagen.
   if grep -rqF -- "$(cat "$P3/chispa.key")" "$CTX"; then echo "¡la clave está en el contexto de la imagen!" >&2; return 1; fi
+  if [ -s "$P3/l3.token" ] && grep -rqF -- "$(cat "$P3/l3.token")" "$CTX"; then echo "¡la clave de L3 está en el contexto de la imagen!" >&2; return 1; fi
 }
 
 # Dockerfile hijo por variante (C1 del análisis): pesos, banco y config horneados; sin entrada.sh (que
@@ -252,6 +329,7 @@ imagenes() {
   local v cfg extra
   for v in $P3_VARIANTES; do
     case $v in claves) cfg=config-claves.json; extra='' ;; abierto) cfg=config-abierta.json; extra='"-abierto", ' ;;
+      l3) cfg=config-l3.json; extra='"-abierto", ' ;;
       *) echo "variante desconocida: $v" >&2; return 1 ;; esac
     cat > "$CTX/Dockerfile.$v" <<EOF
 FROM chispa-p3-base:ort
@@ -291,9 +369,14 @@ dorados() {
   [ -f "$P3/ai.json" ] || echo '{"models": {}}' > "$P3/ai.json"
   chmod 600 "$P3/ai.json"
   : > "$P3/dorados.jsonl"
+  : > "$P3/omitidas.jsonl"
+  [ -n "${L3_OMITIDA:-}" ] && jq -nc --arg r "$L3_OMITIDA" '{variante:"l3", omitida:$r}' >> "$P3/omitidas.jsonl"
   for v in $P3_VARIANTES; do
     n=$(modelo_de "$v") || return 1
     wu=(); [ "$v" = abierto ] && wu=(-warmup "$P3/warmup.jsonl")
+    # l3: la credencial va al fabricante (la plantilla arranca con el marcador en L3_API_KEY) y el
+    # dominio en la lista de salida; el vLLM de mentira, arriba mientras se fabrica.
+    [ "$v" = l3 ] && { wu=(-credential "$P3/l3-cred.json" -allow "$L3_DOMINIO"); vllm_falso_arriba || return 1; }
     t0=$(ms)
     # Con COR (lo pone ia.sh medir) el dorado se fabrica por `ia.sh fabricar`: vigila la plantilla (pico
     # de memoria del invitado y del VMM, C9-20; service.log) y guarda su trozo de journal y su desglose.
@@ -302,6 +385,12 @@ dorados() {
     ${fab[@]+"${fab[@]}"} timeout 1800 "$KLING" ai model deploy "$n" -config "$P3/ai.json" -image "chispa-p3-$v" -contract chispa-decide \
       -port "$PUERTO" -health /healthz -health-timeout 10s -cpus "$P3_CPUS" -mem "$P3_MEM" -max-inflight 16 -wait 15m \
       ${wu[@]+"${wu[@]}"}; rc=$?
+    [ "$v" = l3 ] && vllm_falso_abajo
+    if [ "$rc" != 0 ] && [ "$v" = l3 ]; then
+      # Sin -credential con upstream (Z3/Z6 sin integrar) la variante no se monta; las demás siguen.
+      echo "p3: falló deploy de la variante l3 (¿-credential con upstream?); se omite" >&2
+      jq -nc '{variante:"l3", omitida:"falló kling ai model deploy con -credential (upstream)"}' >> "$P3/omitidas.jsonl"; continue
+    fi
     [ "$rc" = 0 ] || { echo "falló kling ai model deploy $n" >&2; return 1; }
     dor=$(ultimo_dorado "$n")
     [ -n "$dor" ] || { echo "no encuentro el dorado de $n" >&2; return 1; }
@@ -315,6 +404,7 @@ dorados() {
     pico=null
     [ -s "$RES/dorado-$n/meminfo.jsonl" ] && pico=$(jq -s 'map(.usada_mib) | max' "$RES/dorado-$n/meminfo.jsonl")
     [ -s "$RES/dorado-$n/vmm.jsonl" ] && pico=$(jq -sc --argjson g "$pico" '{invitado_usada_mib:$g, vmm_hwm_mib:(map(.hwm_mib) | max)}' "$RES/dorado-$n/vmm.jsonl")
+    [ "$v" = l3 ] && wu=()   # no hubo -warmup
     jq -nc --arg v "$v" --arg n "$n" --arg d "$dor" --argjson ms "$(( $(ms) - t0 ))" --argjson w "${#wu[@]}" \
       --argjson pico "$pico" --argjson mem "$P3_MEM" \
       '{variante:$v, modelo:$n, dorado:$d, fabricar_ms:$ms, calentado:($w > 0), mem_mib:$mem, pico_fabricar:$pico}' >> "$P3/dorados.jsonl"
@@ -361,11 +451,12 @@ preparar() {
 # vCPU (taskset: NumCPU de Go respeta la afinidad, así que las sesiones e hilos de ORT son los de la
 # réplica) y escuchando en loopback; deja el pid en $DPID.
 directo_arriba() {
-  local cfg=config-abierta.json ts=() i
+  local cfg=config-abierta.json ts=() i l3env=()
   [ "$1" = claves ] && cfg=config-claves.json
+  [ "$1" = l3 ] && { cfg=config-l3-directo.json; l3env=("L3_API_KEY=$(cat "$P3/l3.token")"); }
   sed "s#/opt/chispa/#$CTX/#g" "$CTX/$cfg" > "$P3/host/config-$1.json"
   command -v taskset >/dev/null && ts=(taskset -c "0-$(( P3_CPUS - 1 ))")
-  ${ts[@]+"${ts[@]}"} env GOMEMLIMIT=512MiB "$P3/host/chispa-server" -addr "127.0.0.1:$PUERTO_DIRECTO" \
+  ${ts[@]+"${ts[@]}"} env GOMEMLIMIT=512MiB ${l3env[@]+"${l3env[@]}"} "$P3/host/chispa-server" -addr "127.0.0.1:$PUERTO_DIRECTO" \
     -config "$P3/host/config-$1.json" -tok "$CTX/modelos/e5.chispa-tok" -ort-lib "$P3/host/libonnxruntime.so" \
     -timeout 60s > "$RES/p3-directo-$1.log" 2>&1 &
   DPID=$!
@@ -421,6 +512,7 @@ medir() {
     base=(CONTRATO=chispa-decide PUERTO="$PUERTO" REQ_PATH=/v1/decide REQ_BODY="@$P3/peticion.json" HEALTH_PATH=/healthz
           MODELO="$n" TOKEN_FILE="$tok" RUNS="${RUNS:-10}" REPLICAS="${REPLICAS:-4}" CLIENTES="${CLIENTES:-1 4 16}"
           CARGA_S="${CARGA_S:-20}")
+    [ "$v" = l3 ] && { vllm_falso_arriba || continue; }
     paso "$v ($dor): frío, restaurar, primera y memoria"
     bf=$(bloque "$n" 16) || exit 1
     env "${base[@]}" GW_BLOQUE_FILE="$bf" COLD=1 SECCIONES="frio restaurar primera memoria" \
@@ -453,15 +545,25 @@ medir() {
       [ -s "$out" ] && ext=$(jq -c --slurpfile c "$out" '. + {sostenida: $c[0].carga}' <<<"$ext")
     fi
     primera_vez=0
+    local l3j=null
+    if [ "$v" = l3 ]; then
+      # Que la clave llegó al vLLM por el proxy y que no está en el volcado del dorado (sin imprimirla).
+      local enmem=null mf="${KLING_ROOT:-/nonexistent}/snapshots/$dor/mem.file"
+      if [ -r "$mf" ]; then if grep -qaF -f "$P3/l3.token" "$mf"; then enmem=true; else enmem=false; fi; fi
+      l3j=$(jq -nc --argjson s "$(vllm_falso_stats)" --argjson e "$enmem" --argjson ms "${P3_VLLM_MS:-0}" \
+        '{vllm_falso:$s, clave_en_mem_file:$e, vllm_ms:$ms}')
+      [ "$enmem" = true ] && echo "p3: ¡la clave de L3 está en el mem.file del dorado $dor!" >&2
+      vllm_falso_abajo
+    fi
     # Un JSON por dorado con el esquema de 96-von-bench.sh (lo lee ia.py): la carga es la de la primera
     # tanda (la que se compara con el directo); las demás y lo de P3 van en claves extra.
     if [ -s "$P3/parcial-$dor.json" ]; then
       local c1=$P3/parcial-$dor-carga-r${carga%%:*}.json
       [ -s "$c1" ] || c1=/dev/null
-      jq --slurpfile c "$c1" --argjson ext "$ext" --argjson dm "$dmem" \
+      jq --slurpfile c "$c1" --argjson ext "$ext" --argjson dm "$dmem" --argjson l3 "$l3j" \
         --argjson d "$l" --slurpfile p "$P3/preparado.json" \
         '(if ($c | length) > 0 then .carga = $c[0].carga else . end)
-         | . + {carga_tandas:$ext, p3:{variante:$d.variante, dorado:$d, directo_mem:$dm, preparado:($p[0] // null)}}' \
+         | . + {carga_tandas:$ext, p3:{variante:$d.variante, dorado:$d, directo_mem:$dm, preparado:($p[0] // null), l3:$l3}}' \
         "$P3/parcial-$dor.json" > "$RES/ia-p3-$dor.json" || echo "p3: no pude juntar el JSON de $dor" >&2
     fi
   done 3< "$P3/dorados.jsonl"
@@ -484,7 +586,7 @@ resumen() {
          descongelar_primera_p50_ms: ([.primera.descongelar_caliente[]?.total_ms] | p50),
          pss_por_replicas: ([.memoria.restauradas[]? | {replicas, pss_total_mib, rss_total_mib}]),
          carga_gateway: pts(.carga), carga_directo: ((.carga.directo.puntos // []) | map({clientes, rps, p50_ms, p95_ms, p99_ms, errores})),
-         carga_tandas: (.carga_tandas | with_entries(.value |= pts(.))), directo_mem: .p3.directo_mem})' "${fs[@]}" \
+         carga_tandas: (.carga_tandas | with_entries(.value |= pts(.))), directo_mem: .p3.directo_mem, l3: .p3.l3})' "${fs[@]}" \
     > "$RES/p3-resumen.json" || return 1
   {
     echo "P3 · chispa-server en kindling (modo CPU, e5 en ORT)"
@@ -499,7 +601,9 @@ resumen() {
       (.carga_directo[] as $d | "  directo \($d.clientes) cl: \($d.rps|floor) dec/s p50 \($d.p50_ms) p95 \($d.p95_ms) ms err \($d.errores)"),
       (.carga_tandas | to_entries[] | .key as $k | .value[] |
         "  tanda \($k) \(.clientes) cl: \(.rps|floor) dec/s p50 \(.p50_ms) p95 \(.p95_ms) ms err \(.errores)"),
-      "  directo en el host: \(.directo_mem)"' "$RES/p3-resumen.json"
+      "  directo en el host: \(.directo_mem)",
+      (if .l3 then "  L3 por credencial: vLLM \(.l3.vllm_falso); clave en el mem.file: \(.l3.clave_en_mem_file)" else empty end)' "$RES/p3-resumen.json"
+    [ -s "$P3/omitidas.jsonl" ] && jq -r '"\n[\(.variante)] omitida: \(.omitida)"' "$P3/omitidas.jsonl"
   } > "$RES/p3-resumen.txt"
   cat "$RES/p3-resumen.txt"
 }
