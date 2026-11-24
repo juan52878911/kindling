@@ -135,3 +135,61 @@ echo '{"base": "../x"}' > "$1/recipe.json"
 		}
 	}
 }
+
+// Reconstruir la imagen de un modelo (llm) o de un Chispa mientras una réplica
+// la usa no puede reescribir la capa debajo de ella: el constructor deja la
+// salida en KLING_OUT_DIR y el daemon la adopta con las imágenes quietas, con
+// la misma comprobación que un import -replace. El constructor falso hace lo
+// que hacía el script: escribir donde le digan, o en images/ si nadie se lo dice.
+func TestRebuildLLMConReplicasVivas409(t *testing.T) {
+	if !construirImagenes {
+		t.Skip("macOS no construye imágenes")
+	}
+	for _, b := range []string{"llm", "chispa"} {
+		t.Run(b, func(t *testing.T) {
+			s, h := testServer(t)
+			bdir := t.TempDir()
+			t.Setenv("KLING_BUILDERS_DIR", bdir)
+			t.Setenv("KLING_BUILDERS_INSECURE", "1")
+			os.MkdirAll(filepath.Join(s.root, "images"), 0o755)
+			instalarConstructor(t, bdir, b, `
+set -e
+out="${KLING_OUT_DIR:-$KLING_ROOT/images}"
+mkdir -p "$out"
+echo "$CONTENIDO" > "$out/$KLING_IMAGE_NAME.layer.ext4"
+echo "$CONTENIDO" >> "$KLING_ROOT/corridas"
+`)
+			capa := filepath.Join(s.root, "images", "modelo.layer.ext4")
+			corridas := filepath.Join(s.root, "corridas")
+			t.Setenv("CONTENIDO", "v1")
+			if rr := call(t, h, "POST", "/images", `{"name":"modelo","base":"min","builder":"`+b+`","spec":{"a":1}}`); rr.Code != 200 {
+				t.Fatalf("primera construcción: %d %s", rr.Code, rr.Body)
+			}
+			if got, _ := os.ReadFile(capa); string(got) != "v1\n" {
+				t.Fatalf("la capa no llegó a images/: %q", got)
+			}
+			s.mgr.SembrarParaPruebas(&api.Machine{ID: "aaaaaaaaaaaa", Name: "replica-1", State: api.StateRunning, Image: "modelo"})
+			t.Setenv("CONTENIDO", "v2")
+			rr := call(t, h, "POST", "/images", `{"name":"modelo","base":"min","builder":"`+b+`","spec":{"a":2}}`)
+			if rr.Code != 409 || !strings.Contains(rr.Body.String(), "replica-1") {
+				t.Fatalf("reconstruir con una réplica viva = %d %s; quería 409", rr.Code, rr.Body)
+			}
+			if got, _ := os.ReadFile(capa); string(got) != "v1\n" {
+				t.Fatalf("la capa en uso cambió: %q", got)
+			}
+			// Se sabe antes de construir: no se gastan minutos en bajar un
+			// modelo que luego no se puede adoptar.
+			if got, _ := os.ReadFile(corridas); string(got) != "v1\n" {
+				t.Fatalf("el constructor corrió aunque la imagen estaba en uso: %q", got)
+			}
+			// Sin réplicas, reconstruir sustituye la capa.
+			s.mgr.SembrarParaPruebas(&api.Machine{ID: "aaaaaaaaaaaa", Name: "replica-1", State: api.StateStopped, Image: "modelo"})
+			if rr := call(t, h, "POST", "/images", `{"name":"modelo","base":"min","builder":"`+b+`","spec":{"a":3}}`); rr.Code != 200 {
+				t.Fatalf("reconstruir sin réplicas: %d %s", rr.Code, rr.Body)
+			}
+			if got, _ := os.ReadFile(capa); string(got) != "v2\n" {
+				t.Fatalf("la capa no se sustituyó: %q", got)
+			}
+		})
+	}
+}
