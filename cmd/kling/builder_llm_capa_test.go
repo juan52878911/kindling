@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/dorado"
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 )
 
 const script81 = "../../scripts/81-base-image.sh"
@@ -273,51 +275,94 @@ func TestCapaLLMCortadaNoDejaFichero(t *testing.T) {
 	})
 }
 
-// La salida del servicio llega a la consola del invitado (la que lee el
-// fabricante para ver un bucle de reinicios sin exec) y sigue en
-// /var/log/service.log, con la línea `service exited with …` intacta.
-func TestServicioSaleALaConsola(t *testing.T) {
+// La salida del servicio va solo a /var/log/service.log: la consola serie es
+// lenta, y con tee cada línea de llama-server esperaba a la consola (ronda 9:
+// primera respuesta 955 → 1032 ms, generación 32 → 29 tok/s). Cuando el
+// servicio muere, el entrypoint vuelca a /dev/console las últimas 30 líneas
+// del log, cada una con dorado.ServiceLogDumpPrefix, y justo después la línea
+// `service exited with …` intacta, que es la que cuenta el fabricante sin
+// exec. Igual en el script, en entrypointBase y en internal/imagen.
+func TestServicioVuelcaALaConsolaAlMorir(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sin sh")
 	}
 	dir := t.TempDir()
 	svc := filepath.Join(dir, "svc.sh")
-	os.WriteFile(svc, []byte("#!/bin/sh\necho hola-del-servidor\nexit 3\n"), 0o755)
-	log := filepath.Join(dir, "service.log")
-	var linea string
-	for _, l := range strings.Split(entrypointBase(svc), "\n") {
-		if strings.Contains(l, "while :") {
-			linea = l
+	os.WriteFile(svc, []byte("#!/bin/sh\nfor i in $(seq 10 49); do echo linea-$i; done\nexit 3\n"), 0o755)
+	lineaDe := func(ep string) string {
+		for _, l := range strings.Split(ep, "\n") {
+			if strings.Contains(l, "while :") {
+				return l
+			}
+		}
+		t.Fatalf("el entrypoint no arranca el servicio:\n%s", ep)
+		return ""
+	}
+	base := lineaDe(entrypointBase(svc))
+	if otra := lineaDe(imagen.Entrypoint(imagen.Marca{Constructor: "debian"}, nil, svc)); otra != base {
+		t.Errorf("internal/imagen arranca el servicio distinto:\n%s\nfrente a\n%s", otra, base)
+	}
+	if _, err := exec.LookPath("bash"); err == nil {
+		if otra := lineaDe(entrypointDelScript(t, svc)); otra != base {
+			t.Errorf("81-base-image.sh arranca el servicio distinto:\n%s\nfrente a\n%s", otra, base)
 		}
 	}
-	if linea == "" {
-		t.Fatal("el entrypoint no arranca el servicio")
+	log := filepath.Join(dir, "service.log")
+	consolaPath := filepath.Join(dir, "consola")
+	// >> y no >: en el invitado es un dispositivo, aquí un fichero que cada
+	// muerte truncaría.
+	if !strings.Contains(base, ">/dev/console") {
+		t.Fatalf("el entrypoint no vuelca a /dev/console: %s", base)
 	}
-	cmd := exec.Command("sh", "-c", strings.ReplaceAll(linea, "/var/log/service.log", log)+"\nsleep 1.5\n")
+	linea := strings.ReplaceAll(strings.ReplaceAll(base, "/var/log/service.log", log), ">/dev/console", ">>"+consolaPath)
+	cmd := exec.Command("sh", "-c", linea+"\nsleep 1.5\n")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Un fichero y no un pipe: el bucle en segundo plano lo sigue teniendo
 	// abierto, y Wait esperaría a que lo cerrase.
-	cf, err := os.Create(filepath.Join(dir, "consola"))
+	sf, err := os.Create(filepath.Join(dir, "salida"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stdout = cf
+	cmd.Stdout, cmd.Stderr = sf, sf
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	cmd.Wait()
 	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	cf.Close()
+	sf.Close()
 	time.Sleep(100 * time.Millisecond)
-	consola, _ := os.ReadFile(filepath.Join(dir, "consola"))
+	salida, _ := os.ReadFile(filepath.Join(dir, "salida"))
+	consola, _ := os.ReadFile(consolaPath)
 	fichero, _ := os.ReadFile(log)
-	for _, w := range []string{"hola-del-servidor", "service exited with 3, restarting in 1s"} {
-		if !strings.Contains(string(consola), w) {
-			t.Errorf("la consola no tiene %q: %q", w, consola)
+	if len(salida) > 0 {
+		t.Errorf("la salida del servicio no debe ir a la del entrypoint (la consola): %q", salida)
+	}
+	marca := dorado.ServiceExitedMark + "3, restarting in 1s"
+	nFichero := strings.Count(string(fichero), marca)
+	if nFichero == 0 || !strings.Contains(string(fichero), "linea-10\n") {
+		t.Fatalf("service.log debe tener toda la salida y la marca: %q", fichero)
+	}
+	// En la consola: solo líneas del volcado y marcas, tantas marcas sin
+	// prefijo como muertes (las copias del volcado llevan el prefijo).
+	marcas := 0
+	for _, l := range strings.Split(strings.TrimRight(string(consola), "\n"), "\n") {
+		switch {
+		case l == marca:
+			marcas++
+		case strings.HasPrefix(l, dorado.ServiceLogDumpPrefix):
+		default:
+			t.Errorf("línea de la consola sin prefijo ni marca: %q", l)
 		}
-		if !strings.Contains(string(fichero), w) {
-			t.Errorf("service.log no tiene %q: %q", w, fichero)
-		}
+	}
+	if marcas != nFichero {
+		t.Errorf("la consola tiene %d marcas y service.log %d:\n%s", marcas, nFichero, consola)
+	}
+	// La primera muerte: las últimas 30 líneas (20-49), no las de antes.
+	c := string(consola)
+	primera := c[:strings.Index(c, marca)]
+	if !strings.Contains(primera, dorado.ServiceLogDumpPrefix+"linea-49\n") || !strings.Contains(primera, dorado.ServiceLogDumpPrefix+"linea-20\n") ||
+		strings.Contains(primera, "linea-19") || strings.Contains(primera, dorado.ServiceExitedMark) {
+		t.Errorf("el primer volcado debe ser linea-20…linea-49, sin marcas:\n%s", primera)
 	}
 }
 

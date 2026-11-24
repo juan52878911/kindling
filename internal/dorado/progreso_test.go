@@ -304,3 +304,45 @@ func TestServicioQueMuereFallaAlSegundoReinicio(t *testing.T) {
 		t.Fatalf("por la consola: %v", err)
 	}
 }
+
+// Sin exec, el fabricante lee la consola, donde el entrypoint vuelca al morir
+// las últimas líneas de service.log con ServiceLogDumpPrefix y luego la marca.
+// Las marcas copiadas en un volcado no cuentan como otra muerte, y la cola del
+// error enseña el log del servidor sin el prefijo.
+func TestReiniciosConVolcadoEnLaConsola(t *testing.T) {
+	conRitmo(t, 10*time.Millisecond, time.Hour)
+	volcado := func(ls ...string) string {
+		var b strings.Builder
+		for _, l := range ls {
+			b.WriteString(ServiceLogDumpPrefix + l + "\n")
+		}
+		return b.String()
+	}
+	marca := ServiceExitedMark + "137, restarting in 1s"
+	una := "[    1.2] Out of memory: Killed process 77 (llama-server)\n" +
+		volcado("llama_model_load: loading model", "llama_model_load: 1806 MiB") + marca + "\n"
+	o := opcionesBase()
+	o.Wait, o.AllowExec = time.Minute, false
+	// Una muerte con su volcado: se tolera.
+	c := &clienteVigilado{
+		clienteFalso: &clienteFalso{cargando: 20},
+		muestra:      func(n int) (int64, float64) { return 300, float64(n) },
+		consola:      una,
+	}
+	if _, err := Make(context.Background(), c, o); err != nil {
+		t.Fatalf("una muerte con su volcado no basta: %v", err)
+	}
+	// Dos: el segundo volcado trae copiada la marca de la primera, y son dos.
+	c = &clienteVigilado{
+		clienteFalso: &clienteFalso{cargando: 1 << 30},
+		muestra:      func(n int) (int64, float64) { return 300, float64(n) },
+		consola:      una + volcado("llama_model_load: 1806 MiB", marca, "llama_model_load: loading model again") + marca + "\n",
+	}
+	_, err := Make(context.Background(), c, o)
+	if !errors.Is(err, ErrRestarting) || !strings.Contains(err.Error(), "2 times") {
+		t.Fatalf("dos muertes por la consola: %v", err)
+	}
+	if strings.Contains(err.Error(), ServiceLogDumpPrefix) || !strings.Contains(err.Error(), "  | llama_model_load: loading model again") {
+		t.Fatalf("la cola debe enseñar el log del servidor sin el prefijo del volcado: %v", err)
+	}
+}

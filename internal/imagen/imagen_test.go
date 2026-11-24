@@ -48,7 +48,7 @@ func TestEntrypoint(t *testing.T) {
 	if f := EnvFile([]string{"A=it's"}); f != `export A='it'\''s'`+"\n" {
 		t.Fatalf("env file: %q", f)
 	}
-	if e := Entrypoint(m, nil, "/usr/bin/svc"); strings.Contains(e, EnvPath) || !strings.Contains(e, "( while :; do '/usr/bin/svc';") {
+	if e := Entrypoint(m, nil, "/usr/bin/svc"); strings.Contains(e, EnvPath) || !strings.Contains(e, "( while :; do '/usr/bin/svc' >>") {
 		t.Fatalf("entrypoint with service:\n%s", e)
 	}
 }
@@ -97,14 +97,19 @@ func TestCheckELFOtraArquitectura(t *testing.T) {
 	}
 }
 
-// La salida del servicio va a /var/log/service.log y, por tee, a la consola
-// del invitado (la salida del entrypoint), como en 81-base-image.sh: el
-// fabricante ve un bucle de reinicios sin exec. La línea «service exited
-// with» no cambia (dorado.ServiceExitedMark la cuenta).
-func TestEntrypointMandaElServicioALaConsola(t *testing.T) {
+// La salida del servicio va solo a /var/log/service.log (la consola serie es
+// lenta y con tee frenaba a llama-server); al morir, las últimas 30 líneas del
+// log van a /dev/console con el prefijo de dorado.ServiceLogDumpPrefix, y
+// detrás, sin él, la línea «service exited with» intacta. Lo ejecuta
+// TestServicioVuelcaALaConsolaAlMorir (cmd/kling).
+func TestEntrypointVuelcaElLogAlMorir(t *testing.T) {
 	e := Entrypoint(Marca{Constructor: "debian"}, nil, "/usr/bin/svc")
-	quiere := "( while :; do '/usr/bin/svc'; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null 2>&1 | tee -a /var/log/service.log &\n"
+	quiere := "( while :; do '/usr/bin/svc' >>/var/log/service.log 2>&1; echo \"service exited with $?, restarting in 1s\" >>/var/log/service.log; " +
+		"tail -n 31 /var/log/service.log | sed '$!s/^/service.log| /' >/dev/console 2>&1; sleep 1; done ) </dev/null >/dev/null 2>&1 &\n"
 	if !strings.Contains(e, quiere) {
 		t.Fatalf("entrypoint with service:\n%s\nwant the line\n%s", e, quiere)
+	}
+	if strings.Contains(e, "tee") {
+		t.Fatalf("the service output must not go through tee:\n%s", e)
 	}
 }

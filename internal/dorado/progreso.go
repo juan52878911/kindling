@@ -259,7 +259,9 @@ func (v *vigia) muestra(ctx context.Context) (int64, float64, bool) {
 }
 
 // reinicios cuenta las líneas ServiceExitedMark del log del servidor y
-// devuelve también el log leído (para la cola del error).
+// devuelve también el log leído (para la cola del error). En la consola, las
+// copias de la marca dentro de un volcado llevan ServiceLogDumpPrefix delante
+// y no cuentan: cada muerte deja una sola marca sin prefijo.
 func (v *vigia) reinicios(ctx context.Context) (int, string) {
 	log := v.logServidor(ctx)
 	n := 0
@@ -272,8 +274,9 @@ func (v *vigia) reinicios(ctx context.Context) (int, string) {
 }
 
 // logServidor es la salida del servidor: service.log si hay exec (es donde la
-// escribe el entrypoint), y si no la consola de la máquina, que al menos
-// lleva los avisos del kernel (un OOM, por ejemplo).
+// escribe el entrypoint), y si no la consola de la máquina, que lleva los
+// avisos del kernel (un OOM, por ejemplo) y, por cada muerte del servicio, las
+// últimas líneas de service.log que vuelca el entrypoint y su marca.
 func (v *vigia) logServidor(ctx context.Context) string {
 	lctx, cancel := context.WithTimeout(ctx, vigiaCada)
 	defer cancel()
@@ -287,7 +290,9 @@ func (v *vigia) logServidor(ctx context.Context) string {
 		}
 	}
 	if lc, ok := v.c.(lectorConsola); ok && !v.sinConsola {
-		out, _, err := lc.LogsTail(lctx, v.ref, 200)
+		// 400 líneas: cabe un informe de OOM del kernel (~70 líneas) y un
+		// volcado del entrypoint (31) por muerte, y hacen falta dos muertes.
+		out, _, err := lc.LogsTail(lctx, v.ref, 400)
 		if err == nil {
 			return out
 		}
@@ -297,7 +302,9 @@ func (v *vigia) logServidor(ctx context.Context) string {
 	return ""
 }
 
-// cola son las últimas colaLineas de log, sangradas, para un error.
+// cola son las últimas colaLineas de log, sangradas, para un error. Las
+// líneas que el entrypoint volcó a la consola al morir el servicio
+// (ServiceLogDumpPrefix) salen sin el prefijo: son el log del servidor.
 func cola(log string) string {
 	log = strings.TrimRight(log, "\n")
 	if strings.TrimSpace(log) == "" {
@@ -308,6 +315,7 @@ func cola(log string) string {
 		ls = ls[len(ls)-colaLineas:]
 	}
 	for i, l := range ls {
+		l = strings.TrimPrefix(l, ServiceLogDumpPrefix)
 		if len(l) > 300 {
 			l = l[:300] + "..."
 		}

@@ -196,6 +196,12 @@ const (
 	// no puede cambiar el texto) y el fabricante (Z3, que cuenta estas líneas
 	// para distinguir "cargando" de "muere en bucle").
 	ServiceExitedMark = "service exited with "
+	// ServiceLogDumpPrefix va delante de cada línea de service.log que el
+	// entrypoint vuelca a la consola del invitado cuando el servicio muere,
+	// justo antes de su línea ServiceExitedMark (la salida del servicio no va
+	// a la consola mientras corre: la consola serie es lenta). Con el prefijo,
+	// una marca copiada en un volcado no cuenta como otra muerte.
+	ServiceLogDumpPrefix = "service.log| "
 
 	DefaultWait         = 5 * time.Minute
 	DefaultProbeTimeout = 5 * time.Second

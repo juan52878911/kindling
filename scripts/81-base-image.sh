@@ -65,9 +65,12 @@ entrypoint() {
     # PID 1 (recoge huérfanos, monta volúmenes, sirve exec) y el servicio queda
     # como su hijo. El bucle lo relanza si muere, que un servidor caído en una
     # réplica restaurada no tiene a nadie más que lo levante. Su salida va a
-    # /var/log/service.log y, por tee, a la consola del invitado (la salida
-    # del entrypoint), donde el fabricante ve un bucle de reinicios sin exec.
-    echo "( while :; do $(sq "$SERVICE"); echo \"service exited with \$?, restarting in 1s\"; sleep 1; done ) </dev/null 2>&1 | tee -a /var/log/service.log &"
+    # /var/log/service.log y solo ahí: la consola serie es lenta, y con tee
+    # frenaba al servidor. Cuando muere, la línea `service exited with …` va
+    # al log y sus últimas 31 líneas a /dev/console: las 30 del servidor con
+    # el prefijo `service.log| ` (dorado.ServiceLogDumpPrefix) y la marca sin
+    # él; así el fabricante ve un bucle de reinicios y su causa sin exec.
+    echo "( while :; do $(sq "$SERVICE") >>/var/log/service.log 2>&1; echo \"service exited with \$?, restarting in 1s\" >>/var/log/service.log; tail -n 31 /var/log/service.log | sed '\$!s/^/service.log| /' >/dev/console 2>&1; sleep 1; done ) </dev/null >/dev/null 2>&1 &"
   fi
   echo 'exec /usr/local/bin/kling-guest -listen :8080'
 }
