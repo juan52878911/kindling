@@ -292,6 +292,12 @@ func BenchmarkFetchVerificadoEnCache(b *testing.B) {
 		b.Fatal(err)
 	}
 	data = nil
+	// Fuera de Linux no hay boot_id (ni sello): para medirlo en el Mac, uno fijo.
+	if bootID() == "" {
+		antes := bootID
+		bootID = func() string { return "bench" }
+		defer func() { bootID = antes }()
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := fetchVerified(srv.URL, want, dst); err != nil {
