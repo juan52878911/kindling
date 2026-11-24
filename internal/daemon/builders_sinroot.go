@@ -51,6 +51,14 @@ import (
 // (CheckBaseOwner lee recetas 0600 de root): siguen con root por ahora.
 var constructoresAislados = map[string]bool{"oci": true}
 
+// constructoresConSalida son los que dejan la imagen en KLING_OUT_DIR para que
+// el daemon la adopte con las imágenes quietas (ConImagenesQuietas +
+// ImageReplaceable): los aislados y, aunque corran como root, llm y chispa.
+// Antes estos dos escribían la capa en images/ en su sitio: un -rebuild con
+// réplicas vivas o un dorado encima la reescribía debajo de ellos, y un fallo a
+// mitad dejaba un fichero a medias con el nombre definitivo.
+var constructoresConSalida = map[string]bool{"oci": true, "llm": true, "chispa": true}
+
 // usuarioConstructor es el usuario sin privilegios de los constructores.
 type usuarioConstructor struct {
 	Nombre   string

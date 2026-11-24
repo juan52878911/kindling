@@ -6,12 +6,15 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -166,5 +169,83 @@ func TestFetchVerifiedStalledDownload(t *testing.T) {
 	}
 	if _, err := os.Stat(dst + ".part"); err == nil {
 		t.Fatal("quedó el .part de una descarga estancada")
+	}
+}
+
+// La base glibc ya no necesita debootstrap en el host: la hace el constructor
+// debian en Go, con el lock fijado. Dos construcciones a la vez la hacen una
+// sola vez (en fila, con un cerrojo de fichero), y una que falla no deja una
+// base a medias con el nombre definitivo.
+func TestBaseLLMSinDebootstrap(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // ni debootstrap ni nada
+	root := t.TempDir()
+	lib := t.TempDir()
+	var mu sync.Mutex
+	veces := 0
+	antes := baseGlibcEnGo
+	t.Cleanup(func() { baseGlibcEnGo = antes })
+	baseGlibcEnGo = func(root, lib, dst string) error {
+		mu.Lock()
+		veces++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		return os.WriteFile(dst, []byte("base"), 0o600)
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, 3)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); errs[i] = buildLLMBase(root, lib, "glibc-trixie") }(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "images", "glibc-trixie.ext4")); string(b) != "base" || veces != 1 {
+		t.Fatalf("base %q, construida %d veces; quería una", b, veces)
+	}
+
+	baseGlibcEnGo = func(root, lib, dst string) error {
+		os.WriteFile(dst, []byte("a medias"), 0o600)
+		return fmt.Errorf("corte")
+	}
+	if err := buildLLMBase(root, lib, "otra"); err == nil {
+		t.Fatal("una base que falla no dio error")
+	}
+	if left, _ := filepath.Glob(filepath.Join(root, "images", "*otra*ext4*")); len(left) > 0 {
+		t.Fatalf("una base fallida dejó %v", left)
+	}
+}
+
+// 71-build-glibc-base.sh (el camino de antes, KLING_LLM_BASE=debootstrap, y
+// el de las bases de MCP) tampoco deja una base a medias con su nombre: con
+// falsos que hacen fallar el formateo, no queda ningún <nombre>.ext4.
+func TestScriptBaseGlibcCortadoNoDejaFichero(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("sin bash")
+	}
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	bin := filepath.Join(dir, "bin")
+	os.MkdirAll(bin, 0o755)
+	for name, body := range map[string]string{
+		"id":          "echo 0\n",
+		"uname":       "echo x86_64\n",
+		"debootstrap": "exit 0\n",
+		"curl":        "exit 0\n",
+		"truncate":    "for a in \"$@\"; do f=\"$a\"; done; : > \"$f\"\n",
+		"mkfs.ext4":   "exit 1\n",
+	} {
+		os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755)
+	}
+	cmd := exec.Command("bash", "../../scripts/71-build-glibc-base.sh", "glibc-x")
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "KLING_ROOT="+root)
+	if b, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("el script siguió tras un mkfs fallido:\n%s", b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(root, "images", "*glibc-x*")); len(left) > 0 {
+		t.Fatalf("un build cortado dejó %v", left)
 	}
 }
