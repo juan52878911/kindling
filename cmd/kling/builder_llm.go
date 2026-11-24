@@ -243,7 +243,7 @@ func fetchVerified(url, want, dst string) error {
 // fetchVerifiedTimeout es fetchVerified con el detector de estancamiento
 // configurable, para poder probarlo sin esperar 60s de verdad.
 func fetchVerifiedTimeout(url, want, dst string, stall time.Duration) error {
-	if got, err := sha256File(dst); err == nil {
+	if got, err := hashFichero(dst); err == nil {
 		if got == want {
 			return nil
 		}
