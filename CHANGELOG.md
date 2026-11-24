@@ -82,6 +82,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
   - On macOS, `replica_auth: network` replicas log a warning (any local process can reach their forward).
   - The builder's GGUF cache is deleted after baking unless `keep_cache` is set.
   - `kling ai model add -replace -rebuild` deletes the model's golden before rebuilding.
+  - Q8_0 catalog models default to more memory (Qwen2.5-1.5B Q8_0: 2304 to 3136 MiB, plus the prompt cache): llama-server needs about half the weights again while loading them on x86. 4-bit models keep their defaults.
+  - A service's output in images built by kindling goes only to `/var/log/service.log`; when the service dies, the last 30 lines go to the guest console (prefixed `service.log| `) before the `service exited with …` line.
 - AI gateway behaviour changes:
   - `kling_ai_proxy_requests_total`'s `code` label is now a status class (`2xx`, `3xx`, `4xx`, `5xx`).
   - `POST /v1/embeddings` is now a public route: the OpenAI API to `embed` and `openai-embeddings` models.
