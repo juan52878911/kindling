@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -429,11 +430,35 @@ func bloquesDe(f *os.File, p string) ([]tramo, error) {
 	return runs, nil
 }
 
-// soltarCacheModelo decide qué hacer con el GGUF de la caché tras construir.
-func soltarCacheModelo(p string, size int64, keep, convertido bool, compartido int64) {}
+// LA CACHÉ DEL MODELO TRAS CONSTRUIR. Con la capa hecha, los pesos están en
+// ella (y, tras el dorado, en su mem.file): el GGUF de cache/von/models era la
+// tercera copia, 1 GiB más por GiB de modelo. Se borra, con su sello, salvo
+// que:
+//   - el spec pida keep_cache (reconstruir sin volver a bajar);
+//   - lo haya convertido kindling (los codificadores: no hay de dónde
+//     bajarlo, scripts/encoder-gguf.sh tendría que volver a correr);
+//   - la capa comparta sus bloques (reflink): entonces no ocupa nada más.
+//
+// Lo mejor posible: si no se puede borrar, se queda.
+func soltarCacheModelo(p string, size int64, keep, convertido bool, compartido int64) {
+	if keep || convertido || (size > 0 && compartido >= size-ext4.BlockSize) {
+		return
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return
+	}
+	os.Remove(p + selloExt)
+	fmt.Printf("model cache: dropped %s (the layer has it; keep_cache keeps it for rebuilds)\n", filepath.Base(p))
+}
 
-// keepCacheDe lee keep_cache del spec del modelo.
-func keepCacheDe(spec []byte) bool { return false }
+// keepCacheDe lee keep_cache del spec del modelo (lo pone `kling ai model add
+// -keep-cache`).
+func keepCacheDe(spec []byte) bool {
+	var s struct {
+		KeepCache bool `json:"keep_cache"`
+	}
+	return len(spec) > 0 && json.Unmarshal(spec, &s) == nil && s.KeepCache
+}
 
 // ficlonerange es _IOW(0x94, 13, struct file_clone_range) en Linux.
 const ficlonerange = 0x4020940d
