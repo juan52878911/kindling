@@ -37,7 +37,14 @@
 # instancia del banco, nunca en el laboratorio), IA_BENCH (cliente de
 # scripts/ia-bench), y para modelos que no son VON: CONTRATO, PUERTO,
 # REQ_PATH, REQ_BODY (texto o @fichero), HEALTH_PATH y MODELO (nombre en el
-# ai.json del gateway del banco; por defecto el del dorado).
+# ai.json del gateway del banco; por defecto el del dorado). Para un servidor
+# con claves (chispa-server con api_keys, P3): TOKEN_FILE (fichero 0600 con la
+# clave, ruta absoluta: va como Bearer en las peticiones directas a la réplica y
+# a LOAD_DIRECT_URL, y como `auth` del modelo en el gateway del banco).
+# GW_BLOQUE_FILE: bloque del modelo para el gateway del banco (el de un ai.json
+# de `kling ai model deploy`); el banco solo le pone snapshot, idle y
+# max_replicas. MAX_INFLIGHT (1) del bloque generado y CARGA_REPLICAS
+# (REPLICAS) de la sección carga.
 #
 # Los tiempos incluyen arrancar el CLI de kling (~10 ms) y el proxy del daemon:
 # es lo que ve un cliente que llega por el socket.
@@ -149,6 +156,13 @@ HEALTH_PATH="${HEALTH_PATH:-$health_def}"
 MODELO="${MODELO:-$SNAP}"
 [ -n "$REQ_PATH" ] || { echo "set REQ_PATH for contract $CONTRATO" >&2; exit 1; }
 [ "$VON" = 1 ] || [ -n "$REQ_BODY" ] || { echo "set REQ_BODY for contract $CONTRATO" >&2; exit 1; }
+TOKEN_FILE="${TOKEN_FILE:-}"
+TOK=()
+if [ -n "$TOKEN_FILE" ]; then
+  case $TOKEN_FILE in /*) ;; *) echo "TOKEN_FILE must be an absolute path" >&2; exit 1 ;; esac
+  [ -r "$TOKEN_FILE" ] || { echo "cannot read TOKEN_FILE $TOKEN_FILE" >&2; exit 1; }
+  TOK=(-token-file "$TOKEN_FILE")
+fi
 BODY_FILE="$D/peticion.json"
 case $REQ_BODY in @*) cp "${REQ_BODY#@}" "$BODY_FILE" || exit 1 ;; *) printf '%s' "$REQ_BODY" > "$BODY_FILE" ;; esac
 backend="$("$KLING" status -v -json | jq -r '.backend // "?"')"
@@ -199,7 +213,7 @@ pedido() {
     jq -r .request_ms <<<"$a"
   else
     [ -n "$IA_BENCH" ] || return 1
-    a="$("$IA_BENCH" guest -machine "$1" -port "$PUERTO" -path "$REQ_PATH" -body "@$BODY_FILE")" || return 1
+    a="$("$IA_BENCH" guest ${TOK[@]+"${TOK[@]}"} -machine "$1" -port "$PUERTO" -path "$REQ_PATH" -body "@$BODY_FILE")" || return 1
     jq -r .ms <<<"$a"
   fi
 }
@@ -228,7 +242,7 @@ if pide frio; then
     if [ "$VON" = 1 ]; then
       out="$("$KLING" ai model ask -json -wait 30m -max-tokens 1 -temperature 0 "$m" "Hi")"; req="$(jq -r .request_ms <<<"$out")"
     elif [ -n "$IA_BENCH" ]; then
-      out="$("$IA_BENCH" guest -wait 30m -machine "$m" -port "$PUERTO" -path "$REQ_PATH" -body "@$BODY_FILE")"; req="$(jq -r .ms <<<"$out")"
+      out="$("$IA_BENCH" guest ${TOK[@]+"${TOK[@]}"} -wait 30m -machine "$m" -port "$PUERTO" -path "$REQ_PATH" -body "@$BODY_FILE")"; req="$(jq -r .ms <<<"$out")"
     else req=null; fi
     t2=$(now_ms)
     row "boot (kling run returns)" "$((t1 - t0)) ms"
@@ -351,11 +365,15 @@ else omit tps "no pedida en SECCIONES"; fi
 gw_up() {
   local g="$D/gw-$1" bloque
   mkdir -p "$g"
-  if [ "$VON" = 1 ]; then
+  if [ -n "${GW_BLOQUE_FILE:-}" ]; then
+    bloque="$(jq -c --arg s "$SNAP" --arg i "$2" --argjson r "$3" '. + {snapshot:$s, idle:$i, max_replicas:$r}' "$GW_BLOQUE_FILE")" || return 1
+  elif [ "$VON" = 1 ]; then
     bloque="$(jq -nc --arg s "$SNAP" --arg i "$2" --argjson r "$3" '{kind:"von", snapshot:$s, idle:$i, max_replicas:$r}')"
   else
     bloque="$(jq -nc --arg s "$SNAP" --arg i "$2" --argjson r "$3" --argjson p "$PUERTO" --arg c "$CONTRATO" --arg h "$HEALTH_PATH" \
-      '{kind:"http", snapshot:$s, port:$p, contract:$c, health:{path:$h}, idle:$i, max_replicas:$r, max_inflight:1}')"
+      --argjson mi "${MAX_INFLIGHT:-1}" --arg tf "$TOKEN_FILE" \
+      '{kind:"http", snapshot:$s, port:$p, contract:$c, health:{path:$h}, idle:$i, max_replicas:$r, max_inflight:$mi}
+       + (if $tf == "" then {} else {auth:{header:"Authorization", scheme:"Bearer", file:$tf}} end)')"
   fi
   jq -n --arg n "$MODELO" --argjson b "$bloque" '{models: {($n): $b}}' > "$g/ai.json"
   "$KLING" ai serve -config "$g/ai.json" -socket "$g/ai.sock" -id "vb$$$1" -name-prefix "$PREFIX-g$1-" \
@@ -543,7 +561,7 @@ else omit semillas "no pedida en SECCIONES"; fi
 # ── 8. carga por el gateway (P3) ─────────────────────────────────────────────
 if pide carga && [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ]; then
   maxc=1; for c in $(echo "$CLIENTES" | tr ',' ' '); do [ "$c" -gt "$maxc" ] && maxc=$c; done
-  rep=$REPLICAS; [ "$rep" -lt 1 ] && rep=1
+  rep=${CARGA_REPLICAS:-$REPLICAS}; [ "$rep" -lt 1 ] && rep=1
   step "8. Load through the gateway: $CLIENTES clients, ${CARGA_S} s each, up to $rep replicas"
   if gw_up c remove "$rep"; then
     ruta="$(gw_ruta c)"; echo "$ruta" > "$D/gw-c/ruta"
@@ -552,7 +570,7 @@ if pide carga && [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ]; then
     jq -r '.puntos[]? | "  \(.clientes) clients: \(.rps|floor) req/s, p50 \(.p50_ms) ms, p99 \(.p99_ms) ms, errors \(.errores)"' <<<"$gwout"
     dir='null'
     if [ -n "${LOAD_DIRECT_URL:-}" ]; then
-      dir="$("$IA_BENCH" carga -url "$LOAD_DIRECT_URL" -body "@$BODY_FILE" -clientes "$CLIENTES" -duracion "${CARGA_S}s")" || dir='{"error":"falló ia-bench carga directa"}'
+      dir="$("$IA_BENCH" carga ${TOK[@]+"${TOK[@]}"} -url "$LOAD_DIRECT_URL" -body "@$BODY_FILE" -clientes "$CLIENTES" -duracion "${CARGA_S}s")" || dir='{"error":"falló ia-bench carga directa"}'
       jq -r '.puntos[]? | "  direct, \(.clientes) clients: \(.rps|floor) req/s, p50 \(.p50_ms) ms, p99 \(.p99_ms) ms"' <<<"$dir"
     fi
     put carga "$(jq -nc --arg r "$ruta" --argjson g "$gwout" --argjson d "$dir" --argjson h "$(punto "$PREFIX-gc-" 0)" \

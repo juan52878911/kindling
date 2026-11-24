@@ -4,7 +4,7 @@
 //
 //	ia-bench carga  -url http://gw/v1/m/chispa/v1/decide [-socket gw.sock] [-body '{…}'|@f.json]
 //	                [-clientes 1,4,16] [-duracion 20s | -n 200] [-token-file f]
-//	ia-bench guest  -machine M -port 8000 -path /v1/decide [-body …] [-wait 60s]
+//	ia-bench guest  -machine M -port 8000 -path /v1/decide [-body …] [-wait 60s] [-token-file f]
 //	                una petición a una réplica por el daemon (POST /machines/M/guest), cronometrada
 //	ia-bench falso  -listen :8000 -mem-mib 512 [-tocar] [-retardo 0]
 //	                servidor HTTP de mentira con memoria del tamaño pedido
@@ -124,6 +124,7 @@ func ordenGuest(ctx context.Context, args []string) error {
 	metodo := fs.String("method", "POST", "método")
 	body := fs.String("body", "", "cuerpo, o @fichero")
 	wait := fs.Duration("wait", 0, "reintentar hasta un 2xx durante este tiempo (arranque en frío)")
+	tokenFile := fs.String("token-file", "", "fichero con la clave del servidor (Authorization: Bearer); nunca se imprime")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -133,6 +134,14 @@ func ordenGuest(ctx context.Context, args []string) error {
 	b, err := cuerpo(*body)
 	if err != nil {
 		return err
+	}
+	var cab map[string]string
+	if *tokenFile != "" {
+		t, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			return err
+		}
+		cab = map[string]string{"Authorization": "Bearer " + strings.TrimSpace(string(t))}
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -144,7 +153,7 @@ func ordenGuest(ctx context.Context, args []string) error {
 	for {
 		intentos++
 		t := time.Now()
-		resp, err := c.Guest(ctx, *machine, api.GuestRequest{Port: *port, Path: *path, Method: *metodo, Body: string(b)})
+		resp, err := c.Guest(ctx, *machine, api.GuestRequest{Port: *port, Path: *path, Method: *metodo, Body: string(b), Headers: cab})
 		ms := float64(time.Since(t).Microseconds()) / 1000
 		ok := err == nil && resp.Status/100 == 2
 		if ok || *wait <= 0 || time.Since(t0) > *wait || ctx.Err() != nil {

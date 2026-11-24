@@ -174,7 +174,7 @@ func TestLimpiarTodoEnSeco(t *testing.T) {
 // Los guiones del banco de IA pasan bash -n con el bash del sistema (3.2 en
 // macOS) y shellcheck si está.
 func TestGuionesIASintaxis(t *testing.T) {
-	fs := []string{"96-von-bench.sh", "bench/ec2.sh", "bench/remoto/fases.sh", "bench/remoto/ia.sh"}
+	fs := []string{"96-von-bench.sh", "bench/ec2.sh", "bench/remoto/fases.sh", "bench/remoto/ia.sh", "bench/remoto/chispa-p3.sh"}
 	for _, f := range fs {
 		if out, err := exec.Command("bash", "-n", f).CombinedOutput(); err != nil {
 			t.Errorf("bash -n %s: %v\n%s", f, err, out)
