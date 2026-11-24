@@ -166,7 +166,7 @@ func BenchmarkAliasResuelve(b *testing.B) {
 	}
 }
 
-const dosInquilinos =`,"tenants":[{"name":"acme","token":"0123456789abcdef"},{"name":"globex","token":"fedcba9876543210"}]`
+const dosInquilinos = `,"tenants":[{"name":"acme","token":"0123456789abcdef"},{"name":"globex","token":"fedcba9876543210"}]`
 
 // TestChispaDecideExigeInquilino: con inquilinos declarados, un chispa-decide
 // con dorado sirve a exactamente uno (sus bancos van en el dorado), salvo
