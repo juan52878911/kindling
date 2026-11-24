@@ -29,6 +29,7 @@ CLAVES = {
     "memoria": ["restauradas", "descongeladas", "remove"],
     "ociosa": ["descongelar_ms", "restaurar_ms", "gateway"],
     "arranque": ["inmediata", "espera", "anclado"],
+    "secreto": ["sin", "con"],
     "semillas": ["iguales"],
     "carga": ["ruta", "gateway", "directo"],
 }
@@ -93,6 +94,21 @@ def rechazos(doc):
                 k, len(malas), len(v), max(malas), umbral))
         if not v and apartadas.get(k):
             out.append("primera.%s: ninguna muestra caliente de verdad (%d apartadas por leer disco)" % (k, len(apartadas[k])))
+    return out + fugas(doc)
+
+
+def fugas(doc):
+    """Un secreto que aparece donde no debe invalida la corrida y es un fallo de seguridad (Z4, Z6)."""
+    out = []
+    s = doc.get("secreto")
+    if isinstance(s, dict) and not omitida(s):
+        if s.get("valor_en_mem_file"):
+            out.append("secreto: ¡el valor del secreto MMDS está en el mem.file del dorado!")
+        if s.get("valor_en_log_gateway"):
+            out.append("secreto: ¡el valor del secreto MMDS está en el log del gateway!")
+    l3 = (doc.get("p3") or {}).get("l3") if isinstance(doc.get("p3"), dict) else None
+    if isinstance(l3, dict) and l3.get("clave_en_mem_file"):
+        out.append("p3.l3: ¡la clave de L3 está en el mem.file del dorado!")
     return out
 
 
@@ -333,6 +349,9 @@ def resumen(doc, out):
             rp = g.get("idle_remove_repuesto")
             if isinstance(rp, list):
                 w("  por el gateway: idle remove con spare 1 %s" % est(muestras(rp, "ms")))
+                ps = g.get("repuesto_pss")
+                if isinstance(ps, dict) and not omitida(ps):
+                    w("  el repuesto añade %s MiB de PSS" % ps.get("extra_mib"))
                 r50, p50 = pct(muestras(g.get("idle_remove"), "ms"), 50), pct(muestras(rp, "ms"), 50)
                 if r50 is not None and p50 is not None:
                     veredictos.append("P2: con repuesto %s frente a %s sin él → %s" % (
@@ -356,6 +375,24 @@ def resumen(doc, out):
         if e50 is not None:
             veredictos.append("P1: tras arrancar el gateway y esperar, primera respuesta p50 %s → %s" % (
                 fmt(e50), "≤ 1,2 s, precalentar vale (C9-10)" if e50 <= 1200 else "> 1,2 s (¿falta Z1/Z4?)"))
+
+    sc = doc.get("secreto")
+    if isinstance(sc, dict) and not omitida(sc):
+        w("secreto por MMDS tras restaurar (idle remove): sin %s; con %s; gancho p50 %s" % (
+            est(muestras(sc.get("sin"), "ms")), est(muestras(sc.get("con"), "ms")), fmt(sc.get("gancho_ms_p50"))))
+        w("  valor en el mem.file del dorado: %s; en el log del gateway: %s" % (
+            sc.get("valor_en_mem_file"), sc.get("valor_en_log_gateway")))
+        g = sc.get("gancho_ms_p50")
+        if g is not None:
+            veredictos.append("P1 (Z4): el gancho tras restaurar con un secreto MMDS cuesta %s p50 → %s" % (
+                fmt(g), "≤ 20 ms, vale" if g <= 20 else "> 20 ms"))
+    elif omitida(sc):
+        w("secreto por MMDS: omitida: %s" % sc["omitida"])
+    l3 = (doc.get("p3") or {}).get("l3") if isinstance(doc.get("p3"), dict) else None
+    if isinstance(l3, dict):
+        v = l3.get("vllm_falso") or {}
+        w("L3 por credencial (P3): el vLLM recibió %s peticiones (%s con la clave, %s sin ella); clave en el mem.file: %s" % (
+            v.get("peticiones"), v.get("con_clave"), v.get("sin_clave"), l3.get("clave_en_mem_file")))
 
     s = doc.get("semillas")
     if isinstance(s, dict) and not omitida(s):
@@ -469,6 +506,8 @@ def autoprueba():
                    "gateway": {"idle_freeze": [{"ms": 400}], "idle_remove": [{"ms": 440, "dormidas": {"estado": "borradas"}}]}},
         "arranque": {"espera_s": 20, "inmediata": [{"ms": 7400, "disco_leido_bytes": 1085689856}],
                      "espera": [{"ms": 1000, "disco_leido_bytes": 0}], "anclado": [{"ms": 950, "disco_leido_bytes": 0}]},
+        "secreto": {"sin": [{"ms": 995}], "con": [{"ms": 1010}], "gancho_ms_p50": 15,
+                    "valor_en_mem_file": False, "valor_en_log_gateway": False},
         "semillas": {"iguales": False},
         "carga": {"ruta": "/v1/m/von-q8/v1/chat/completions",
                   "gateway": {"puntos": [{"clientes": 1, "rps": 10, "p50_ms": 50.5, "p99_ms": 60, "errores": 0},
@@ -487,7 +526,7 @@ def autoprueba():
     txt = "\n".join(out)
     for want in ("V1 CONFIRMADA", "remove se queda por defecto", "≤ 1 s → la instancia anidada vale",
                  "> 5 s → abrir T2-1", "0.50 ms p50 → ≤ 1 ms, vale", "0 errores con 16 clientes → vale",
-                 "precalentar vale"):
+                 "precalentar vale", "15 ms p50 → ≤ 20 ms, vale"):
         assert want in txt, (want, txt)
 
     # C9-14: una muestra «caliente» que leyó del disco es fría; la corrida se rechaza.
@@ -503,6 +542,10 @@ def autoprueba():
     vacia["primera"]["descongelar_caliente"] = []
     vacia["primera"]["calientes_con_disco"] = {"descongelar_caliente": [sm(7900)]}
     assert any("descongelar_caliente" in x for x in rechazos(vacia)), rechazos(vacia)
+
+    fuga = json.loads(json.dumps(doc))
+    fuga["secreto"]["valor_en_mem_file"] = True
+    assert any("mem.file" in x for x in rechazos(fuga)), rechazos(fuga)
 
     # C9-12: sin journal del daemon (o sin desglose / service.log de un dorado) no hay corrida.
     import tempfile

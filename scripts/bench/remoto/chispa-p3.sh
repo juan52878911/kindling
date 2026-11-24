@@ -515,7 +515,7 @@ medir() {
     [ "$v" = l3 ] && { vllm_falso_arriba || continue; }
     paso "$v ($dor): frío, restaurar, primera y memoria"
     bf=$(bloque "$n" 16) || exit 1
-    env "${base[@]}" GW_BLOQUE_FILE="$bf" COLD=1 SECCIONES="frio restaurar primera memoria" \
+    env "${base[@]}" GW_BLOQUE_FILE="$bf" COLD=1 SECCIONES="frio restaurar primera memoria secreto" \
       JSON_OUT="$P3/parcial-$dor.json" timeout "$(( ${PLAZO_P3_VAR_MIN:-30} * 60 ))" bash "$VB" "$dor" \
       > "$RES/p3-$dor.txt" 2>&1 || echo "p3: 96-von-bench ($v) rc=$?" >&2
     ext='{}'; dmem=null; tanda=0

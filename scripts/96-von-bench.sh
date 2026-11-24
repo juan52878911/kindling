@@ -32,6 +32,9 @@
 #   arranque   primera respuesta tras arrancar el gateway con la caché fría: en
 #              cuanto contesta, tras ARRANQUE_ESPERA_S (precalentado al arrancar)
 #              y anclado (pin: true); ARRANQUE_RUNS vueltas; necesita drop_caches;
+#   secreto    kind http: ociosa → primera respuesta por el gateway con y sin un
+#              secreto deliver: mmds (el coste del gancho tras restaurar) y si el
+#              valor aparece en el mem.file del dorado o en el log del gateway;
 #   semillas   dos réplicas no repiten la misma muestra a temperatura 1 (openai);
 #   carga      P3: CLIENTES clientes por /v1/m/<modelo>/… del gateway durante
 #              CARGA_S s cada tanda (y contra LOAD_DIRECT_URL si se da).
@@ -44,7 +47,7 @@
 # HIGIENE (0; 1 = `pkill -9 -x firecracker` entre variantes: SOLO en una
 # instancia del banco, nunca en el laboratorio), KLING_ROOT (raíz de datos del
 # daemon, si se puede leer: calienta los ficheros del dorado), UMBRAL_CALIENTE_BYTES,
-# REINTENTOS_CALIENTE, ARRANQUE_RUNS (3), ARRANQUE_ESPERA_S (20), IA_BENCH (cliente de
+# REINTENTOS_CALIENTE, ARRANQUE_RUNS (3), ARRANQUE_ESPERA_S (20), SECRETO_RUNS (CYCLES), IA_BENCH (cliente de
 # scripts/ia-bench), y para modelos que no son VON: CONTRATO, PUERTO,
 # REQ_PATH, REQ_BODY (texto o @fichero), HEALTH_PATH y MODELO (nombre en el
 # ai.json del gateway del banco; por defecto el del dorado). Para un servidor
@@ -78,7 +81,7 @@ KLING_ROOT="${KLING_ROOT:-}"
 UMBRAL_CALIENTE_BYTES="${UMBRAL_CALIENTE_BYTES:-0}"
 REINTENTOS_CALIENTE="${REINTENTOS_CALIENTE:-2}"
 case $UMBRAL_CALIENTE_BYTES$REINTENTOS_CALIENTE in *[!0-9]*) echo "UMBRAL_CALIENTE_BYTES and REINTENTOS_CALIENTE must be integers" >&2; exit 1 ;; esac
-TODAS="restaurar primera tps memoria ociosa arranque semillas carga"
+TODAS="restaurar primera tps memoria ociosa arranque secreto semillas carga"
 [ "$COLD" = 1 ] && TODAS="frio $TODAS"
 SECCIONES="${SECCIONES:-$TODAS}"
 [ "$COLD" = 1 ] && case " $SECCIONES " in *" frio "*) ;; *) SECCIONES="frio $SECCIONES" ;; esac
@@ -622,6 +625,15 @@ if pide ociosa; then
       orden="of or"; repj='{"omitida":"el gateway con spare: 1 no arrancó"}'
       gw_up os remove 1 '{"spare":1}' && orden="of or os"
       for g in $orden; do gw_pedir "$g" 1 >/dev/null; done
+      # PSS que añade el repuesto: con una réplica que acaba de servir en cada gateway, la de spare 1
+      # tiene además el repuesto (Z4 lo repone en segundo plano: se le dan IDLE_S/2 s).
+      pssj='{"omitida":"sin gateway con spare"}'
+      case " $orden " in *" os "*)
+        gw_pedir or 1 >/dev/null; gw_pedir os 1 >/dev/null; sleep $(( IDLE_S / 2 + 1 ))
+        pssj="$(jq -nc --argjson a "$(punto "$PREFIX-gor-" 1)" --argjson b "$(punto "$PREFIX-gos-" 1)" \
+          '{sin:$a, con:$b, extra_mib:($b.pss_total_mib - $a.pss_total_mib)}')"
+        row "PSS added by the spare replica" "$(jq -r .extra_mib <<<"$pssj") MiB" ;;
+      esac
       for i in $(seq "$CYCLES"); do
         for g in $orden; do
           if [ "$g" = os ]; then
@@ -635,7 +647,7 @@ if pide ociosa; then
       done
       [ -s "$D/o-os.jsonl" ] && repj="$(jsonl "$D/o-os.jsonl")"
       gwj="$(jq -nc --argjson a "$(jsonl "$D/o-of.jsonl")" --argjson b "$(jsonl "$D/o-or.jsonl")" --argjson c "$repj" \
-        '{idle_freeze:$a, idle_remove:$b, idle_remove_repuesto:$c}')"
+        --argjson pss "$pssj" '{idle_freeze:$a, idle_remove:$b, idle_remove_repuesto:$c, repuesto_pss:$pss}')"
       row "gateway, idle freeze, p50" "$(jq -r .ms "$D/o-of.jsonl" 2>/dev/null | stats) ms"
       row "gateway, idle remove, p50" "$(jq -r .ms "$D/o-or.jsonl" 2>/dev/null | stats) ms"
       row "gateway, idle remove + spare 1, p50" "$(jq -r .ms "$D/o-os.jsonl" 2>/dev/null | stats) ms"
@@ -685,6 +697,44 @@ elif pide arranque && [ "$GATEWAY" != 1 ]; then omit arranque "GATEWAY=0"
 elif pide arranque && [ -z "$IA_BENCH" ]; then omit arranque "sin ia-bench (IA_BENCH)"
 elif pide arranque; then omit arranque "hace falta drop_caches: $DROP_MOTIVO"
 else omit arranque "no pedida en SECCIONES"; fi
+
+# ── 6c. secreto entregado por MMDS tras restaurar (P1 de la ronda 8, Z4) ──────
+# El gateway pone el secreto en el MMDS de cada réplica tras restaurarla y corre el gancho de la
+# imagen: lo que cuesta se ve en «ociosa → primera respuesta» con y sin secret (idle remove). Y el
+# valor no puede estar en el mem.file del dorado ni en el log del gateway (se busca, no se imprime).
+SECRETO_RUNS="${SECRETO_RUNS:-$CYCLES}"
+if pide secreto && [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ] && [ "$VON" != 1 ]; then
+  step "6c. Secret delivered by MMDS after restore: idle → first response with and without it ($SECRETO_RUNS cycles)"
+  mkdir -p "$D/gw-ss"
+  (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/gw-ss/secreto")
+  sj='{"omitida":"el gateway con secrets no arrancó (¿falta Z4?)"}'
+  if gw_up sn remove 1 && gw_up ss remove 1 '{"secrets":[{"name":"bench","deliver":"mmds","file":"secreto"}]}'; then
+    orden="sn ss"
+    for g in $orden; do gw_pedir "$g" 1 >/dev/null; done
+    for i in $(seq "$SECRETO_RUNS"); do
+      for g in $orden; do
+        dorm="$(dormidas "$PREFIX-g$g-")"
+        gw_pedir "$g" 1 | jq -c --argjson d "$dorm" '{ms: .puntos[0].p50_ms, errores: .puntos[0].errores, dormidas: $d}' >> "$D/s-$g.jsonl"
+      done
+      orden="${orden#* } ${orden%% *}"
+    done
+    enmem=null; mf="${KLING_ROOT:-/nonexistent}/snapshots/$SNAP/mem.file"
+    if [ -r "$mf" ]; then if grep -qaF -f "$D/gw-ss/secreto" "$mf"; then enmem=true; else enmem=false; fi; fi
+    enlog=false; grep -qaF -f "$D/gw-ss/secreto" "$D/gw-ss/log" && enlog=true
+    sj="$(jq -nc --argjson a "$(jsonl "$D/s-sn.jsonl")" --argjson b "$(jsonl "$D/s-ss.jsonl")" --argjson m "$enmem" --argjson l "$enlog" \
+      'def p50: (map(select(. != null)) | sort) as $s | if ($s|length) == 0 then null else $s[(($s|length) - 1) / 2 | floor] end;
+       {sin:$a, con:$b, gancho_ms_p50:(if ([$b[].ms]|p50) == null or ([$a[].ms]|p50) == null then null else ([$b[].ms]|p50) - ([$a[].ms]|p50) end),
+        valor_en_mem_file:$m, valor_en_log_gateway:$l}')"
+    row "idle remove, no secret, p50" "$(jq -r .ms "$D/s-sn.jsonl" 2>/dev/null | stats) ms"
+    row "idle remove, MMDS secret, p50" "$(jq -r .ms "$D/s-ss.jsonl" 2>/dev/null | stats) ms"
+    row "secret value in the golden mem.file / gateway log" "$enmem / $enlog"
+  fi
+  gw_down sn; gw_down ss
+  put secreto "$sj"
+elif pide secreto && [ "$VON" = 1 ]; then omit secreto "secrets solo en bloques kind http (no VON)"
+elif pide secreto && [ "$GATEWAY" != 1 ]; then omit secreto "GATEWAY=0"
+elif pide secreto; then omit secreto "sin ia-bench (IA_BENCH)"
+else omit secreto "no pedida en SECCIONES"; fi
 
 # ── 7. semillas ──────────────────────────────────────────────────────────────
 if pide semillas && [ "$VON" = 1 ]; then
