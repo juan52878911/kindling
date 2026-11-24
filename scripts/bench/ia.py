@@ -28,6 +28,7 @@ CLAVES = {
     "tps": ["prompt_tok_s", "generacion_tok_s"],
     "memoria": ["restauradas", "descongeladas", "remove"],
     "ociosa": ["descongelar_ms", "restaurar_ms", "gateway"],
+    "arranque": ["inmediata", "espera", "anclado"],
     "semillas": ["iguales"],
     "carga": ["ruta", "gateway", "directo"],
 }
@@ -260,6 +261,11 @@ def resumen(doc, out):
             w("  %-30s %s   petición %s   resync %s   majflt p50 %s" % (
                 et, est(muestras(v, "total_ms")), fmt(pct(muestras(v, "peticion_ms"), 50)),
                 fmt(pct(muestras(v, "resync_ms"), 50)), fmt(pct(maj, 50), "")))
+        apartadas = pr.get("calientes_con_disco") or {}
+        n_ap = sum(len(v) for v in apartadas.values() if isinstance(v, list))
+        if n_ap:
+            w("  (%d muestras calientes apartadas por leer disco y repetidas; calentado por: %s)" % (
+                n_ap, ", ".join(pr.get("calentado_por") or []) or "nada"))
         cal = pct(muestras(pr.get("restaurar_caliente"), "total_ms"), 50)
         if cal is not None:
             if cal <= 1000:
@@ -324,11 +330,32 @@ def resumen(doc, out):
         g = oc.get("gateway")
         if isinstance(g, dict) and not omitida(g):
             w("  por el gateway: idle freeze %s; idle remove %s" % (est(muestras(g.get("idle_freeze"), "ms")), est(muestras(g.get("idle_remove"), "ms"))))
+            rp = g.get("idle_remove_repuesto")
+            if isinstance(rp, list):
+                w("  por el gateway: idle remove con spare 1 %s" % est(muestras(rp, "ms")))
+                r50, p50 = pct(muestras(g.get("idle_remove"), "ms"), 50), pct(muestras(rp, "ms"), 50)
+                if r50 is not None and p50 is not None:
+                    veredictos.append("P2: con repuesto %s frente a %s sin él → %s" % (
+                        fmt(p50), fmt(r50), "≤ 150 ms, vale (C9-08)" if p50 <= 150 else "> 150 ms (¿falta Z4?)"))
+            elif omitida(rp):
+                w("  por el gateway: idle remove con spare 1 omitida: %s" % rp["omitida"])
             estados = sorted({(d.get("dormidas") or {}).get("estado") for d in g.get("idle_remove") or [] if isinstance(d, dict)} - {None})
             if estados and estados != ["borradas"]:
                 w("  AVISO: con idle: remove el segador dejó las réplicas %s (¿falta integrar Z3/Z4?)" % ", ".join(estados))
         elif omitida(g):
             w("  por el gateway: omitida: %s" % g["omitida"])
+
+    a = doc.get("arranque")
+    if isinstance(a, dict) and not omitida(a):
+        w("gateway recién arrancado, caché fría → primera respuesta (espera %s s):" % a.get("espera_s"))
+        for k in ("inmediata", "espera", "anclado"):
+            v = a.get(k)
+            dr = pct(muestras(v, "disco_leido_bytes"), 50)
+            w("  %-10s %s   disco leído p50 %s MiB" % (k, est(muestras(v, "ms")), _mib(dr)))
+        e50 = pct(muestras(a.get("espera"), "ms"), 50)
+        if e50 is not None:
+            veredictos.append("P1: tras arrancar el gateway y esperar, primera respuesta p50 %s → %s" % (
+                fmt(e50), "≤ 1,2 s, precalentar vale (C9-10)" if e50 <= 1200 else "> 1,2 s (¿falta Z1/Z4?)"))
 
     s = doc.get("semillas")
     if isinstance(s, dict) and not omitida(s):
@@ -440,6 +467,8 @@ def autoprueba():
                     "remove": [pt(1, 2100), pt(2, 2140)]},
         "ociosa": {"descongelar_ms": [400, 410], "restaurar_ms": [420, 430],
                    "gateway": {"idle_freeze": [{"ms": 400}], "idle_remove": [{"ms": 440, "dormidas": {"estado": "borradas"}}]}},
+        "arranque": {"espera_s": 20, "inmediata": [{"ms": 7400, "disco_leido_bytes": 1085689856}],
+                     "espera": [{"ms": 1000, "disco_leido_bytes": 0}], "anclado": [{"ms": 950, "disco_leido_bytes": 0}]},
         "semillas": {"iguales": False},
         "carga": {"ruta": "/v1/m/von-q8/v1/chat/completions",
                   "gateway": {"puntos": [{"clientes": 1, "rps": 10, "p50_ms": 50.5, "p99_ms": 60, "errores": 0},
@@ -457,7 +486,8 @@ def autoprueba():
     resumen(doc, out)
     txt = "\n".join(out)
     for want in ("V1 CONFIRMADA", "remove se queda por defecto", "≤ 1 s → la instancia anidada vale",
-                 "> 5 s → abrir T2-1", "0.50 ms p50 → ≤ 1 ms, vale", "0 errores con 16 clientes → vale"):
+                 "> 5 s → abrir T2-1", "0.50 ms p50 → ≤ 1 ms, vale", "0 errores con 16 clientes → vale",
+                 "precalentar vale"):
         assert want in txt, (want, txt)
 
     # C9-14: una muestra «caliente» que leyó del disco es fría; la corrida se rechaza.

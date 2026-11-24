@@ -16,14 +16,22 @@
 #   restaurar  kling run -from + primera respuesta, RUNS veces (lo de siempre);
 #   primera    P1: primera respuesta tras restaurar y tras descongelar, con la
 #              caché de páginas caliente y tras drop_caches; fallos de página
-#              del VMM, bytes leídos de disco y fases del despertar (resync);
+#              del VMM, bytes leídos de disco y fases del despertar (resync).
+#              Las calientes van todas antes que las frías, cada una con el
+#              dorado traído a la caché (API warm, ficheros bajo KLING_ROOT y
+#              una restauración descartada); la que aun así lee más de
+#              UMBRAL_CALIENTE_BYTES (0) se aparta y se repite (REINTENTOS_CALIENTE, 2);
 #   tps        tokens/s de prompt y de generación en una réplica caliente (openai);
 #   memoria    P2: PSS/RSS de 1..REPLICAS réplicas en tres variantes —restauradas,
 #              descongeladas (congeladas y vueltas a despertar, lo que hace el
 #              segador) e idle: remove por el gateway— con Cached y MemAvailable
 #              del host y el disco de cada réplica dormida;
 #   ociosa     P2: «ociosa → primera respuesta», CYCLES ciclos alternando thaw y
-#              restaurar, y por el gateway con idle freeze frente a idle remove;
+#              restaurar, y por el gateway con idle freeze, idle remove e idle
+#              remove con una réplica de repuesto (spare: 1);
+#   arranque   primera respuesta tras arrancar el gateway con la caché fría: en
+#              cuanto contesta, tras ARRANQUE_ESPERA_S (precalentado al arrancar)
+#              y anclado (pin: true); ARRANQUE_RUNS vueltas; necesita drop_caches;
 #   semillas   dos réplicas no repiten la misma muestra a temperatura 1 (openai);
 #   carga      P3: CLIENTES clientes por /v1/m/<modelo>/… del gateway durante
 #              CARGA_S s cada tanda (y contra LOAD_DIRECT_URL si se da).
@@ -34,7 +42,9 @@
 # IDLE_S (5: -idle del gateway del banco), CLIENTES ("1 4 16"), CARGA_S (20),
 # DROP_CACHES (auto: si /proc/sys/vm/drop_caches se puede escribir; 0 = nunca),
 # HIGIENE (0; 1 = `pkill -9 -x firecracker` entre variantes: SOLO en una
-# instancia del banco, nunca en el laboratorio), IA_BENCH (cliente de
+# instancia del banco, nunca en el laboratorio), KLING_ROOT (raíz de datos del
+# daemon, si se puede leer: calienta los ficheros del dorado), UMBRAL_CALIENTE_BYTES,
+# REINTENTOS_CALIENTE, ARRANQUE_RUNS (3), ARRANQUE_ESPERA_S (20), IA_BENCH (cliente de
 # scripts/ia-bench), y para modelos que no son VON: CONTRATO, PUERTO,
 # REQ_PATH, REQ_BODY (texto o @fichero), HEALTH_PATH y MODELO (nombre en el
 # ai.json del gateway del banco; por defecto el del dorado). Para un servidor
@@ -68,7 +78,7 @@ KLING_ROOT="${KLING_ROOT:-}"
 UMBRAL_CALIENTE_BYTES="${UMBRAL_CALIENTE_BYTES:-0}"
 REINTENTOS_CALIENTE="${REINTENTOS_CALIENTE:-2}"
 case $UMBRAL_CALIENTE_BYTES$REINTENTOS_CALIENTE in *[!0-9]*) echo "UMBRAL_CALIENTE_BYTES and REINTENTOS_CALIENTE must be integers" >&2; exit 1 ;; esac
-TODAS="restaurar primera tps memoria ociosa semillas carga"
+TODAS="restaurar primera tps memoria ociosa arranque semillas carga"
 [ "$COLD" = 1 ] && TODAS="frio $TODAS"
 SECCIONES="${SECCIONES:-$TODAS}"
 [ "$COLD" = 1 ] && case " $SECCIONES " in *" frio "*) ;; *) SECCIONES="frio $SECCIONES" ;; esac
@@ -442,10 +452,12 @@ elif pide tps; then omit tps "solo para el contrato openai de un modelo VON"
 else omit tps "no pedida en SECCIONES"; fi
 
 # ── gateway del banco ────────────────────────────────────────────────────────
-# gw_up <etq> <idle> <max_replicas>: un `kling ai serve` propio en un socket del
-# directorio temporal, con su id y su prefijo, para no tocar el gateway de nadie.
+# gw_up <etq> <idle> <max_replicas> [json extra]: un `kling ai serve` propio en un socket del
+# directorio temporal, con su id y su prefijo, para no tocar el gateway de nadie. El extra se
+# mezcla en el bloque del modelo (spare, pin: ronda 9).
 gw_up() {
-  local g="$D/gw-$1" bloque
+  local g="$D/gw-$1" bloque x="${4:-}"
+  [ -n "$x" ] || x='{}'
   mkdir -p "$g"
   if [ -n "${GW_BLOQUE_FILE:-}" ]; then
     bloque="$(jq -c --arg s "$SNAP" --arg i "$2" --argjson r "$3" '. + {snapshot:$s, idle:$i, max_replicas:$r}' "$GW_BLOQUE_FILE")" || return 1
@@ -457,7 +469,7 @@ gw_up() {
       '{kind:"http", snapshot:$s, port:$p, contract:$c, health:{path:$h}, idle:$i, max_replicas:$r, max_inflight:$mi}
        + (if $tf == "" then {} else {auth:{header:"Authorization", scheme:"Bearer", file:$tf}} end)')"
   fi
-  jq -n --arg n "$MODELO" --argjson b "$bloque" '{models: {($n): $b}}' > "$g/ai.json"
+  jq -n --arg n "$MODELO" --argjson b "$bloque" --argjson x "$x" '{models: {($n): ($b + $x)}}' > "$g/ai.json"
   "$KLING" ai serve -config "$g/ai.json" -socket "$g/ai.sock" -id "vb$$$1" -name-prefix "$PREFIX-g$1-" \
     -idle "${IDLE_S}s" -paused-mib 0 -max-inflight 1 -max-replicas "$3" > "$g/log" 2>&1 &
   echo $! > "$g/pid"
@@ -605,23 +617,74 @@ if pide ociosa; then
   [ "$GATEWAY" = 1 ] && [ -z "$IA_BENCH" ] && gwj='{"omitida":"sin ia-bench (IA_BENCH)"}'
   if [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ]; then
     if gw_up of freeze 1 && gw_up or remove 1; then
-      gw_pedir of 1 >/dev/null; gw_pedir or 1 >/dev/null
+      # «Con repuesto» (C9-08, Z4): idle remove con spare 1, una réplica restaurada y ya tocada
+      # esperando. Un daemon sin Z4 ignora spare y la fila sale igual que idle remove.
+      orden="of or"; repj='{"omitida":"el gateway con spare: 1 no arrancó"}'
+      gw_up os remove 1 '{"spare":1}' && orden="of or os"
+      for g in $orden; do gw_pedir "$g" 1 >/dev/null; done
       for i in $(seq "$CYCLES"); do
-        if [ $((i % 2)) = 1 ]; then orden="of or"; else orden="or of"; fi
         for g in $orden; do
-          dorm="$(dormidas "$PREFIX-g$g-")"
+          if [ "$g" = os ]; then
+            # El repuesto sigue vivo: no se espera a «todas dormidas», sino lo que tarda el segador.
+            sleep $((IDLE_S * 2 + 5)); dorm="$(jq -nc --argjson v "$(nuestras "$PREFIX-gos-" | wc -l)" '{vivas:$v}')"
+          else dorm="$(dormidas "$PREFIX-g$g-")"; fi
           gw_pedir "$g" 1 | jq -c --argjson d "$dorm" '{ms: .puntos[0].p50_ms, errores: .puntos[0].errores, dormidas: $d}' >> "$D/o-$g.jsonl"
         done
+        # A/B rotado: nadie va siempre primero.
+        orden="${orden#* } ${orden%% *}"
       done
-      gwj="$(jq -nc --argjson a "$(jsonl "$D/o-of.jsonl")" --argjson b "$(jsonl "$D/o-or.jsonl")" '{idle_freeze:$a, idle_remove:$b}')"
+      [ -s "$D/o-os.jsonl" ] && repj="$(jsonl "$D/o-os.jsonl")"
+      gwj="$(jq -nc --argjson a "$(jsonl "$D/o-of.jsonl")" --argjson b "$(jsonl "$D/o-or.jsonl")" --argjson c "$repj" \
+        '{idle_freeze:$a, idle_remove:$b, idle_remove_repuesto:$c}')"
       row "gateway, idle freeze, p50" "$(jq -r .ms "$D/o-of.jsonl" 2>/dev/null | stats) ms"
       row "gateway, idle remove, p50" "$(jq -r .ms "$D/o-or.jsonl" 2>/dev/null | stats) ms"
+      row "gateway, idle remove + spare 1, p50" "$(jq -r .ms "$D/o-os.jsonl" 2>/dev/null | stats) ms"
     else gwj='{"omitida":"el gateway del banco no arrancó (¿ai.json sin las claves de la ronda 8?)"}'; fi
-    gw_down of; gw_down or
+    gw_down of; gw_down or; gw_down os
   fi
   put ociosa "$(jq -nc --argjson d "$(arr ${dz[@]+"${dz[@]}"})" --argjson r "$(arr ${rs[@]+"${rs[@]}"})" --argjson g "$gwj" \
     '{descongelar_ms:$d, restaurar_ms:$r, gateway:$g}')"
 else omit ociosa "no pedida en SECCIONES"; fi
+
+# ── 6b. primera petición tras arrancar el gateway (C9-10) ─────────────────────
+# Con la caché fría (drop_caches) se arranca un gateway del banco y se pide: en cuanto contesta
+# (inmediata), tras ARRANQUE_ESPERA_S (espera: lo que gana precalentar al arrancar, Z4) y con pin: true
+# y un drop_caches DESPUÉS de la espera (anclado: el dorado sigue en RAM). Sin Z1/Z4 las tres salen frías.
+ARRANQUE_RUNS="${ARRANQUE_RUNS:-3}"
+ARRANQUE_ESPERA_S="${ARRANQUE_ESPERA_S:-20}"
+# disco_prefijo <prefijo>: bytes leídos del disco por los VMM de las máquinas con ese prefijo.
+disco_prefijo() {
+  "$KLING" top -json 2>/dev/null | jq -r --arg p "$1" '[.machines[]? | select(.name|startswith($p)) | .disk_read_bytes // 0] | if length == 0 then null else add end'
+}
+arranque_una() { # arranque_una <variante> <vuelta>
+  local etq="a$1$2" x='{}' t0 out
+  [ "$1" = anclado ] && x='{"pin":true}'
+  [ "$1" = anclado ] || soltar_cache
+  t0=$(now_ms)
+  gw_up "$etq" remove 1 "$x" || return 1
+  case $1 in espera|anclado) sleep "$ARRANQUE_ESPERA_S" ;; esac
+  [ "$1" = anclado ] && soltar_cache
+  out="$(gw_pedir "$etq" 1)" || { gw_down "$etq"; return 1; }
+  jq -c --arg v "$1" --argjson t "$(( $(now_ms) - t0 ))" --argjson dr "$(disco_prefijo "$PREFIX-g$etq-")" \
+    '{variante:$v, ms:.puntos[0].p50_ms, errores:.puntos[0].errores, desde_arranque_ms:$t, disco_leido_bytes:$dr}' <<<"$out" >> "$D/a-$1.jsonl"
+  gw_down "$etq"
+}
+if pide arranque && [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ] && [ "$DROP_OK" = 1 ]; then
+  step "6b. First request after starting the gateway with a cold page cache ($ARRANQUE_RUNS runs, wait ${ARRANQUE_ESPERA_S} s)"
+  orden="inmediata espera anclado"
+  for i in $(seq "$ARRANQUE_RUNS"); do
+    for v in $orden; do higiene; arranque_una "$v" "$i" || echo "  start $v $i FAILED" >&2; done
+    orden="${orden#* } ${orden%% *}"
+  done
+  for v in inmediata espera anclado; do
+    row "gateway start → first response, $v, p50" "$(jq -r .ms "$D/a-$v.jsonl" 2>/dev/null | stats) ms"
+  done
+  put arranque "$(jq -nc --argjson a "$(jsonl "$D/a-inmediata.jsonl")" --argjson b "$(jsonl "$D/a-espera.jsonl")" \
+    --argjson c "$(jsonl "$D/a-anclado.jsonl")" --argjson e "$ARRANQUE_ESPERA_S" '{inmediata:$a, espera:$b, anclado:$c, espera_s:$e}')"
+elif pide arranque && [ "$GATEWAY" != 1 ]; then omit arranque "GATEWAY=0"
+elif pide arranque && [ -z "$IA_BENCH" ]; then omit arranque "sin ia-bench (IA_BENCH)"
+elif pide arranque; then omit arranque "hace falta drop_caches: $DROP_MOTIVO"
+else omit arranque "no pedida en SECCIONES"; fi
 
 # ── 7. semillas ──────────────────────────────────────────────────────────────
 if pide semillas && [ "$VON" = 1 ]; then
