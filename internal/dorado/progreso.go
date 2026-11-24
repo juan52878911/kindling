@@ -110,14 +110,15 @@ type vigia struct {
 	fase string
 
 	// Estado de la muestra.
-	conStats  bool
-	base      int64 // MiB de la primera muestra
-	ultMem    int64
-	t0        time.Time
-	refMem    int64
-	refCPU    float64
-	refT      time.Time
-	ultimoLog time.Time
+	conStats   bool
+	base       int64 // MiB de la primera muestra
+	ultMem     int64
+	t0         time.Time
+	refMem     int64
+	refCPU     float64
+	refT       time.Time
+	ultimoLog  time.Time
+	sinConsola bool
 }
 
 // vigilar arranca el vigilante si el cliente sabe dar estadísticas o logs;
@@ -285,11 +286,13 @@ func (v *vigia) logServidor(ctx context.Context) string {
 			return string(b)
 		}
 	}
-	if lc, ok := v.c.(lectorConsola); ok {
+	if lc, ok := v.c.(lectorConsola); ok && !v.sinConsola {
 		out, _, err := lc.LogsTail(lctx, v.ref, 200)
 		if err == nil {
 			return out
 		}
+		// Un daemon que no la sirve no la servirá en la vuelta siguiente.
+		v.sinConsola = api.IsUnsupported(err)
 	}
 	return ""
 }
