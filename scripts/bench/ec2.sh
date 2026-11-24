@@ -23,7 +23,16 @@
 # pasar de PRESUPUESTO_USD; si pasa, se niega antes de llamar a aws. Cada lanzamiento apunta su peor
 # caso en el libro (cota superior: lo real es menor). Recetas:
 #   P1 anidado + P2:  BINS_DIR=… scripts/bench/ec2.sh --dry-run ia     (c8i.4xlarge)
-#   P1 metal:         EC2_TYPE=c7i.metal-24xl IA_PRUEBAS=p1 TOPE_MIN=90 BINS_DIR=… scripts/bench/ec2.sh ia
+#   (P1 metal, c7i.metal-24xl: la cuenta no puede; 16 vCPU bajo demanda y < 48 spot, ver EC2_MAX_VCPU)
+#   Ronda 9 (Z7, analisis/ronda9-carga/plan-r9.md):
+#     línea base con el banco arreglado: BINS_DIR=… scripts/bench/ec2.sh ia      (p1 p2; journal, desglose,
+#                       service.log y calientes de verdad: ia.py rechaza la corrida si falta algo)
+#     disco rápido:     EC2_DISCO_MIBS=1000 EC2_DISCO_IOPS=4000 IA_PRUEBAS=p1 BINS_DIR=… scripts/bench/ec2.sh ia
+#     NVMe local:       EC2_TYPE=<tipo 8i con disco «d» que admita la anidada> EC2_PRECIO_USD_H=… EC2_NVME=1 \
+#                       IA_PRUEBAS=p1 BINS_DIR=… scripts/bench/ec2.sh ia
+#     spikes:           IA_PRUEBAS="s-huge s-volcado s-pmem" IA_MODELOS=von-q4=qwen2.5-1.5b-instruct:q4_k_m \
+#                       BINS_DIR=… scripts/bench/ec2.sh ia      (prototypes/r9-*; s-pmem compila un kernel de
+#                       prueba solo si Firecracker admite virtio-pmem: PLAZO_SPIKE_MIN=45 para él)
 #   P3:               CHISPA_DIR=… (imagen.tar, peticion.json, warmup.jsonl[, directo.sh]) añade p3
 #   P3 construida en la instancia (remoto/chispa-p3.sh: clona chispa, imagen ORT, e5, dorados):
 #                     IA_PRUEBAS=p3 EC2_DISCO_GB=60 TOPE_MIN=110 BINS_DIR=… scripts/bench/ec2.sh ia
@@ -33,6 +42,10 @@
 #   EC2_CPU_OPTS    opciones de CPU             (NestedVirtualization=enabled; vacío o .metal: ninguna)
 #   EC2_AMI         AMI; por defecto Debian 12 vía SSM
 #   EC2_DISCO_GB    disco raíz (80; ia: 40)     TOPE_MIN   tope duro en minutos (300; ia: 150)
+#   EC2_DISCO_MIBS  caudal del gp3 en MiB/s (125..1000; por encima de 125 se paga aparte)
+#   EC2_DISCO_IOPS  IOPS del gp3 (3000..16000; el caudal no puede pasar de IOPS/4)
+#   EC2_NVME        1 = la raíz del daemon del banco en el NVMe local de la instancia (tipo «d»)
+#   EC2_MAX_VCPU    vCPU máximos del tipo (16: el cupo bajo demanda de la cuenta; .metal se niega siempre)
 #   EC2_SPOT        1 = spot (ia: 1; resto: 0)  EC2_SPOT_FACTOR  precio máximo / precio de tabla (1.5)
 #   EC2_PRECIO_USD_H  precio por hora si el tipo no está en la tabla (obligatorio en ia)
 #   PRESUPUESTO_USD tope de gasto total (10)    GASTO_LIBRO  libro de gasto (~/.cache/kindling-bench/gasto.tsv)
@@ -42,7 +55,8 @@
 #   CHISPA_DIR      material de P3 (solo ia)
 #   SALIDA          dónde se copian los resultados (./bench-out)
 #   RUNS CONC SERIE EXECS POOL   parámetros del banco (ver README.md)
-#   ia: IA_PRUEBAS ("p1 p2", + p3 con CHISPA_DIR), IA_MODELOS, REPLICAS, CYCLES, CLIENTES, CARGA_S;
+#   ia: IA_PRUEBAS ("p1 p2", + p3 con CHISPA_DIR; s-huge s-pmem s-volcado), IA_MODELOS, REPLICAS, CYCLES,
+#       CLIENTES, CARGA_S, PLAZO_SPIKE_MIN (25), ARRANQUE_RUNS, ARRANQUE_ESPERA_S, UMBRAL_CALIENTE_BYTES;
 #       p3 sin CHISPA_DIR: PLAZO_P3_PREP_MIN (30), CHISPA_COMMIT, P3_VARIANTES, P3_CPUS, P3_MEM, P3_CARGA,
 #       P3_SOSTENIDA_S (ver remoto/chispa-p3.sh)
 #   Barrido: PARALELO="2 4 8 16" (KLING_MAX_PARALLEL_BOOT), JAILER="0 1", CUOTAS_LISTA="- 200:50"
@@ -75,7 +89,7 @@ else
 fi
 # Solo las familias 8i (no metal) admiten virtualización anidada; un .metal no la necesita y AWS
 # rechaza la opción en los tipos que no la tienen (g4dn, c7i…).
-case $TIPO in *.metal*) CPU_DEF="" ;; c8i.*|m8i.*|r8i.*) CPU_DEF=NestedVirtualization=enabled ;; *) CPU_DEF="" ;; esac
+case $TIPO in *.metal*) CPU_DEF="" ;; c8i.*|m8i.*|r8i.*|c8id.*|m8id.*|r8id.*) CPU_DEF=NestedVirtualization=enabled ;; *) CPU_DEF="" ;; esac
 CPU_OPTS=${EC2_CPU_OPTS-$CPU_DEF}
 SALIDA=${SALIDA:-./bench-out}
 KB=/opt/kbench
@@ -85,12 +99,41 @@ FASE_ETQ=${FASES[*]}; FASE_ETQ=${FASE_ETQ// /+}
 case $TOPE in ''|*[!0-9]*) echo "TOPE_MIN debe ser un entero" >&2; exit 2 ;; esac
 [ "$TOPE" -ge 10 ] && [ "$TOPE" -le 720 ] || { echo "TOPE_MIN fuera de 10..720" >&2; exit 2; }
 case $DISCO in ''|*[!0-9]*) echo "EC2_DISCO_GB debe ser un entero" >&2; exit 2 ;; esac
+# Caudal e IOPS del gp3 (fila de disco rápido, ronda 9). Vacíos = los de serie (125 MiB/s, 3000 IOPS).
+DISCO_MIBS=${EC2_DISCO_MIBS:-}; DISCO_IOPS=${EC2_DISCO_IOPS:-}
+case $DISCO_MIBS$DISCO_IOPS in *[!0-9]*) echo "EC2_DISCO_MIBS y EC2_DISCO_IOPS deben ser enteros" >&2; exit 2 ;; esac
+if [ -n "$DISCO_MIBS" ]; then
+  [ "$DISCO_MIBS" -ge 125 ] && [ "$DISCO_MIBS" -le 1000 ] || { echo "EC2_DISCO_MIBS fuera de 125..1000" >&2; exit 2; }
+  [ -n "$DISCO_IOPS" ] || DISCO_IOPS=$(( DISCO_MIBS * 4 > 3000 ? DISCO_MIBS * 4 : 3000 ))
+fi
+if [ -n "$DISCO_IOPS" ]; then
+  [ "$DISCO_IOPS" -ge 3000 ] && [ "$DISCO_IOPS" -le 16000 ] || { echo "EC2_DISCO_IOPS fuera de 3000..16000" >&2; exit 2; }
+  [ -z "$DISCO_MIBS" ] || [ $(( DISCO_MIBS * 4 )) -le "$DISCO_IOPS" ] || { echo "gp3: el caudal no puede pasar de IOPS/4 (sube EC2_DISCO_IOPS)" >&2; exit 2; }
+fi
+EBS="VolumeSize=$DISCO,VolumeType=gp3,DeleteOnTermination=true${DISCO_IOPS:+,Iops=$DISCO_IOPS}${DISCO_MIBS:+,Throughput=$DISCO_MIBS}"
+DISCO_DESC="gp3 ${DISCO} GB ${DISCO_MIBS:-125} MiB/s ${DISCO_IOPS:-3000} IOPS"
+NVME=${EC2_NVME:-0}
+case $NVME in 0|1) ;; *) echo "EC2_NVME es 0 o 1" >&2; exit 2 ;; esac
+[ "$NVME" = 1 ] && DISCO_DESC="nvme local (raíz del sistema en $DISCO_DESC)"
+export EC2_DISCO_DESC=$DISCO_DESC   # se reenvía a ia.sh (corrida.json)
+# Cupo de la cuenta: 16 vCPU bajo demanda y menos de 48 spot. Nada de .metal.
+MAX_VCPU=${EC2_MAX_VCPU:-16}
+vcpus_de() { # vCPU de un tipo de las familias de x86 por su tamaño (vacío = no se sabe)
+  case ${1#*.} in large) echo 2 ;; xlarge) echo 4 ;; 2xlarge) echo 8 ;; 4xlarge) echo 16 ;; 8xlarge) echo 32 ;;
+    12xlarge) echo 48 ;; 16xlarge) echo 64 ;; 24xlarge) echo 96 ;; 32xlarge) echo 128 ;; 48xlarge) echo 192 ;; esac
+}
+case $TIPO in *.metal*) [ -n "$LIMPIAR" ] || [ "$LIMPIAR_TODO" = 1 ] || { echo "se niega: $TIPO es .metal (fuera del cupo de la cuenta)" >&2; exit 2; } ;; esac
+NV=$(vcpus_de "$TIPO")
+if [ -z "$LIMPIAR" ] && [ "$LIMPIAR_TODO" = 0 ] && { [ -z "$NV" ] || [ "$NV" -gt "$MAX_VCPU" ]; }; then
+  echo "se niega: $TIPO tiene ${NV:-?} vCPU y el cupo es $MAX_VCPU (EC2_MAX_VCPU)" >&2; exit 2
+fi
 
 # Pruebas de la fase ia y su plazo (min) dentro de remoto/ia.sh; la preparación se cuenta aparte.
 IA_PRUEBAS=${IA_PRUEBAS:-p1 p2${CHISPA_DIR:+ p3}}
 PLAZO_P1_MIN=${PLAZO_P1_MIN:-60}; PLAZO_P2_MIN=${PLAZO_P2_MIN:-45}; PLAZO_P3_MIN=${PLAZO_P3_MIN:-45}
 # P3 sin material subido construye chispa en la instancia: su preparación lleva plazo propio.
 PLAZO_P3_PREP_MIN=${PLAZO_P3_PREP_MIN:-30}
+PLAZO_SPIKE_MIN=${PLAZO_SPIKE_MIN:-25}
 PREPARAR_MIN=20
 
 CLAVE=$ID_BANCO; GRUPO=$ID_BANCO
@@ -138,16 +181,20 @@ if [ "$IA" = 1 ]; then
   MIN_ESP=$PREPARAR_MIN
   for p in $IA_PRUEBAS; do
     case $p in p1) MIN_ESP=$((MIN_ESP + PLAZO_P1_MIN)) ;; p2) MIN_ESP=$((MIN_ESP + PLAZO_P2_MIN)) ;;
-      p3) MIN_ESP=$((MIN_ESP + PLAZO_P3_MIN)); [ -n "${CHISPA_DIR:-}" ] || MIN_ESP=$((MIN_ESP + PLAZO_P3_PREP_MIN)) ;; *) echo "prueba desconocida en IA_PRUEBAS: $p" >&2; exit 2 ;; esac
+      p3) MIN_ESP=$((MIN_ESP + PLAZO_P3_MIN)); [ -n "${CHISPA_DIR:-}" ] || MIN_ESP=$((MIN_ESP + PLAZO_P3_PREP_MIN)) ;;
+      s-huge|s-pmem|s-volcado) MIN_ESP=$((MIN_ESP + PLAZO_SPIKE_MIN)) ;;
+      *) echo "prueba desconocida en IA_PRUEBAS: $p" >&2; exit 2 ;; esac
   done
   [ "$MIN_ESP" -le "$TOPE" ] || MIN_ESP=$TOPE
 fi
 if [ -n "$PRECIO" ]; then
-  num "$PRECIO" && num "$FACTOR" && num "$PRESUPUESTO" || { echo "precio, factor o presupuesto no numéricos" >&2; exit 2; }
+  if ! { num "$PRECIO" && num "$FACTOR" && num "$PRESUPUESTO"; }; then echo "precio, factor o presupuesto no numéricos" >&2; exit 2; fi
   if [ "$SPOT" = 1 ]; then MAXP=$(awk -v p="$PRECIO" -v f="$FACTOR" 'BEGIN {printf "%.4f", p*f}'); else MAXP=$PRECIO; fi
   # Disco gp3 a 0,08 USD/GB-mes (730 h) e IPv4 pública a 0,005 USD/h.
-  PEOR=$(awk -v p="$MAXP" -v m="$TOPE" -v d="$DISCO" 'BEGIN {h=m/60; printf "%.2f", p*h + d*0.08/730*h + 0.005*h}')
-  ESPERADO=$(awk -v p="$PRECIO" -v m="$MIN_ESP" -v d="$DISCO" 'BEGIN {h=m/60; printf "%.2f", p*h + d*0.08/730*h + 0.005*h}')
+  # Caudal por encima de 125 MiB/s a 0,04 USD/(MiB/s)-mes e IOPS por encima de 3000 a 0,005 USD/IOPS-mes.
+  EXTRA_MES=$(awk -v t="${DISCO_MIBS:-125}" -v i="${DISCO_IOPS:-3000}" 'BEGIN {printf "%.4f", (t-125)*0.04 + (i-3000)*0.005}')
+  PEOR=$(awk -v p="$MAXP" -v m="$TOPE" -v d="$DISCO" -v x="$EXTRA_MES" 'BEGIN {h=m/60; printf "%.2f", p*h + (d*0.08+x)/730*h + 0.005*h}')
+  ESPERADO=$(awk -v p="$PRECIO" -v m="$MIN_ESP" -v d="$DISCO" -v x="$EXTRA_MES" 'BEGIN {h=m/60; printf "%.2f", p*h + (d*0.08+x)/730*h + 0.005*h}')
 elif [ "$IA" = 1 ]; then
   echo "no hay precio de $TIPO en la tabla (spot=$SPOT): define EC2_PRECIO_USD_H" >&2; exit 2
 fi
@@ -160,7 +207,7 @@ coste() {
   local modo="bajo demanda"; [ "$SPOT" = 1 ] && modo="spot de un solo uso, precio máximo $MAXP USD/h"
   cat <<COSTE
 Coste estimado ($TIPO, $modo):
-  esperado   $ESPERADO USD   ($PRECIO USD/h × $MIN_ESP min + disco gp3 ${DISCO} GB + IPv4)
+  esperado   $ESPERADO USD   ($PRECIO USD/h × $MIN_ESP min + disco $DISCO_DESC + IPv4)
   peor caso  $PEOR USD   (precio máximo × tope de $TOPE min; la instancia se apaga y termina sola)
   libro      $GASTADO USD ya apuntados en $LIBRO; presupuesto $PRESUPUESTO USD
 COSTE
@@ -187,7 +234,7 @@ plan() {
 Crearía (región $REGION):
   1. par de claves        $CLAVE   (la .pem queda en un directorio temporal 0700)
   2. grupo de seguridad   $GRUPO   (SSH/22 solo desde la IP pública de quien lanza)
-  3. instancia            $TIPO, disco gp3 ${DISCO} GB (se borra con ella), cpu-options '$CPU_OPTS', spot=$SPOT
+  3. instancia            $TIPO ($NV vCPU), disco $DISCO_DESC (se borra con ella), cpu-options '$CPU_OPTS', spot=$SPOT
        InstanceInitiatedShutdownBehavior=terminate
        user-data: shutdown -h +$TOPE   (tope duro de $((TOPE / 60)) h $((TOPE % 60)) min)
        etiquetas: kbench=$ID_BANCO kbench-fase=$FASE_ETQ (instancia, disco, clave y grupo)
@@ -291,7 +338,7 @@ lanzar() {
   fi
   INST=$(aws_ ec2 run-instances --image-id "$AMI" --instance-type "$TIPO" --key-name "$CLAVE" --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate ${CPU[@]+"${CPU[@]}"} ${MERCADO[@]+"${MERCADO[@]}"} --user-data "file://$TMP/ud.sh" \
-    --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=$DISCO,VolumeType=gp3,DeleteOnTermination=true}" \
+    --block-device-mappings "DeviceName=/dev/xvda,Ebs={$EBS}" \
     "${TAGS[@]}" --query 'Instances[0].InstanceId' --output text) || exit 1
 }
 
@@ -314,7 +361,7 @@ if [ "$DRY" = 1 ]; then
   echo "+ apunta $PEOR USD en $LIBRO"
   echo "+ ssh admin@<ip>: sube scripts y bins a $KB"
   if [ "$IA" = 1 ]; then
-    echo "+ ssh admin@<ip>: sudo bash $KB/remoto/ia.sh preparar"
+    echo "+ ssh admin@<ip>: sudo env KB_NVME=$NVME bash $KB/remoto/ia.sh preparar"
     echo "+ ssh admin@<ip>: sudo KB=$KB IA_PRUEBAS='$IA_PRUEBAS' bash $KB/remoto/fases.sh ia"
   else
     echo "+ ssh admin@<ip>: sudo bash $KB/remoto/setup.sh"
@@ -368,7 +415,8 @@ sube() { # sube <fichero local> <ruta remota>
 }
 
 R mkdir -p "$KB/sube" "$KB/res" "$KB/run"
-tar czf "$TMP/sube.tgz" -C "$AQUI" bench.py bench_k8s.py fases.py ia.py osbk8s remoto -C "$AQUI/.." 96-von-bench.sh || exit 1
+tar czf "$TMP/sube.tgz" -C "$AQUI" bench.py bench_k8s.py fases.py ia.py osbk8s remoto -C "$AQUI/.." 96-von-bench.sh \
+  -C "$AQUI/../.." prototypes/r9-hugepages prototypes/r9-pmem-dax prototypes/r9-volcado-tmpfs || exit 1
 sube "$TMP/sube.tgz" /tmp/sube.tgz || exit 1
 tar czf "$TMP/bins.tgz" -C "$(dirname "$BINS_DIR")" "$(basename "$BINS_DIR")" || exit 1
 sube "$TMP/bins.tgz" /tmp/bins.tgz || exit 1
@@ -379,7 +427,7 @@ if [ "$IA" = 1 ]; then
     tar czf "$TMP/ch.tgz" -C "$(dirname "$CHISPA_DIR")" "$(basename "$CHISPA_DIR")" || exit 1
     sube "$TMP/ch.tgz" /tmp/chispa.tgz && R sh -c "mkdir -p $KB/sube/chispa && tar xzf /tmp/chispa.tgz -C $KB/sube/chispa --strip-components=1" || exit 1
   fi
-  R bash "$KB/remoto/ia.sh" preparar || exit 1
+  R env KB_NVME="$NVME" bash "$KB/remoto/ia.sh" preparar || exit 1
 else
   tar czf "$TMP/sdk.tgz" -C "$(dirname "$SDK_DIR")" "$(basename "$SDK_DIR")" || exit 1
   sube "$TMP/sdk.tgz" /tmp/sdk.tgz || exit 1
@@ -394,7 +442,8 @@ fi
 PASO="KB=$KB"
 for v in RUNS CONC SERIE EXECS POOL ESPERA_POOL PARALELO JAILER CUOTAS_LISTA \
          IA_PRUEBAS IA_MODELOS REPLICAS CYCLES CLIENTES CARGA_S PLAZO_P1_MIN PLAZO_P2_MIN PLAZO_P3_MIN \
-         PLAZO_P3_PREP_MIN CHISPA_COMMIT P3_VARIANTES P3_CPUS P3_MEM P3_CARGA P3_SOSTENIDA_S; do
+         PLAZO_P3_PREP_MIN CHISPA_COMMIT P3_VARIANTES P3_CPUS P3_MEM P3_CARGA P3_SOSTENIDA_S \
+         PLAZO_SPIKE_MIN ARRANQUE_RUNS ARRANQUE_ESPERA_S UMBRAL_CALIENTE_BYTES REINTENTOS_CALIENTE VIGILAR_S EC2_DISCO_DESC; do
   [ -n "${!v:-}" ] && PASO="$PASO $v='${!v}'"
 done
 rc=0
@@ -404,6 +453,6 @@ done
 mkdir -p "$SALIDA"
 "${SSH[@]}" "admin@$IP" "sudo tar czf - -C $KB res" | tar xzf - -C "$SALIDA" && echo "== resultados en $SALIDA/res"
 if [ "$IA" = 1 ] && command -v python3 >/dev/null; then
-  python3 -I "$AQUI/ia.py" "$SALIDA"/res/ia-*.json
+  python3 -I "$AQUI/ia.py" "$SALIDA"/res/ia-*.json || echo "ia.py rechaza la corrida (ver RECHAZO arriba)" >&2
 fi
 exit $rc
