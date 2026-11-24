@@ -240,3 +240,27 @@ func mmdsJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+// secrets[].file relativo en un ai.json vale: LoadConfig lo resuelve contra
+// el directorio del fichero antes de validar, y validateSecrets ve la ruta ya
+// absoluta. Sin fichero del que colgarla (ParseConfig) sigue rechazándose.
+func TestSecretoRelativoSeResuelveContraElRegistro(t *testing.T) {
+	dir := t.TempDir()
+	ficheroSecreto(t, dir, "lic.key", "lic-secreta", 0o600)
+	doc := `{"models":{"acme":{"kind":"http","contract":"chispa-decide","snapshot":"chispa-acme","port":8090,
+		"idle":"remove","secrets":[{"name":"licencia","deliver":"mmds","file":"lic.key"}]}},"tasks":{}}`
+	p := filepath.Join(dir, "ai.json")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(p)
+	if err != nil {
+		t.Fatalf("un secrets[].file relativo al ai.json no carga: %v", err)
+	}
+	if got := c.Models["acme"].Secrets[0].File; got != filepath.Join(dir, "lic.key") {
+		t.Errorf("secrets[0].file = %q, quería la ruta resuelta contra el registro", got)
+	}
+	if _, err := ParseConfig(strings.NewReader(doc)); err == nil || !strings.Contains(err.Error(), "relative") {
+		t.Errorf("sin fichero, un secrets[].file relativo: err = %v, quería el rechazo por relativo", err)
+	}
+}
