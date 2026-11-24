@@ -39,6 +39,7 @@ func TestBackendAtajos(t *testing.T) {
 		Name: "q", Snapshot: "von-qwen15", Port: 8000, Contract: ContractOpenAI,
 		Routes: []Route{{"POST", "/v1/chat/completions"}, {"POST", "/v1/completions"}},
 		Health: Health{Path: "/health"}, MaxReplicas: 2, Idle: IdleRemove,
+		ReplicaAuth: ReplicaAuthNetwork, // ronda 9: lo de hoy, deducido (sin auth)
 	}
 	if !reflect.DeepEqual(q, want) {
 		t.Errorf("von expands to\n%+v\nwant\n%+v", q, want)

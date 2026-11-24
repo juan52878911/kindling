@@ -154,6 +154,8 @@ type catalogo struct {
 	lista  []*Backend
 	byName map[string]*Backend
 	bySnap map[string]*Backend
+	// byAlias son los bloques de cada alias (alias.go), en orden de nombre.
+	byAlias map[string][]*Backend
 }
 
 // catalogo devuelve el catálogo del registro efectivo.
@@ -182,6 +184,7 @@ func (g *Gateway) catalogo() *catalogo {
 			c.bySnap[b.Snapshot] = b
 		}
 	}
+	c.indexarAlias()
 	p.catCfg, p.cat = cfg, c
 	return c
 }
@@ -428,12 +431,19 @@ func (g *Gateway) reenviar(ctx context.Context, b *Backend, s *salida) (*http.Re
 // llevan topes, semilla y nombre del modelo, y aquí se los saltarían.
 func (g *Gateway) handleModelo(w http.ResponseWriter, r *http.Request) {
 	name, ruta := r.PathValue("modelo"), "/"+r.PathValue("ruta")
-	b := g.catalogo().byName[name]
+	inquilino := scheduler.TenantFrom(r.Context()).Name()
+	b, concretos, err := g.catalogo().resolver(name, inquilino)
+	if errors.Is(err, errAliasPrincipal) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("%q is an alias resolved by the tenant token; with the main token name the model: %s", name, strings.Join(concretos, ", ")))
+		return
+	}
 	if b == nil || (b.Contract != ContractChispaDecide && b.Contract != ContractRaw) {
 		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("model %q has no routes under /v1/m (see GET /v1/models)", name))
 		return
 	}
-	if !permitido(b, scheduler.TenantFrom(r.Context()).Name()) {
+	// Desde aquí, el modelo concreto: métricas y log no abren series por alias.
+	name = b.Name
+	if !permitido(b, inquilino) {
 		writeError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("this token cannot use model %q", name))
 		return
 	}
@@ -454,7 +464,7 @@ func (g *Gateway) handleModelo(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 {
 		s.cuerpo = &cuerpoUnaVez{r: r.Body}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), g.opts.ProxyTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), g.plazoDe(b))
 	defer cancel()
 	resp, soltar, err := g.reenviar(ctx, b, s)
 	if err != nil {

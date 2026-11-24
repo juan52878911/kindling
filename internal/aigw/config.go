@@ -491,6 +491,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("tenant %d: needs a valid name (not \"default\") and a token of at least 16 characters", i))
 		}
 	}
+	errs = append(errs, c.validateAliases(tenants)...)
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
