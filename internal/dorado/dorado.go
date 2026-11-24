@@ -138,6 +138,14 @@ type Result struct {
 
 // Plazos por defecto.
 const (
+	// ServiceExitedMark es el principio de la línea que el entrypoint de las
+	// imágenes de kindling escribe en /var/log/service.log cada vez que el
+	// servicio muere y lo relanza (scripts/81-base-image.sh). Semilla de la
+	// ronda 9 (C9-13): es contrato entre el constructor de imágenes (Z2, que
+	// no puede cambiar el texto) y el fabricante (Z3, que cuenta estas líneas
+	// para distinguir "cargando" de "muere en bucle").
+	ServiceExitedMark = "service exited with "
+
 	DefaultWait         = 5 * time.Minute
 	DefaultProbeTimeout = 5 * time.Second
 	// warmRetry es la pausa entre reintentos de una petición de calentamiento

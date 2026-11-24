@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Este fichero es la SEMILLA de la ronda 8 (analisis/ronda8-ia/plan.md §2):
@@ -76,6 +78,32 @@ type PorServicio struct {
 	// gateway de IA suelta ahí sus conexiones y su estado por réplica. Se
 	// llama una vez por instancia y con g.mu suelto.
 	OnForget func(service, addr string)
+
+	// Ganchos de la ronda 9 (analisis/ronda9-carga/plan-r9.md). Semilla: están
+	// declarados y nadie los llama todavía; los llama y los rellena Z4. El
+	// contrato común sigue valiendo: nil = lo de hoy.
+
+	// AfterRestore, si está, se llama con cada instancia recién RESTAURADA de
+	// un dorado (no al reanudar, descongelar ni adoptar), cuando su puerto ya
+	// acepta conexiones y ANTES de la sonda ReadyFor y de entregarla. También
+	// para las del fondo y las de repuesto. El gateway de IA entrega ahí los
+	// secretos por réplica (MMDS + ganchos). Un error suelta la instancia como
+	// una que no llegó a escuchar, y su texto no puede llevar el secreto. A
+	// diferencia de los demás ganchos puede tardar: se llama sin g.mu y con el
+	// plazo de ctx.
+	AfterRestore func(ctx context.Context, service string, mc *api.Machine) error
+	// SpareFor da cuántas instancias de REPUESTO mantiene un servicio (C9-08):
+	// restauradas, pasadas por AfterRestore y por WarmSpare, sin petición
+	// asignada. 0 = ninguna. Un repuesto no cuenta como instancia ocupada ni
+	// para MaxInflight; sí para la admisión de memoria. Al reclamarlo se
+	// repone en segundo plano; al drenar o cerrar se borra (nunca se congela).
+	SpareFor func(service string) int
+	// WarmSpare, si está, se llama con cada repuesto antes de darlo por listo
+	// (después de AfterRestore y de la sonda): el gateway de IA manda ahí la
+	// petición de calentamiento del contrato para que la réplica toque sus
+	// páginas fuera del camino de la petición. Un error descarta el repuesto.
+	// Puede tardar, como AfterRestore.
+	WarmSpare func(ctx context.Context, service, addr string) error
 }
 
 // adoptReadyTimeout es el plazo de la sonda de una máquina ADOPTADA (ya

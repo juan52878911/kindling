@@ -121,6 +121,7 @@ POST /sandboxes/claim  ←  POST /sandboxes/claim {"match":{"x":"y"}}  →  400 
 POST /sandboxes/{ref}/fork  ←  POST /sandboxes/nadie/fork {}  →  404 not_found
 POST /sandboxes/{ref}/renew  ←  POST /sandboxes/nadie/renew  →  404 not_found
 POST /shares/uploads  ←  POST /shares/uploads  →  201 -
+POST /snapshots/{name}/warm  ←  POST /snapshots/nada/warm {}  →  404 not_found
 POST /volumes  ←  POST /volumes {  →  400 bad_request
 POST /volumes  ←  POST /volumes {"name":"Malo"}  →  400 bad_request
 POST /volumes/{name}/clone  ←  POST /volumes/nada/clone {"to":"otro"}  →  404 not_found

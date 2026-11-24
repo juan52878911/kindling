@@ -1099,6 +1099,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `PUT /snapshots/{name}/credentials` | 200 | `413`/`400` cuerpo (256 KiB); `snapshotStatus` |
 | `GET /snapshots/{name}/pool` | 200 | `snapshotStatus` |
 | `PUT /snapshots/{name}/pool` | 200 | `413`/`400` cuerpo; `snapshotStatus` (`400` tamaño fuera de rango) |
+| `POST /snapshots/{name}/warm` | 200 | `snapshotStatus`; `501` si el daemon no sabe precalentar o anclar (hoy siempre: la ruta está declarada, sin implementar) |
 | `DELETE /snapshots/{name}` | 204 | `snapshotStatus` |
 | `GET /store/{ns}` | 200 | `storeStatus` |
 | `GET /store/{ns}/{key}` | 200 | `404`; `storeStatus` |

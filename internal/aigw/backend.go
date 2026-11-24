@@ -124,7 +124,67 @@ type Backend struct {
 	// modelo; vacío = todos. El token principal siempre puede. Fuera de la
 	// lista, Z2 responde 403.
 	Tenants []string
+
+	// Campos de la ronda 9 (plan-r9.md). Semilla: expandBackend los copia tal
+	// cual; quien los valida y quien los lee va dicho en cada uno.
+
+	// Spare son las réplicas de repuesto del modelo (C9-08): restauradas del
+	// dorado y ya TOCADAS (con la petición de calentamiento del contrato)
+	// fuera del camino de la petición. 0 = ninguna, lo de hoy. Solo con
+	// Snapshot. Valida Z5 (0..MaxReplicas); lo lee Z4 vía scheduler.SpareFor.
+	// Un repuesto no cuenta como réplica ocupada y se repone al reclamarlo.
+	Spare int
+	// Pin pide al daemon que ancle el mem.file del dorado en RAM (C9-10,
+	// api.WarmSnapshotRequest.Pin). Solo con Snapshot. Lo lee Z4 al arrancar y
+	// en cada Reload; con o sin Pin, Z4 precalienta la caché de todos los
+	// dorados de ai.json.
+	Pin bool
+	// ReplicaAuth dice quién autentica las peticiones que llegan a la réplica
+	// (pendiente 1 de la ronda 8). Es una de las constantes ReplicaAuth*; Z5
+	// lo valida y, vacío, lo resuelve: ReplicaAuthKey si el bloque lleva Auth,
+	// ReplicaAuthNetwork si no (lo de hoy en los dos casos).
+	ReplicaAuth string
+	// Secrets son los secretos del backend ya validados por Z4
+	// (validateSecrets), con File absoluto. Los entrega Z4; Z5 no los toca.
+	Secrets []SecretConfig
+	// Alias es el nombre común bajo el que se publican los bloques de varios
+	// inquilinos (pendiente 4): POST /v1/m/<alias>/… resuelve al bloque cuyo
+	// Tenants contiene al inquilino del token. Valida y resuelve Z5; lo
+	// escribe Z3 con `kling ai model deploy -alias`.
+	Alias string
+	// Shared exime a un backend chispa-decide de la regla "exactamente un
+	// inquilino" cuando ai.json declara inquilinos (pendiente 4). Valida Z5.
+	Shared bool
+	// LoadWait es el plazo de carga del modelo al fabricar o rehacer su
+	// dorado (pendiente 3); 0 = automático por tamaño. Z5 valida el texto; lo
+	// leen `kling ai prime` y `kling ai up` (Z3). El gateway no lo usa.
+	LoadWait time.Duration
+	// CAFile es el PEM (ruta absoluta tras cargar) con el que el gateway
+	// verifica el TLS de Upstream (pendiente 5). Vacío = raíces del sistema.
+	// Valida y usa Z5.
+	CAFile string
 }
+
+// Modos de Backend.ReplicaAuth: quién es la frontera de una réplica.
+//
+// Decisión de la ronda 9: los dos modos son soportados y ninguno se retira.
+// La réplica escucha en un puerto al que en Linux llega CUALQUIER proceso
+// local del host, de cualquier uid (ni otra microVM ni la LAN), y en macOS es
+// un reenvío en 127.0.0.1. Por eso:
+//
+//   - ReplicaAuthNetwork vale cuando el host es dedicado a kindling (nadie
+//     más ejecuta código en él) y en desarrollo;
+//   - ReplicaAuthKey es el modo para hosts compartidos o multiusuario, para
+//     macOS fuera de desarrollo y siempre que el backend sepa autenticar.
+const (
+	// ReplicaAuthNetwork: la frontera es el gateway y la red del host. La
+	// réplica corre sin claves de entrada; se puede calentar y sus claves no
+	// se rotan porque no hay.
+	ReplicaAuthNetwork = "network"
+	// ReplicaAuthKey: la réplica exige una clave de entrada (su verificador va
+	// en el dorado) y el gateway la añade con Auth. Exige el bloque Auth.
+	ReplicaAuthKey = "key"
+)
 
 // Route es una ruta reenviable: método HTTP en mayúsculas y ruta absoluta sin
 // ".." (Z1 lo valida). En ai.json se escribe como una cadena "POST /v1/decide".
@@ -145,6 +205,11 @@ type Health struct {
 	// Every es el periodo del sondeo de un Upstream (Z2: tres fallos
 	// seguidos abren el circuito). Con Snapshot no hay sondeo periódico.
 	Every time.Duration
+	// Grace es cuánto se tolera, tras cargar o recargar, que un Upstream aún
+	// no conteste a la sonda (un vLLM tarda minutos en cargar): durante la
+	// gracia el gateway responde 503 con Retry-After en vez de 502 y no abre
+	// el circuito. 0 = sin gracia, lo de hoy. Semilla de la ronda 9; Z5.
+	Grace time.Duration
 }
 
 // HealthConfig es Health tal como se escribe en ai.json, con las duraciones
@@ -154,6 +219,9 @@ type HealthConfig struct {
 	Expect  int    `json:"expect,omitempty"`
 	Timeout string `json:"timeout,omitempty"`
 	Every   string `json:"every,omitempty"`
+	// Grace: ver Health.Grace. Semilla de la ronda 9: se lee del JSON y
+	// parseHealth (Z5) aún no lo convierte.
+	Grace string `json:"grace,omitempty"`
 }
 
 // Auth es la cabecera que el gateway añade al reenviar:
@@ -171,6 +239,17 @@ type Auth struct {
 type Limits struct {
 	MaxTokens int `json:"max_tokens,omitempty"`
 	N         int `json:"n,omitempty"`
+
+	// Semilla de la ronda 9 (pendiente 5); los aplica Z5. 0 o vacío = sin tope.
+
+	// TopLogprobs topa top_logprobs (y logprobs entero de completions).
+	TopLogprobs int `json:"top_logprobs,omitempty"`
+	// PromptLogprobs topa prompt_logprobs, la extensión de vLLM: un valor alto
+	// multiplica el coste por token de entrada.
+	PromptLogprobs int `json:"prompt_logprobs,omitempty"`
+	// Timeout es el plazo de una petición a este modelo, como texto de
+	// time.ParseDuration; vacío = el -proxy-timeout del gateway.
+	Timeout string `json:"timeout,omitempty"`
 }
 
 // Backend devuelve el modelo nombre expandido a backend HTTP (atajos von,
@@ -333,6 +412,14 @@ func expandBackend(nombre string, m *ModelConfig) *Backend {
 	}
 	if len(m.Tenants) > 0 {
 		b.Tenants = append([]string(nil), m.Tenants...)
+	}
+	// Semilla de la ronda 9: copia sin interpretar. ReplicaAuth vacío lo
+	// resuelve Z5; CAFile lo hace absoluto Z5.
+	b.Spare, b.Pin, b.ReplicaAuth = m.Spare, m.Pin, m.ReplicaAuth
+	b.Alias, b.Shared, b.CAFile = m.Alias, m.Shared, m.CAFile
+	b.LoadWait, _ = time.ParseDuration(m.LoadWait)
+	if len(m.Secrets) > 0 {
+		b.Secrets = append([]SecretConfig(nil), m.Secrets...)
 	}
 	return b
 }

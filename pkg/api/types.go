@@ -999,6 +999,11 @@ type Snapshot struct {
 	// al restaurar hay que reenganchar exactamente estos, en este orden.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
+	// Timings es el desglose del commit que hizo este dorado. Semilla de la
+	// ronda 9 (C9-12): solo viene en la respuesta de Commit (Z1), nunca en los
+	// listados ni en meta.json.
+	Timings *CommitTimings `json:"timings,omitempty"`
+
 	// Los tres campos siguientes son de los snapshots de una sola unidad, de
 	// antes de que una microVM pudiera llevar varios. Se conservan para poder
 	// leerlos: un snapshot ya congelado no se puede reescribir, y romperlos
