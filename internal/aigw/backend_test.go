@@ -287,7 +287,7 @@ func TestBackendAuthFichero(t *testing.T) {
 // se comparte; Backends() da un slice nuevo cada vez (reordenarlo no afecta).
 func TestBackendDevuelveCopiaEstable(t *testing.T) {
 	c := parse(t, `{"models":{"a":{"kind":"von","snapshot":"s"},"b":{"kind":"embed","snapshot":"t"}}}`)
-	if c.Backend("a") != c.Backend("a") {
+	if a1, a2 := c.Backend("a"), c.Backend("a"); a1 != a2 {
 		t.Error("Backend should return the validated, shared value")
 	}
 	l := c.Backends()

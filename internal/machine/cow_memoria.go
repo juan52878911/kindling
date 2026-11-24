@@ -332,7 +332,11 @@ func (m *Manager) espejarMemoriaDorado(name string) {
 		}
 		cancel()
 	}()
+	// En sueltas: escribe en el almacén después de que el commit vuelva, y quien
+	// cierra el Manager (los tests al borrar su raíz) tiene que poder esperarla.
+	m.sueltas.Add(1)
 	go func() {
+		defer m.sueltas.Done()
 		defer cancel()
 		t0 := time.Now()
 		hecho, err := m.alm.espejarMemoria(ctx, name, src, m.cow.gibs())
