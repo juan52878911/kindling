@@ -143,15 +143,16 @@ disco_foto() {
     awk -v e="$enteros " '$3 !~ /^(ram|zram)/ {print $3, $6, $10, (index(" " e, " " $3 " ") ? 1 : 0)}' /proc/diskstats > "$1"
   else : > "$1"; fi
 }
+# (%.0f y no %d: mawk, el awk de Debian, satura %d en 2^31-1 y daba 2 GiB en vez de lo escrito.)
 # disco_delta <antes> <después> → {"dispositivos":{dev:{leidos_bytes,escritos_bytes}}, "total":{…}}: cada
 # dispositivo que se movió (particiones y loop incluidos) y el total de los discos enteros.
 disco_delta() {
   awk 'NR==FNR {r[$1]=$2; w[$1]=$3; next}
        ($1 in r) {dr=($2-r[$1])*512; dw=($3-w[$1])*512; if (dr>0 || dw>0) {
-         d[$1]=sprintf("\"%s\":{\"leidos_bytes\":%d,\"escritos_bytes\":%d}", $1, dr, dw)
+         d[$1]=sprintf("\"%s\":{\"leidos_bytes\":%.0f,\"escritos_bytes\":%.0f}", $1, dr, dw)
          if ($4 == 1) {tr+=dr; tw+=dw}}}
        END {s=""; for (k in d) {s = s (s=="" ? "" : ",") d[k]}
-            printf "{\"dispositivos\":{%s},\"total\":{\"leidos_bytes\":%d,\"escritos_bytes\":%d}}\n", s, tr, tw}' "$1" "$2"
+            printf "{\"dispositivos\":{%s},\"total\":{\"leidos_bytes\":%.0f,\"escritos_bytes\":%.0f}}\n", s, tr, tw}' "$1" "$2"
 }
 FASE_T0=0
 fase_ini() { disco_foto "$COR/disco-antes"; FASE_T0=$(date +%s); }
