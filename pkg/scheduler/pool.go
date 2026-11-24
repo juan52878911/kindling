@@ -312,6 +312,12 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
 		return nil, err
 	}
+	// Recién restaurada: los secretos por réplica (AfterRestore) antes de
+	// prepararla y de entregarla. Sin gancho, nada.
+	if err := p.gw.despuesDeRestaurar(ctx, service, mc); err != nil {
+		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
+		return nil, err
+	}
 	// La preparación (el initialize de MCP) se paga AQUÍ, no cuando llegue la
 	// petición.
 	var sid string

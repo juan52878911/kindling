@@ -149,6 +149,14 @@ type Gateway struct {
 	// "service" del planificador). Lo rehace setConfig (New y Reload) y lo
 	// leen los ganchos del planificador sin candado.
 	porDorado atomic.Pointer[map[string]*Backend]
+
+	// retirar saca de servicio las réplicas de un dorado (scheduler.Retire);
+	// los tests lo sustituyen.
+	retirar func(ctx context.Context, snap string)
+	// secretos son las generaciones de los secretos ya entregados (secretos.go).
+	secretos secretosVivos
+	// pin son los dorados que este gateway ancló (repuesto.go).
+	pin anclados
 }
 
 // New crea el gateway. No habla con el daemon hasta Start o la primera
@@ -235,6 +243,18 @@ func New(o Options) (*Gateway, error) {
 	// Toda réplica que el planificador deja de tener (borrada, congelada,
 	// caída) se lleva sus conexiones del pool, como OnSleep.
 	s.OnForget = func(_, addr string) { g.guests.forget(addr) }
+	// Ganchos de la ronda 9: repuestos (spare), su calentamiento con la
+	// petición del contrato y los secretos en claro tras restaurar. Sin spare
+	// ni secrets mmds en el bloque, sus ceros son lo de hoy.
+	s.SpareFor = func(snap string) int {
+		if b := g.backendDe(snap); b != nil {
+			return b.Spare
+		}
+		return 0
+	}
+	s.WarmSpare = g.calentarRepuesto
+	s.AfterRestore = g.entregarSecretos
+	g.retirar = s.Retire
 	s.OnAcquire = func(snap, how string, d time.Duration) {
 		name, _ := g.config().replicaModel(snap)
 		if name == "" {
@@ -365,6 +385,15 @@ func (g *Gateway) Reload() ([]string, error) {
 	g.files.reset()
 	notes := g.setConfig(c)
 	g.sched.SetTenants(tenantLimits(c))
+	// Ronda 9: credenciales rotadas, réplicas con un secreto en claro viejo
+	// retiradas, dorados precalentados (y anclados o soltados) y repuestos
+	// según el registro nuevo.
+	if g.opts.Client != nil && g.config().NeedsDaemon() {
+		ctx := context.Background()
+		g.aplicarSecretos(ctx)
+		g.calentarDorados(ctx)
+		g.llenarRepuestos(ctx)
+	}
 	return notes, nil
 }
 
@@ -400,6 +429,9 @@ func (g *Gateway) Start(ctx context.Context) {
 			if r.barridas > 0 {
 				log.Printf("removed %d replica(s) of models no longer in the registry", r.barridas)
 			}
+			g.aplicarSecretos(ctx)
+			g.calentarDorados(ctx)
+			g.llenarRepuestos(ctx)
 		}
 	}
 	// El segador no llama al daemon si no hay ninguna réplica VON/embed
@@ -427,6 +459,8 @@ func (g *Gateway) Close(ctx context.Context) {
 	if g.opts.Client == nil || !g.config().NeedsDaemon() {
 		return
 	}
+	// Los repuestos se borran (nunca se congelan) y dejan de reponerse.
+	g.sched.DrainSpares(ctx)
 	r := g.ordenarPropias(ctx, false)
 	if r.dormidas > 0 {
 		log.Printf("froze %d replica(s) on shutdown", r.dormidas)
@@ -474,6 +508,7 @@ func (g *Gateway) conocido(snap string) bool {
 //   - al arrancar, borra las de un dorado que ya no es de ningún modelo del
 //     registro, en cualquier estado (R8-06b): nadie las va a volver a pedir y
 //     ocupan disco para siempre. Una máquina sin dorado conocido no se toca;
+//   - borra los repuestos y las réplicas con secretos en claro (HasSecrets);
 //   - borra las de un modelo con idle "remove" (no se congelan nunca);
 //   - congela las demás que corren (lo de siempre).
 func (g *Gateway) ordenarPropias(ctx context.Context, arranque bool) recuento {
@@ -494,6 +529,15 @@ func (g *Gateway) ordenarPropias(ctx context.Context, arranque bool) recuento {
 		}
 		snap := doradoDe(m)
 		switch {
+		case m.Labels[scheduler.LabelSpare] == "true" || m.HasSecrets:
+			// Un repuesto que quedó (de un proceso anterior, o uno que DrainSpares
+			// no llegó a borrar) y una réplica con secretos en claro (no se puede
+			// congelar, y tras reiniciar no se sabe su generación) se borran.
+			if err := g.opts.Client.Remove(ctx, m.ID); err != nil {
+				log.Printf("removing %s: %v", m.Name, err)
+				continue
+			}
+			r.borradas++
 		case arranque && snap != "" && !g.conocido(snap):
 			if err := g.opts.Client.Remove(ctx, m.ID); err != nil {
 				log.Printf("removing %s (model gone from the registry): %v", m.Name, err)

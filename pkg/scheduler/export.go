@@ -133,6 +133,7 @@ func (g *Scheduler) DropInstance(service, machineID string) {
 // ServiceStatus resume el estado de un servicio para mostrarlo.
 type ServiceStatus struct {
 	Prewarmed int           // precalentadas listas en el pool
+	Spares    int           // repuestos listos (SpareFor); no son instancias ocupadas
 	Warm      bool          // tiene instancia primaria despierta
 	IP        string        // de la primaria
 	Addr      string        // host:puerto del agente de la primaria (ver Addr)
@@ -145,6 +146,7 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	st := ServiceStatus{Prewarmed: g.pool.stats()[service]}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	st.Spares = len(g.repuestos[service])
 	if e, ok := g.services[service]; ok {
 		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(g.puertoDe(e)), time.Since(e.lastUse)
 		for _, rt := range g.routes {
