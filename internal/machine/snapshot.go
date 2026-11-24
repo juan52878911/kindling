@@ -288,7 +288,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// por defecto del cliente (F-01). Las llamadas de la limpieza usan el mismo
 	// plazo porque pueden llegar con un volcado aún en marcha, y la API de
 	// Firecracker las atiende de una en una: esperan a que acabe.
-	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	// Un dorado, con el plazo de dorado (plazoVolcadoDorado, C9-19).
+	plazo := plazoVolcadoDorado(max(mc.MemMiB, mc.MemMaxMiB))
+	if deFork {
+		plazo = plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))
+	}
+	lento := c.ConPlazo(plazo)
 
 	// LIMPIEZA. Una sola, diferida, para TODAS las salidas de error (M-05).
 	// Antes cada camino deshacía su parte a mano y varios se olvidaban de algo:
