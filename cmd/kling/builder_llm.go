@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,8 +16,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/imagen"
+	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -223,11 +228,102 @@ func builderLLM(dir string) error {
 	return nil
 }
 
-// baseGlibcEnGo escribe la base glibc en dst.
-var baseGlibcEnGo = func(root, lib, dst string) error { return fmt.Errorf("not implemented") }
+// baseGlibcEnGo escribe la base glibc en dst; variable para los tests.
+var baseGlibcEnGo = baseGlibcDebian
 
-// buildLLMBase construye la base glibc (Debian trixie) con 71-build-glibc-base.sh.
+// baseGlibcDebian arma la base glibc con el constructor debian
+// (internal/imagen): debian:trixie-slim por digest y los .deb de
+// imagen.DebianLock, más von.BasePackages resueltos contra el mismo snapshot
+// de snapshot.debian.org, cada .deb comprobado por sha256 y cacheado en
+// cache/debs. Sustituye al debootstrap de red de 71-build-glibc-base.sh (29 s
+// medidos en EC2, sin caché ni versiones fijadas). Sin root, loop ni chroot.
+func baseGlibcDebian(root, lib, dst string) error {
+	ctx := context.Background()
+	arch := runtime.GOARCH
+	lock, ok := imagen.DebianLock[arch]
+	if !ok {
+		return fmt.Errorf("no pinned Debian base for %s", arch)
+	}
+	oci.SetUnpackHelper(filepath.Join(lib, "kling-unpack"))
+	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
+	t := time.Now().UTC().Truncate(time.Second)
+	logf := func(format string, a ...any) { fmt.Printf(format+"\n", a...) }
+	cache := filepath.Join(root, "cache")
+	d := imagen.Debs{Cache: cache, Snapshot: lock.Snapshot, T: t, Marca: marcaDebian, Logf: logf, Agent: agent}
+	base, err := imagen.PrepareBase(ctx, &oci.Client{Cache: filepath.Join(cache, "oci"), Log: os.Stdout}, lock, arch, lock.Packages, d)
+	if err != nil {
+		return err
+	}
+	pins, err := d.Resolve(ctx, arch, base.Status(), von.BasePackages)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", strings.Join(von.BasePackages, " "), err)
+	}
+	streams, added, err := d.Install(ctx, base.Root, base.Streams, nil, pins)
+	if err != nil {
+		return err
+	}
+	base.Streams, base.Packages = streams, append(base.Packages, added...)
+	if err := d.Ajustar(base.Root, true); err != nil {
+		return err
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "kindling-llm-base-v1\x00%s\x00%d\x00%+v\x00%+v", arch, t.Unix(), lock, pins)
+	var id [32]byte
+	copy(id[:], h.Sum(nil))
+	st, err := base.Write(dst, imagen.UUID("kindling-llm", "base", id), "")
+	if err != nil {
+		return err
+	}
+	logf("base: %d MiB, %d files, packages %s", st.Bytes()>>20, st.Files, strings.Join(base.Packages, " "))
+	return nil
+}
+
+// buildLLMBase construye la base glibc (Debian trixie), una sola vez aunque
+// lleguen varias construcciones de modelos a la vez: en fila con un cerrojo de
+// fichero, y la que entra después ve que ya está. Se escribe a un temporal y
+// se renombra durable: un corte no deja una base a medias con su nombre.
+// KLING_LLM_BASE=debootstrap vuelve al script de antes (71-build-glibc-base.sh).
 func buildLLMBase(root, lib, name string) error {
+	if os.Getenv("KLING_LLM_BASE") == "debootstrap" {
+		return buildLLMBaseScript(root, lib, name)
+	}
+	images := filepath.Join(root, "images")
+	if err := os.MkdirAll(images, 0o755); err != nil {
+		return err
+	}
+	lf, err := os.OpenFile(filepath.Join(images, "."+name+".base.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	final := filepath.Join(images, name+".ext4")
+	if _, err := os.Stat(final); err == nil {
+		return nil // la hizo otra construcción mientras se esperaba
+	}
+	fmt.Printf("building base image %q (Debian trixie, pinned; first model only)...\n", name)
+	t0 := time.Now()
+	tmp := filepath.Join(images, "."+name+".ext4.tmp")
+	defer os.Remove(tmp)
+	if err := baseGlibcEnGo(root, lib, tmp); err != nil {
+		return fmt.Errorf("building base %q: %w", name, err)
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	if err := durable.Renombrar(tmp, final); err != nil {
+		return err
+	}
+	fmt.Printf("base image %q ready in %.1f s\n", name, time.Since(t0).Seconds())
+	return nil
+}
+
+// buildLLMBaseScript construye la base glibc con 71-build-glibc-base.sh
+// (debootstrap de red), como antes.
+func buildLLMBaseScript(root, lib, name string) error {
 	script := filepath.Join(lib, "71-build-glibc-base.sh")
 	if _, err := os.Stat(script); err != nil {
 		return fmt.Errorf("base image %q is missing and %s is not installed (make deploy installs it)", name, script)

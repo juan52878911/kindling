@@ -213,7 +213,7 @@ func TestBaseLLMSinDebootstrap(t *testing.T) {
 	if err := buildLLMBase(root, lib, "otra"); err == nil {
 		t.Fatal("una base que falla no dio error")
 	}
-	if left, _ := filepath.Glob(filepath.Join(root, "images", "*otra*")); len(left) > 0 {
+	if left, _ := filepath.Glob(filepath.Join(root, "images", "*otra*ext4*")); len(left) > 0 {
 		t.Fatalf("una base fallida dejó %v", left)
 	}
 }
