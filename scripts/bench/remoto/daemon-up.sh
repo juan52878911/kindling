@@ -15,6 +15,11 @@ printf '{"daemon":{"share_roots":["%s"]}}\n' "$BASE/shares" > "$BASE/config.json
 install -m755 "$BINS/kling" "$BASE/bin/kling"
 install -m755 "$BINS/kling-guest" "$LIB/kling-guest"
 install -m755 "$BINS/81-base-image.sh" "$BINS/lib-ext4-shrink.sh" "$LIB/"
+# Lo mismo que deja `make deploy` para los dorados de IA: la base glibc de llama-server (llm), el init
+# mínimo y el agente de Chispa en microVM. Opcionales para las fases que no son de IA.
+for f in 71-build-glibc-base.sh minimal-init.sh kling-chispa kling-unpack; do
+  [ ! -f "$BINS/$f" ] || install -m755 "$BINS/$f" "$LIB/$f"
+done
 install -d -m755 "$BASE/builders"
 # Los constructores que usa el banco: base (imágenes), llm (dorados VON de `kling ai model add`)
 # y chispa (`kling ai chispa deploy`). Son el mismo kling con otro subcomando.
