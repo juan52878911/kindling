@@ -248,7 +248,13 @@ func New(o Options) (*Gateway, error) {
 	// ni secrets mmds en el bloque, sus ceros son lo de hoy.
 	s.SpareFor = func(snap string) int {
 		if b := g.backendDe(snap); b != nil {
-			return b.Spare
+			// Un repuesto es una réplica: con max_replicas 0 (la del
+			// gateway) Validate no lo pudo acotar, y se acota aquí.
+			tope := b.MaxReplicas
+			if tope <= 0 {
+				tope = g.opts.MaxReplicas
+			}
+			return min(b.Spare, tope)
 		}
 		return 0
 	}

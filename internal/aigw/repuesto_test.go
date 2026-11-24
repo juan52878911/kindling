@@ -68,3 +68,30 @@ func TestRepuestoSeCalientaPorContrato(t *testing.T) {
 		t.Errorf("calentamiento embeddings = %q", vistas[1])
 	}
 }
+
+// Con max_replicas 0 (la del gateway), spare no puede pasar del tope de
+// réplicas del gateway: un repuesto es una réplica, y Validate solo lo acota
+// cuando el bloque pone su max_replicas.
+func TestSpareSeAcotaAlTopeDelGateway(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]*ModelConfig{
+			"sin-tope": {Kind: KindHTTP, Contract: ContractOpenAI, Snapshot: "llm-a", Port: 8080, Spare: 5},
+			"con-tope": {Kind: KindHTTP, Contract: ContractOpenAI, Snapshot: "llm-b", Port: 8080, Spare: 3, MaxReplicas: 4},
+			"smol":     {Kind: KindVON, Snapshot: "von-smol"},
+		},
+		Tasks: map[string]*TaskConfig{},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	g, err := New(Options{Config: cfg, Replicas: &fakeReplicas{}, MaxReplicas: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.sched.SpareFor("llm-a"); got != 2 {
+		t.Errorf("spare 5 con max_replicas 0 y el gateway a 2: SpareFor = %d, quería 2", got)
+	}
+	if got := g.sched.SpareFor("llm-b"); got != 3 {
+		t.Errorf("spare 3 con max_replicas 4: SpareFor = %d, quería 3", got)
+	}
+}
