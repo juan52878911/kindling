@@ -556,9 +556,8 @@ func (g *Gateway) proxyOpenAI(w http.ResponseWriter, r *http.Request, contract s
 }
 
 // plazoDe es el plazo de una petición a b: su limits.timeout (validado al
-// cargar) o el -proxy-timeout del gateway. Con un dorado, un plazo mayor que
-// el -proxy-timeout no alarga la espera a las cabeceras de la réplica, que
-// fija el transporte de las réplicas.
+// cargar) o el -proxy-timeout del gateway. Con un dorado, también alarga la
+// espera a las cabeceras de la réplica (cabecerasDe).
 func (g *Gateway) plazoDe(b *Backend) time.Duration {
 	if b.Limits.Timeout != "" {
 		if d, err := time.ParseDuration(b.Limits.Timeout); err == nil && d > 0 {

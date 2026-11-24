@@ -209,7 +209,7 @@ func TestGuestHeaderTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.deploy = fakeDeployLookup{"chispa-commits": {Labels: []string{"fix", "feat", "docs"}}}
-	if rt := g.guests.transport("x").ResponseHeaderTimeout; rt != plazo {
+	if rt := g.guests.transport("x", 0).ResponseHeaderTimeout; rt != plazo {
 		t.Fatalf("ResponseHeaderTimeout = %v, want %v", rt, plazo)
 	}
 	done := make(chan error, 1)
@@ -224,5 +224,43 @@ func TestGuestHeaderTimeout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Classify kept waiting on a guest that never answers")
+	}
+}
+
+// limits.timeout de un modelo con dorado alarga también la espera a las
+// cabeceras de su réplica: un chat sin stream manda las cabeceras al acabar,
+// y con el tope del pool (-proxy-timeout) se cortaba antes del plazo que el
+// modelo pidió. Las réplicas de los demás siguen con el tope del pool.
+func TestLimitsTimeoutAlargaLaEsperaACabecerasDeLaReplica(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(700 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &Config{
+		Models: map[string]*ModelConfig{
+			"lento": {Kind: KindHTTP, Contract: ContractOpenAI, Snapshot: "llm-lento", Port: 8080, Limits: &Limits{Timeout: "5s"}},
+			"smol":  {Kind: KindVON, Snapshot: "von-smol"},
+		},
+		Tasks: map[string]*TaskConfig{},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	const plazo = 200 * time.Millisecond
+	g, err := New(Options{Config: cfg, Replicas: &fakeReplicas{addr: strings.TrimPrefix(srv.URL, "http://")},
+		ProxyTimeout: plazo, VONTimeout: plazo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, rep, err := g.postGuest(context.Background(), "llm-lento", "/v1/chat/completions", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("la réplica contesta en 700 ms con limits.timeout 5s y se cortó: %v", err)
+	}
+	resp.Body.Close()
+	rep.Release()
+	if _, _, err := g.postGuest(context.Background(), "von-smol", "/v1/chat/completions", []byte(`{}`)); err == nil {
+		t.Fatal("sin limits.timeout, la réplica sigue con el tope del pool (200 ms) y debía cortarse")
 	}
 }
