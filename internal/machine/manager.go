@@ -1589,6 +1589,26 @@ func (m *Manager) List() []*api.Machine {
 	return out
 }
 
+// limiteDisco es el limitador de un disco de la microVM: diskBytesPerSec.
+func limiteDisco() *fc.RateLimiter { return fc.Limit(diskBytesPerSec) }
+
+// limiteCapa es el de la capa del servicio (C9-01): el mismo caudal
+// sostenido, más una ráfaga del tamaño de la capa. Una capa de modelo son los
+// pesos, que el servidor lee enteros al arrancar: con el cubo de 128 MiB/s,
+// 1 GiB eran 7,7 s medidos de un «server ready» que el disco del host sirve
+// en 2-3. Va solo en el arranque en frío, que es el único que hace SetDrive
+// (una restauración hereda del volcado el cubo con la ráfaga ya gastada en la
+// carga), y solo en la capa, que es de solo lectura: lo que gana una VM
+// hostil es leer una vez su propia capa sin tope, no saturar el disco de
+// forma sostenida. Sin poder leer su tamaño, el limitador de siempre.
+func limiteCapa(path string) *fc.RateLimiter {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return limiteDisco()
+	}
+	return fc.LimitBurst(diskBytesPerSec, fi.Size())
+}
+
 // allocatedBytes devuelve los bytes realmente ocupados por un fichero, que con
 // ficheros dispersos no tiene nada que ver con su tamaño lógico.
 func allocatedBytes(path string) int64 {
@@ -2644,7 +2664,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if layer != "" {
 		if err := c.SetDrive(ctx, fc.Drive{
 			DriveID: layerDriveID, PathOnHost: layer, IsRootDevice: false, IsReadOnly: true,
-			RateLimiter: fc.Limit(diskBytesPerSec),
+			RateLimiter: limiteCapa(layer),
 		}); err != nil {
 			return pid, err
 		}
