@@ -189,3 +189,164 @@ func TestModelDeployWarmupFallaNoEscribe(t *testing.T) {
 		t.Fatalf("ai.json cambió:\n%s", b)
 	}
 }
+
+const registroInquilinos = `{
+  "tenants": [{"name": "acme", "token": "acme-token-0123456789"}, {"name": "globex", "token": "globex-token-012345678"}],
+  "models": {}
+}
+`
+
+// P4: -tenant y -alias escriben tenants y alias en el bloque; un inquilino que
+// no está en ai.json falla antes de fabricar.
+func TestDeployEscribeTenants(t *testing.T) {
+	cfg := escribeRegistro(t, registroInquilinos)
+	d := &daemonModelos{}
+	o := opcionesDeploy(cfg)
+	o.Name, o.Tenants, o.Alias = "chispa-acme", []string{"acme"}, "chispa"
+	if _, err := modelDeploy(context.Background(), d.cliente(t), o); err != nil {
+		t.Fatal(err)
+	}
+	b := leeModelos(t, cfg)["chispa-acme"]
+	if ts, _ := b["tenants"].([]any); len(ts) != 1 || ts[0] != "acme" || b["alias"] != "chispa" || b["shared"] != nil {
+		t.Fatalf("bloque: %v", b)
+	}
+	// shared, cuando se pide, también.
+	o.Name, o.Tenants, o.Shared = "chispa-todos", []string{"acme", "globex"}, true
+	if _, err := modelDeploy(context.Background(), d.cliente(t), o); err != nil {
+		t.Fatal(err)
+	}
+	if b := leeModelos(t, cfg)["chispa-todos"]; b["shared"] != true {
+		t.Fatalf("bloque: %v", b)
+	}
+	for nombre, mod := range map[string]func(*modelDeployOptions){
+		"desconocido":  func(o *modelDeployOptions) { o.Tenants = []string{"initech"} },
+		"repetido":     func(o *modelDeployOptions) { o.Tenants = []string{"acme", "acme"} },
+		"alias malo":   func(o *modelDeployOptions) { o.Tenants, o.Alias = []string{"acme"}, "Chispa!" },
+		"alias=nombre": func(o *modelDeployOptions) { o.Tenants, o.Alias = []string{"acme"}, o.Name },
+	} {
+		cfg := escribeRegistro(t, registroInquilinos)
+		d := &daemonModelos{}
+		o := opcionesDeploy(cfg)
+		o.Name = "chispa-x"
+		mod(&o)
+		if _, err := modelDeploy(context.Background(), d.cliente(t), o); err == nil {
+			t.Fatalf("%s: debería fallar", nombre)
+		}
+		d.mu.Lock()
+		if len(d.runs) != 0 {
+			t.Fatalf("%s: arrancó una máquina antes de validar", nombre)
+		}
+		d.mu.Unlock()
+	}
+	// Sin inquilinos en ai.json, -tenant no tiene a quién referirse.
+	cfg = escribeRegistro(t, registroBase)
+	o = opcionesDeploy(cfg)
+	o.Tenants = []string{"acme"}
+	d = &daemonModelos{}
+	if _, err := modelDeploy(context.Background(), d.cliente(t), o); err == nil || !strings.Contains(err.Error(), "acme") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+// C9-10: tras fabricar, deploy pide al daemon que traiga el dorado a la caché
+// de página; un daemon anterior (404) o sin la capacidad (501) no es un fallo.
+func TestDeployPrecalientaYToleraDaemonViejo(t *testing.T) {
+	for _, cod := range []int{200, 404, 405, 501, 500} {
+		cfg := escribeRegistro(t, registroBase)
+		d := &daemonModelos{warmCod: cod}
+		r, err := modelDeploy(context.Background(), d.cliente(t), opcionesDeploy(cfg))
+		if err != nil {
+			t.Fatalf("%d: un precalentado que no se puede no tumba el despliegue: %v", cod, err)
+		}
+		d.mu.Lock()
+		llamadas := strings.Join(d.llamadas, "|")
+		calentados := d.calentados
+		d.mu.Unlock()
+		if !strings.Contains(llamadas, "commit srv-v1|") || !strings.Contains(llamadas, "warm srv-v1") || !r.Written {
+			t.Fatalf("%d: llamadas %s", cod, llamadas)
+		}
+		if cod == 200 && (len(calentados) != 1 || calentados[0] != "srv-v1") {
+			t.Fatalf("calentados: %v", calentados)
+		}
+	}
+}
+
+// C9-15: un bloque idle remove (el defecto de kind http) nunca congela
+// réplicas en diferencial, así que su plantilla pide no espejar el dorado.
+func TestDeployEtiquetaSinEspejoConIdleRemove(t *testing.T) {
+	for idle, quiero := range map[string]string{"remove": api.GoldenMirrorOff, "": api.GoldenMirrorOff, "freeze": "", "pause": ""} {
+		cfg := escribeRegistro(t, registroBase)
+		d := &daemonModelos{}
+		o := opcionesDeploy(cfg)
+		o.Idle = idle
+		if _, err := modelDeploy(context.Background(), d.cliente(t), o); err != nil {
+			t.Fatal(err)
+		}
+		d.mu.Lock()
+		got := d.runs[0].Labels[api.LabelGoldenMirror]
+		d.mu.Unlock()
+		if got != quiero {
+			t.Fatalf("idle %q: %s = %q, quería %q", idle, api.LabelGoldenMirror, got, quiero)
+		}
+	}
+	// Un modelo que ya está: manda el idle de su bloque, no la bandera.
+	cfg := escribeRegistro(t, `{"models": {"srv": {"kind": "http", "snapshot": "srv-v1", "port": 8090, "contract": "chispa-decide", "idle": "freeze"}}}`)
+	d := &daemonModelos{snaps: []*api.Snapshot{{Name: "srv-v1"}}}
+	if _, err := modelDeploy(context.Background(), d.cliente(t), opcionesDeploy(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.runs[0].Labels[api.LabelGoldenMirror]; got != "" {
+		t.Fatalf("el bloque dice freeze: %q", got)
+	}
+}
+
+// P2, P3 y P5: las banderas nuevas llegan al fabricante.
+func TestDeployOpcionesDelFabricante(t *testing.T) {
+	cfg := escribeRegistro(t, registroBase)
+	d := &daemonModelos{}
+	o := opcionesDeploy(cfg)
+	o.Wait, o.ModelBytes = 0, 1900<<20
+	o.AllowDomains = []string{"huggingface.co"}
+	o.WarmupKey = true
+	o.Warmup = []dorado.Request{{Method: "POST", Path: "/v1/decide", Headers: map[string]string{"Authorization": "Bearer " + dorado.WarmupKeyPlaceholder}}}
+	if _, err := modelDeploy(context.Background(), d.cliente(t), o); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	run := d.runs[0]
+	d.mu.Unlock()
+	if run.Egress != "allowlist" || len(run.AllowDomains) != 1 {
+		t.Fatalf("run: %+v", run)
+	}
+	conClave := false
+	for _, kv := range run.Env {
+		conClave = conClave || strings.HasPrefix(kv, dorado.EnvWarmupKeySHA256+"=")
+	}
+	if !conClave {
+		t.Fatalf("env: %v", run.Env)
+	}
+}
+
+// P5: -credential lee la credencial de un fichero JSON que solo lee su dueño:
+// la clave nunca va en una bandera.
+func TestDeployCredencialFichero(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "l3.json")
+	if err := os.WriteFile(p, []byte(`{"domain":"l3.kindling.internal","env":"L3_TOKEN","secret":"s3cr3t","allow":["POST /v1/chat/completions"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := leerCredencial(p)
+	if err != nil || c.Secret != "s3cr3t" || c.Env != "L3_TOKEN" || len(c.Allow) != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leerCredencial(p); err == nil || strings.Contains(err.Error(), "s3cr3t") {
+		t.Fatalf("un fichero con la clave legible por otros debería rechazarse: %v", err)
+	}
+	_ = os.WriteFile(p, []byte(`{"domain":"x","env":"Y","secret":"z","otro":1}`), 0o600)
+	_ = os.Chmod(p, 0o600)
+	if _, err := leerCredencial(p); err == nil {
+		t.Fatal("un campo desconocido debería rechazarse")
+	}
+}
