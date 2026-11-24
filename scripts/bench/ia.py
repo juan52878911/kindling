@@ -386,7 +386,7 @@ def resumen(doc, out):
         if g is not None:
             veredictos.append("P1 (Z4): el gancho tras restaurar con un secreto MMDS cuesta %s p50 → %s" % (
                 fmt(g), "≤ 20 ms, vale" if g <= 20 else "> 20 ms"))
-    elif omitida(sc):
+    elif omitida(sc) and not sc["omitida"].startswith("no pedida"):
         w("secreto por MMDS: omitida: %s" % sc["omitida"])
     l3 = (doc.get("p3") or {}).get("l3") if isinstance(doc.get("p3"), dict) else None
     if isinstance(l3, dict):
