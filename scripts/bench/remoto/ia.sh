@@ -19,6 +19,8 @@
 # CLIENTES, CARGA_S, PLAZO_P1_MIN (60), PLAZO_P2_MIN (45), PLAZO_P3_MIN (45), y para P3 el material en
 # $KB/sube/chispa: imagen.tar (imagen OCI de chispa-server con modelos y config horneados), peticion.json,
 # warmup.jsonl y, opcional, directo.sh (el mismo binario en el host, escuchando en 127.0.0.1:18090).
+# Con IA_PRUEBAS=p3 y sin ese material, P3 construye chispa en la instancia con chispa-p3.sh (plazo de
+# la preparación PLAZO_P3_PREP_MIN, 30; sus variables P3_* y CHISPA_COMMIT, en su cabecera).
 set -uo pipefail
 KB=${KB:-/opt/kbench}; export KB
 AQUI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -117,7 +119,17 @@ medir() {
         JSON_OUT="$RES/ia-p2-$ultimo.json" timeout "$(( ${PLAZO_P2_MIN:-45} * 60 ))" bash "$VB" "$ultimo" \
         > "$RES/ia-p2-$ultimo.txt" 2>&1 || echo "P2: rc=$? (¿plazo?)" >&2 ;;
     p3)
-      [ -f "$CH/imagen.tar" ] && [ -f "$CH/peticion.json" ] || { echo "P3: falta $CH/imagen.tar o peticion.json" >&2; continue; }
+      if [ ! -f "$CH/imagen.tar" ]; then
+        # Sin material subido: chispa se construye aquí (chispa-p3.sh: clona el commit fijo, imagen
+        # imagen-ort, e5 en ONNX, banco, dorados con y sin claves) y se mide contra el binario directo.
+        paso "P3 chispa construida en la instancia (preparar ${PLAZO_P3_PREP_MIN:-30} min, medir ${PLAZO_P3_MIN:-45} min)"; entre
+        timeout "$(( ${PLAZO_P3_PREP_MIN:-30} * 60 ))" bash "$AQUI/chispa-p3.sh" preparar \
+          || { echo "P3: falló chispa-p3.sh preparar (rc=$?; ver $KB/p3/preparar.log)" >&2; continue; }
+        RES=$RES timeout "$(( ${PLAZO_P3_MIN:-45} * 60 ))" bash "$AQUI/chispa-p3.sh" medir \
+          || echo "P3: chispa-p3.sh medir rc=$? (¿plazo?)" >&2
+        continue
+      fi
+      [ -f "$CH/peticion.json" ] || { echo "P3: falta $CH/peticion.json" >&2; continue; }
       paso "P3 chispa (plazo ${PLAZO_P3_MIN:-45} min)"; entre
       "$K" image import -archive "$CH/imagen.tar" -name chispa-bench -replace || { echo "P3: falló image import" >&2; continue; }
       t0=$(ms)

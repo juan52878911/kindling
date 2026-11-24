@@ -25,6 +25,8 @@
 #   P1 anidado + P2:  BINS_DIR=… scripts/bench/ec2.sh --dry-run ia     (c8i.4xlarge)
 #   P1 metal:         EC2_TYPE=c7i.metal-24xl IA_PRUEBAS=p1 TOPE_MIN=90 BINS_DIR=… scripts/bench/ec2.sh ia
 #   P3:               CHISPA_DIR=… (imagen.tar, peticion.json, warmup.jsonl[, directo.sh]) añade p3
+#   P3 construida en la instancia (remoto/chispa-p3.sh: clona chispa, imagen ORT, e5, dorados):
+#                     IA_PRUEBAS=p3 EC2_DISCO_GB=60 TOPE_MIN=110 BINS_DIR=… scripts/bench/ec2.sh ia
 #
 # Entorno (las credenciales de AWS son las normales del aws CLI y nunca se leen ni se muestran aquí):
 #   AWS_REGION      región (us-east-1)          EC2_TYPE   tipo (c8i.2xlarge; ia: c8i.4xlarge)
@@ -40,7 +42,9 @@
 #   CHISPA_DIR      material de P3 (solo ia)
 #   SALIDA          dónde se copian los resultados (./bench-out)
 #   RUNS CONC SERIE EXECS POOL   parámetros del banco (ver README.md)
-#   ia: IA_PRUEBAS ("p1 p2", + p3 con CHISPA_DIR), IA_MODELOS, REPLICAS, CYCLES, CLIENTES, CARGA_S
+#   ia: IA_PRUEBAS ("p1 p2", + p3 con CHISPA_DIR), IA_MODELOS, REPLICAS, CYCLES, CLIENTES, CARGA_S;
+#       p3 sin CHISPA_DIR: PLAZO_P3_PREP_MIN (30), CHISPA_COMMIT, P3_VARIANTES, P3_CPUS, P3_MEM, P3_CARGA,
+#       P3_SOSTENIDA_S (ver remoto/chispa-p3.sh)
 #   Barrido: PARALELO="2 4 8 16" (KLING_MAX_PARALLEL_BOOT), JAILER="0 1", CUOTAS_LISTA="- 200:50"
 set -uo pipefail
 
@@ -85,6 +89,8 @@ case $DISCO in ''|*[!0-9]*) echo "EC2_DISCO_GB debe ser un entero" >&2; exit 2 ;
 # Pruebas de la fase ia y su plazo (min) dentro de remoto/ia.sh; la preparación se cuenta aparte.
 IA_PRUEBAS=${IA_PRUEBAS:-p1 p2${CHISPA_DIR:+ p3}}
 PLAZO_P1_MIN=${PLAZO_P1_MIN:-60}; PLAZO_P2_MIN=${PLAZO_P2_MIN:-45}; PLAZO_P3_MIN=${PLAZO_P3_MIN:-45}
+# P3 sin material subido construye chispa en la instancia: su preparación lleva plazo propio.
+PLAZO_P3_PREP_MIN=${PLAZO_P3_PREP_MIN:-30}
 PREPARAR_MIN=20
 
 CLAVE=$ID_BANCO; GRUPO=$ID_BANCO
@@ -132,7 +138,7 @@ if [ "$IA" = 1 ]; then
   MIN_ESP=$PREPARAR_MIN
   for p in $IA_PRUEBAS; do
     case $p in p1) MIN_ESP=$((MIN_ESP + PLAZO_P1_MIN)) ;; p2) MIN_ESP=$((MIN_ESP + PLAZO_P2_MIN)) ;;
-      p3) MIN_ESP=$((MIN_ESP + PLAZO_P3_MIN)) ;; *) echo "prueba desconocida en IA_PRUEBAS: $p" >&2; exit 2 ;; esac
+      p3) MIN_ESP=$((MIN_ESP + PLAZO_P3_MIN)); [ -n "${CHISPA_DIR:-}" ] || MIN_ESP=$((MIN_ESP + PLAZO_P3_PREP_MIN)) ;; *) echo "prueba desconocida en IA_PRUEBAS: $p" >&2; exit 2 ;; esac
   done
   [ "$MIN_ESP" -le "$TOPE" ] || MIN_ESP=$TOPE
 fi
@@ -172,6 +178,8 @@ plan() {
   local sube="scripts de scripts/bench, bins (${BINS_DIR:-¡falta BINS_DIR!}), sdk (${SDK_DIR:-¡falta SDK_DIR!})"
   if [ "$IA" = 1 ]; then
     fase="remoto/ia.sh preparar y fases.sh ia: $IA_PRUEBAS (plazos p1 ${PLAZO_P1_MIN} / p2 ${PLAZO_P2_MIN} / p3 ${PLAZO_P3_MIN} min)"
+    case " $IA_PRUEBAS " in *" p3 "*) [ -n "${CHISPA_DIR:-}" ] || \
+      fase="$fase; p3 construye chispa en la instancia con remoto/chispa-p3.sh (+${PLAZO_P3_PREP_MIN} min)" ;; esac
     sube="scripts de scripts/bench, 96-von-bench.sh, bins (${BINS_DIR:-¡falta BINS_DIR!}) con ia-bench${CHISPA_DIR:+, chispa ($CHISPA_DIR)}"
   fi
   cat <<PLAN
@@ -383,7 +391,8 @@ fi
 # Solo se reenvían variables del banco, nunca el entorno entero del que lanza.
 PASO="KB=$KB"
 for v in RUNS CONC SERIE EXECS POOL ESPERA_POOL PARALELO JAILER CUOTAS_LISTA \
-         IA_PRUEBAS IA_MODELOS REPLICAS CYCLES CLIENTES CARGA_S PLAZO_P1_MIN PLAZO_P2_MIN PLAZO_P3_MIN; do
+         IA_PRUEBAS IA_MODELOS REPLICAS CYCLES CLIENTES CARGA_S PLAZO_P1_MIN PLAZO_P2_MIN PLAZO_P3_MIN \
+         PLAZO_P3_PREP_MIN CHISPA_COMMIT P3_VARIANTES P3_CPUS P3_MEM P3_CARGA P3_SOSTENIDA_S; do
   [ -n "${!v:-}" ] && PASO="$PASO $v='${!v}'"
 done
 rc=0
