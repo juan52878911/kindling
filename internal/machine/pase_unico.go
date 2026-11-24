@@ -53,6 +53,29 @@ func paseUnico(ctx context.Context, path string) (string, error) {
 	})
 }
 
+// capaSoltarMinBytes es desde qué tamaño la caché de la capa se suelta tras
+// el commit de un dorado (soltarCacheCapa): por encima es la de un modelo.
+const capaSoltarMinBytes = 256 << 20
+
+// soltarCache es dropCache; variable para los tests.
+var soltarCache = dropCache
+
+// soltarCacheCapa saca de la caché de página la capa de un dorado recién
+// hecho si pasa de capaSoltarMinBytes (C9-11). En un dorado de modelo los
+// pesos pasan, al cargarlos con O_DIRECT, a memoria del invitado y de ahí al
+// mem.file: la caché que deja la lectura de Firecracker (1,1 GiB medidos con
+// un Q4) no la usa ya nadie, y bajo presión compite con el mem.file, que es el
+// que mapean las réplicas. Es caché recuperable: un arranque en frío
+// posterior de esa imagen la vuelve a leer. Las capas pequeñas se quedan.
+func soltarCacheCapa(path string) {
+	if path == "" {
+		return
+	}
+	if fi, err := os.Stat(path); err == nil && fi.Size() > capaSoltarMinBytes {
+		soltarCache(path)
+	}
+}
+
 // cronoCommit es el cronómetro por fases del commit: escribe lo mismo que
 // antes en el registro ("commit X -> Y: overlay…, dump…") y además lo guarda
 // por campo, para devolverlo en la respuesta (api.CommitTimings, C9-12).

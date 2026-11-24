@@ -775,6 +775,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// (cow_memoria.go). No el de un fork: su dorado es temporal.
 	if !deFork {
 		m.espejarMemoriaDorado(name, mc.Labels)
+		// La caché de una capa de modelo ya no sirve a nadie (C9-11). Tras los
+		// digests, que la leen la primera vez.
+		if mc.Image != "" {
+			if _, capa, err := m.imageLayer(mc.Image); err == nil {
+				soltarCacheCapa(capa)
+			}
+		}
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
