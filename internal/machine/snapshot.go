@@ -288,7 +288,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// por defecto del cliente (F-01). Las llamadas de la limpieza usan el mismo
 	// plazo porque pueden llegar con un volcado aún en marcha, y la API de
 	// Firecracker las atiende de una en una: esperan a que acabe.
-	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	// Un dorado, con el plazo de dorado (plazoVolcadoDorado, C9-19).
+	plazo := plazoVolcadoDorado(max(mc.MemMiB, mc.MemMaxMiB))
+	if deFork {
+		plazo = plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))
+	}
+	lento := c.ConPlazo(plazo)
 
 	// LIMPIEZA. Una sola, diferida, para TODAS las salidas de error (M-05).
 	// Antes cada camino deshacía su parte a mano y varios se olvidaban de algo:
@@ -439,6 +444,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		goldDst = rutaEnDir(dj, "overlay.ext4")
 	}
 
+	// Lo que tardó el apretón, para el desglose de la respuesta (C9-12).
+	var apreton time.Duration
+
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
 	// corriendo: un invitado pausado no atiende HTTP.
 	//
@@ -462,9 +470,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// Con la plantilla aún en marcha: que suelte lo que no usa, y el
 		// dorado lleve solo lo que está en uso (apreton_volcado.go). Es el
 		// mem.file que mapearán todas las copias.
+		t0 := time.Now()
 		if n := apretarAntesDeVolcar(ctx, c, mc); n > 0 {
 			log.Printf("commit %s: the guest handed back ~%d MiB before the dump", mc.Name, n)
 		}
+		apreton = time.Since(t0)
 
 		pausaPedida = true
 		if err := c.Pause(ctx); err != nil {
@@ -472,7 +482,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		}
 		pausada = true
 	}
-	t := nuevosTiempos()
+	t := nuevoCronoCommit(apreton)
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
@@ -571,10 +581,24 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// Con limpio: el volcado ya está completo y la plantilla reanudada, y un
 	// cliente que se desconecte aquí tiraba un dorado entero por un perforado
 	// cortado.
-	if out, err := perforarHuecos(limpio, memPath); err != nil {
-		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
+	//
+	// Un dorado perfora y hashea su memoria en un solo pase (paseUnico,
+	// C9-02): el digest es el mismo que daban fallocate y digest.Tree. El
+	// temporal de un fork no graba digest de memoria (ver abajo): solo
+	// perfora, como antes.
+	var memDigest string
+	if deFork {
+		if out, err := perforarHuecos(limpio, memPath); err != nil {
+			return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
+		}
+		t.marca("holes")
+	} else {
+		var err error
+		if memDigest, err = paseUnico(limpio, memPath); err != nil {
+			return nil, fmt.Errorf("punching holes in and hashing the memory dump: %w", err)
+		}
+		t.marca("pass")
 	}
-	t.marca("holes")
 
 	// A disco antes del meta, con la plantilla ya reanudada: el meta es
 	// durable y sin esto, tras un corte, daba por bueno un volcado que seguía
@@ -605,7 +629,8 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// para ese fichero (verifyIntegrity lo salta); el de snap.file, que es
 	// pequeño, se sigue grabando y comprobando.
 	// El de la memoria, por lo mismo que el del overlay, tampoco en un fork.
-	var rootfsDigest, memDigest, imgDigest, baseDigest string
+	// El de la memoria ya salió del pase único.
+	var rootfsDigest, imgDigest, baseDigest string
 	if !deFork {
 		// El disco de solo lectura sobre el que se congela (disco_base.go):
 		// cacheado, solo se lee la primera vez que se usa la imagen. Sin
@@ -617,9 +642,6 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		}
 		if rootfsDigest, err = digest.Tree(goldOverlay); err != nil {
 			return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
-		}
-		if memDigest, err = digest.Tree(memPath); err != nil {
-			return nil, fmt.Errorf("computing digest of the memory dump: %w", err)
 		}
 	}
 	snapSHA, err := digest.File(snapPath)
@@ -752,19 +774,24 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// copia entero el primer thaw de una copia congelada en diferencial
 	// (cow_memoria.go). No el de un fork: su dorado es temporal.
 	if !deFork {
-		m.espejarMemoriaDorado(name)
+		m.espejarMemoriaDorado(name, mc.Labels)
+		// La caché de una capa de modelo ya no sirve a nadie (C9-11). Tras los
+		// digests, que la leen la primera vez.
+		if mc.Image != "" {
+			if _, capa, err := m.imageLayer(mc.Image); err == nil {
+				soltarCacheCapa(capa)
+			}
+		}
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
-	if len(avisosCommit) > 0 {
-		// En una copia: el snap puede ser el de la caché de metas, y los
-		// avisos son de esta respuesta, no del dorado.
-		out := *snap
-		out.Warnings = avisosCommit
-		return &out, nil
-	}
-	return snap, nil
+	// En una copia: el snap puede ser el de la caché de metas, y los avisos y
+	// el desglose (C9-12) son de esta respuesta, no del dorado.
+	out := *snap
+	out.Warnings = avisosCommit
+	out.Timings = t.desglose()
+	return &out, nil
 }
 
 // Snapshots lista los snapshots dorados y cuántas instancias vivas tiene cada uno.
@@ -1264,6 +1291,9 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 	m.mu.Lock()
 	delete(m.integridad, name)
 	m.mu.Unlock()
+	// Y su anclado en RAM, si lo tenía (C9-10): también al reemplazarlo, que
+	// el mapeo es del fichero que se va.
+	m.soltarAnclado(name)
 	// Sus credenciales se van con ella (al borrar, no al reemplazar: un
 	// commit -replace las conserva). El almacén va sellado solo con el nombre,
 	// así que si se quedara, la siguiente plantilla con ese nombre las heredaría.
@@ -1521,6 +1551,13 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 			ai.danado = true
 		}
 		return nil, err
+	}
+	// Con el dorado frío (tras reiniciar, o desalojado), que la lectura del
+	// mem.file corra ya, a la vez que el VMM, y no a golpe de fallo de página
+	// en la primera petición (C9-10). Solo con Firecracker: en macOS el
+	// cuello es otro.
+	if backendVMM == BackendFirecracker {
+		m.precargarDoradoSiFrio(filepath.Join(m.snapDir(req.From), "mem.file"))
 	}
 	// KERNEL (K2): solo se avisa. Ver avisoKernel.
 	if aviso := m.avisoKernel(snap.KernelSHA256, fmt.Sprintf("snapshot %q", req.From)); aviso != "" {

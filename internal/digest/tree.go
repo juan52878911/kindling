@@ -41,6 +41,21 @@ func Tree(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
+	return TreeFile(f, nil)
+}
+
+// TreeFile es Tree sobre un fichero ya abierto.
+//
+// Con alLeer, cada trozo que tiene datos se lee ENTERO en memoria y se le pasa
+// (su desplazamiento y su contenido) antes de hashearlo: es lo que deja al
+// commit perforar las páginas a cero del volcado en el mismo pase en que lo
+// hashea (C9-02), en vez de releerlo dos veces. El hash sale de lo leído, no
+// de lo que quede en el fichero después: alLeer no debe cambiar el contenido
+// (perforar ceros no lo cambia) ni b, que se reutiliza. Puede llamarse a la
+// vez desde varios hilos, con trozos distintos. Un error de alLeer corta el
+// digest y es el que se devuelve. Los trozos que el sistema de ficheros ya
+// dice que son hueco no se leen ni se le pasan.
+func TreeFile(f *os.File, alLeer func(off int64, b []byte) error) (string, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		return "", err
@@ -57,7 +72,12 @@ func Tree(path string) (string, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			buf := make([]byte, 1<<20)
+			var buf []byte
+			if alLeer != nil {
+				buf = make([]byte, treeChunk)
+			} else {
+				buf = make([]byte, 1<<20)
+			}
 			h := sha256.New()
 			for i := range work {
 				off := int64(i) * treeChunk
@@ -67,7 +87,17 @@ func Tree(path string) (string, error) {
 					continue
 				}
 				h.Reset()
-				if _, err := io.CopyBuffer(h, io.NewSectionReader(f, off, l), buf); err != nil {
+				var err error
+				if alLeer == nil {
+					_, err = io.CopyBuffer(h, io.NewSectionReader(f, off, l), buf)
+				} else {
+					b := buf[:l]
+					if _, err = f.ReadAt(b, off); err == nil {
+						err = alLeer(off, b)
+					}
+					h.Write(b)
+				}
+				if err != nil {
 					select {
 					case errs <- err:
 					default:

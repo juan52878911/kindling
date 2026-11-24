@@ -8,7 +8,47 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
+
+// Un dorado cuya plantilla lleva kling.golden.mirror=off (lo pone el
+// fabricante para un backend idle "remove", C9-15) no se espeja tras el
+// commit: sus réplicas no se congelan en diferencial, y el espejo era otra
+// copia del mem.file entero compitiendo por el disco con las primeras
+// restauraciones. Sin la etiqueta, o con otro valor, lo de hoy.
+func TestSinEspejoConEtiqueta(t *testing.T) {
+	casos := []struct {
+		labels map[string]string
+		espeja bool
+	}{
+		{nil, true},
+		{map[string]string{"otra": "x"}, true},
+		{map[string]string{api.LabelGoldenMirror: "on"}, true},
+		{map[string]string{api.LabelGoldenMirror: api.GoldenMirrorOff}, false},
+	}
+	for _, c := range casos {
+		if got := espejarTrasCommit(c.labels); got != c.espeja {
+			t.Errorf("espejarTrasCommit(%v) = %v, quería %v", c.labels, got, c.espeja)
+		}
+	}
+
+	// Y de punta a punta, donde hay almacén (Linux con congelado diferencial).
+	m, f := managerConAlmacen(t, "c0aa170000000031", "dorado")
+	m.mu.Lock()
+	m.byID["c0aa170000000031"].Labels = map[string]string{api.LabelGoldenMirror: api.GoldenMirrorOff}
+	m.mu.Unlock()
+	if _, err := m.Commit(context.Background(), "c0aa170000000031", "dorado", false); err != nil {
+		t.Fatal(err)
+	}
+	m.sueltas.Wait()
+	if n := f.copias.Load(); n != 0 {
+		t.Errorf("el commit con %s=off copió %d veces", api.LabelGoldenMirror, n)
+	}
+	if e := espejosHechos(t, m.root, "dorado"); len(e) != 0 {
+		t.Errorf("el commit con %s=off dejó espejos: %v", api.LabelGoldenMirror, e)
+	}
+}
 
 // escribirMemoriaDorada deja el mem.file del dorado snap con las páginas
 // dadas (reemplazándolo como hace commit: otro inodo).
