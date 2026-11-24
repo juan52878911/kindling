@@ -277,7 +277,7 @@ func TestVonBenchSacaJSON(t *testing.T) {
 	salida := filepath.Join(dir, "von.json")
 	cmd := exec.Command("bash", "96-von-bench.sh", "von-falso")
 	cmd.Env = append(os.Environ(), "KLING="+k, "KFALSO="+filepath.Join(dir, "estado"), "JSON_OUT="+salida,
-		"RUNS=2", "REPLICAS=2", "CYCLES=2", "GATEWAY=0", "DROP_CACHES=0", "IA_BENCH=/nonexistent", "KFALSO_DISCO=*-p1-rc-0",
+		"RUNS=2", "REPLICAS=2", "CYCLES=2", "GATEWAY=0", "DROP_CACHES=0", "IA_BENCH=/nonexistent", "KFALSO_DISCO=*-p1-?c-0",
 		"SECCIONES=restaurar primera memoria ociosa carga")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -317,11 +317,18 @@ func TestVonBenchSacaJSON(t *testing.T) {
 	if ms, _ := filepath.Glob(filepath.Join(dir, "estado", "m", "*")); len(ms) != 0 {
 		t.Errorf("quedaron máquinas: %v", ms)
 	}
-	// El primer intento de la primera muestra caliente leyó disco (KFALSO_DISCO): se aparta y se repite.
+	// El primer intento de la primera restauración caliente leyó disco (KFALSO_DISCO): se aparta y se
+	// repite. La primera descongelada caliente también leyó, y se queda: una réplica congelada siempre
+	// lee su propio volcado.
 	if ap, _ := pr["calientes_con_disco"].(map[string]any); ap == nil {
 		t.Errorf("falta primera.calientes_con_disco: %v", pr)
-	} else if n := len(ap["restaurar_caliente"].([]any)) + len(ap["descongelar_caliente"].([]any)); n != 1 {
-		t.Errorf("quería 1 muestra caliente apartada por leer disco, hay %d: %v", n, ap)
+	} else if a, d := len(ap["restaurar_caliente"].([]any)), len(ap["descongelar_caliente"].([]any)); a != 1 || d != 0 {
+		t.Errorf("quería 1 restauración caliente apartada por leer disco y ninguna descongelada, hay %d y %d: %v", a, d, ap)
+	}
+	if dc, _ := pr["descongelar_caliente"].([]any); len(dc) != 2 {
+		t.Errorf("quería las 2 descongeladas calientes, con su disco, hay %v", pr["descongelar_caliente"])
+	} else if m, _ := dc[0].(map[string]any); m["disco_leido_bytes"] != float64(4096) {
+		t.Errorf("la primera descongelada caliente leyó 4096 bytes: %v", dc[0])
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		return

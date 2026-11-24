@@ -44,9 +44,11 @@ scripts/bench/remoto/ia.sh medir`. Las tablas las saca `scripts/bench/ia.py res/
 En la ronda 8 la mitad de las muestras «calientes» leían 1 GiB de disco: venían detrás de un
 `drop_caches`. Ahora las calientes van todas antes que las frías y, antes de cada una, el dorado se trae a
 la caché (la API `POST /snapshots/<n>/warm` si el daemon la tiene, los ficheros bajo `KLING_ROOT` y una
-restauración descartada con su petición). Una muestra cuyo VMM aun así lee del disco se aparta
-(`primera.calientes_con_disco`) y se repite. `ia.py` rechaza la corrida si alguna muestra caliente leyó
-más de `UMBRAL_CALIENTE_BYTES` (0).
+restauración descartada con su petición). Una restauración cuyo VMM aun así lee del disco se aparta
+(`primera.calientes_con_disco`) y se repite, y `ia.py` rechaza la corrida si alguna restauración caliente
+leyó más de `UMBRAL_CALIENTE_BYTES` (0). Descongelar no entra en esa regla: una réplica congelada lee su
+propio volcado, que es solo suyo, por mucho que se caliente; su muestra se apunta con lo que leyó y el
+resumen lo enseña (`disco p50`).
 
 ### Filas
 

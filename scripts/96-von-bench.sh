@@ -21,6 +21,8 @@
 #              dorado traído a la caché (API warm, ficheros bajo KLING_ROOT y
 #              una restauración descartada); la que aun así lee más de
 #              UMBRAL_CALIENTE_BYTES (0) se aparta y se repite (REINTENTOS_CALIENTE, 2);
+#              solo al restaurar: una descongelada lee su propio volcado y se
+#              apunta con lo que leyó;
 #   tps        tokens/s de prompt y de generación en una réplica caliente (openai);
 #   memoria    P2: PSS/RSS de 1..REPLICAS réplicas en tres variantes —restauradas,
 #              descongeladas (congeladas y vueltas a despertar, lo que hace el
@@ -334,7 +336,7 @@ calentar_maquina() {
   [ -n "$id" ] && [ -r "$KLING_ROOT/machines/$id" ] && leer_a_cache "$KLING_ROOT/machines/$id" && usado congelada
   return 0
 }
-# caliente <restaurar_una|descongelar_una> <rc|dc> <nombre>: una muestra caliente de verdad. Si aun
+# caliente <restaurar_una> <rc> <nombre>: una muestra caliente de verdad (solo restaurar). Si aun
 # calentada su VMM leyó del disco más de UMBRAL_CALIENTE_BYTES, la muestra se aparta (p-<k>-disco, va
 # al JSON en primera.calientes_con_disco) y se repite, hasta REINTENTOS_CALIENTE veces. Donde no se
 # sabe lo leído (null: no es Linux) se queda como está.
@@ -400,8 +402,11 @@ if pide primera; then
     # A/B alternado: las vueltas impares restauran primero; las pares descongelan primero.
     if [ $((i % 2)) = 1 ]; then orden="r d"; else orden="d r"; fi
     for k in $orden; do
+      # Descongelar no pasa por caliente: la réplica congelada lee su propio volcado, que es solo
+      # suyo, por mucho que se caliente (ronda 9: las 30 de cada modelo leían); se apunta con su
+      # disco leído y se calienta igual, para que lo que sí comparte con el dorado no lea.
       if [ "$k" = r ]; then caliente restaurar_una rc "$PREFIX-p$i-rc"
-      else caliente descongelar_una dc "$PREFIX-p$i-dc"; fi
+      else CALENTAR=1 descongelar_una "$D/p-dc.jsonl" "$PREFIX-p$i-dc-0" 0; fi
     done
   done
   if [ "$DROP_OK" = 1 ]; then

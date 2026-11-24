@@ -66,16 +66,20 @@ def faltan(doc):
     return out
 
 
-CALIENTES = ("restaurar_caliente", "descongelar_caliente")
+# Las muestras «calientes» a las que se exige no leer disco. Solo restaurar: descongelar una réplica
+# congelada lee su propio volcado, que es solo suyo y que nadie trajo antes a la caché (en la ronda 9 las
+# 30 de cada modelo leían disco aun calentadas); el resumen enseña cuánto.
+CALIENTES = ("restaurar_caliente",)
 
 
 def rechazos(doc):
     """Motivos para no dar por buena la medida de un JSON del banco (vacía = vale).
 
-    C9-14: una muestra «caliente» que leyó del disco es una muestra fría con otra etiqueta (la mitad de
-    las de la ronda 8 leían 1 GiB). El banco las aparta a primera.calientes_con_disco y repite; si aun
-    así alguna llega a la lista caliente, o no queda ninguna, la corrida no vale. El umbral es 0 bytes
-    salvo que el banco declare otro (UMBRAL_CALIENTE_BYTES, primera.umbral_caliente_bytes).
+    C9-14: una restauración «caliente» que leyó del disco es una muestra fría con otra etiqueta (la
+    mitad de las de la ronda 8 leían 1 GiB). El banco las aparta a primera.calientes_con_disco y repite;
+    si aun así alguna llega a la lista caliente, o no queda ninguna, la corrida no vale. El umbral es 0
+    bytes salvo que el banco declare otro (UMBRAL_CALIENTE_BYTES, primera.umbral_caliente_bytes).
+    Descongelar no entra (ver CALIENTES).
     """
     out = []
     pr = doc.get("primera")
@@ -267,18 +271,22 @@ def resumen(doc, out):
     pr = doc.get("primera")
     if isinstance(pr, dict) and not omitida(pr):
         w("primera respuesta (P1):")
+        apartadas = pr.get("calientes_con_disco") or {}
         for k, et in (("restaurar_caliente", "restaurar, caché caliente"), ("restaurar_fria", "restaurar, tras drop_caches"),
                       ("descongelar_caliente", "descongelar, caché caliente"), ("descongelar_fria", "descongelar, tras drop_caches")):
             v = pr.get(k)
             if omitida(v):
                 w("  %-30s omitida: %s" % (et, v["omitida"]))
                 continue
+            if k not in CALIENTES and not v and apartadas.get(k):
+                # Un banco anterior apartaba también las descongeladas que leían disco (siempre leen).
+                v = apartadas[k]
             maj = [f.get("majflt") for f in muestras(v, "fallos") if isinstance(f, dict)]
-            w("  %-30s %s   petición %s   resync %s   majflt p50 %s" % (
+            w("  %-30s %s   petición %s   resync %s   majflt p50 %s   disco p50 %s" % (
                 et, est(muestras(v, "total_ms")), fmt(pct(muestras(v, "peticion_ms"), 50)),
-                fmt(pct(muestras(v, "resync_ms"), 50)), fmt(pct(maj, 50), "")))
-        apartadas = pr.get("calientes_con_disco") or {}
-        n_ap = sum(len(v) for v in apartadas.values() if isinstance(v, list))
+                fmt(pct(muestras(v, "resync_ms"), 50)), fmt(pct(maj, 50), ""),
+                fmt(_mib(pct(muestras(v, "disco_leido_bytes"), 50)), " MiB")))
+        n_ap = sum(len(v) for k, v in apartadas.items() if k in CALIENTES and isinstance(v, list))
         if n_ap:
             w("  (%d muestras calientes apartadas por leer disco y repetidas; calentado por: %s)" % (
                 n_ap, ", ".join(pr.get("calentado_por") or []) or "nada"))
@@ -539,9 +547,27 @@ def autoprueba():
     tolerada["primera"]["umbral_caliente_bytes"] = 2 << 30
     assert rechazos(tolerada) == [], rechazos(tolerada)
     vacia = json.loads(json.dumps(doc))
-    vacia["primera"]["descongelar_caliente"] = []
-    vacia["primera"]["calientes_con_disco"] = {"descongelar_caliente": [sm(7900)]}
-    assert any("descongelar_caliente" in x for x in rechazos(vacia)), rechazos(vacia)
+    vacia["primera"]["restaurar_caliente"] = []
+    vacia["primera"]["calientes_con_disco"] = {"restaurar_caliente": [sm(7900)]}
+    assert any("restaurar_caliente" in x for x in rechazos(vacia)), rechazos(vacia)
+    # Descongelar en caliente siempre lee: el volcado de una réplica congelada es solo suyo, nadie
+    # lo trajo antes a la caché. Ni sus lecturas ni (en corridas viejas) que el banco las apartara
+    # rechazan la corrida, y el resumen las enseña con su disco.
+    desc = json.loads(json.dumps(doc))
+    desc["primera"]["descongelar_caliente"][0]["disco_leido_bytes"] = 1011 << 20
+    assert rechazos(desc) == [], rechazos(desc)
+    out = []
+    resumen(desc, out)
+    lin = [x for x in out if "descongelar, caché caliente" in x]
+    assert lin and "disco p50 1011 MiB" in lin[0], out
+    vieja = json.loads(json.dumps(doc))
+    vieja["primera"]["descongelar_caliente"] = []
+    vieja["primera"]["calientes_con_disco"] = {"descongelar_caliente": [dict(sm(1200), disco_leido_bytes=900 << 20)] * 3}
+    assert rechazos(vieja) == [], rechazos(vieja)
+    out = []
+    resumen(vieja, out)
+    lin = [x for x in out if "descongelar, caché caliente" in x]
+    assert lin and "p50 1200 ms" in lin[0] and "(n=3)" in lin[0] and "disco p50 900 MiB" in lin[0], out
 
     fuga = json.loads(json.dumps(doc))
     fuga["secreto"]["valor_en_mem_file"] = True
