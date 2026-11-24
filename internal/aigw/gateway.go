@@ -149,6 +149,10 @@ type Gateway struct {
 	// "service" del planificador). Lo rehace setConfig (New y Reload) y lo
 	// leen los ganchos del planificador sin candado.
 	porDorado atomic.Pointer[map[string]*Backend]
+
+	// retirar saca de servicio las réplicas de un dorado (scheduler.Retire);
+	// los tests lo sustituyen.
+	retirar func(ctx context.Context, snap string)
 }
 
 // New crea el gateway. No habla con el daemon hasta Start o la primera

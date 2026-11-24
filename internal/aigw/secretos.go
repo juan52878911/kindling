@@ -1,5 +1,11 @@
 package aigw
 
+import (
+	"context"
+
+	"github.com/juan52878911/kindling/pkg/api"
+)
+
 // SEMILLA de la ronda 9 (analisis/ronda9-carga/plan-r9.md, pendiente 1 de la
 // ronda 8). Dueño: Z4 (planificador, repuesto y secretos). Solo declaraciones.
 
@@ -52,5 +58,11 @@ type SecretConfig struct {
 // con snapshot, Name único, Deliver conocido, File 0600 (como checkAuth),
 // DeliverMMDS con idle remove o pause, DeliverCredential con Domain y Allow.
 func validateSecrets(n string, m *ModelConfig) []error {
+	return nil
+}
+
+// Declaraciones para los tests de la ronda 9 (Z4); se rellenan después.
+func (g *Gateway) aplicarSecretos(ctx context.Context) {}
+func (g *Gateway) entregarSecretos(ctx context.Context, snap string, mc *api.Machine) error {
 	return nil
 }
