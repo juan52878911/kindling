@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // Las banderas de una credencial: postgres lleva rol, puerto, base y CA; lo
@@ -229,6 +232,27 @@ func TestCredentialFlagsSigV4(t *testing.T) {
 		}
 		if _, err := cf.spec(); err == nil {
 			t.Errorf("%s: spec aceptado", nombre)
+		}
+	}
+}
+
+// httpDestino es a dónde sale de verdad la clave de una credencial HTTP: el
+// dominio por HTTPS, o el upstream fijado (Z6) con TLS verificado o, con
+// -upstream-tls disable, sin TLS. «only goes to https://dominio» con un
+// upstream mentía sobre el destino.
+func TestHTTPDestino(t *testing.T) {
+	casos := []struct {
+		spec api.CredentialSpec
+		want string
+	}{
+		{api.CredentialSpec{Domain: "API.example.com"}, "https://api.example.com"},
+		{api.CredentialSpec{Domain: "api.example.com", Upstream: "10.0.0.5:8443"}, "upstream 10.0.0.5:8443 over TLS verified as api.example.com"},
+		{api.CredentialSpec{Domain: "api.example.com", Upstream: "10.0.0.5:8443", TLSServerName: "Interno.example.com"}, "upstream 10.0.0.5:8443 over TLS verified as interno.example.com"},
+		{api.CredentialSpec{Domain: "api.example.com", Upstream: "127.0.0.1:8080", UpstreamTLS: credproxy.UpstreamTLSDisable}, "upstream 127.0.0.1:8080 without TLS"},
+	}
+	for _, c := range casos {
+		if got := httpDestino(c.spec); got != c.want {
+			t.Errorf("httpDestino(%+v) = %q, want %q", c.spec, got, c.want)
 		}
 	}
 }

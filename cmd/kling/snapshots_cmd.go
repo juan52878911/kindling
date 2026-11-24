@@ -129,12 +129,8 @@ func snapshotsCredential(args []string) error {
 		fmt.Printf("      running instances are not changed (kling machine credential does that)\n")
 		return nil
 	}
-	destino := "https://" + strings.ToLower(spec.Domain)
-	if spec.Upstream != "" {
-		destino = "upstream " + spec.Upstream
-	}
 	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to %s through its proxy\n",
-		s.Name, spec.Env, destino)
+		s.Name, spec.Env, httpDestino(spec))
 	fmt.Printf("      %s\n", describirAllow(spec.Allow))
 	fmt.Printf("      %s\n", describirSitios(spec))
 	fmt.Printf("      point the SDK at http://%s; running instances are not changed (kling machine credential does that)\n",
@@ -299,6 +295,23 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 	}
 	s.Secret = secret
 	return s, nil
+}
+
+// httpDestino dice a dónde sale de verdad la clave de una credencial HTTP: a
+// https://dominio o, con -upstream, a ese servidor con TLS verificado contra
+// el dominio (o -tls-server-name), o sin TLS con -upstream-tls disable.
+func httpDestino(s api.CredentialSpec) string {
+	if s.Upstream == "" {
+		return "https://" + strings.ToLower(s.Domain)
+	}
+	if s.UpstreamTLS == credproxy.UpstreamTLSDisable {
+		return "upstream " + s.Upstream + " without TLS"
+	}
+	nombre := s.Domain
+	if s.TLSServerName != "" {
+		nombre = s.TLSServerName
+	}
+	return "upstream " + s.Upstream + " over TLS verified as " + strings.ToLower(nombre)
 }
 
 // pgDestino dice a dónde y cómo sale la contraseña de una credencial

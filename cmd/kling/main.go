@@ -1699,12 +1699,17 @@ func cmdCredential(args []string) error {
 		fmt.Printf("      the key survives freeze/thaw and daemon restarts\n")
 		return nil
 	}
-	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
-		mc.ID[:12], spec.Env, strings.ToLower(spec.Domain))
+	fmt.Printf("%s  %s now holds a placeholder; the key only goes to %s through the proxy\n",
+		mc.ID[:12], spec.Env, httpDestino(spec))
 	fmt.Printf("      %s\n", describirAllow(spec.Allow))
 	fmt.Printf("      %s\n", describirSitios(spec))
-	fmt.Printf("      point the SDK at http://%s (the proxy adds TLS); the key survives freeze/thaw and daemon restarts\n",
-		strings.ToLower(spec.Domain))
+	// Con -upstream-tls disable el proxy no pone TLS: no se dice que lo pone.
+	tls := " (the proxy adds TLS)"
+	if spec.UpstreamTLS == credproxy.UpstreamTLSDisable {
+		tls = ""
+	}
+	fmt.Printf("      point the SDK at http://%s%s; the key survives freeze/thaw and daemon restarts\n",
+		strings.ToLower(spec.Domain), tls)
 	return nil
 }
 
