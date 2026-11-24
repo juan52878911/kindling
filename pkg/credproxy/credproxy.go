@@ -182,6 +182,10 @@ type Credential struct {
 	// (ver upstream.go). UpstreamTLS "" es TLS verificado; "disable", sin TLS
 	// y solo con SCRAM-SHA-256 (exige Upstream). TLSServerName, si no es "",
 	// es el nombre contra el que se verifica el certificado en vez de Domain.
+	// En una credencial HTTP (upstream.go, validarUpstreamHTTP) Upstream exige
+	// Allow, "disable" solo vale hacia el loopback del host, y UpstreamTLS,
+	// TLSServerName y CAPEM no valen sin Upstream. Un almacén con alguna así
+	// se sella en una versión propia (internal/machine, credenciales.go).
 	Upstream      string `json:",omitempty"`
 	UpstreamTLS   string `json:",omitempty"`
 	TLSServerName string `json:",omitempty"`
@@ -258,6 +262,9 @@ func ValidarCredenciales(creds []Credential) error {
 			return err
 		}
 	}
+	if err := ValidarDestinosHTTP(creds); err != nil {
+		return err
+	}
 	return ValidarPuertosDB(creds)
 }
 
@@ -279,12 +286,15 @@ func ValidarTipo(c *Credential) error {
 		if err := validarCabeceras(c.Headers); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
 		}
-		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.CAPEM != "" ||
-			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" || c.UpstreamMachine != "" || c.UpstreamOwner != "" {
-			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS, TLS server name and upstream machine are only for -type postgres or mysql", d)
+		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.UpstreamMachine != "" || c.UpstreamOwner != "" {
+			return fmt.Errorf("credential for %s: port, user, database, any-database and upstream machine are only for -type postgres or mysql", d)
 		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
+		}
+		// Upstream, su TLS y su CA (upstream.go): solo juntos, con Allow.
+		if err := validarUpstreamHTTP(c); err != nil {
+			return err
 		}
 	case KindSigV4:
 		return validarSigV4(c)
@@ -327,7 +337,9 @@ type Options struct {
 	// debe llevar la clave a la LAN ni a los metadatos del cloud.
 	Lookup LookupFunc
 	// Transport sustituye al transporte seguro. Solo para tests (un proveedor
-	// de httptest en 127.0.0.1): en producción anula la barrera de IPs.
+	// de httptest en 127.0.0.1): en producción anula la barrera de IPs. Una
+	// credencial HTTP con Upstream no lo usa: marca siempre con el dialer de
+	// upstream.go, con su propia barrera.
 	Transport http.RoundTripper
 	// TempDir es dónde se derrama a fichero un cuerpo con Content-Length que
 	// no cabe en MaxSwapBody (ver cuerpo.go). "" es NUNCA a disco: ese cuerpo
@@ -390,8 +402,11 @@ type Proxy struct {
 	// (paresRedaccion de sus credenciales): se calculan en SetCredentials y
 	// no en cada petición.
 	redaccion map[string][]par
-	sem       chan struct{}
-	client    *http.Client
+	// httpUp son, por dominio, las salidas de las credenciales HTTP con
+	// Upstream (upstream.go): a la dirección fijada y nunca al dominio.
+	httpUp map[string]*salidaUpstream
+	sem    chan struct{}
+	client *http.Client
 	// idle y max son IdleTimeout y MaxDuration; campos para que los tests no
 	// tengan que esperar minutos.
 	idle, max time.Duration
@@ -571,8 +586,17 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	}
 	sort.Strings(domains)
 	redaccion := make(map[string][]par, len(byDomain))
+	httpUp := map[string]*salidaUpstream{}
 	for d, cc := range byDomain {
 		redaccion[d] = paresRedaccion(credencialesDe(cc))
+		// Todas las del dominio tienen el mismo destino (ValidarDestinosHTTP).
+		if cc[0].Upstream != "" {
+			s, err := p.nuevaSalidaUpstream(cc[0].Credential)
+			if err != nil {
+				return nil, err
+			}
+			httpUp[d] = s
+		}
 	}
 	// sesMu antes que mu (el mismo orden que registrarSesion): una sesión de
 	// base de datos cuya credencial desaparece o cambia (kling db detach, otra
@@ -581,8 +605,14 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	p.sesMu.Lock()
 	defer p.sesMu.Unlock()
 	p.mu.Lock()
-	p.creds, p.ocultar, p.redaccion, p.pg, p.my = byDomain, ocultar, redaccion, pg, my
+	viejas := p.httpUp
+	p.creds, p.ocultar, p.redaccion, p.pg, p.my, p.httpUp = byDomain, ocultar, redaccion, pg, my, httpUp
 	p.mu.Unlock()
+	// Las conexiones en reposo de las salidas sustituidas no se reutilizan:
+	// una petición en vuelo termina con la suya.
+	for _, s := range viejas {
+		s.tr.CloseIdleConnections()
+	}
 	p.cortarSesionesHuerfanasLocked(pg, my)
 	return domains, nil
 }
@@ -626,7 +656,7 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	}
 	host = strings.TrimSuffix(host, ".")
 	p.mu.RLock()
-	todas, ocultar, redaccion := p.creds[host], p.ocultar, p.redaccion[host]
+	todas, ocultar, redaccion, fijada := p.creds[host], p.ocultar, p.redaccion[host], p.httpUp[host]
 	p.mu.RUnlock()
 
 	// w mide lo que se contesta; sw (el del servidor) solo va a
@@ -794,7 +824,13 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	// La URL saliente se monta por campos y NUNCA concatenando texto del
 	// invitado tras "https://"+host: una ruta que no empezase por "/" o un
 	// request-target opaco cambiarían el host al volver a parsearla.
-	salida := &url.URL{Scheme: "https", Host: host, Path: u.Path, RawPath: u.RawPath, RawQuery: sustituirQuery(u.RawQuery, cs)}
+	// Con upstream fijado, el esquema es el de su TLS y el cliente marca la
+	// dirección fijada; el Host sigue siendo el de la credencial.
+	scheme, cliente := "https", p.client
+	if fijada != nil {
+		scheme, cliente = fijada.scheme, fijada.client
+	}
+	salida := &url.URL{Scheme: scheme, Host: host, Path: u.Path, RawPath: u.RawPath, RawQuery: sustituirQuery(u.RawQuery, cs)}
 	if salida.Path == "" {
 		salida.Path = "/"
 	}
@@ -863,9 +899,19 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		red.par(res.semilla, firma.firma)
 	}
 
-	resp, err := p.client.Do(out)
+	if fijada != nil {
+		rec.Upstream = fijada.upstream
+	}
+	resp, err := cliente.Do(out)
 	if err != nil {
 		rec.Reason = ReasonUpstreamError
+		if fijada != nil {
+			// La dirección fijada es del operador: el invitado no la ve, ni
+			// en el texto del error. Va al registro del daemon.
+			p.logf("credential proxy: upstream %s for %s: %s", fijada.upstream, host, red.texto(errorSinURL(err)))
+			http.Error(w, "kindling credential proxy: upstream error", http.StatusBadGateway)
+			return
+		}
 		http.Error(w, "kindling credential proxy: upstream error: "+red.texto(errorSinURL(err)), http.StatusBadGateway)
 		return
 	}

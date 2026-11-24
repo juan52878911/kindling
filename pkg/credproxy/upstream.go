@@ -65,12 +65,36 @@ package credproxy
 // en claro ni md5 ni trust. Lo que sí viaja en claro son las consultas y sus
 // resultados: para un Docker en el mismo host no sale de la máquina; para una
 // base de datos de la LAN, la CLI lo advierte.
+//
+// CREDENCIALES HTTP CON UPSTREAM: lo mismo para HTTP (la réplica de un modelo
+// que llama al gateway de IA del host con un token de inquilino, o un servicio
+// de la VPC). El invitado habla HTTP en claro con el nombre de la credencial,
+// que su resolver desvía al proxy, y el proxy marca la dirección fijada con
+// los mismos vetos de arriba (validar y marcar). Diferencias con Postgres:
+//   - Allow es obligatorio. El proxy es un oráculo de la clave, y hacia un
+//     servicio del host o de la LAN lo único que acota qué se hace con ella es
+//     la lista de peticiones; con Postgres lo acotan el rol y la base.
+//   - "disable" solo hacia el loopback del host (una IP de loopback o
+//     "localhost", nunca un nombre que resuelva ahí): aquí no hay SCRAM, la
+//     clave va en una cabecera y fuera del host cruzaría la red en claro.
+//     Hacia la LAN o la VPC, TLS verificado contra TLSServerName o Domain, con
+//     las raíces del sistema más CAPEM.
+//   - En el loopback el razonamiento de Postgres («un servicio HTTP no
+//     completa SCRAM») no aplica: lo que protege el resto del loopback es el
+//     rango de reenvíos (vetado) y que Allow solo deja pasar las peticiones
+//     que el operador escribió.
+//   - Todas las credenciales HTTP de un dominio van al mismo sitio
+//     (ValidarDestinosHTTP): el destino es del dominio, no de cada clave.
+//   - Al invitado no le llega la dirección fijada, ni en un error.
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -425,4 +449,116 @@ func dialFijado(lookup lookupUpstream, d *net.Dialer, loop func(context.Context,
 		}
 		return nil, last
 	}
+}
+
+// validarUpstreamHTTP comprueba y normaliza Upstream, UpstreamTLS,
+// TLSServerName y CAPEM de una credencial HTTP (ver la cabecera). Sin
+// Upstream ninguno vale: la credencial sale al dominio como siempre.
+func validarUpstreamHTTP(c *Credential) error {
+	d := c.Domain
+	if c.Upstream == "" {
+		if c.UpstreamTLS != "" || c.TLSServerName != "" || c.CAPEM != "" {
+			return fmt.Errorf("credential for %s: -upstream-tls, -tls-server-name and -ca-file on an HTTP credential need -upstream", d)
+		}
+		return nil
+	}
+	if len(c.Allow) == 0 {
+		return fmt.Errorf("credential for %s: an HTTP credential with -upstream needs -allow-request (the only requests that may carry the key there)", d)
+	}
+	if err := validarUpstream(c); err != nil {
+		return err
+	}
+	if c.UpstreamTLS == UpstreamTLSDisable && !UpstreamLoopback(c.Upstream) {
+		return fmt.Errorf("credential for %s: -upstream-tls disable on an HTTP credential is only for the host's loopback (an IP or localhost): the key would cross the network unencrypted to %s", d, c.Upstream)
+	}
+	if len(c.CAPEM) > MaxCAPEM {
+		return fmt.Errorf("credential for %s: the CA is larger than %d bytes", d, MaxCAPEM)
+	}
+	if c.CAPEM != "" && !x509.NewCertPool().AppendCertsFromPEM([]byte(c.CAPEM)) {
+		return fmt.Errorf("credential for %s: the CA is not a PEM certificate", d)
+	}
+	return nil
+}
+
+// sirveHTTP dice si c la atiende el proxy HTTP (ServeHTTP).
+func sirveHTTP(c Credential) bool {
+	return c.Kind == "" || c.Kind == KindHTTP || c.Kind == KindSigV4
+}
+
+// ValidarDestinosHTTP exige que las credenciales HTTP (y sigv4) de un mismo
+// dominio vayan al mismo sitio: mismo Upstream, UpstreamTLS, TLSServerName y
+// CAPEM. El proxy elige la salida por el Host, antes de saber qué credencial
+// se usará. Los campos deben venir ya normalizados (ValidarTipo). Lo usa
+// ValidarCredenciales y el manager con el juego fusionado de una plantilla.
+func ValidarDestinosHTTP(creds []Credential) error {
+	type destino struct{ up, tls, nombre, ca string }
+	vistos := map[string]destino{}
+	for _, c := range creds {
+		if !sirveHTTP(c) {
+			continue
+		}
+		d := destino{c.Upstream, c.UpstreamTLS, c.TLSServerName, c.CAPEM}
+		if prev, ok := vistos[c.Domain]; ok && prev != d {
+			return fmt.Errorf("credential for %s: every HTTP credential of a domain must have the same -upstream, -upstream-tls, -tls-server-name and -ca-file", c.Domain)
+		}
+		vistos[c.Domain] = d
+	}
+	return nil
+}
+
+// salidaUpstream es la salida de las credenciales HTTP de un dominio con
+// Upstream: un cliente cuyo transporte marca SIEMPRE la dirección fijada (con
+// dialFijado y sus vetos), con el esquema de su TLS.
+type salidaUpstream struct {
+	upstream string
+	scheme   string
+	tr       *http.Transport
+	client   *http.Client
+}
+
+// nuevaSalidaUpstream arma la salida de c (validada). El TLS se verifica
+// contra TLSServerName o Domain, nunca contra el host del upstream.
+func (p *Proxy) nuevaSalidaUpstream(c Credential) (*salidaUpstream, error) {
+	up := c.Upstream
+	tr := &http.Transport{
+		Proxy: nil,
+		// Pida lo que pida el transporte (el Host es el dominio), se marca la
+		// dirección fijada. p.dialUp se lee aquí: los tests cambian su resolver.
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return p.dialUp(ctx, up)
+		},
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       60 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: HeaderTimeout,
+	}
+	s := &salidaUpstream{upstream: up, scheme: "https", tr: tr}
+	if c.UpstreamTLS == UpstreamTLSDisable {
+		// Ya lo exige la validación; aquí otra vez porque es lo que decide
+		// si la clave sale en claro.
+		if !UpstreamLoopback(up) {
+			return nil, fmt.Errorf("credential for %s: upstream without TLS outside the loopback", c.Domain)
+		}
+		s.scheme = "http"
+	} else {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if c.CAPEM != "" && !pool.AppendCertsFromPEM([]byte(c.CAPEM)) {
+			return nil, fmt.Errorf("credential for %s: the CA is not a PEM certificate", c.Domain)
+		}
+		nombre := c.Domain
+		if c.TLSServerName != "" {
+			nombre = c.TLSServerName
+		}
+		tr.TLSClientConfig = &tls.Config{ServerName: nombre, MinVersion: tls.VersionTLS12, RootCAs: pool}
+		tr.ForceAttemptHTTP2 = true
+	}
+	s.client = &http.Client{
+		Transport:     tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return s, nil
 }
