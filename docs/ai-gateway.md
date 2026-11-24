@@ -580,6 +580,42 @@ Límites, dichos claros:
 - Un umbral forzado en la tarea (`thresholds`) sigue mandando al servir; el
   informe lo marca.
 
+## Cifras en EC2 (c8i.4xlarge, virtualización anidada, Firecracker)
+
+Medido el 2026-11-24 con `scripts/bench/ec2.sh ia` (spot, us-east-1, Debian 12, disco gp3 de 40-60 GB).
+Los JSON y los resúmenes completos los deja el banco en `res/`.
+
+**Réplicas de un modelo VON** (Qwen2.5-1.5B Q4_K_M, dorado de 1240 MiB, 4 vCPU):
+
+| Política | Memoria por réplica de más (PSS) | Ociosa → primera respuesta por el gateway, p50 |
+|---|---|---|
+| `idle: freeze` (descongelar) | 1009 MiB, el 81 % del modelo | 1138 ms |
+| restaurar del dorado (`kling run -from`) | 22 MiB | — |
+| `idle: remove` (por defecto en `von` y `embed`) | 7 MiB | 995 ms |
+
+Una réplica descongelada no comparte las páginas del modelo con el dorado; una restaurada sí. Por eso
+`remove` es el valor por defecto. Restaurar cuesta 75 ms (p50); el resto hasta la primera respuesta es
+la propia petición (~900 ms: prompt a 309 tok/s y generación a 31 tok/s). Con la caché de páginas del host
+fría (tras `drop_caches`), la primera respuesta sube a 7,4 s, porque el modelo se lee del gp3: un host con
+NVMe local o precargar el dorado lo evita. El Q8_0 (1,9 GiB) no terminó de cargar en 5 minutos bajo
+virtualización anidada.
+
+**chispa-server** (modo producto en CPU: kNN con e5 en ONNX Runtime, sin L3; dorado de ~2,6 GiB, 4 vCPU),
+servido por `/v1/m/<modelo>/v1/decide`:
+
+| | Con claves, sin calentar | Sin claves, calentado |
+|---|---|---|
+| restaurar → primera decisión, p50 | 471 ms | 430 ms |
+| … con la caché del host fría | 1527 ms | 1472 ms |
+| descongelar → primera decisión | 908 ms | 553 ms |
+| PSS de 1 réplica / de 4 réplicas | 163 / 236 MiB | 161 / 224 MiB |
+| 16 clientes, 1 réplica | 393 dec/s, p50 36 ms | 406 dec/s, p50 30 ms |
+| 16 clientes, 4 réplicas | 865 dec/s, p50 16 ms | 870 dec/s, p50 16 ms |
+
+El gateway añade ~0,6-0,7 ms (p50, un cliente) sobre chispa-server en el host, que ocupa 2,4 GB de RSS él
+solo. 0 errores en todas las cargas. Sin medir todavía: la misma prueba en hierro (`.metal`) y L3 con vLLM
+en GPU como `upstream`.
+
 ## Cifras (Mac mini M4, backend `vz`)
 
 Conjunto: el reparto temporal de [CHISPA-EVAL.md](CHISPA-EVAL.md) (861 commits de prueba
