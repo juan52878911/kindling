@@ -1,6 +1,7 @@
 package von
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -175,5 +176,18 @@ func TestLabels(t *testing.T) {
 	l := Labels("m:q8_0", "von-smol", map[string]string{"kling.ports": "9999", "x": "y"})
 	if l["kling.ports"] != "8000" || l[LabelModel] != "m:q8_0" || l["service"] != "von-smol" || l["x"] != "y" {
 		t.Fatalf("etiquetas: %v", l)
+	}
+}
+
+// C9-16: el constructor llm borra la copia del GGUF de su caché tras meterlo en
+// la capa; keep_cache la conserva (receta de la imagen, bandera -keep-cache).
+func TestSpecKeepCache(t *testing.T) {
+	b, err := json.Marshal(Spec{Model: "smollm2-360m-instruct", KeepCache: true})
+	if err != nil || !strings.Contains(string(b), `"keep_cache":true`) {
+		t.Fatalf("%s %v", b, err)
+	}
+	b, _ = json.Marshal(Spec{Model: "smollm2-360m-instruct"})
+	if strings.Contains(string(b), "keep_cache") {
+		t.Fatalf("sin -keep-cache la receta no lo lleva (las de antes siguen igual): %s", b)
 	}
 }
