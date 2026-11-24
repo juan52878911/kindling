@@ -96,3 +96,15 @@ func TestCheckELFOtraArquitectura(t *testing.T) {
 		t.Fatalf("the error should name both architectures: %v", err)
 	}
 }
+
+// La salida del servicio va a /var/log/service.log y, por tee, a la consola
+// del invitado (la salida del entrypoint), como en 81-base-image.sh: el
+// fabricante ve un bucle de reinicios sin exec. La línea «service exited
+// with» no cambia (dorado.ServiceExitedMark la cuenta).
+func TestEntrypointMandaElServicioALaConsola(t *testing.T) {
+	e := Entrypoint(Marca{Constructor: "debian"}, nil, "/usr/bin/svc")
+	quiere := "( while :; do '/usr/bin/svc'; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null 2>&1 | tee -a /var/log/service.log &\n"
+	if !strings.Contains(e, quiere) {
+		t.Fatalf("entrypoint with service:\n%s\nwant the line\n%s", e, quiere)
+	}
+}

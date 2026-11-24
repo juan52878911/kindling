@@ -180,7 +180,10 @@ func Entrypoint(m Marca, env []string, service string) string {
 		e.WriteString(". " + EnvPath + "\n")
 	}
 	if service != "" {
-		fmt.Fprintf(&e, "( while :; do %s; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &\n", SQ(service))
+		// La salida va a /var/log/service.log y, por tee, a la consola del
+		// invitado (la salida del entrypoint), como en 81-base-image.sh. La
+		// línea «service exited with» la cuenta dorado.ServiceExitedMark.
+		fmt.Fprintf(&e, "( while :; do %s; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null 2>&1 | tee -a /var/log/service.log &\n", SQ(service))
 	}
 	e.WriteString("exec /usr/local/bin/kling-guest -listen :8080\n")
 	return e.String()
