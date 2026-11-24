@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/dorado"
 	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -849,7 +850,8 @@ func aiPrime(args []string) error {
 	cfgPath := fs.String("config", aiDefault("ai.json"), "model and task registry")
 	dryRun := fs.Bool("dry-run", false, "only say what would be done")
 	force := fs.Bool("force", false, "remake the golden snapshot even if its prefixes are up to date")
-	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
+	wait := fs.Duration("wait", 0, "how long to wait for the model to load (default: the block's load_wait, else by the model's size)")
+	stall := fs.Duration("stall", 0, "give up when the model touches no new memory and uses no CPU for this long (default 2m)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -928,12 +930,30 @@ func aiPrime(args []string) error {
 		for k, v := range s.Labels {
 			extra[k] = v
 		}
+		// C9-15: con idle remove (el defecto) las réplicas nunca se congelan en
+		// diferencial y el espejo del dorado sobra.
+		delete(extra, api.LabelGoldenMirror)
+		if m.Idle == "" || m.Idle == aigw.IdleRemove {
+			extra[api.LabelGoldenMirror] = api.GoldenMirrorOff
+		}
+		var loadWait time.Duration
+		if m.LoadWait != "" {
+			if loadWait, err = time.ParseDuration(m.LoadWait); err != nil {
+				errs = append(errs, fmt.Errorf("%s: load_wait: %w", name, err))
+				continue
+			}
+		}
+		var bytes int64
+		if mod, err := von.Find(s.Labels[von.LabelModel], ""); err == nil {
+			bytes = mod.Size
+		}
 		fmt.Printf("%s: remaking %s with %d task prefix(es)...\n", name, s.Name, len(pre))
 		t0 := time.Now()
 		g, err := von.MakeGolden(ctx, c, von.GoldenOptions{
 			Image: s.Image, Snapshot: s.Name, Ref: s.Labels[von.LabelModel],
 			VCPUs: s.VCPUs, MemMiB: s.MemMiB, CPUPct: s.CPUPct, AllowExec: s.AllowExec,
-			Replace: true, Wait: *wait, Prefixes: pre, Labels: extra,
+			Replace: true, Prefixes: pre, Labels: extra,
+			Wait: dorado.ResolveWait(*wait, loadWait, 0, bytes), ModelBytes: bytes, Stall: *stall,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 		})
 		if err != nil {
@@ -942,6 +962,7 @@ func aiPrime(args []string) error {
 		}
 		fmt.Printf(uiMarks().ok+" %s  %d prefix(es), %v tokens, %s of memory, %s\n", g.Snapshot.Name, len(pre), g.PrefixTokens,
 			human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+		precalentar(ctx, c, g.Snapshot.Name)
 	}
 	return errors.Join(errs...)
 }
