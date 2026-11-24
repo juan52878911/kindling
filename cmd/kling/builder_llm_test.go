@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -215,5 +216,36 @@ func TestBaseLLMSinDebootstrap(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(root, "images", "*otra*ext4*")); len(left) > 0 {
 		t.Fatalf("una base fallida dejó %v", left)
+	}
+}
+
+// 71-build-glibc-base.sh (el camino de antes, KLING_LLM_BASE=debootstrap, y
+// el de las bases de MCP) tampoco deja una base a medias con su nombre: con
+// falsos que hacen fallar el formateo, no queda ningún <nombre>.ext4.
+func TestScriptBaseGlibcCortadoNoDejaFichero(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("sin bash")
+	}
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	bin := filepath.Join(dir, "bin")
+	os.MkdirAll(bin, 0o755)
+	for name, body := range map[string]string{
+		"id":          "echo 0\n",
+		"uname":       "echo x86_64\n",
+		"debootstrap": "exit 0\n",
+		"curl":        "exit 0\n",
+		"truncate":    "for a in \"$@\"; do f=\"$a\"; done; : > \"$f\"\n",
+		"mkfs.ext4":   "exit 1\n",
+	} {
+		os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755)
+	}
+	cmd := exec.Command("bash", "../../scripts/71-build-glibc-base.sh", "glibc-x")
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "KLING_ROOT="+root)
+	if b, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("el script siguió tras un mkfs fallido:\n%s", b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(root, "images", "*glibc-x*")); len(left) > 0 {
+		t.Fatalf("un build cortado dejó %v", left)
 	}
 }
