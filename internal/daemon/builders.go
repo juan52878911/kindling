@@ -49,9 +49,10 @@ import (
 // la receta.
 //
 // El constructor recibe en el entorno KLING_ROOT, KLING_IMAGE_NAME,
-// KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW. Los aislados
-// (constructoresAislados) reciben además KLING_OUT_DIR, donde dejan la imagen
-// en vez de en images/, y sin root KLING_CACHE_DIR, su caché,
+// KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW. Los de
+// constructoresConSalida (los aislados, llm y chispa) reciben además
+// KLING_OUT_DIR, donde dejan la imagen en vez de en images/, y los aislados
+// sin root KLING_CACHE_DIR, su caché,
 // KLING_VERIFIED_CACHE_DIR, la que verificó el daemon, y, si la imagen es de
 // un registro con credenciales o de un archivo, KLING_VERIFIED_SCOPE_DIR, la
 // de ese origen (builders_cache.go).
@@ -175,6 +176,16 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	// Los aislados dejan la imagen en out/ y, con usuario de construcción,
 	// corren con él (builders_sinroot.go).
 	aislado := constructoresAislados[req.Builder]
+	conSalida := aislado || constructoresConSalida[req.Builder]
+	if conSalida {
+		// Si ya se sabe que no se podrá adoptar (una réplica viva, un dorado
+		// encima), mejor ahora que tras minutos de descarga. La comprobación
+		// que manda es la de la adopción, con las imágenes quietas.
+		if err := s.imagenSustituible(req.Name); err != nil {
+			fail(w, http.StatusConflict, fmt.Errorf("builder %s: %w", req.Builder, err))
+			return
+		}
+	}
 	var u *usuarioConstructor
 	if aislado {
 		u = s.constructor
@@ -298,7 +309,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	// con un loopback montado a medias deja el host peor que esperar.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
-	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache, verificada, deOrigen)
+	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, conSalida, u, cache, verificada, deOrigen)
 	enVM := aislarSpec(req)
 	if enVM {
 		// Solo baja y verifica; el aplanado lo hace la microVM (builders_vm.go).
@@ -321,7 +332,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 			fmt.Errorf("builder %s failed: %w\n%s", req.Builder, err, strings.TrimSpace(salida.String())))
 		return
 	}
-	if aislado {
+	if conSalida {
 		if u != nil {
 			barrerProcesos(u.UID) // nada del constructor sigue vivo mientras se valida
 		}
@@ -347,14 +358,9 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		status := http.StatusInternalServerError
 		err := s.mgr.ConImagenesQuietas(func() error {
 			images := filepath.Join(s.root, "images")
-			for _, f := range []string{req.Name + ".ext4", req.Name + ".layer.ext4"} {
-				if _, lerr := os.Lstat(filepath.Join(images, f)); lerr == nil {
-					if rerr := s.mgr.ImageReplaceable(req.Name); rerr != nil {
-						status = http.StatusConflict
-						return rerr
-					}
-					break
-				}
+			if rerr := s.imagenSustituible(req.Name); rerr != nil {
+				status = http.StatusConflict
+				return rerr
 			}
 			_, aerr := adoptarSalida(out, images, req.Name, dueño)
 			return aerr
@@ -403,6 +409,19 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}
 	writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: img, Output: salida.String()})
+}
+
+// imagenSustituible dice si la imagen name se puede sustituir: si no existe,
+// siempre; si existe, lo que diga ImageReplaceable (ni réplicas vivas, ni un
+// dorado, ni otra capa encima).
+func (s *Server) imagenSustituible(name string) error {
+	images := filepath.Join(s.root, "images")
+	for _, f := range []string{name + ".ext4", name + ".layer.ext4"} {
+		if _, err := os.Lstat(filepath.Join(images, f)); err == nil {
+			return s.mgr.ImageReplaceable(name)
+		}
+	}
+	return nil
 }
 
 // cerrojoImagen es el cerrojo de construir un nombre de imagen; n, cuántos
@@ -473,7 +492,7 @@ func mismoJSON(a, b json.RawMessage) bool {
 // usuario de construcción, su identidad (u.credencial) y un entorno de lista
 // blanca en vez del del daemon.
 func comandoConstructor(ctx context.Context, bin string, binArgs []string, root, work string,
-	req api.BuildImageRequest, aislado bool, u *usuarioConstructor, cache, verificada, deOrigen string) *exec.Cmd {
+	req api.BuildImageRequest, conSalida bool, u *usuarioConstructor, cache, verificada, deOrigen string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, bin, append(append([]string{}, binArgs...), work)...)
 	cmd.Dir = work
 	cmd.Env = os.Environ()
@@ -493,7 +512,7 @@ func comandoConstructor(ctx context.Context, bin string, binArgs []string, root,
 		"KLING_ROOT="+root,
 		"KLING_IMAGE_NAME="+req.Name,
 		"KLING_BUILD_DIR="+work)
-	if aislado {
+	if conSalida {
 		cmd.Env = append(cmd.Env, "KLING_OUT_DIR="+filepath.Join(work, "out"))
 	}
 	if req.Base != "" {
