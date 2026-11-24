@@ -30,8 +30,10 @@ import (
 //     (MAP_PRIVATE sin escribir), y así no las desaloja nadie. Es RAM que no
 //     se recupera: opt-in, solo administradores (lo mira el daemon), pasa por
 //     la admisión de memoria y solo en Linux;
-//   - runFromUna, si el dorado está frío, lanza la misma precarga en paralelo
-//     con el VMM (precargarDoradoSiFrio).
+//   - runFromUna no precarga nada: con el dorado frío, leer el mem.file
+//     entero (2,6 GiB en chispa, que solo toca ~160 MiB) a la vez que el VMM
+//     peleaba por el disco con los fallos de página que sí hacían falta, y el
+//     mincore de cada run -from costaba en caliente (ronda 9, EC2 gp3).
 
 // ErrAncladoNoSoportado: este backend no sabe anclar un dorado en RAM (macOS).
 var ErrAncladoNoSoportado = errors.New("pinning a golden snapshot in RAM is not supported on this platform")
@@ -115,18 +117,6 @@ func (m *Manager) precargarDoradoEnFondo(mem string) bool {
 		precargarParalelo(ctx, mem, lectoresCalentar())
 	}()
 	return true
-}
-
-// precargarDoradoSiFrio es lo de runFromUna: si menos de la mitad de lo
-// asignado del mem.file está en caché, lanza la precarga en segundo plano
-// para que corra a la vez que el VMM y la primera petición, en vez de a golpe
-// de fallo de página. Dice si la lanzó (o ya corría una).
-func (m *Manager) precargarDoradoSiFrio(mem string) bool {
-	asignado := allocatedBytes(mem)
-	if asignado == 0 || bytesEnCache(mem) >= asignado/2 {
-		return false
-	}
-	return m.precargarDoradoEnFondo(mem)
 }
 
 // precargarParalelo lee path entero (sus tramos con datos) con n lectores,

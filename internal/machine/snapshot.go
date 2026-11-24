@@ -1552,13 +1552,9 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 		}
 		return nil, err
 	}
-	// Con el dorado frío (tras reiniciar, o desalojado), que la lectura del
-	// mem.file corra ya, a la vez que el VMM, y no a golpe de fallo de página
-	// en la primera petición (C9-10). Solo con Firecracker: en macOS el
-	// cuello es otro.
-	if backendVMM == BackendFirecracker {
-		m.precargarDoradoSiFrio(filepath.Join(m.snapDir(req.From), "mem.file"))
-	}
+	// Aquí no se precarga el mem.file del dorado aunque esté frío: leerlo
+	// entero compite por el disco con los fallos de página que sí hacen falta
+	// (ver TestRunFromUnaNoLeeElDorado). Calentar es cosa de CalentarDorado.
 	// KERNEL (K2): solo se avisa. Ver avisoKernel.
 	if aviso := m.avisoKernel(snap.KernelSHA256, fmt.Sprintf("snapshot %q", req.From)); aviso != "" {
 		log.Print(aviso)

@@ -1,11 +1,13 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -84,28 +86,58 @@ func TestPrecargarParaleloLeeTodo(t *testing.T) {
 	}
 }
 
-// runFromUna precarga el dorado si está frío, y no si ya está en caché; dos
-// a la vez del mismo dorado no lanzan dos lecturas.
-func TestRunFromPrecargaSiFrio(t *testing.T) {
-	m := annotTestManager(t)
-	mem := doradoParaCalentar(t, m, "modelo", 8)
-	precargarParalelo(context.Background(), mem, 4)
-	if m.precargarDoradoSiFrio(mem) {
-		t.Error("con el dorado en caché se lanzó la precarga")
+// runFromUna no lee el mem.file del dorado ni le hace mincore: la precarga
+// en paralelo con el VMM (Z1) leía el volcado entero (2,6 GiB en chispa, que
+// solo toca ~160 MiB) y peleaba por el disco con los fallos de página que sí
+// hacían falta: restaurar en frío pasó de 1,5 a 12,9 s en chispa y de 7,5 a
+// 9,3 s en VON (EC2, gp3), y el mincore de todo el fichero en cada run -from
+// subió el thaw en caliente. Calentar es cosa de POST /snapshots/{name}/warm,
+// de pin y del gateway al arrancar. Sobre el fuente, como
+// TestRunFromConPuertaSoloEnLaCarga.
+func TestRunFromUnaNoLeeElDorado(t *testing.T) {
+	b, err := os.ReadFile("snapshot.go")
+	if err != nil {
+		t.Fatal(err)
 	}
+	s := string(b)
+	ini := strings.Index(s, "func (m *Manager) runFromUna(")
+	if ini < 0 {
+		t.Fatal("no encuentro runFromUna")
+	}
+	s = s[ini:]
+	if fin := strings.Index(s, "\nfunc "); fin > 0 {
+		s = s[:fin]
+	}
+	for _, prohibida := range []string{"precargarDorado", "precargarParalelo", "bytesEnCache(", "CalentarDorado("} {
+		if strings.Contains(s, prohibida) {
+			t.Errorf("runFromUna llama a %s: restaurar no debe leer el mem.file", prohibida)
+		}
+	}
+}
+
+// Lo mismo, de verdad: con el dorado frío, runFrom no lo trae a la caché.
+// Solo en Linux, donde se puede enfriar el fichero.
+func TestRunFromNoPrecargaElDoradoFrio(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("sin POSIX_FADV_DONTNEED no se puede enfriar el fichero")
+	}
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
+	m := newTestManager(t)
+	escribirSnapshot(t, m, "modelo", api.Snapshot{GuestIPv6Off: true})
+	mem := filepath.Join(m.snapDir("modelo"), "mem.file")
+	if err := os.WriteFile(mem, bytes.Repeat([]byte{1}, 16<<20), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	dropCache(mem)
 	if bytesEnCache(mem) >= allocatedBytes(mem)/2 {
 		t.Skip("el kernel no soltó la caché del fichero")
 	}
-	if !m.precargarDoradoSiFrio(mem) {
-		t.Error("con el dorado frío no se lanzó la precarga")
+	if _, err := m.runFrom(context.Background(), api.RunRequest{From: "modelo"}); err == nil {
+		t.Fatal("se esperaba un error más adelante (sin overlay.ext4 real que copiar)")
 	}
 	m.sueltas.Wait()
-	if got := bytesEnCache(mem); got < allocatedBytes(mem) {
-		t.Errorf("tras la precarga, %d de %d bytes en caché", got, allocatedBytes(mem))
+	if got := bytesEnCache(mem); got >= allocatedBytes(mem)/2 {
+		t.Errorf("runFrom trajo el dorado a la caché: %d de %d bytes", got, allocatedBytes(mem))
 	}
 }
 
