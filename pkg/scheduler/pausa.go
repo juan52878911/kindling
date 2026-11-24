@@ -40,6 +40,9 @@ type pausada struct {
 	// aislada es la clave de la sesión aislada dueña de la máquina, si lo es
 	// (ver probarCandadoPausada).
 	aislada string
+	// marcada: lleva secretos en claro; al enfriarse se borra, nunca se
+	// congela.
+	marcada bool
 }
 
 // pausedFor es cuánto dura una pausada antes de congelarse de verdad.

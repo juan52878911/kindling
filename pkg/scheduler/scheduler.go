@@ -422,6 +422,10 @@ type entry struct {
 	// en la entrada que está en el mapa, que heredó su inflight. Se toca con
 	// g.mu.
 	sucesora *entry
+
+	// marcada: la máquina recibió secretos en claro (api.Machine.HasSecrets,
+	// AfterRestore). No se congela nunca; ociosa o desalojada, se borra.
+	marcada bool
 }
 
 // vigenteLocked sigue la cadena de sucesoras hasta la entrada que representa
