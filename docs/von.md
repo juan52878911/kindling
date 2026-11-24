@@ -85,12 +85,12 @@ curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 
 | Modelo (`-model`) | `-quant` | GGUF | vCPU / memoria por defecto | Origen fijado | Licencia |
 |---|---|---|---|---|---|
-| `smollm2-360m-instruct` | `q8_0` (defecto) | 369 MiB | 2 / 768 MiB | HuggingFaceTB, rev `593b5a2e` | Apache-2.0 |
+| `smollm2-360m-instruct` | `q8_0` (defecto) | 369 MiB | 2 / 960 MiB | HuggingFaceTB, rev `593b5a2e` | Apache-2.0 |
 | `smollm2-360m-instruct` | `q4_k_m` | 258 MiB | 2 / 640 MiB | bartowski, rev `7be6f65f` | Apache-2.0 |
-| `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1152 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
+| `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1408 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
 | `qwen2.5-0.5b-instruct` | `q4_k_m` | 469 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
 | `qwen2.5-0.5b-instruct` | `q4_0` | 409 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
-| `qwen2.5-1.5b-instruct` | `q8_0` | 1807 MiB | 4 / 2304 MiB | Qwen, rev `91cad511` | Apache-2.0 |
+| `qwen2.5-1.5b-instruct` | `q8_0` | 1807 MiB | 4 / 3136 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-1.5b-instruct` | `q4_k_m` | 1066 MiB | 4 / 1536 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-1.5b-instruct` | `q4_0` | 1017 MiB | 4 / 1536 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-3b-instruct` | `q4_k_m` (única) | 2007 MiB | 4 / 2816 MiB | Qwen, rev `7dabda4d` | **Qwen Research** (no comercial): fuera del catálogo por defecto |
@@ -240,8 +240,17 @@ una semilla fija (la API la acepta).
 | Qwen2.5-0.5B Q4_K_M | 896 MiB | 602 MiB / 528 MiB | KV pequeña (2 cabezas KV); búfer de cálculo grande (vocabulario de 152k) |
 | Qwen2.5-0.5B Q8_0 | 1152 MiB | 871 MiB / 800 MiB | el más justo: a 1024 medía 871 MiB (153 libres para la caché KV y los búferes del vocabulario de 152k si se sube `-ctx`); memoria por defecto subida a 1152 |
 | Qwen2.5-1.5B Q4_K_M | 1536 MiB | 1286 MiB / 1184 MiB | 4 vCPU; KV ~28 KiB/token (56 MiB a 2048) |
-| Qwen2.5-1.5B Q8_0 | 2304 MiB | — / 2048 MiB | en el laboratorio anidado no terminó de cargar en 2 h (abajo) |
+| Qwen2.5-1.5B Q8_0 | 3136 MiB | — / 2048 MiB | en el laboratorio anidado no terminó de cargar en 2 h (abajo); en EC2 (x86) moría por OOM en 2304 + 64: 2,34 GB de anon-rss y 2,8 GB de total-vm a mitad de carga |
 | Qwen2.5-3B Q4_K_M | 2816 MiB | — / 2176 MiB | KV ~36 KiB/token; licencia no abierta (arriba) |
+
+La memoria por defecto (`Model.MemDefault`, en `internal/von/catalog.go`) es lo
+medido o, si es más, `pesos + transitorio + 380 MiB` redondeado a 64: los 380
+son la caché KV de `DefaultCtx`, los búferes de cálculo, el kernel y el agente
+con margen (lo que los modelos de 4 bits medidos tienen por encima de sus
+pesos), y el transitorio es la mitad de los pesos en Q8_0 (lo que llama-server
+pide de más al cargarlo en x86) y 0 en 4 bits. A eso se suma la caché de
+prompts (`-cache-ram`, 64 MiB). Los modelos de 4 bits quedan en lo medido; los
+Q8_0 suben (en Linux la memoria que no se toca no cuesta; en macOS, `-mem`).
 
 `-mem` se dimensiona con el **pico real tras cargar más un margen**, no a ojo: el
 dorado vuelca toda la memoria que el invitado tocó y cada restauración en frío la

@@ -90,7 +90,7 @@ func modelsList(args []string) error {
 		if m.Kind != "" {
 			kind = m.Kind
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, kind, human(m.Size), m.VCPUs, m.MemMiB, lic)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, kind, human(m.Size), m.VCPUs, m.MemDefault(), lic)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -189,7 +189,7 @@ func modelsAdd(args []string) error {
 			// La caché de prompts va aparte de lo medido para el modelo: sin
 			// sumarla, un dorado de 1,5B en 1536 MiB se quedaba sin memoria al
 			// llenarla (docs/von-cpu.md).
-			memMiB = res.Model.MemMiB + res.CacheRAM
+			memMiB = res.Model.MemDefault() + res.CacheRAM
 		}
 	}
 	if vcpus == 0 {
