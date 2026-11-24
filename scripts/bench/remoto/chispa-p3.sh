@@ -287,7 +287,7 @@ ultimo_dorado() {
 }
 
 dorados() {
-  local v n t0 rc dor wu
+  local v n t0 rc dor wu pico
   [ -f "$P3/ai.json" ] || echo '{"models": {}}' > "$P3/ai.json"
   chmod 600 "$P3/ai.json"
   : > "$P3/dorados.jsonl"
@@ -295,7 +295,11 @@ dorados() {
     n=$(modelo_de "$v") || return 1
     wu=(); [ "$v" = abierto ] && wu=(-warmup "$P3/warmup.jsonl")
     t0=$(ms)
-    timeout 1800 "$KLING" ai model deploy "$n" -config "$P3/ai.json" -image "chispa-p3-$v" -contract chispa-decide \
+    # Con COR (lo pone ia.sh medir) el dorado se fabrica por `ia.sh fabricar`: vigila la plantilla (pico
+    # de memoria del invitado y del VMM, C9-20; service.log) y guarda su trozo de journal y su desglose.
+    local fab=()
+    [ -n "${COR:-}" ] && fab=(bash "$AQUI/ia.sh" fabricar "$n" "chispa-p3-$v")
+    ${fab[@]+"${fab[@]}"} timeout 1800 "$KLING" ai model deploy "$n" -config "$P3/ai.json" -image "chispa-p3-$v" -contract chispa-decide \
       -port "$PUERTO" -health /healthz -health-timeout 10s -cpus "$P3_CPUS" -mem "$P3_MEM" -max-inflight 16 -wait 15m \
       ${wu[@]+"${wu[@]}"}; rc=$?
     [ "$rc" = 0 ] || { echo "falló kling ai model deploy $n" >&2; return 1; }
@@ -307,8 +311,13 @@ dorados() {
       '.models[$n].snapshot = $d | if $v == "claves" then .models[$n].auth = {header:"Authorization", scheme:"Bearer", file:$k}
         else .models[$n] |= del(.auth) end' "$P3/ai.json" > "$P3/ai.json.n" && mv "$P3/ai.json.n" "$P3/ai.json" || return 1
     chmod 600 "$P3/ai.json"
+    # C9-20: el pico real de la plantilla al fabricar (lo que vio `ia.sh vigilar`), para dimensionar -mem.
+    pico=null
+    [ -s "$RES/dorado-$n/meminfo.jsonl" ] && pico=$(jq -s 'map(.usada_mib) | max' "$RES/dorado-$n/meminfo.jsonl")
+    [ -s "$RES/dorado-$n/vmm.jsonl" ] && pico=$(jq -sc --argjson g "$pico" '{invitado_usada_mib:$g, vmm_hwm_mib:(map(.hwm_mib) | max)}' "$RES/dorado-$n/vmm.jsonl")
     jq -nc --arg v "$v" --arg n "$n" --arg d "$dor" --argjson ms "$(( $(ms) - t0 ))" --argjson w "${#wu[@]}" \
-      '{variante:$v, modelo:$n, dorado:$d, fabricar_ms:$ms, calentado:($w > 0)}' >> "$P3/dorados.jsonl"
+      --argjson pico "$pico" --argjson mem "$P3_MEM" \
+      '{variante:$v, modelo:$n, dorado:$d, fabricar_ms:$ms, calentado:($w > 0), mem_mib:$mem, pico_fabricar:$pico}' >> "$P3/dorados.jsonl"
   done
 }
 
@@ -374,10 +383,12 @@ directo_arriba() {
       "http://127.0.0.1:$PUERTO_DIRECTO/v1/decide" || { echo "el directo no contesta a /v1/decide" >&2; return 1; }
   done 4< "$P3/warmup.jsonl"
 }
-# mem_proc <pid> → {"rss_mib","pss_mib"} de /proc/<pid>/smaps_rollup (o null).
+# mem_proc <pid> → {"rss_mib","pss_mib","hwm_mib"} de /proc/<pid>/smaps_rollup y status (o null). hwm es el
+# pico de RSS desde que arrancó: el del directo es la referencia de C9-20 (cuánta RAM pide de verdad).
 mem_proc() {
   if [ -r "/proc/$1/smaps_rollup" ]; then
-    awk '/^Rss:/{r=$2} /^Pss:/{p=$2} END {printf "{\"rss_mib\":%d,\"pss_mib\":%d}\n", r/1024, p/1024}' "/proc/$1/smaps_rollup"
+    awk '/^Rss:/{r=$2} /^Pss:/{p=$2} /^VmHWM:/{h=$2} END {printf "{\"rss_mib\":%d,\"pss_mib\":%d,\"hwm_mib\":%d}\n", r/1024, p/1024, h/1024}' \
+      "/proc/$1/smaps_rollup" "/proc/$1/status"
   else echo null; fi
 }
 directo_abajo() {
@@ -465,6 +476,7 @@ resumen() {
   jq -s 'def p50: (map(select(. != null)) | sort) as $s | if ($s|length) == 0 then null else $s[(($s|length) - 1) / 2 | floor] end;
     def pts($c): ($c.gateway.puntos // []) | map({clientes, rps, p50_ms, p95_ms, p99_ms, errores});
     map({variante: .p3.variante, dorado: .modelo.snapshot, fabricar_ms: .p3.dorado.fabricar_ms, calentado: .p3.dorado.calentado,
+         mem_mib: .p3.dorado.mem_mib, pico_fabricar: .p3.dorado.pico_fabricar,
          frio_hasta_primera_ms: (.frio.hasta_primera_ms // null),
          restaurar_primera_p50_ms: ([.primera.restaurar_caliente[]?.total_ms] | p50),
          restaurar_primera_peticion_p50_ms: ([.primera.restaurar_caliente[]?.peticion_ms] | p50),
@@ -479,6 +491,7 @@ resumen() {
     jq -r '.chispa_commit as $c | "chispa \($c[0:12]), \(.e5), banco kNN: \(.banco_knn), \(.vcpus) vCPU, \(.mem_mib) MiB, \(.e5_sesiones) sesiones ORT, preparar \(.preparar_ms/1000|floor) s"' \
       "$P3/preparado.json" 2>/dev/null
     jq -r '.[] | "\n[\(.variante)] \(.dorado): fabricar \(.fabricar_ms/1000|floor) s, calentado \(.calentado)",
+      "  memoria: -mem \(.mem_mib) MiB; pico al fabricar \(.pico_fabricar); directo \(.directo_mem)",
       "  frío (kling run -image → 1.ª decisión) \(.frio_hasta_primera_ms) ms",
       "  restaurar → 1.ª decisión p50 \(.restaurar_primera_p50_ms) ms (petición \(.restaurar_primera_peticion_p50_ms) ms; caché fría \(.restaurar_fria_p50_ms) ms); descongelar \(.descongelar_primera_p50_ms) ms",
       (.pss_por_replicas[] | "  \(.replicas) réplica(s): PSS \(.pss_total_mib) MiB, RSS \(.rss_total_mib) MiB"),
