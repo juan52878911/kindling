@@ -271,3 +271,37 @@ func TestCapaLLMCortadaNoDejaFichero(t *testing.T) {
 		}
 	})
 }
+
+// Tras construir, el GGUF de la caché se borra (la capa ya lo lleva y el
+// dorado, en su mem.file): tres copias por modelo eran 3,4 GiB por GiB. Se
+// queda con keep_cache, si lo convirtió kindling (no se puede volver a bajar)
+// o si la capa comparte sus bloques (entonces no ocupa).
+func TestKeepCache(t *testing.T) {
+	const gib = int64(1 << 30)
+	for _, c := range []struct {
+		keep, convertido bool
+		compartido       int64
+		quedar           bool
+	}{
+		{false, false, 0, false},
+		{true, false, 0, true},
+		{false, true, 0, true},
+		{false, false, gib - ext4.BlockSize, true},
+		{false, false, gib / 2, false},
+	} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "x.gguf")
+		os.WriteFile(p, []byte("pesos"), 0o600)
+		os.WriteFile(p+selloExt, []byte("{}"), 0o600)
+		soltarCacheModelo(p, gib, c.keep, c.convertido, c.compartido)
+		_, err := os.Stat(p)
+		_, errSello := os.Stat(p + selloExt)
+		if (err == nil) != c.quedar || (errSello == nil) != c.quedar {
+			t.Errorf("%+v: el GGUF sigue = %v, el sello sigue = %v", c, err == nil, errSello == nil)
+		}
+	}
+	// keep_cache viaja en el spec del modelo.
+	if !keepCacheDe([]byte(`{"model":"qwen","keep_cache":true}`)) || keepCacheDe([]byte(`{"model":"qwen"}`)) || keepCacheDe(nil) {
+		t.Fatal("keep_cache del spec mal leído")
+	}
+}

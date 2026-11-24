@@ -429,6 +429,12 @@ func bloquesDe(f *os.File, p string) ([]tramo, error) {
 	return runs, nil
 }
 
+// soltarCacheModelo decide qué hacer con el GGUF de la caché tras construir.
+func soltarCacheModelo(p string, size int64, keep, convertido bool, compartido int64) {}
+
+// keepCacheDe lee keep_cache del spec del modelo.
+func keepCacheDe(spec []byte) bool { return false }
+
 // ficlonerange es _IOW(0x94, 13, struct file_clone_range) en Linux.
 const ficlonerange = 0x4020940d
 

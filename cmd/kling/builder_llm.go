@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -79,10 +80,8 @@ func builderLLM(dir string) error {
 	lib := envOr("KLING_LIB_DIR", "/usr/local/lib/kindling")
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	script := envOr("KLING_BASE_IMAGE_SCRIPT", filepath.Join(lib, "81-base-image.sh"))
-	for _, p := range []string{agent, script} {
-		if _, err := os.Stat(p); err != nil {
-			return fmt.Errorf("missing %s (installed by `make deploy`)", p)
-		}
+	if _, err := os.Stat(agent); err != nil {
+		return fmt.Errorf("missing %s (installed by `make deploy`)", agent)
 	}
 
 	// 1. La base glibc, si no está. Es de todos los modelos y se hace una vez.
@@ -179,7 +178,30 @@ func builderLLM(dir string) error {
 		return err
 	}
 
-	// 5. La capa, con el motor del constructor base.
+	// 5. La capa. Sin paquetes que instalar (la base propia), en Go: una
+	// escritura del GGUF, del tamaño justo, a un temporal en KLING_OUT_DIR
+	// (builder_llm_capa.go). Con paquetes, el motor del constructor base.
+	out := envOr("KLING_OUT_DIR", filepath.Join(root, "images"))
+	if len(pkgs) == 0 {
+		t0 := time.Now()
+		r, err := construirCapaLLM(capaLLM{Name: req.Name, BaseImg: filepath.Join(root, "images", req.Base+".ext4"),
+			Agent: agent, Rootfs: rootfs, Service: "/etc/von/run.sh", Out: out,
+			T: time.Now().UTC().Truncate(time.Second), Reflink: cached, Modelo: "/models/" + res.File})
+		if err != nil {
+			return err
+		}
+		compartido := ""
+		if r.Compartido > 0 {
+			compartido = fmt.Sprintf(", %d MiB shared with the cache (reflink)", r.Compartido>>20)
+		}
+		fmt.Printf("imagen '%s' lista — capa sobre base '%s' (%d MiB, %d files, in %.1f s%s)\n",
+			req.Name, req.Base, r.Stats.Bytes()>>20, r.Stats.Files, time.Since(t0).Seconds(), compartido)
+		soltarCacheModelo(cached, st.Size(), keepCacheDe(req.Spec), res.URL == "", r.Compartido)
+		return nil
+	}
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("missing %s (installed by `make deploy`)", script)
+	}
 	grow := req.GrowMB
 	if grow == 0 {
 		grow = res.LayerMiB(st.Size())
@@ -193,8 +215,12 @@ func builderLLM(dir string) error {
 	cmd.Env = append(os.Environ(),
 		"NAME="+req.Name, "BASE="+req.Base, fmt.Sprintf("GROW=%d", grow),
 		"PKGS="+strings.Join(pkgs, " "), "AGENT="+agent, "ENV_FILE="+envFile,
-		"ROOTFS_DIR="+rootfs, "SERVICE=/etc/von/run.sh")
-	return cmd.Run()
+		"ROOTFS_DIR="+rootfs, "SERVICE=/etc/von/run.sh", "KLING_OUT_DIR="+out)
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	soltarCacheModelo(cached, st.Size(), keepCacheDe(req.Spec), res.URL == "", 0)
+	return nil
 }
 
 // buildLLMBase construye la base glibc (Debian trixie) con 71-build-glibc-base.sh.
