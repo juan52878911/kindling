@@ -230,8 +230,15 @@ type GoldenOptions struct {
 	// AllowExec deja exec y cp en el dorado y en sus réplicas (depurar).
 	AllowExec bool
 	Replace   bool
-	// Wait es cuánto esperar a que el modelo cargue.
+	// Wait es cuánto esperar a que el modelo cargue; 0 = automático por
+	// tamaño (dorado.AutoWait de ModelBytes).
 	Wait time.Duration
+	// ModelBytes es el tamaño del GGUF: da el plazo automático y el 100 % del
+	// progreso de la carga. 0 = no se sabe (5 min, progreso sin porcentaje).
+	ModelBytes int64
+	// Stall corta la carga si la plantilla no toca memoria ni gasta CPU en
+	// ese tiempo; 0 = dorado.DefaultStall.
+	Stall time.Duration
 	// Prefixes son los prefijos de las tareas que se dejan evaluados en el
 	// dorado, en este orden, después del calentamiento. El último queda en la
 	// ranura; los demás, en la caché de prompts de llama-server (Spec.CacheRAM:
@@ -283,7 +290,9 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 		logf = func(string, ...any) {}
 	}
 	if o.Wait == 0 {
-		o.Wait = 5 * time.Minute
+		// El mismo plazo que usará el fabricante, que hace falta aquí para
+		// el reintento del calentamiento (warmLlama).
+		o.Wait = dorado.AutoWait(o.ModelBytes)
 	}
 	labels := Labels(o.Ref, o.Snapshot, o.Labels)
 	delete(labels, LabelPrefixes)
@@ -295,7 +304,7 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 		Image: o.Image, Snapshot: o.Snapshot, Port: Port,
 		VCPUs: o.VCPUs, MemMiB: o.MemMiB, CPUPct: o.CPUPct,
 		Labels: labels, AllowExec: o.AllowExec, Replace: o.Replace,
-		Wait: o.Wait, Log: logf,
+		Wait: o.Wait, Log: logf, ModelBytes: o.ModelBytes, Stall: o.Stall,
 		Ready: func(ctx context.Context, ref string, timeout time.Duration) error {
 			return WaitReady(ctx, c, ref, timeout)
 		},
