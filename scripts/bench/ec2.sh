@@ -415,7 +415,9 @@ sube() { # sube <fichero local> <ruta remota>
 }
 
 R mkdir -p "$KB/sube" "$KB/res" "$KB/run"
-tar czf "$TMP/sube.tgz" -C "$AQUI" bench.py bench_k8s.py fases.py ia.py osbk8s remoto -C "$AQUI/.." 96-von-bench.sh \
+# builders/kernel y check-kernel-config.sh: el spike s-pmem compila con una copia un kernel de prueba.
+tar czf "$TMP/sube.tgz" -C "$AQUI" bench.py bench_k8s.py fases.py ia.py osbk8s remoto \
+  -C "$AQUI/.." 96-von-bench.sh builders/kernel check-kernel-config.sh \
   -C "$AQUI/../.." prototypes/r9-hugepages prototypes/r9-pmem-dax prototypes/r9-volcado-tmpfs || exit 1
 sube "$TMP/sube.tgz" /tmp/sube.tgz || exit 1
 tar czf "$TMP/bins.tgz" -C "$(dirname "$BINS_DIR")" "$(basename "$BINS_DIR")" || exit 1
