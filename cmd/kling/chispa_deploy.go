@@ -61,6 +61,7 @@ func cmdChispaDeploy(args []string) error {
 	reuse := fs.Bool("reuse-image", false, "the image already exists with this same -model (built on a Linux host and brought with `kling image copy`): make only the golden snapshot")
 	allowExec := fs.Bool("allow-exec", false, "keep kling exec/cp working in this task's machines (debugging)")
 	wait := fs.Duration("wait", 2*time.Minute, "how long to wait for kling-chispa to answer /healthz")
+	stall := fs.Duration("stall", 0, "give up when kling-chispa touches no new memory and uses no CPU for this long (default 2m)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -84,7 +85,7 @@ func cmdChispaDeploy(args []string) error {
 	c := api.NewClient(hostOf(*host))
 	if err := chispaDeploy(ctx, c, chispaDeployOptions{
 		Name: name, Model: modelBytes, ModelName: *modelPath, Slots: slotsBytes, MemMiB: *mem, VCPUs: *vcpus,
-		WarmText: *warmText, Replace: *replace, Rebuild: *rebuild, Reuse: *reuse, AllowExec: *allowExec, Wait: *wait,
+		WarmText: *warmText, Replace: *replace, Rebuild: *rebuild, Reuse: *reuse, AllowExec: *allowExec, Wait: *wait, Stall: *stall,
 	}); err != nil {
 		return err
 	}
@@ -108,6 +109,7 @@ type chispaDeployOptions struct {
 	Reuse            bool // la imagen ya existe con este mismo Model; solo el dorado
 	AllowExec        bool
 	Wait             time.Duration
+	Stall            time.Duration
 }
 
 // chispaDeploy construye la imagen (kling-chispa + el .chispa), hace el dorado
@@ -182,7 +184,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	t0 := time.Now()
 	g, err := makeChispaGolden(ctx, c, chispaGoldenOptions{
 		Image: name, Snapshot: name, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
-		AllowExec: o.AllowExec, Replace: o.Replace, Wait: o.Wait, WarmText: o.WarmText,
+		AllowExec: o.AllowExec, Replace: o.Replace, Wait: o.Wait, Stall: o.Stall, WarmText: o.WarmText,
 		Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {
@@ -275,7 +277,7 @@ type chispaGoldenOptions struct {
 	Image, Snapshot    string
 	VCPUs, MemMiB      int
 	AllowExec, Replace bool
-	Wait               time.Duration
+	Wait, Stall        time.Duration
 	WarmText           string
 	Log                func(format string, args ...any)
 }
@@ -303,7 +305,7 @@ func makeChispaGolden(ctx context.Context, c *api.Client, o chispaGoldenOptions)
 		Health:    dorado.Probe{Path: "/healthz"},
 		Warmup:    []dorado.Request{{Method: http.MethodPost, Path: "/v1/classify", Body: body}},
 		Labels:    chispaLabels(o.Snapshot, nil),
-		AllowExec: o.AllowExec, Replace: o.Replace, Wait: o.Wait, Log: o.Log,
+		AllowExec: o.AllowExec, Replace: o.Replace, Wait: o.Wait, Stall: o.Stall, Log: o.Log,
 	})
 	if err != nil {
 		return nil, err

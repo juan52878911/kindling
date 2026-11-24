@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/dorado"
 	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/units"
@@ -131,7 +132,9 @@ func modelsAdd(args []string) error {
 	rebuild := fs.Bool("rebuild", false, "rebuild the image even if it exists")
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
 	allowExec := fs.Bool("allow-exec", true, "keep kling exec/cp working in the model's machines (debugging)")
-	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
+	wait := fs.Duration("wait", 0, "how long to wait for the model to load (default: by the model's size, from 5m to 45m)")
+	stall := fs.Duration("stall", 0, "give up when the model touches no new memory and uses no CPU for this long (default 2m)")
+	keepCache := fs.Bool("keep-cache", false, "keep the builder's copy of the GGUF after baking it into the image (saves the download of the next rebuild; costs its size in disk)")
 	acceptLicense := fs.String("accept-license", "", "build a catalog model outside the default catalog, accepting its license (give its id)")
 	buildOnly := fs.Bool("build-only", false, "build the image and stop: e.g. to copy it to a macOS daemon, which cannot build")
 	cacheRAM := fs.Int("cache-ram", -1, fmt.Sprintf("MiB of llama-server's prompt cache, added to the memory (default %d; 0 = off)", von.DefaultCacheRAM))
@@ -145,7 +148,7 @@ func modelsAdd(args []string) error {
 	}
 	name := fs.Arg(0)
 	spec := von.Spec{Model: *model, Quant: *quant, URL: *url, SHA256: *sum,
-		Ctx: *ctxSize, Parallel: *parallel, Threads: *threads, AcceptLicense: *acceptLicense}
+		Ctx: *ctxSize, Parallel: *parallel, Threads: *threads, AcceptLicense: *acceptLicense, KeepCache: *keepCache}
 	if *cacheRAM >= 0 {
 		spec.CacheRAM = cacheRAM
 	}
@@ -214,6 +217,9 @@ func modelsAdd(args []string) error {
 		}
 	}
 
+	if err := prepararReconstruccion(ctx, c, name, *replace && !*buildOnly, *rebuild); err != nil {
+		return err
+	}
 	if err := ensureModelImage(ctx, c, name, spec, res, *rebuild); err != nil {
 		return err
 	}
@@ -233,10 +239,12 @@ func modelsAdd(args []string) error {
 	if res.Kind != "" {
 		labels = map[string]string{von.LabelKind: res.Kind}
 	}
+	bytes := modelBytes(ctx, c, name, res)
 	g, err := von.MakeGolden(ctx, c, von.GoldenOptions{
 		Image: name, Snapshot: name, Ref: res.Ref, VCPUs: vcpus, MemMiB: memMiB, CPUPct: *cpuPct,
 		Kind: res.Kind, Labels: labels,
-		AllowExec: *allowExec, Replace: *replace, Wait: *wait, Prefixes: pre,
+		AllowExec: *allowExec, Replace: *replace, Prefixes: pre,
+		Wait: dorado.ResolveWait(*wait, 0, 0, bytes), ModelBytes: bytes, Stall: *stall,
 		Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {
@@ -259,6 +267,63 @@ func modelsAdd(args []string) error {
 	}
 	fmt.Printf("  kling ai model ask %s-1 \"What is a microVM?\"\n", name)
 	fmt.Printf("OpenAI-compatible API on port %d of each replica (kling inspect <ref> for the address).\n", von.Port)
+	return nil
+}
+
+// modelBytes es el tamaño de los pesos del modelo: el del catálogo o, para un
+// GGUF propio (-url), lo que ocupa la imagen ya construida (la capa lleva el
+// GGUF y poco más). 0 = no se sabe.
+func modelBytes(ctx context.Context, c *api.Client, image string, res von.Resolved) int64 {
+	if res.Size > 0 {
+		return res.Size
+	}
+	imgs, err := c.Images(ctx)
+	if err != nil {
+		return 0
+	}
+	for _, img := range imgs {
+		if img.Name == image {
+			return img.DiskBytes
+		}
+	}
+	return 0
+}
+
+// prepararReconstruccion deja que -rebuild reconstruya la imagen del modelo.
+// El daemon responde 409 a reconstruir una imagen que usa un dorado (sus
+// réplicas mapean ese disco): con replace (-replace), el dorado del modelo se
+// borra antes, salvo que tenga réplicas vivas; sin él, o si la imagen la usa
+// otro dorado, se dice qué hacer antes de construir nada.
+func prepararReconstruccion(ctx context.Context, c *api.Client, name string, replace, rebuild bool) error {
+	if !rebuild {
+		return nil
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+	var propio *api.Snapshot
+	for _, s := range snaps {
+		switch {
+		case s.Name == name:
+			propio = s
+		case s.Image == name:
+			return fmt.Errorf("-rebuild: image %q is also used by the golden snapshot %q, and the daemon refuses to rebuild an image in use (409): remove that snapshot first", name, s.Name)
+		}
+	}
+	switch {
+	case propio == nil:
+		return nil
+	case propio.Instances > 0:
+		return fmt.Errorf("-rebuild: the golden snapshot %q has %d machine(s) restored from it (the gateway's replicas): remove them first (kling ps; kling rm <ref>)", name, propio.Instances)
+	case !replace:
+		return fmt.Errorf("-rebuild: the golden snapshot %q uses image %q, and the daemon refuses to rebuild an image in use (409): add -replace to remove the golden first, or kling ai model rm %s -keep-image", name, name, name)
+	}
+	fmt.Printf("Removing the golden snapshot %q first: the image it was made from is going to be rebuilt.\n", name)
+	var se *api.StatusError
+	if err := c.RemoveSnapshot(ctx, name); err != nil && !(errors.As(err, &se) && se.Code == 404) {
+		return fmt.Errorf("removing the golden snapshot %q before the rebuild: %w", name, err)
+	}
 	return nil
 }
 
@@ -288,6 +353,9 @@ func modelFlags(s von.Spec) string {
 	}
 	if s.CacheRAM != nil && *s.CacheRAM != von.DefaultCacheRAM {
 		out = append(out, fmt.Sprintf("-cache-ram %d", *s.CacheRAM))
+	}
+	if s.KeepCache {
+		out = append(out, "-keep-cache")
 	}
 	return strings.Join(out, " ")
 }

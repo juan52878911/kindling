@@ -139,8 +139,10 @@ pequeños (0.6B, 1.7B, 4B; Apache-2.0). Un GGUF propio:
 | `-prefix` | — | fichero con el system prompt de una tarea que el dorado deja ya evaluado (repetible); con el gateway, `kling ai prime` los saca del registro |
 | `-build-only` | — | solo la imagen (para copiarla a un Mac) |
 | `-accept-license` | — | construir un modelo del catálogo que no es de licencia abierta (su identificador) |
-| `-wait` | 5m | cuánto esperar a que el modelo cargue, y a que conteste el calentamiento (que se reintenta si el proxy del daemon se cansa antes) |
-| `-rebuild`, `-replace` | — | rehacer la imagen / pisar el dorado |
+| `-wait` | por tamaño | cuánto esperar a que el modelo cargue, y a que conteste el calentamiento (que se reintenta si el proxy del daemon se cansa antes). Sin él, `2 min + tamaño del GGUF / 2 MiB/s`, entre 5 y 45 min (Q8_0 de 1,5B: ~17 min). En `kling ai prime`, el `load_wait` del bloque manda sobre el automático |
+| `-stall` | 2m | corta la carga si en ese tiempo la plantilla no toca 8 MiB de memoria nueva **ni** gasta 1 s de CPU, con la cola del log del servidor |
+| `-keep-cache` | — | conservar la copia del GGUF en la caché del constructor tras meterlo en la imagen (ahorra la descarga del próximo `-rebuild`; ocupa su tamaño en disco) |
+| `-rebuild`, `-replace` | — | rehacer la imagen / pisar el dorado. El daemon no deja reconstruir una imagen de la que sale un dorado (409): con los dos, `models add` borra antes el dorado del modelo (si no tiene réplicas vivas); con `-rebuild` solo, dice qué hacer |
 
 ## Cómo está hecho
 
@@ -173,7 +175,23 @@ según la memoria libre), `--no-webui`, `--metrics`, `--alias <modelo:quant>`.
 pasada vacía del arranque no toca: páginas de pesos, hilos de OpenMP, búferes del
 tamaño de un lote real—, evalúa los prefijos de tareas que se le den (`-prefix`,
 `kling ai prime`; etiqueta `von.prefixes`), aprieta el globo (`squeeze`) para que lo libre acabe en
-huecos del `mem.file`, congela y borra la plantilla. Etiquetas: `von.model`
+huecos del `mem.file`, congela y borra la plantilla. Con Firecracker el apretón lo
+hace el propio commit (el fabricante ya no lo repite: era 1-3 s de más); con los
+backends de macOS, el fabricante. Al acabar imprime lo que costó el commit y su
+desglose (`squeeze`, `dump`, `digest`…) si el daemon lo da.
+
+**La carga, vigilada.** Mientras el servidor carga y se calienta, el fabricante
+lee del daemon cada 5 s la memoria (PSS en Linux, huella en macOS) y la CPU de
+la plantilla y escribe cada 15 s
+`loading: ~812 / 1946 MiB (42 %) · 6.1 MiB/s · ETA 3m05s` (aproximado: lleva
+kernel y caché del rootfs). Corta antes del plazo en dos casos, con las últimas
+líneas del log del servidor (`/var/log/service.log` si la máquina tiene exec, que
+`models add` deja por defecto; si no, la consola, donde al menos sale un OOM del
+kernel): **estancado**, si en `-stall` no toca memoria nueva ni gasta CPU; y
+**reinicios**, si el entrypoint relanzó el servidor dos veces (`service exited
+with …`): un servidor que muere en bucle ya no se ve como «todavía cargando».
+Con un daemon sin `/procstats`, ni progreso ni estancamiento: el plazo de
+siempre. Etiquetas: `von.model`
 (`smollm2-360m-instruct:q8_0`), `kling.ports=8000` y `service`. Un gateway
 descubre los modelos listando snapshots con `von.model`.
 
@@ -224,6 +242,12 @@ una semilla fija (la API la acepta).
 | Qwen2.5-1.5B Q4_K_M | 1536 MiB | 1286 MiB / 1184 MiB | 4 vCPU; KV ~28 KiB/token (56 MiB a 2048) |
 | Qwen2.5-1.5B Q8_0 | 2304 MiB | — / 2048 MiB | en el laboratorio anidado no terminó de cargar en 2 h (abajo) |
 | Qwen2.5-3B Q4_K_M | 2816 MiB | — / 2176 MiB | KV ~36 KiB/token; licencia no abierta (arriba) |
+
+`-mem` se dimensiona con el **pico real tras cargar más un margen**, no a ojo: el
+dorado vuelca toda la memoria que el invitado tocó y cada restauración en frío la
+relee, así que la memoria de más es tiempo de fabricar y de restaurar, y disco
+(lo mismo vale para `kling ai model deploy -mem`). El pico lo da `kling top` con
+la plantilla cargada.
 
 En Linux la memoria de la VM que no se toca no cuesta: el `mem.file` es disperso y
 lo no escrito son huecos. En macOS sí: `vz` restaura copiando la memoria del
@@ -642,7 +666,40 @@ generar (`/v1/generate` con plantilla por tarea, y la API de OpenAI), con
 `pkg/scheduler` para despertarlos por petición y congelarlos al quedarse
 ociosos. Descubre los dorados por `von.model`, habla con cada réplica en
 `api.Machine.Addr(von.Port)` (streaming directo, sin el proxy del daemon) y manda
-una semilla propia por petición. Como clasificadores detrás de Chispa (la cascada)
+una semilla propia por petición. Tras `kling ai model deploy`, `roll` y `prime`
+el CLI pide al daemon que traiga el dorado a la caché de página
+(`POST /snapshots/{name}/warm`; un daemon que no sabe se ignora), para que la
+primera réplica no lo lea del disco.
+
+El fabricante genérico (`kling ai model deploy`, cualquier servidor HTTP) usa
+la misma vigilancia de la carga (`-wait` por `-model-bytes`, `-stall`) y añade:
+
+- **Cabeceras en el calentamiento** (`"headers"` en cada línea de `-warmup`):
+  solo no secretas. Una con pinta de credencial (`Authorization`, `Cookie`,
+  `X-Api-Key`, o un nombre con `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `AUTH`) se
+  rechaza, porque su valor quedaría en la memoria del dorado y de cada réplica.
+  Lo recomendado es calentar en abierto (detrás del gateway la réplica no tiene
+  por qué autenticar). Si el backend no puede correr abierto, `-warmup-key`: el
+  fabricante genera una clave desechable que solo él conoce, la pone donde el
+  JSONL dice `{{warmup_key}}` (`"Authorization": "Bearer {{warmup_key}}"`) y al
+  invitado solo le da su sha256 (`KLING_WARMUP_KEY_SHA256`) y su caducidad
+  (`KLING_WARMUP_KEY_EXPIRES`, RFC 3339). El backend tiene que dejar de aceptarla
+  al caducar: la clave puede quedar en la memoria del dorado, y vale porque ya
+  caducó (cada réplica restaurada resincroniza su reloj), no porque no esté.
+- **Un dorado por inquilino**: `-tenant acme [-alias chispa] [-shared]` escribe
+  `tenants`, `alias` y `shared` en el bloque nuevo, y falla antes de fabricar si
+  el inquilino no está en `tenants` de `ai.json`.
+- **Red y credenciales de la plantilla**: `-allow dominio` (egress allowlist) y
+  `-credential fichero.json` (una credencial del proxy, `{"domain", "env",
+  "secret", "allow"}`, en un fichero 0600: la clave no va en una bandera ni entra
+  en el invitado, que recibe un marcador). La plantilla se rearranca una vez con
+  la credencial para que el servidor arranque con su marcador, y el dorado se
+  queda con ella para sus réplicas.
+- Con `idle: remove` (el defecto de `kind http`), la plantilla lleva
+  `kling.golden.mirror=off`: sus réplicas nunca se congelan en diferencial y el
+  espejo del dorado en el almacén CoW sobra.
+
+Como clasificadores detrás de Chispa (la cascada)
 no ganaron en la tarea medida, ni con 1,5B ni con 3B: allí están las cifras.
 
 ## Límites conocidos

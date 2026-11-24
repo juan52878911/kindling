@@ -40,6 +40,31 @@ func daemonRoll() *daemonModelos {
 	}
 }
 
+// C9-10: roll precalienta el dorado nuevo ANTES de recargar el gateway, para
+// que la primera réplica no lo lea del disco; un daemon que no sabe no es un
+// fallo.
+func TestRollPrecalienta(t *testing.T) {
+	for _, cod := range []int{200, 501} {
+		cfg := escribeRegistro(t, registroRoll)
+		d := daemonRoll()
+		d.warmCod = cod
+		c := d.cliente(t)
+		calentadoAntes := false
+		reload := func(context.Context) error {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			calentadoAntes = strings.Contains(strings.Join(d.llamadas, "|"), "warm srv-v2")
+			return nil
+		}
+		if _, err := modelRoll(context.Background(), c, reload, rollOptions{Model: "srv", Config: cfg, Drain: time.Second, Poll: 10 * time.Millisecond}); err != nil {
+			t.Fatalf("%d: %v", cod, err)
+		}
+		if !calentadoAntes {
+			t.Fatalf("%d: no se precalentó srv-v2 antes de recargar", cod)
+		}
+	}
+}
+
 func idsQuedan(d *daemonModelos) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()

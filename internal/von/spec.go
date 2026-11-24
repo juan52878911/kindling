@@ -52,6 +52,11 @@ type Spec struct {
 	// Kind "embed" y Pooling mean, cls o last. Los del catálogo ya los traen.
 	Kind    string `json:"kind,omitempty"`
 	Pooling string `json:"pooling,omitempty"`
+	// KeepCache conserva la copia del GGUF en la caché del constructor
+	// después de meterlo en la capa (C9-16): sin ella, el disco guarda el
+	// modelo tres veces (caché, capa y volcado del dorado). La caché solo
+	// ahorra la descarga de la próxima reconstrucción.
+	KeepCache bool `json:"keep_cache,omitempty"`
 }
 
 // Resolved es un Spec validado y completo: lo que el constructor necesita.
