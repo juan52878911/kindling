@@ -223,6 +223,9 @@ func builderLLM(dir string) error {
 	return nil
 }
 
+// baseGlibcEnGo escribe la base glibc en dst.
+var baseGlibcEnGo = func(root, lib, dst string) error { return fmt.Errorf("not implemented") }
+
 // buildLLMBase construye la base glibc (Debian trixie) con 71-build-glibc-base.sh.
 func buildLLMBase(root, lib, name string) error {
 	script := filepath.Join(lib, "71-build-glibc-base.sh")
