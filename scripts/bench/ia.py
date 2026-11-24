@@ -305,6 +305,53 @@ def autoprueba():
     for want in ("V1 CONFIRMADA", "remove se queda por defecto", "≤ 1 s → la instancia anidada vale",
                  "> 5 s → abrir T2-1", "0.50 ms p50 → ≤ 1 ms, vale", "0 errores con 16 clientes → vale"):
         assert want in txt, (want, txt)
+
+    # C9-14: una muestra «caliente» que leyó del disco es fría; la corrida se rechaza.
+    assert rechazos(doc) == [], rechazos(doc)
+    fria = json.loads(json.dumps(doc))
+    fria["primera"]["restaurar_caliente"][1]["disco_leido_bytes"] = 1085689856
+    r = rechazos(fria)
+    assert len(r) == 1 and "restaurar_caliente" in r[0] and "1085689856" in r[0], r
+    tolerada = json.loads(json.dumps(fria))
+    tolerada["primera"]["umbral_caliente_bytes"] = 2 << 30
+    assert rechazos(tolerada) == [], rechazos(tolerada)
+    vacia = json.loads(json.dumps(doc))
+    vacia["primera"]["descongelar_caliente"] = []
+    vacia["primera"]["calientes_con_disco"] = {"descongelar_caliente": [sm(7900)]}
+    assert any("descongelar_caliente" in x for x in rechazos(vacia)), rechazos(vacia)
+
+    # C9-12: sin journal del daemon (o sin desglose / service.log de un dorado) no hay corrida.
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as base:
+        assert any("corrida.json" in x for x in rechazos_corrida(None, base)), "sin corrida.json"
+        with open(os.path.join(base, "journal-kt-bench.log"), "w") as fh:
+            fh.write("nov 23 10:00:00 kling[1]: commit von-q4-golden-x -> von-q4: overlay 80 ms (total 900 ms)\n")
+        os.mkdir(os.path.join(base, "dorado-von-q4"))
+        for nom in ("service.log", "meminfo.jsonl"):
+            with open(os.path.join(base, "dorado-von-q4", nom), "w") as fh:
+                fh.write("x\n")
+        cor = {"esquema": ESQUEMA_CORRIDA, "journal": {"unidad": "kt-bench", "fichero": "journal-kt-bench.log"},
+               "dorados": [{"dorado": "von-q4", "rc": 0, "fabricar_ms": 40000, "commit": {"overlay": 80, "total": 900},
+                            "service_log": "dorado-von-q4/service.log", "meminfo": "dorado-von-q4/meminfo.jsonl"},
+                           {"dorado": "von-q8", "rc": 1, "fabricar_ms": 300000, "commit": None,
+                            "service_log": "dorado-von-q4/service.log", "meminfo": "dorado-von-q4/meminfo.jsonl"}]}
+        assert rechazos_corrida(cor, base) == [], rechazos_corrida(cor, base)
+        sinj = json.loads(json.dumps(cor))
+        sinj["journal"] = {"omitido": "sin systemd"}
+        assert any("journal" in x for x in rechazos_corrida(sinj, base)), rechazos_corrida(sinj, base)
+        os.remove(os.path.join(base, "journal-kt-bench.log"))
+        assert any("journal" in x for x in rechazos_corrida(cor, base)), "journal borrado"
+        with open(os.path.join(base, "journal-kt-bench.log"), "w") as fh:
+            fh.write("x\n")
+        sind = json.loads(json.dumps(cor))
+        sind["dorados"][0]["commit"] = None
+        assert any("desglose" in x and "von-q4" in x for x in rechazos_corrida(sind, base)), rechazos_corrida(sind, base)
+        sins = json.loads(json.dumps(cor))
+        sins["dorados"][1]["service_log"] = None
+        assert any("service.log" in x and "von-q8" in x for x in rechazos_corrida(sins, base)), rechazos_corrida(sins, base)
+        txt = "\n".join(resumen_corrida(cor, base))
+        assert "von-q4" in txt and "overlay 80" in txt, txt
     print("ia.py: autoprueba OK")
     return 0
 
