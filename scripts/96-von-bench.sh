@@ -16,14 +16,25 @@
 #   restaurar  kling run -from + primera respuesta, RUNS veces (lo de siempre);
 #   primera    P1: primera respuesta tras restaurar y tras descongelar, con la
 #              caché de páginas caliente y tras drop_caches; fallos de página
-#              del VMM, bytes leídos de disco y fases del despertar (resync);
+#              del VMM, bytes leídos de disco y fases del despertar (resync).
+#              Las calientes van todas antes que las frías, cada una con el
+#              dorado traído a la caché (API warm, ficheros bajo KLING_ROOT y
+#              una restauración descartada); la que aun así lee más de
+#              UMBRAL_CALIENTE_BYTES (0) se aparta y se repite (REINTENTOS_CALIENTE, 2);
 #   tps        tokens/s de prompt y de generación en una réplica caliente (openai);
 #   memoria    P2: PSS/RSS de 1..REPLICAS réplicas en tres variantes —restauradas,
 #              descongeladas (congeladas y vueltas a despertar, lo que hace el
 #              segador) e idle: remove por el gateway— con Cached y MemAvailable
 #              del host y el disco de cada réplica dormida;
 #   ociosa     P2: «ociosa → primera respuesta», CYCLES ciclos alternando thaw y
-#              restaurar, y por el gateway con idle freeze frente a idle remove;
+#              restaurar, y por el gateway con idle freeze, idle remove e idle
+#              remove con una réplica de repuesto (spare: 1);
+#   arranque   primera respuesta tras arrancar el gateway con la caché fría: en
+#              cuanto contesta, tras ARRANQUE_ESPERA_S (precalentado al arrancar)
+#              y anclado (pin: true); ARRANQUE_RUNS vueltas; necesita drop_caches;
+#   secreto    kind http: ociosa → primera respuesta por el gateway con y sin un
+#              secreto deliver: mmds (el coste del gancho tras restaurar) y si el
+#              valor aparece en el mem.file del dorado o en el log del gateway;
 #   semillas   dos réplicas no repiten la misma muestra a temperatura 1 (openai);
 #   carga      P3: CLIENTES clientes por /v1/m/<modelo>/… del gateway durante
 #              CARGA_S s cada tanda (y contra LOAD_DIRECT_URL si se da).
@@ -34,7 +45,9 @@
 # IDLE_S (5: -idle del gateway del banco), CLIENTES ("1 4 16"), CARGA_S (20),
 # DROP_CACHES (auto: si /proc/sys/vm/drop_caches se puede escribir; 0 = nunca),
 # HIGIENE (0; 1 = `pkill -9 -x firecracker` entre variantes: SOLO en una
-# instancia del banco, nunca en el laboratorio), IA_BENCH (cliente de
+# instancia del banco, nunca en el laboratorio), KLING_ROOT (raíz de datos del
+# daemon, si se puede leer: calienta los ficheros del dorado), UMBRAL_CALIENTE_BYTES,
+# REINTENTOS_CALIENTE, ARRANQUE_RUNS (3), ARRANQUE_ESPERA_S (20), SECRETO_RUNS (CYCLES), IA_BENCH (cliente de
 # scripts/ia-bench), y para modelos que no son VON: CONTRATO, PUERTO,
 # REQ_PATH, REQ_BODY (texto o @fichero), HEALTH_PATH y MODELO (nombre en el
 # ai.json del gateway del banco; por defecto el del dorado). Para un servidor
@@ -64,7 +77,11 @@ CLIENTES="${CLIENTES:-1 4 16}"
 CARGA_S="${CARGA_S:-20}"
 DROP_CACHES="${DROP_CACHES:-auto}"
 HIGIENE="${HIGIENE:-0}"
-TODAS="restaurar primera tps memoria ociosa semillas carga"
+KLING_ROOT="${KLING_ROOT:-}"
+UMBRAL_CALIENTE_BYTES="${UMBRAL_CALIENTE_BYTES:-0}"
+REINTENTOS_CALIENTE="${REINTENTOS_CALIENTE:-2}"
+case $UMBRAL_CALIENTE_BYTES$REINTENTOS_CALIENTE in *[!0-9]*) echo "UMBRAL_CALIENTE_BYTES and REINTENTOS_CALIENTE must be integers" >&2; exit 1 ;; esac
+TODAS="restaurar primera tps memoria ociosa arranque secreto semillas carga"
 [ "$COLD" = 1 ] && TODAS="frio $TODAS"
 SECCIONES="${SECCIONES:-$TODAS}"
 [ "$COLD" = 1 ] && case " $SECCIONES " in *" frio "*) ;; *) SECCIONES="frio $SECCIONES" ;; esac
@@ -277,6 +294,64 @@ if pide restaurar; then
     --argjson r "$(arr ${req[@]+"${req[@]}"})" '{thaw_ms:$t, hasta_primera_ms:$f, peticion_ms:$r}')"
 else omit restaurar "no pedida en SECCIONES"; fi
 
+# ── calentar (C9-14) ──────────────────────────────────────────────────────────
+# Una muestra «caliente» solo lo es si su VMM no leyó nada del disco. Antes de cada una se trae el
+# dorado a la caché por todas las vías que haya: la API del daemon (POST /snapshots/<n>/warm, Z1; un
+# daemon sin ella contesta 404/501 y se sigue), los ficheros del dorado y de su imagen si KLING_ROOT es
+# legible, y una restauración descartada con su petición (toca lo mismo que la muestra).
+CAL_USADOS=""
+usado() { case " $CAL_USADOS " in *" $1 "*) ;; *) CAL_USADOS="$CAL_USADOS $1" ;; esac; }
+calentado_por() { echo "$CAL_USADOS"; }
+# leer_a_cache <ruta>...: lee ficheros (o directorios enteros, siguiendo enlaces) a la caché de página.
+leer_a_cache() {
+  local f
+  for f in "$@"; do
+    [ -e "$f" ] || continue
+    find -L "$f" -type f -exec cat {} + >/dev/null 2>&1
+  done
+  return 0
+}
+warm_api() { # warm_api: 0 si el daemon trajo el dorado a la caché (y esperó a tenerlo entero)
+  local s c
+  case ${KLING_HOST:-} in unix://*) s=${KLING_HOST#unix://} ;; *) return 1 ;; esac
+  [ -S "$s" ] || return 1
+  c="$(curl -s -o "$D/warm.json" -w '%{http_code}' --max-time 300 --unix-socket "$s" -H 'Content-Type: application/json' \
+       -X POST --data '{"wait":true}' "http://kling/snapshots/$SNAP/warm" 2>/dev/null)"
+  [ "$c" = 200 ]
+}
+calentar_dorado() {
+  warm_api && usado api
+  if [ -n "$KLING_ROOT" ] && [ -r "$KLING_ROOT/snapshots/$SNAP" ]; then
+    leer_a_cache "$KLING_ROOT/snapshots/$SNAP" "$KLING_ROOT/images/$image".* && usado ficheros
+  fi
+  return 0
+}
+# calentar_maquina <nombre>: los ficheros de una máquina congelada (su volcado y su overlay).
+calentar_maquina() {
+  local id
+  [ -n "$KLING_ROOT" ] || return 0
+  id="$("$KLING" ps -a -json 2>/dev/null | jq -r --arg n "$1" '[.[]? | select(.name==$n) | .id][0] // empty')"
+  [ -n "$id" ] && [ -r "$KLING_ROOT/machines/$id" ] && leer_a_cache "$KLING_ROOT/machines/$id" && usado congelada
+  return 0
+}
+# caliente <restaurar_una|descongelar_una> <rc|dc> <nombre>: una muestra caliente de verdad. Si aun
+# calentada su VMM leyó del disco más de UMBRAL_CALIENTE_BYTES, la muestra se aparta (p-<k>-disco, va
+# al JSON en primera.calientes_con_disco) y se repite, hasta REINTENTOS_CALIENTE veces. Donde no se
+# sabe lo leído (null: no es Linux) se queda como está.
+caliente() {
+  local f="$D/p-$2-intento.jsonl" n=0 dr
+  while :; do
+    : > "$f"
+    CALENTAR=1 "$1" "$f" "$3-$n" 0 || return 1
+    [ -s "$f" ] || return 1
+    dr="$(jq -r '.disco_leido_bytes // "null"' "$f")"
+    if [ "$dr" = null ] || [ "$dr" -le "$UMBRAL_CALIENTE_BYTES" ]; then cat "$f" >> "$D/p-$2.jsonl"; return 0; fi
+    jq -c --argjson n "$n" '. + {intento:$n}' "$f" >> "$D/p-$2-disco.jsonl"
+    n=$((n + 1))
+    [ "$n" -le "$REINTENTOS_CALIENTE" ] || { echo "  $3: still reading the disk after $n warm-ups" >&2; return 1; }
+  done
+}
+
 # ── 3. primera petición (P1) ──────────────────────────────────────────────────
 # muestra <fichero> <máquina> <json de run/thaw> <t0>: hace la petición y apunta una muestra.
 muestra() {
@@ -289,8 +364,14 @@ muestra() {
     '{total_ms:$tot, peticion_ms:$r, thaw_ms:($w.thaw_ms // null), resync_ms:($w.wake.resync_ms // null),
       load_ms:($w.wake.load_ms // null), fallos:$f, disco_leido_bytes:$dr}' >> "$1"
 }
-restaurar_una() { # restaurar_una <fichero> <nombre> <fría 0|1>
+restaurar_una() { # restaurar_una <fichero> <nombre> <fría 0|1>; con CALENTAR=1, ver caliente
   local out t0
+  if [ "${CALENTAR:-0}" = 1 ]; then
+    calentar_dorado
+    # La restauración descartada toca lo mismo que la muestra, también lo que no es del dorado.
+    if "$KLING" run -from "$SNAP" -name "$2-cal" >/dev/null 2>&1 && pedido "$2-cal" >/dev/null; then usado descartada; fi
+    "$KLING" rm -f "$2-cal" >/dev/null 2>&1
+  fi
   [ "$3" = 1 ] && soltar_cache
   t0=$(now_ms)
   out="$("$KLING" run -from "$SNAP" -name "$2" -json 2>/dev/null)" || { echo "  run -from $2 FAILED" >&2; return 1; }
@@ -299,8 +380,10 @@ restaurar_una() { # restaurar_una <fichero> <nombre> <fría 0|1>
 }
 descongelar_una() { # descongelar_una <fichero> <nombre> <fría 0|1>
   local out t0
-  "$KLING" run -from "$SNAP" -name "$2" -json >/dev/null 2>&1 && pedido "$2" >/dev/null && "$KLING" freeze -json "$2" >/dev/null 2>&1 \
-    || { echo "  preparing frozen $2 FAILED" >&2; "$KLING" rm -f "$2" >/dev/null 2>&1; return 1; }
+  if ! { "$KLING" run -from "$SNAP" -name "$2" -json >/dev/null 2>&1 && pedido "$2" >/dev/null && "$KLING" freeze -json "$2" >/dev/null 2>&1; }; then
+    echo "  preparing frozen $2 FAILED" >&2; "$KLING" rm -f "$2" >/dev/null 2>&1; return 1
+  fi
+  if [ "${CALENTAR:-0}" = 1 ]; then calentar_dorado; calentar_maquina "$2"; fi
   [ "$3" = 1 ] && soltar_cache
   t0=$(now_ms)
   out="$("$KLING" thaw -json "$2" 2>/dev/null)" || { echo "  thaw $2 FAILED" >&2; "$KLING" rm -f "$2" >/dev/null 2>&1; return 1; }
@@ -310,29 +393,41 @@ descongelar_una() { # descongelar_una <fichero> <nombre> <fría 0|1>
 if pide primera; then
   step "3. First response after restore and after thaw, warm page cache and after drop_caches ($RUNS runs)"
   [ "$DROP_OK" = 1 ] || row "cold page cache" "skipped: $DROP_MOTIVO"
-  # Una restauración descartada: la caché caliente es caliente también en la primera vuelta.
+  # C9-14. Calientes primero y todas juntas; las frías (cada una tras drop_caches) después: en la
+  # ronda 8 el orden mezclado dejaba la mitad de las «calientes» detrás de un drop_caches.
   restaurar_una "$D/descartada" "$PREFIX-p0" 0 >/dev/null 2>&1
   for i in $(seq "$RUNS"); do
     # A/B alternado: las vueltas impares restauran primero; las pares descongelan primero.
     if [ $((i % 2)) = 1 ]; then orden="r d"; else orden="d r"; fi
     for k in $orden; do
-      if [ "$k" = r ]; then
-        restaurar_una "$D/p-rc.jsonl" "$PREFIX-p$i-rc" 0
-        [ "$DROP_OK" = 1 ] && restaurar_una "$D/p-rf.jsonl" "$PREFIX-p$i-rf" 1
-      else
-        descongelar_una "$D/p-dc.jsonl" "$PREFIX-p$i-dc" 0
-        [ "$DROP_OK" = 1 ] && descongelar_una "$D/p-df.jsonl" "$PREFIX-p$i-df" 1
-      fi
+      if [ "$k" = r ]; then caliente restaurar_una rc "$PREFIX-p$i-rc"
+      else caliente descongelar_una dc "$PREFIX-p$i-dc"; fi
     done
   done
+  if [ "$DROP_OK" = 1 ]; then
+    for i in $(seq "$RUNS"); do
+      if [ $((i % 2)) = 1 ]; then orden="r d"; else orden="d r"; fi
+      for k in $orden; do
+        if [ "$k" = r ]; then restaurar_una "$D/p-rf.jsonl" "$PREFIX-p$i-rf" 1
+        else descongelar_una "$D/p-df.jsonl" "$PREFIX-p$i-df" 1; fi
+      done
+    done
+  fi
   for k in rc:restore,warm rf:restore,cold dc:thaw,warm df:thaw,cold; do
     f="$D/p-${k%%:*}.jsonl"
     [ -s "$f" ] && row "${k#*:} to first response, p50" "$(jq -r .total_ms "$f" | stats) ms (request $(jq -r .peticion_ms "$f" | stats))"
   done
+  for k in rc dc; do
+    [ -s "$D/p-$k-disco.jsonl" ] && row "  warm samples set aside ($k: read the disk)" "$(wc -l < "$D/p-$k-disco.jsonl" | tr -d ' ')"
+  done
   fria() { if [ "$DROP_OK" = 1 ]; then jsonl "$1"; else jq -nc --arg r "$DROP_MOTIVO" '{omitida:$r}'; fi; }
   put primera "$(jq -nc --argjson rc "$(jsonl "$D/p-rc.jsonl")" --argjson rf "$(fria "$D/p-rf.jsonl")" \
     --argjson dc "$(jsonl "$D/p-dc.jsonl")" --argjson df "$(fria "$D/p-df.jsonl")" \
-    '{restaurar_caliente:$rc, restaurar_fria:$rf, descongelar_caliente:$dc, descongelar_fria:$df}')"
+    --argjson arc "$(jsonl "$D/p-rc-disco.jsonl")" --argjson adc "$(jsonl "$D/p-dc-disco.jsonl")" \
+    --argjson u "$UMBRAL_CALIENTE_BYTES" --argjson rep "$REINTENTOS_CALIENTE" --arg cal "$(calentado_por)" \
+    '{restaurar_caliente:$rc, restaurar_fria:$rf, descongelar_caliente:$dc, descongelar_fria:$df,
+      calientes_con_disco:{restaurar_caliente:$arc, descongelar_caliente:$adc},
+      umbral_caliente_bytes:$u, reintentos_caliente:$rep, calentado_por:($cal|split(" ")|map(select(.!="")))}')"
 else omit primera "no pedida en SECCIONES"; fi
 
 # ── 4. tokens/s ───────────────────────────────────────────────────────────────
@@ -360,10 +455,12 @@ elif pide tps; then omit tps "solo para el contrato openai de un modelo VON"
 else omit tps "no pedida en SECCIONES"; fi
 
 # ── gateway del banco ────────────────────────────────────────────────────────
-# gw_up <etq> <idle> <max_replicas>: un `kling ai serve` propio en un socket del
-# directorio temporal, con su id y su prefijo, para no tocar el gateway de nadie.
+# gw_up <etq> <idle> <max_replicas> [json extra]: un `kling ai serve` propio en un socket del
+# directorio temporal, con su id y su prefijo, para no tocar el gateway de nadie. El extra se
+# mezcla en el bloque del modelo (spare, pin: ronda 9).
 gw_up() {
-  local g="$D/gw-$1" bloque
+  local g="$D/gw-$1" bloque x="${4:-}"
+  [ -n "$x" ] || x='{}'
   mkdir -p "$g"
   if [ -n "${GW_BLOQUE_FILE:-}" ]; then
     bloque="$(jq -c --arg s "$SNAP" --arg i "$2" --argjson r "$3" '. + {snapshot:$s, idle:$i, max_replicas:$r}' "$GW_BLOQUE_FILE")" || return 1
@@ -375,7 +472,7 @@ gw_up() {
       '{kind:"http", snapshot:$s, port:$p, contract:$c, health:{path:$h}, idle:$i, max_replicas:$r, max_inflight:$mi}
        + (if $tf == "" then {} else {auth:{header:"Authorization", scheme:"Bearer", file:$tf}} end)')"
   fi
-  jq -n --arg n "$MODELO" --argjson b "$bloque" '{models: {($n): $b}}' > "$g/ai.json"
+  jq -n --arg n "$MODELO" --argjson b "$bloque" --argjson x "$x" '{models: {($n): ($b + $x)}}' > "$g/ai.json"
   "$KLING" ai serve -config "$g/ai.json" -socket "$g/ai.sock" -id "vb$$$1" -name-prefix "$PREFIX-g$1-" \
     -idle "${IDLE_S}s" -paused-mib 0 -max-inflight 1 -max-replicas "$3" > "$g/log" 2>&1 &
   echo $! > "$g/pid"
@@ -523,23 +620,121 @@ if pide ociosa; then
   [ "$GATEWAY" = 1 ] && [ -z "$IA_BENCH" ] && gwj='{"omitida":"sin ia-bench (IA_BENCH)"}'
   if [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ]; then
     if gw_up of freeze 1 && gw_up or remove 1; then
-      gw_pedir of 1 >/dev/null; gw_pedir or 1 >/dev/null
+      # «Con repuesto» (C9-08, Z4): idle remove con spare 1, una réplica restaurada y ya tocada
+      # esperando. Un daemon sin Z4 ignora spare y la fila sale igual que idle remove.
+      orden="of or"; repj='{"omitida":"el gateway con spare: 1 no arrancó"}'
+      gw_up os remove 1 '{"spare":1}' && orden="of or os"
+      for g in $orden; do gw_pedir "$g" 1 >/dev/null; done
+      # PSS que añade el repuesto: con una réplica que acaba de servir en cada gateway, la de spare 1
+      # tiene además el repuesto (Z4 lo repone en segundo plano: se le dan IDLE_S/2 s).
+      pssj='{"omitida":"sin gateway con spare"}'
+      case " $orden " in *" os "*)
+        gw_pedir or 1 >/dev/null; gw_pedir os 1 >/dev/null; sleep $(( IDLE_S / 2 + 1 ))
+        pssj="$(jq -nc --argjson a "$(punto "$PREFIX-gor-" 1)" --argjson b "$(punto "$PREFIX-gos-" 1)" \
+          '{sin:$a, con:$b, extra_mib:($b.pss_total_mib - $a.pss_total_mib)}')"
+        row "PSS added by the spare replica" "$(jq -r .extra_mib <<<"$pssj") MiB" ;;
+      esac
       for i in $(seq "$CYCLES"); do
-        if [ $((i % 2)) = 1 ]; then orden="of or"; else orden="or of"; fi
         for g in $orden; do
-          dorm="$(dormidas "$PREFIX-g$g-")"
+          if [ "$g" = os ]; then
+            # El repuesto sigue vivo: no se espera a «todas dormidas», sino lo que tarda el segador.
+            sleep $((IDLE_S * 2 + 5)); dorm="$(jq -nc --argjson v "$(nuestras "$PREFIX-gos-" | wc -l)" '{vivas:$v}')"
+          else dorm="$(dormidas "$PREFIX-g$g-")"; fi
           gw_pedir "$g" 1 | jq -c --argjson d "$dorm" '{ms: .puntos[0].p50_ms, errores: .puntos[0].errores, dormidas: $d}' >> "$D/o-$g.jsonl"
         done
+        # A/B rotado: nadie va siempre primero.
+        orden="${orden#* } ${orden%% *}"
       done
-      gwj="$(jq -nc --argjson a "$(jsonl "$D/o-of.jsonl")" --argjson b "$(jsonl "$D/o-or.jsonl")" '{idle_freeze:$a, idle_remove:$b}')"
+      [ -s "$D/o-os.jsonl" ] && repj="$(jsonl "$D/o-os.jsonl")"
+      gwj="$(jq -nc --argjson a "$(jsonl "$D/o-of.jsonl")" --argjson b "$(jsonl "$D/o-or.jsonl")" --argjson c "$repj" \
+        --argjson pss "$pssj" '{idle_freeze:$a, idle_remove:$b, idle_remove_repuesto:$c, repuesto_pss:$pss}')"
       row "gateway, idle freeze, p50" "$(jq -r .ms "$D/o-of.jsonl" 2>/dev/null | stats) ms"
       row "gateway, idle remove, p50" "$(jq -r .ms "$D/o-or.jsonl" 2>/dev/null | stats) ms"
+      row "gateway, idle remove + spare 1, p50" "$(jq -r .ms "$D/o-os.jsonl" 2>/dev/null | stats) ms"
     else gwj='{"omitida":"el gateway del banco no arrancó (¿ai.json sin las claves de la ronda 8?)"}'; fi
-    gw_down of; gw_down or
+    gw_down of; gw_down or; gw_down os
   fi
   put ociosa "$(jq -nc --argjson d "$(arr ${dz[@]+"${dz[@]}"})" --argjson r "$(arr ${rs[@]+"${rs[@]}"})" --argjson g "$gwj" \
     '{descongelar_ms:$d, restaurar_ms:$r, gateway:$g}')"
 else omit ociosa "no pedida en SECCIONES"; fi
+
+# ── 6b. primera petición tras arrancar el gateway (C9-10) ─────────────────────
+# Con la caché fría (drop_caches) se arranca un gateway del banco y se pide: en cuanto contesta
+# (inmediata), tras ARRANQUE_ESPERA_S (espera: lo que gana precalentar al arrancar, Z4) y con pin: true
+# y un drop_caches DESPUÉS de la espera (anclado: el dorado sigue en RAM). Sin Z1/Z4 las tres salen frías.
+ARRANQUE_RUNS="${ARRANQUE_RUNS:-3}"
+ARRANQUE_ESPERA_S="${ARRANQUE_ESPERA_S:-20}"
+# disco_prefijo <prefijo>: bytes leídos del disco por los VMM de las máquinas con ese prefijo.
+disco_prefijo() {
+  "$KLING" top -json 2>/dev/null | jq -r --arg p "$1" '[.machines[]? | select(.name|startswith($p)) | .disk_read_bytes // 0] | if length == 0 then null else add end'
+}
+arranque_una() { # arranque_una <variante> <vuelta>
+  local etq="a$1$2" x='{}' t0 out
+  [ "$1" = anclado ] && x='{"pin":true}'
+  [ "$1" = anclado ] || soltar_cache
+  t0=$(now_ms)
+  gw_up "$etq" remove 1 "$x" || return 1
+  case $1 in espera|anclado) sleep "$ARRANQUE_ESPERA_S" ;; esac
+  [ "$1" = anclado ] && soltar_cache
+  out="$(gw_pedir "$etq" 1)" || { gw_down "$etq"; return 1; }
+  jq -c --arg v "$1" --argjson t "$(( $(now_ms) - t0 ))" --argjson dr "$(disco_prefijo "$PREFIX-g$etq-")" \
+    '{variante:$v, ms:.puntos[0].p50_ms, errores:.puntos[0].errores, desde_arranque_ms:$t, disco_leido_bytes:$dr}' <<<"$out" >> "$D/a-$1.jsonl"
+  gw_down "$etq"
+}
+if pide arranque && [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ] && [ "$DROP_OK" = 1 ]; then
+  step "6b. First request after starting the gateway with a cold page cache ($ARRANQUE_RUNS runs, wait ${ARRANQUE_ESPERA_S} s)"
+  orden="inmediata espera anclado"
+  for i in $(seq "$ARRANQUE_RUNS"); do
+    for v in $orden; do higiene; arranque_una "$v" "$i" || echo "  start $v $i FAILED" >&2; done
+    orden="${orden#* } ${orden%% *}"
+  done
+  for v in inmediata espera anclado; do
+    row "gateway start → first response, $v, p50" "$(jq -r .ms "$D/a-$v.jsonl" 2>/dev/null | stats) ms"
+  done
+  put arranque "$(jq -nc --argjson a "$(jsonl "$D/a-inmediata.jsonl")" --argjson b "$(jsonl "$D/a-espera.jsonl")" \
+    --argjson c "$(jsonl "$D/a-anclado.jsonl")" --argjson e "$ARRANQUE_ESPERA_S" '{inmediata:$a, espera:$b, anclado:$c, espera_s:$e}')"
+elif pide arranque && [ "$GATEWAY" != 1 ]; then omit arranque "GATEWAY=0"
+elif pide arranque && [ -z "$IA_BENCH" ]; then omit arranque "sin ia-bench (IA_BENCH)"
+elif pide arranque; then omit arranque "hace falta drop_caches: $DROP_MOTIVO"
+else omit arranque "no pedida en SECCIONES"; fi
+
+# ── 6c. secreto entregado por MMDS tras restaurar (P1 de la ronda 8, Z4) ──────
+# El gateway pone el secreto en el MMDS de cada réplica tras restaurarla y corre el gancho de la
+# imagen: lo que cuesta se ve en «ociosa → primera respuesta» con y sin secret (idle remove). Y el
+# valor no puede estar en el mem.file del dorado ni en el log del gateway (se busca, no se imprime).
+SECRETO_RUNS="${SECRETO_RUNS:-$CYCLES}"
+if pide secreto && [ "$GATEWAY" = 1 ] && [ -n "$IA_BENCH" ] && [ "$VON" != 1 ]; then
+  step "6c. Secret delivered by MMDS after restore: idle → first response with and without it ($SECRETO_RUNS cycles)"
+  mkdir -p "$D/gw-ss"
+  (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/gw-ss/secreto")
+  sj='{"omitida":"el gateway con secrets no arrancó (¿falta Z4?)"}'
+  if gw_up sn remove 1 && gw_up ss remove 1 '{"secrets":[{"name":"bench","deliver":"mmds","file":"secreto"}]}'; then
+    orden="sn ss"
+    for g in $orden; do gw_pedir "$g" 1 >/dev/null; done
+    for i in $(seq "$SECRETO_RUNS"); do
+      for g in $orden; do
+        dorm="$(dormidas "$PREFIX-g$g-")"
+        gw_pedir "$g" 1 | jq -c --argjson d "$dorm" '{ms: .puntos[0].p50_ms, errores: .puntos[0].errores, dormidas: $d}' >> "$D/s-$g.jsonl"
+      done
+      orden="${orden#* } ${orden%% *}"
+    done
+    enmem=null; mf="${KLING_ROOT:-/nonexistent}/snapshots/$SNAP/mem.file"
+    if [ -r "$mf" ]; then if grep -qaF -f "$D/gw-ss/secreto" "$mf"; then enmem=true; else enmem=false; fi; fi
+    enlog=false; grep -qaF -f "$D/gw-ss/secreto" "$D/gw-ss/log" && enlog=true
+    sj="$(jq -nc --argjson a "$(jsonl "$D/s-sn.jsonl")" --argjson b "$(jsonl "$D/s-ss.jsonl")" --argjson m "$enmem" --argjson l "$enlog" \
+      'def p50: (map(select(. != null)) | sort) as $s | if ($s|length) == 0 then null else $s[(($s|length) - 1) / 2 | floor] end;
+       {sin:$a, con:$b, gancho_ms_p50:(if ([$b[].ms]|p50) == null or ([$a[].ms]|p50) == null then null else ([$b[].ms]|p50) - ([$a[].ms]|p50) end),
+        valor_en_mem_file:$m, valor_en_log_gateway:$l}')"
+    row "idle remove, no secret, p50" "$(jq -r .ms "$D/s-sn.jsonl" 2>/dev/null | stats) ms"
+    row "idle remove, MMDS secret, p50" "$(jq -r .ms "$D/s-ss.jsonl" 2>/dev/null | stats) ms"
+    row "secret value in the golden mem.file / gateway log" "$enmem / $enlog"
+  fi
+  gw_down sn; gw_down ss
+  put secreto "$sj"
+elif pide secreto && [ "$VON" = 1 ]; then omit secreto "secrets solo en bloques kind http (no VON)"
+elif pide secreto && [ "$GATEWAY" != 1 ]; then omit secreto "GATEWAY=0"
+elif pide secreto; then omit secreto "sin ia-bench (IA_BENCH)"
+else omit secreto "no pedida en SECCIONES"; fi
 
 # ── 7. semillas ──────────────────────────────────────────────────────────────
 if pide semillas && [ "$VON" = 1 ]; then
