@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 func TestWriteSnapshots(t *testing.T) {
@@ -154,5 +158,74 @@ func TestSnapshotsInspectContraUnDaemonFalso(t *testing.T) {
 	_, err = c.Snapshot(t.Context(), "nope")
 	if err == nil || hintFor(err) != "kling template ls" {
 		t.Fatalf("%v / %q", err, hintFor(err))
+	}
+}
+
+// -upstream en una credencial HTTP (template credential y machine credential
+// comparten las banderas): exige -allow-request, admite -ca-file y
+// -tls-server-name solo con él, y disable solo hacia el loopback. La salida
+// dice a dónde va la clave.
+func TestFlagUpstreamHTTP(t *testing.T) {
+	dir := t.TempDir()
+	clave := filepath.Join(dir, "clave")
+	ca := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(clave, []byte("tok-inquilino\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ca, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec := func(args ...string) (api.CredentialSpec, error) {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		cf := credentialFlags(fs)
+		base := []string{"-f", clave, "-domain", "l3.kindling.internal", "-env", "L3_TOKEN"}
+		if err := fs.Parse(append(base, args...)); err != nil {
+			return api.CredentialSpec{}, err
+		}
+		return cf.spec()
+	}
+	const regla = "POST /v1/chat/completions"
+
+	s, err := spec("-upstream", "127.0.0.1:8080", "-upstream-tls", "disable", "-allow-request", regla)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Type != "" || s.Upstream != "127.0.0.1:8080" || s.UpstreamTLS != credproxy.UpstreamTLSDisable ||
+		len(s.Allow) != 1 || s.Secret != "tok-inquilino" {
+		t.Fatalf("spec %+v", s)
+	}
+	if got := describirSitios(s); !strings.Contains(got, "127.0.0.1:8080") || !strings.Contains(got, "unencrypted") {
+		t.Errorf("describirSitios: %q", got)
+	}
+	s, err = spec("-upstream", "10.0.0.5:8443", "-tls-server-name", "gw.vpc.lan", "-ca-file", ca, "-allow-request", regla)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Upstream != "10.0.0.5:8443" || s.TLSServerName != "gw.vpc.lan" || !strings.HasPrefix(s.CAPEM, "-----BEGIN") || s.UpstreamTLS != "" {
+		t.Fatalf("spec %+v", s)
+	}
+	if got := describirSitios(s); !strings.Contains(got, "10.0.0.5:8443") || !strings.Contains(got, "gw.vpc.lan") {
+		t.Errorf("describirSitios: %q", got)
+	}
+	// Sin upstream, la salida de siempre.
+	if s, err := spec(); err != nil || strings.Contains(describirSitios(s), "upstream") {
+		t.Fatalf("sin upstream: %q, %v", describirSitios(s), err)
+	}
+
+	for nombre, args := range map[string][]string{
+		"sin allow":             {"-upstream", "127.0.0.1:8080"},
+		"disable fuera":         {"-upstream", "10.0.0.5:8080", "-upstream-tls", "disable", "-allow-request", regla},
+		"disable con nombre":    {"-upstream", "gw.lan:8080", "-upstream-tls", "disable", "-allow-request", regla},
+		"disable sin upstream":  {"-upstream-tls", "disable", "-allow-request", regla},
+		"disable con CA":        {"-upstream", "127.0.0.1:8080", "-upstream-tls", "disable", "-ca-file", ca, "-allow-request", regla},
+		"CA sin upstream":       {"-ca-file", ca, "-allow-request", regla},
+		"nombre sin upstream":   {"-tls-server-name", "gw.lan", "-allow-request", regla},
+		"tls raro":              {"-upstream", "127.0.0.1:8080", "-upstream-tls", "require", "-allow-request", regla},
+		"upstream con rol":      {"-upstream", "127.0.0.1:8080", "-user", "app", "-allow-request", regla},
+		"upstream con un sigv4": {"-type", "sigv4", "-access-key-id", "AKIAX", "-region", "auto", "-upstream", "127.0.0.1:8080"},
+	} {
+		if _, err := spec(args...); err == nil {
+			t.Errorf("%s: aceptada", nombre)
+		}
 	}
 }

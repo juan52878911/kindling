@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/esquema"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
@@ -263,5 +264,93 @@ func TestRotarReescribeLasCopiasDelAlmacen(t *testing.T) {
 	}
 	if len(enCopia) != 1 || enCopia[0].Secret != "sk_test_NUEVA" {
 		t.Fatalf("la copia .v1.bak tiene que ser lo de ahora sin la sigv4: %+v", enCopia)
+	}
+}
+
+// Una credencial HTTP de un almacén anterior (sin upstream) se lee como
+// antes, sigue siendo válida con las reglas de ahora y no sube la versión del
+// almacén al volver a sellarlo: los campos del upstream se leen ausentes.
+func TestAlmacenLeeCredencialHTTPAntigua(t *testing.T) {
+	m := managerConClaveDePrueba(t)
+	ruta := m.credPath("m1")
+	copiarFijacion(t, "credentials.v0.enc", ruta)
+	creds, err := m.cargarCredenciales("m1")
+	if err != nil || len(creds) != 1 {
+		t.Fatalf("almacén v0: %+v, %v", creds, err)
+	}
+	c := creds[0]
+	if c.Kind != "" || c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" || c.CAPEM != "" {
+		t.Fatalf("una HTTP antigua se leyó con upstream: %+v", c)
+	}
+	if err := credproxy.ValidarCredenciales(creds); err != nil {
+		t.Fatalf("una HTTP antigua ya no valida: %v", err)
+	}
+	if err := m.guardarCredenciales("m1", creds); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(ruta); versionSellada(b) != versionAlmacen {
+		t.Fatalf("resellada en la versión %d, want %d", versionSellada(b), versionAlmacen)
+	}
+}
+
+// Una credencial HTTP con upstream sube el almacén (de máquina y de
+// plantilla) a versionAlmacenHTTPUpstream: un kling anterior que no la
+// entendiera mandaría la clave al dominio en vez de a la dirección fijada.
+// Las copias de versiones anteriores no la llevan (fallar cerrado), y sin
+// ella el almacén vuelve a la versión de antes.
+func TestAlmacenHTTPUpstreamSubeDeVersion(t *testing.T) {
+	m := managerConClaveDePrueba(t)
+	ruta := m.credPath("m1")
+	vieja := credproxy.Credential{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: "sk_test_VIEJA"}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{vieja}); err != nil {
+		t.Fatal(err)
+	}
+	up := credproxy.Credential{Env: "L3", Domain: "l3.kindling.internal", Placeholder: "kling-cred-bb", Secret: "tok_inquilino_0123",
+		Upstream: "127.0.0.1:8080", UpstreamTLS: credproxy.UpstreamTLSDisable, Allow: []string{"POST /v1/chat/completions"}}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{vieja, up}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(ruta)
+	if versionSellada(b) != versionAlmacenHTTPUpstream || versionAlmacenHTTPUpstream <= versionAlmacenPlantillaSigV4 {
+		t.Fatalf("con upstream HTTP: versión %d", versionSellada(b))
+	}
+	copia, err := os.ReadFile(esquema.RutaRespaldo(ruta, versionAlmacen))
+	if err != nil {
+		t.Fatalf("falta la copia de la migración: %v", err)
+	}
+	var enCopia []credproxy.Credential
+	if err := m.abrir("bak", copia, "m1", &enCopia); err != nil || len(enCopia) != 1 || enCopia[0].Upstream != "" {
+		t.Fatalf("la copia v1 lleva el upstream HTTP: %+v, %v", enCopia, err)
+	}
+	back, err := m.cargarCredenciales("m1")
+	if err != nil || len(back) != 2 || back[1].Upstream != "127.0.0.1:8080" || back[1].UpstreamTLS != credproxy.UpstreamTLSDisable {
+		t.Fatalf("releída: %+v, %v", back, err)
+	}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{vieja}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(ruta); versionSellada(b) != versionAlmacen {
+		t.Fatalf("sin el upstream HTTP: versión %d", versionSellada(b))
+	}
+	// Un upstream de Postgres no la sube: ese ya lo entendía la v1.
+	pg := credproxy.Credential{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-cc", Secret: "pw-de-prueba",
+		Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "app", Upstream: "127.0.0.1:5432"}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{pg}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(ruta); versionSellada(b) != versionAlmacen {
+		t.Fatalf("con upstream postgres: versión %d", versionSellada(b))
+	}
+
+	// La plantilla, igual.
+	if v := versionParaSellar([]api.CredentialSpec{{Env: "L3", Domain: "l3.kindling.internal", Upstream: "127.0.0.1:8080"}}); v != versionAlmacenHTTPUpstream {
+		t.Errorf("plantilla con upstream HTTP: versión %d", v)
+	}
+	if v := versionParaSellar([]api.CredentialSpec{{Env: "P", Domain: "db.example.com", Type: credproxy.KindPostgres, Upstream: "127.0.0.1:5432"}}); v != versionAlmacen {
+		t.Errorf("plantilla con upstream postgres: versión %d", v)
+	}
+	if r, _ := representableEn([]api.CredentialSpec{{Env: "K", Domain: "api.example.com"}, {Env: "L3", Domain: "l3.kindling.internal", Upstream: "127.0.0.1:8080"}},
+		versionAlmacenPlantillaSigV4).([]api.CredentialSpec); len(r) != 1 || r[0].Env != "K" {
+		t.Errorf("copia v3 de una plantilla: %+v", r)
 	}
 }
