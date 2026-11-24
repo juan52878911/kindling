@@ -1,6 +1,7 @@
 package aigw
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,6 +39,7 @@ func TestBackendAtajos(t *testing.T) {
 		Name: "q", Snapshot: "von-qwen15", Port: 8000, Contract: ContractOpenAI,
 		Routes: []Route{{"POST", "/v1/chat/completions"}, {"POST", "/v1/completions"}},
 		Health: Health{Path: "/health"}, MaxReplicas: 2, Idle: IdleRemove,
+		ReplicaAuth: ReplicaAuthNetwork, // ronda 9: lo de hoy, deducido (sin auth)
 	}
 	if !reflect.DeepEqual(q, want) {
 		t.Errorf("von expands to\n%+v\nwant\n%+v", q, want)
@@ -294,5 +296,233 @@ func TestBackendDevuelveCopiaEstable(t *testing.T) {
 	l[0], l[1] = l[1], l[0]
 	if c.Backends()[0].Name != "a" {
 		t.Error("Backends() shares its slice with the caller")
+	}
+}
+
+// cargaBloque valida un registro de un solo modelo m (más el sufijo extra,
+// p. ej. inquilinos) y devuelve su error.
+func cargaBloque(m, extra string) (*Config, error) {
+	return ParseConfig(strings.NewReader(`{"models":{"m":` + m + `}` + extra + `}`))
+}
+
+// ficheroClave deja una credencial 0600 y devuelve el bloque auth que la usa.
+func ficheroClave(t *testing.T) string {
+	t.Helper()
+	clave := filepath.Join(t.TempDir(), "k")
+	if err := os.WriteFile(clave, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return `"auth":{"header":"Authorization","scheme":"Bearer","file":` + strconv.Quote(clave) + `}`
+}
+
+// TestReplicaAuthResuelve: replica_auth vacío se deduce del bloque, que es
+// exactamente lo de hoy: key si lleva auth (el gateway añade la clave que la
+// réplica exige), network si no. Lo declarado se respeta, y un upstream no
+// tiene réplica que proteger.
+func TestReplicaAuthResuelve(t *testing.T) {
+	auth := ficheroClave(t)
+	casos := []struct{ bloque, quiere string }{
+		{`{"kind":"http","snapshot":"s","contract":"chispa-decide",` + auth + `}`, ReplicaAuthKey},
+		{`{"kind":"http","snapshot":"s","contract":"chispa-decide"}`, ReplicaAuthNetwork},
+		{`{"kind":"http","snapshot":"s","contract":"chispa-decide","replica_auth":"network"}`, ReplicaAuthNetwork},
+		{`{"kind":"http","snapshot":"s","contract":"chispa-decide","replica_auth":"key",` + auth + `}`, ReplicaAuthKey},
+		{`{"kind":"von","snapshot":"s"}`, ReplicaAuthNetwork},
+		{`{"kind":"embed","snapshot":"s","replica_auth":"network"}`, ReplicaAuthNetwork},
+		{`{"kind":"chispa","backend":"microvm","snapshot":"s"}`, ReplicaAuthNetwork},
+		{`{"kind":"http","upstream":"http://h:1","contract":"openai",` + auth + `}`, ""},
+	}
+	for _, c := range casos {
+		cfg, err := cargaBloque(c.bloque, "")
+		if err != nil {
+			t.Errorf("%s: %v", c.bloque, err)
+			continue
+		}
+		if got := cfg.Backend("m").ReplicaAuth; got != c.quiere {
+			t.Errorf("%s: replica_auth %q, want %q", c.bloque, got, c.quiere)
+		}
+	}
+}
+
+// TestReplicaAuthContradiccion: key sin la clave que añadir y network con una
+// clave son contradicciones; un upstream no tiene réplica.
+func TestReplicaAuthContradiccion(t *testing.T) {
+	auth := ficheroClave(t)
+	for _, m := range []string{
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","replica_auth":"key"}`,
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","replica_auth":"network",` + auth + `}`,
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","replica_auth":"auth",` + auth + `}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","replica_auth":"key",` + auth + `}`,
+		`{"kind":"von","snapshot":"s","replica_auth":"key"}`,
+		`{"kind":"chispa","path":"x.chispa","replica_auth":"network"}`,
+	} {
+		if _, err := cargaBloque(m, ""); err == nil {
+			t.Errorf("accepted %s", m)
+		} else {
+			t.Logf("%s: %v", m, err)
+		}
+	}
+}
+
+// TestReplicaAuthAvisos: network avisa (no falla) en macOS siempre y en Linux
+// si hay inquilinos: el puerto de la réplica lo alcanza cualquier proceso
+// local. key no avisa, y un registro de hoy en Linux sin inquilinos tampoco.
+func TestReplicaAuthAvisos(t *testing.T) {
+	auth := ficheroClave(t)
+	const ten = `,"tenants":[{"name":"acme","token":"0123456789abcdef"}]`
+	red := `{"kind":"http","snapshot":"s","contract":"chispa-decide"}`
+	redAcme := `{"kind":"http","snapshot":"s","contract":"chispa-decide","tenants":["acme"]}`
+	conClave := `{"kind":"http","snapshot":"s","contract":"chispa-decide","tenants":["acme"],` + auth + `}`
+	casos := []struct {
+		bloque, extra, goos string
+		avisa               bool
+	}{
+		{red, "", "darwin", true},
+		{red, "", "linux", false},
+		{redAcme, ten, "darwin", true},
+		{redAcme, ten, "linux", true},
+		{`{"kind":"von","snapshot":"s"}`, "", "linux", false},
+		{`{"kind":"von","snapshot":"s"}`, "", "darwin", true},
+		{conClave, ten, "linux", false},
+		{conClave, ten, "darwin", false},
+		{`{"kind":"chispa","path":"x.chispa"}`, ten, "darwin", false},
+	}
+	for _, c := range casos {
+		cfg, err := cargaBloque(c.bloque, c.extra)
+		if err != nil {
+			t.Fatalf("%s: %v", c.bloque, err)
+		}
+		notas := cfg.BackendNotes(c.goos)
+		var hay bool
+		for _, n := range notas {
+			if strings.Contains(n, "replica_auth") {
+				hay = true
+				if !strings.Contains(n, "m") || !strings.Contains(n, "key") {
+					t.Errorf("note does not name the model and the way out: %s", n)
+				}
+			}
+		}
+		if hay != c.avisa {
+			t.Errorf("%s %s (tenants %v): notes %q", c.goos, c.bloque, c.extra != "", notas)
+		}
+	}
+}
+
+// Un upstream http:// que lleva auth fuera del loopback manda la clave en
+// claro por la red: aviso al cargar.
+func TestAvisoHTTPConAuth(t *testing.T) {
+	auth := "," + ficheroClave(t)
+	for up, avisa := range map[string]bool{
+		"http://10.0.0.20:8000": true, "http://gpu.interna:8000": true,
+		"https://10.0.0.20:8000": false, "http://127.0.0.1:8000": false, "http://localhost:8000": false, "http://[::1]:8000": false,
+	} {
+		cfg, err := cargaBloque(`{"kind":"http","upstream":"`+up+`","contract":"openai"`+auth+`}`, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hay := strings.Contains(strings.Join(cfg.BackendNotes("linux"), "\n"), "in clear")
+		if hay != avisa {
+			t.Errorf("%s: note %v, want %v", up, hay, avisa)
+		}
+	}
+}
+
+// TestSpareYPinValidan: spare entre 0 y max_replicas y solo con dorado; pin
+// solo con dorado.
+func TestSpareYPinValidan(t *testing.T) {
+	malas := []string{
+		`{"kind":"http","snapshot":"s","contract":"openai","spare":-1}`,
+		`{"kind":"http","snapshot":"s","contract":"openai","spare":3,"max_replicas":2}`,
+		`{"kind":"http","snapshot":"s","contract":"openai","spare":65}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","spare":1}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","pin":true}`,
+		`{"kind":"chispa","path":"x.chispa","pin":true}`,
+		`{"kind":"chispa","path":"x.chispa","spare":1}`,
+	}
+	for _, m := range malas {
+		if _, err := cargaBloque(m, ""); err == nil {
+			t.Errorf("accepted %s", m)
+		}
+	}
+	type quiere struct {
+		spare int
+		pin   bool
+	}
+	buenas := map[string]quiere{
+		`{"kind":"http","snapshot":"s","contract":"openai","spare":2,"max_replicas":2,"pin":true}`: {2, true},
+		`{"kind":"http","snapshot":"s","contract":"openai","spare":1}`:                             {1, false},
+		`{"kind":"von","snapshot":"s","spare":1,"pin":true}`:                                       {1, true},
+		`{"kind":"embed","snapshot":"s","pin":true}`:                                               {0, true},
+		`{"kind":"chispa","backend":"microvm","snapshot":"s","spare":1}`:                           {1, false},
+	}
+	for m, q := range buenas {
+		c, err := cargaBloque(m, "")
+		if err != nil {
+			t.Errorf("rejected %s: %v", m, err)
+			continue
+		}
+		if b := c.Backend("m"); b.Spare != q.spare || b.Pin != q.pin {
+			t.Errorf("%s: spare %d pin %v", m, b.Spare, b.Pin)
+		}
+	}
+}
+
+// TestLoadWaitValida: load_wait es una duración positiva y acotada, solo de un
+// modelo con dorado (es el plazo al fabricarlo).
+func TestLoadWaitValida(t *testing.T) {
+	for _, m := range []string{
+		`{"kind":"http","snapshot":"s","contract":"openai","load_wait":"10 minutos"}`,
+		`{"kind":"http","snapshot":"s","contract":"openai","load_wait":"0s"}`,
+		`{"kind":"http","snapshot":"s","contract":"openai","load_wait":"-5m"}`,
+		`{"kind":"http","snapshot":"s","contract":"openai","load_wait":"100h"}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","load_wait":"5m"}`,
+		`{"kind":"chispa","path":"x.chispa","load_wait":"5m"}`,
+	} {
+		if _, err := cargaBloque(m, ""); err == nil {
+			t.Errorf("accepted %s", m)
+		}
+	}
+	c, err := cargaBloque(`{"kind":"von","snapshot":"s","load_wait":"12m30s"}`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Backend("m").LoadWait; got != 12*time.Minute+30*time.Second {
+		t.Errorf("load_wait = %v", got)
+	}
+}
+
+// TestCheckUpstreamVetaLinkLocal: un upstream no puede apuntar a link-local ni
+// a los metadatos del cloud, a la red propia de kindling ni, en el loopback,
+// al rango de los reenvíos de las máquinas. Lo demás (una VPC, el loopback en
+// otro puerto) vale.
+func TestCheckUpstreamVetaLinkLocal(t *testing.T) {
+	for _, u := range []string{
+		"http://169.254.169.254/latest", "http://169.254.10.1:8000", "http://[fe80::1]:8000",
+		"http://[fd00:ec2::254]/", "http://172.30.0.5:8000", "http://172.16.0.2:8000",
+		"http://127.0.0.1:29001", "http://[::1]:29999", "http://0.0.0.0:8000", "http://[::ffff:169.254.169.254]/",
+	} {
+		if err := checkUpstream(u); err == nil {
+			t.Errorf("accepted %s", u)
+		}
+	}
+	for _, u := range []string{
+		"http://10.0.0.20:8000", "https://gpu.interna:8443/v1", "http://127.0.0.1:8000", "http://localhost:28999", "http://127.0.0.1:30000",
+	} {
+		if err := checkUpstream(u); err != nil {
+			t.Errorf("rejected %s: %v", u, err)
+		}
+	}
+}
+
+// Un nombre que resuelve a un destino vetado se corta al marcar: la
+// comprobación del fichero solo ve IPs literales.
+func TestUpstreamVetaAlMarcar(t *testing.T) {
+	b := &Backend{Name: "gpu", Upstream: "http://localhost:29005", Contract: ContractRaw, Routes: []Route{{"POST", "/x"}}}
+	u, err := newUpstream(b, 1, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, u.base+"/x", nil)
+	if _, err := u.tr.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("dial to the forward range: %v", err)
 	}
 }

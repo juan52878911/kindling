@@ -1,15 +1,21 @@
 package aigw
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/netip"
 	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // Este fichero es la SEMILLA de la ronda 8 (analisis/ronda8-ia/plan.md §1.1 y
@@ -142,7 +148,8 @@ type Backend struct {
 	// ReplicaAuth dice quién autentica las peticiones que llegan a la réplica
 	// (pendiente 1 de la ronda 8). Es una de las constantes ReplicaAuth*; Z5
 	// lo valida y, vacío, lo resuelve: ReplicaAuthKey si el bloque lleva Auth,
-	// ReplicaAuthNetwork si no (lo de hoy en los dos casos).
+	// ReplicaAuthNetwork si no (lo de hoy en los dos casos). Con Upstream
+	// queda vacío: no hay réplica (la credencial hacia la URL es Auth).
 	ReplicaAuth string
 	// Secrets son los secretos del backend ya validados por Z4
 	// (validateSecrets), con File absoluto. Los entrega Z4; Z5 no los toca.
@@ -219,8 +226,7 @@ type HealthConfig struct {
 	Expect  int    `json:"expect,omitempty"`
 	Timeout string `json:"timeout,omitempty"`
 	Every   string `json:"every,omitempty"`
-	// Grace: ver Health.Grace. Semilla de la ronda 9: se lee del JSON y
-	// parseHealth (Z5) aún no lo convierte.
+	// Grace: ver Health.Grace; solo con upstream.
 	Grace string `json:"grace,omitempty"`
 }
 
@@ -303,6 +309,13 @@ const (
 	minHealthEvery     = time.Second
 	maxHealthEvery     = time.Hour
 	maxHealthTimeout   = 5 * time.Minute
+	// Ronda 9.
+	maxHealthGrace   = time.Hour     // un vLLM grande carga en minutos, no en horas
+	maxLimitTimeout  = time.Hour     // plazo de una petición (limits.timeout)
+	maxLoadWait      = 6 * time.Hour // plazo de carga al fabricar un dorado
+	maxLimitLogprobs = 1024          // top_logprobs / prompt_logprobs
+	maxSpare         = 64            // como max_replicas
+	maxCAFileBytes   = 1 << 20
 )
 
 // metodosRuta son los métodos que puede declarar "routes".
@@ -394,6 +407,18 @@ func expandBackend(nombre string, m *ModelConfig) *Backend {
 	if b.Health.Path == "" {
 		b.Health.Path = saludDeContrato(b.Contract)
 	}
+	if b.Upstream == "" {
+		// Decisión de la ronda 9 (plan-r9.md, «frontera de la réplica»): vacío
+		// es lo de hoy, deducido del bloque.
+		switch {
+		case m.ReplicaAuth != "":
+			b.ReplicaAuth = m.ReplicaAuth
+		case m.Auth != nil:
+			b.ReplicaAuth = ReplicaAuthKey
+		default:
+			b.ReplicaAuth = ReplicaAuthNetwork
+		}
+	}
 	if b.Idle == "" {
 		// Decisión de la ronda 8 (§1.4): borrar lo ocioso para que toda réplica
 		// viva comparta el mem.file del dorado; chispa-classify sigue congelando
@@ -413,9 +438,8 @@ func expandBackend(nombre string, m *ModelConfig) *Backend {
 	if len(m.Tenants) > 0 {
 		b.Tenants = append([]string(nil), m.Tenants...)
 	}
-	// Semilla de la ronda 9: copia sin interpretar. ReplicaAuth vacío lo
-	// resuelve Z5; CAFile lo hace absoluto Z5.
-	b.Spare, b.Pin, b.ReplicaAuth = m.Spare, m.Pin, m.ReplicaAuth
+	// Ronda 9: ya validados; CAFile llega absoluto (resolveAuthFiles).
+	b.Spare, b.Pin = m.Spare, m.Pin
 	b.Alias, b.Shared, b.CAFile = m.Alias, m.Shared, m.CAFile
 	b.LoadWait, _ = time.ParseDuration(m.LoadWait)
 	if len(m.Secrets) > 0 {
@@ -488,7 +512,23 @@ func parseHealth(h *HealthConfig) (Health, error) {
 		}
 		out.Every = d
 	}
+	if h.Grace != "" {
+		d, err := duracionEn("health.grace", h.Grace, maxHealthGrace)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		out.Grace = d
+	}
 	return out, errors.Join(errs...)
+}
+
+// duracionEn lee s como duración en (0, max]; campo nombra el error.
+func duracionEn(campo, s string, max time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 || d > max {
+		return 0, fmt.Errorf("%s must be a duration in (0, %s], like \"90s\" or \"10m\"", campo, max)
+	}
+	return d, nil
 }
 
 // checkUpstream: URL http/https con host y sin credenciales. La query y el
@@ -512,7 +552,81 @@ func checkUpstream(s string) error {
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
 		return fmt.Errorf("upstream must not have a query or fragment (credentials go in auth)")
 	}
+	// Destino (pendiente 5): las mismas prohibiciones que un upstream fijado
+	// del proxy de credenciales. Aquí solo se ve una IP literal; un nombre se
+	// comprueba al marcar (destinoVetado en el Dialer del upstream).
+	host := u.Hostname()
+	puerto, _ := strconv.Atoi(u.Port())
+	if puerto == 0 {
+		puerto = 80
+		if u.Scheme == "https" {
+			puerto = 443
+		}
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if credproxy.UpstreamIPProhibida(ip) {
+			return fmt.Errorf("upstream %s is a forbidden destination (link-local, cloud metadata, multicast or kindling's own network)", host)
+		}
+		if ip.Unmap().IsLoopback() && credproxy.PuertoReservado(puerto) {
+			return errReenvio(puerto)
+		}
+	} else if strings.EqualFold(host, "localhost") && credproxy.PuertoReservado(puerto) {
+		return errReenvio(puerto)
+	}
 	return nil
+}
+
+func errReenvio(puerto int) error {
+	return fmt.Errorf("upstream port %d on loopback is in kindling's reserved forward range (%d-%d, where machines' guests are exposed)",
+		puerto, credproxy.ForwardPortMin, credproxy.ForwardPortMax)
+}
+
+// destinoVetado dice si marcar address ("ip:puerto", ya resuelto) iría a un
+// destino prohibido. Lo llama el Dialer de un upstream en cada conexión, así
+// que un nombre que resuelva (o pase a resolver) ahí tampoco llega.
+func destinoVetado(address string) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("upstream dial to %q: not an IP address", address)
+	}
+	ip := ap.Addr().Unmap()
+	if credproxy.UpstreamIPProhibida(ip) || (ip.IsLoopback() && credproxy.PuertoReservado(int(ap.Port()))) {
+		return fmt.Errorf("upstream dial to %s: forbidden destination (link-local, metadata, kindling's network or its forward range)", address)
+	}
+	return nil
+}
+
+// esLoopback dice si el host de una URL es el loopback (nombre o IP).
+func esLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
+}
+
+// cargarCA lee el PEM de p (absoluto) como conjunto de raíces.
+func cargarCA(p string) (*x509.CertPool, error) {
+	if !filepath.IsAbs(p) {
+		return nil, fmt.Errorf("ca_file %q is relative: it is resolved against the config file, so load it with LoadConfig", p)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, fmt.Errorf("ca_file: %w", err)
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("ca_file %s is not a regular file", p)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxCAFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("ca_file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if len(raw) > maxCAFileBytes || !pool.AppendCertsFromPEM(raw) {
+		return nil, fmt.Errorf("ca_file %s has no PEM certificate (or is larger than %d bytes)", p, maxCAFileBytes)
+	}
+	return pool, nil
 }
 
 // esToken dice si s es un token de RFC 9110 (nombre de cabecera, esquema).
@@ -573,17 +687,23 @@ func validateBackend(n string, m *ModelConfig, tenants map[string]bool) []error 
 		"routes": len(m.Routes) > 0, "health": m.Health != nil, "max_inflight": m.MaxInflight != 0,
 		"idle": m.Idle != "", "upstream_model": m.UpstreamModel != "", "auth": m.Auth != nil,
 		"limits": m.Limits != nil, "tenants": len(m.Tenants) > 0,
+		// Ronda 9.
+		"spare": m.Spare != 0, "pin": m.Pin, "replica_auth": m.ReplicaAuth != "", "alias": m.Alias != "",
+		"shared": m.Shared, "load_wait": m.LoadWait != "", "ca_file": m.CAFile != "",
 	}
 	var admitidos map[string]bool
 	switch {
 	case m.Kind == KindHTTP:
 		admitidos = nil // todo
 	case m.Kind == KindVON:
-		admitidos = map[string]bool{"health": true, "max_inflight": true, "idle": true, "tenants": true, "limits": true}
+		admitidos = map[string]bool{"health": true, "max_inflight": true, "idle": true, "tenants": true, "limits": true,
+			"spare": true, "pin": true, "replica_auth": true, "load_wait": true}
 	case m.Kind == KindEmbed:
-		admitidos = map[string]bool{"health": true, "max_inflight": true, "idle": true, "tenants": true}
+		admitidos = map[string]bool{"health": true, "max_inflight": true, "idle": true, "tenants": true,
+			"spare": true, "pin": true, "replica_auth": true, "load_wait": true}
 	case m.Kind == KindChispa && m.Backend == BackendMicroVM:
-		admitidos = map[string]bool{"health": true, "max_inflight": true, "idle": true}
+		admitidos = map[string]bool{"health": true, "max_inflight": true, "idle": true,
+			"spare": true, "pin": true, "replica_auth": true}
 	default:
 		admitidos = map[string]bool{} // chispa en proceso: ninguno
 	}
@@ -671,6 +791,9 @@ func validateBackend(n string, m *ModelConfig, tenants map[string]bool) []error 
 		if m.Health.Every != "" && m.Upstream == "" {
 			add("health.every polls an upstream; a snapshot is probed after each restore")
 		}
+		if m.Health.Grace != "" && m.Upstream == "" {
+			add("health.grace is for an upstream that takes long to load; a snapshot is probed after each restore")
+		}
 	}
 	if m.MaxInflight < 0 || m.MaxInflight > maxBackendInflight {
 		add("max_inflight must be 0..%d", maxBackendInflight)
@@ -681,13 +804,23 @@ func validateBackend(n string, m *ModelConfig, tenants map[string]bool) []error 
 		add("idle must be remove, pause or freeze, not %q", m.Idle)
 	}
 	if l := m.Limits; l != nil {
-		if contrato != ContractOpenAI {
-			add("limits apply to the openai contract (max_tokens and n of a completion)")
+		// timeout vale en cualquier contrato; el resto topa campos de OpenAI.
+		if contrato != ContractOpenAI && (l.MaxTokens != 0 || l.N != 0 || l.TopLogprobs != 0 || l.PromptLogprobs != 0) {
+			add("limits max_tokens, n, top_logprobs and prompt_logprobs apply to the openai contract (only limits.timeout applies to any)")
 		}
 		if l.MaxTokens < 0 || l.MaxTokens > maxLimitTokens || l.N < 0 || l.N > maxLimitN {
 			add("limits.max_tokens must be 0..%d and limits.n 0..%d", maxLimitTokens, maxLimitN)
 		}
+		if l.TopLogprobs < 0 || l.TopLogprobs > maxLimitLogprobs || l.PromptLogprobs < 0 || l.PromptLogprobs > maxLimitLogprobs {
+			add("limits.top_logprobs and limits.prompt_logprobs must be 0..%d", maxLimitLogprobs)
+		}
+		if l.Timeout != "" {
+			if _, err := duracionEn("limits.timeout", l.Timeout, maxLimitTimeout); err != nil {
+				add("%v", err)
+			}
+		}
 	}
+	errs = append(errs, validarRonda9(n, m)...)
 	visto := map[string]bool{}
 	for _, tn := range m.Tenants {
 		if !tenants[tn] {
@@ -701,16 +834,104 @@ func validateBackend(n string, m *ModelConfig, tenants map[string]bool) []error 
 	return errs
 }
 
-// resolveAuthFiles hace absoluto auth.file respecto a dir (el directorio del
-// ai.json). Con dir "" (ParseConfig sin fichero) lo deja como está, y
-// Validate rechaza una ruta relativa.
+// validarRonda9 comprueba spare, pin, load_wait, replica_auth y ca_file de un
+// modelo que ya pasó el filtro de campos por kind. alias y shared, que
+// dependen de otros bloques, los mira validateAliases (alias.go).
+func validarRonda9(n string, m *ModelConfig) []error {
+	var errs []error
+	add := func(format string, a ...any) {
+		errs = append(errs, fmt.Errorf("model %q: "+format, append([]any{n}, a...)...))
+	}
+	dorado := m.Snapshot != ""
+	if m.Spare < 0 || m.Spare > maxSpare {
+		add("spare must be 0..%d", maxSpare)
+	} else if m.MaxReplicas > 0 && m.Spare > m.MaxReplicas {
+		add("spare (%d) cannot be more than max_replicas (%d): a spare is a replica", m.Spare, m.MaxReplicas)
+	}
+	if (m.Spare != 0 || m.Pin) && !dorado {
+		add("spare and pin apply to a snapshot (replicas restored from a golden), not to an upstream")
+	}
+	if m.LoadWait != "" {
+		if !dorado {
+			add("load_wait is the load deadline when building a snapshot; it does not apply here")
+		} else if _, err := duracionEn("load_wait", m.LoadWait, maxLoadWait); err != nil {
+			add("%v", err)
+		}
+	}
+	switch m.ReplicaAuth {
+	case "":
+	case ReplicaAuthNetwork, ReplicaAuthKey:
+		switch {
+		case !dorado:
+			add("replica_auth is about a replica's port; an upstream has none (its credential is auth)")
+		case m.ReplicaAuth == ReplicaAuthKey && m.Auth == nil:
+			add("replica_auth key needs auth: the key the gateway adds and the replica checks")
+		case m.ReplicaAuth == ReplicaAuthNetwork && m.Auth != nil:
+			add("replica_auth network contradicts auth (the replica would check a key): drop one of them")
+		}
+	default:
+		add("replica_auth must be network or key, not %q", m.ReplicaAuth)
+	}
+	if m.CAFile != "" {
+		if u, err := url.Parse(m.Upstream); m.Upstream == "" || err != nil || u.Scheme != "https" {
+			add("ca_file verifies the TLS of an https:// upstream")
+		} else if _, err := cargarCA(m.CAFile); err != nil {
+			add("%v", err)
+		}
+	}
+	return errs
+}
+
+// BackendNotes son los avisos (no errores) del registro para un gateway que
+// corre en goos (runtime.GOOS): la frontera de las réplicas en modo network
+// (plan-r9.md, «Decisión de seguridad») y las credenciales que cruzan la red
+// en claro. Un registro de hoy en Linux sin inquilinos no da ninguno.
+func (c *Config) BackendNotes(goos string) []string {
+	var red, out []string
+	for _, b := range c.Backends() {
+		if b.Snapshot != "" && b.ReplicaAuth == ReplicaAuthNetwork {
+			red = append(red, strconv.Quote(b.Name))
+		}
+		if b.Upstream != "" && b.Auth != nil {
+			if u, err := url.Parse(b.Upstream); err == nil && u.Scheme == "http" && !esLoopback(u.Hostname()) {
+				out = append(out, fmt.Sprintf("model %q: upstream %s is http:// off loopback, so its auth credential crosses the network in clear; use https:// (with ca_file for a private CA)", b.Name, u.Host))
+			}
+		}
+	}
+	if len(red) > 0 {
+		lista := strings.Join(red, ", ")
+		switch {
+		case goos == "darwin":
+			out = append(out, fmt.Sprintf("models %s: replica_auth network on macOS: each replica is a forward on 127.0.0.1 that any process on this Mac can reach; fine for development, otherwise use replica_auth key (auth with a key the replica checks)", lista))
+		case len(c.Tenants) > 0:
+			out = append(out, fmt.Sprintf("models %s: replica_auth network with tenants: any local process of any user on this host reaches the replica's port, bypassing the gateway; use replica_auth key if the host is not dedicated to kindling", lista))
+		}
+	}
+	return out
+}
+
+// resolveAuthFiles hace absolutos auth.file, ca_file y secrets[].file
+// respecto a dir (el directorio del ai.json). Con dir "" (ParseConfig sin
+// fichero) los deja como están, y Validate rechaza una ruta relativa.
 func (c *Config) resolveAuthFiles(dir string) {
 	if dir == "" {
 		return
 	}
+	rel := func(p *string) {
+		if *p != "" && !filepath.IsAbs(*p) {
+			*p = filepath.Join(dir, *p)
+		}
+	}
 	for _, m := range c.Models {
-		if m != nil && m.Auth != nil && m.Auth.File != "" && !filepath.IsAbs(m.Auth.File) {
-			m.Auth.File = filepath.Join(dir, m.Auth.File)
+		if m == nil {
+			continue
+		}
+		if m.Auth != nil {
+			rel(&m.Auth.File)
+		}
+		rel(&m.CAFile)
+		for i := range m.Secrets {
+			rel(&m.Secrets[i].File)
 		}
 	}
 }
