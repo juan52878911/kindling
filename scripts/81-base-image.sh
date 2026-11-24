@@ -15,6 +15,11 @@
 #   SERVICE     (opcional) ruta absoluta, dentro de la imagen, de un ejecutable
 #               que el entrypoint arranca en segundo plano y relanza si muere,
 #               antes de ceder el PID 1 al agente. Su salida: /var/log/service.log
+#   KLING_OUT_DIR (opcional) dónde dejar la capa en vez de en images/: el daemon
+#               la adopta desde ahí con las imágenes quietas (llm y chispa).
+#   KLING_PRINT_ENTRYPOINT=1  solo imprime el /entrypoint que escribiría y
+#               sale, sin root ni imagen: el constructor llm lo escribe en Go
+#               y sus tests comparan los dos textos.
 #
 # ROOTFS_DIR y SERVICE los usa el constructor "llm" (llama-server + un GGUF, ver
 # docs/von.md), pero no saben nada de modelos: sirven a cualquier imagen que sea
@@ -36,6 +41,39 @@ AGENT="${AGENT:?falta AGENT}"
 ENV_FILE="${ENV_FILE:-}"
 ROOTFS_DIR="${ROOTFS_DIR:-}"
 SERVICE="${SERVICE:-}"
+OUT="${KLING_OUT_DIR:-$ROOT/images}"
+
+case "$SERVICE" in
+  ""|/*) ;;
+  *) echo "SERVICE must be an absolute path inside the image: $SERVICE" >&2; exit 1 ;;
+esac
+
+# Entrecomillado POSIX: el entrypoint es #!/bin/sh (busybox en Alpine).
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# entrypoint HAS_ENV — el /entrypoint de la imagen. Es el mismo texto que
+# entrypointBase (cmd/kling/builder_llm_capa.go); la línea `service exited
+# with …` la cuenta el fabricante (dorado.ServiceExitedMark): no cambiarla.
+entrypoint() {
+  echo '#!/bin/sh'
+  echo '# Generado por el constructor base de kindling: el agente de invitado es PID 1.'
+  echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  echo 'export HOME=/root'
+  [ "$1" = 0 ] || echo '. /etc/kling/env'
+  if [ -n "$SERVICE" ]; then
+    # El servicio arranca ANTES que el agente y en segundo plano: el agente es
+    # PID 1 (recoge huérfanos, monta volúmenes, sirve exec) y el servicio queda
+    # como su hijo. El bucle lo relanza si muere, que un servidor caído en una
+    # réplica restaurada no tiene a nadie más que lo levante.
+    echo "( while :; do $(sq "$SERVICE"); echo \"service exited with \$?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &"
+  fi
+  echo 'exec /usr/local/bin/kling-guest -listen :8080'
+}
+
+if [ "${KLING_PRINT_ENTRYPOINT:-}" = 1 ]; then
+  entrypoint 0
+  exit 0
+fi
 
 [ "$(id -u)" -eq 0 ] || { echo "ejecútalo como root" >&2; exit 1; }
 BASE_IMG="$ROOT/images/$BASE.ext4"
@@ -43,15 +81,8 @@ BASE_IMG="$ROOT/images/$BASE.ext4"
 if [ -n "$ROOTFS_DIR" ] && [ ! -d "$ROOTFS_DIR" ]; then
   echo "ROOTFS_DIR $ROOTFS_DIR is not a directory" >&2; exit 1
 fi
-case "$SERVICE" in
-  ""|/*) ;;
-  *) echo "SERVICE must be an absolute path inside the image: $SERVICE" >&2; exit 1 ;;
-esac
 [ "$(head -c4 "$AGENT" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || {
   echo "$AGENT no es un binario ELF: compila kling-guest para linux (make guest)" >&2; exit 1; }
-
-# Entrecomillado POSIX: el entrypoint es #!/bin/sh (busybox en Alpine).
-sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 pkg_add() {
   [ $# -gt 0 ] || return 0
@@ -64,10 +95,16 @@ pkg_add() {
   fi
 }
 
-LAYER="$ROOT/images/$NAME.layer.ext4"
+# La capa se arma en un temporal junto al destino y se renombra al final: un
+# fallo a mitad no deja nada con el nombre definitivo, y la capa de antes (que
+# puede estar usando una réplica o un dorado) no se toca hasta entonces.
+mkdir -p "$OUT"
+FINAL="$OUT/$NAME.layer.ext4"
+LAYER="$OUT/.$NAME.layer.ext4.tmp"
 SHRUNK="$LAYER.shrink" # la copia que se encoge (ver más abajo)
 [ "$GROW" -gt 0 ] || GROW=256
 rm -f "$LAYER"
+trap 'rm -f "$LAYER" "$SHRUNK"' EXIT
 truncate -s "${GROW}M" "$LAYER"
 # Sin resize_inode: ese inodo solo sirve para crecer EN CALIENTE (montado), y
 # una capa no se monta en escritura más que aquí y, sin montar, en un refresco
@@ -91,7 +128,7 @@ ov_down() {
   umount "$layer_mnt" 2>/dev/null || true
   umount "$base_mnt"  2>/dev/null || true
 }
-cleanup() { ov_down; rm -f "$SHRUNK"; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
+cleanup() { ov_down; rm -f "$SHRUNK" "$LAYER"; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
 trap cleanup EXIT
 ov_up
 
@@ -136,37 +173,31 @@ if [ -n "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
   has_env=1
 fi
 
-{
-  echo '#!/bin/sh'
-  echo '# Generado por el constructor base de kindling: el agente de invitado es PID 1.'
-  echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-  echo 'export HOME=/root'
-  [ "$has_env" = 0 ] || echo '. /etc/kling/env'
-  if [ -n "$SERVICE" ]; then
-    # El servicio arranca ANTES que el agente y en segundo plano: el agente es
-    # PID 1 (recoge huérfanos, monta volúmenes, sirve exec) y el servicio queda
-    # como su hijo. El bucle lo relanza si muere, que un servidor caído en una
-    # réplica restaurada no tiene a nadie más que lo levante.
-    echo "( while :; do $(sq "$SERVICE"); echo \"service exited with \$?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &"
-  fi
-  echo 'exec /usr/local/bin/kling-guest -listen :8080'
-} > "$mnt/entrypoint"
+entrypoint "$has_env" > "$mnt/entrypoint"
 chmod 755 "$mnt/entrypoint"
 
 # El resolver del host se copió para instalar; dentro de la microVM no vale
 # (127.0.0.53, IP privadas bloqueadas por el egress). Ver 80-mcp-image.sh.
 printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$mnt/etc/resolv.conf"
-sync
+# Sin `sync` del host entero: desmontar ya vuelca la capa al fichero, y lo
+# que tiene que llegar al disco es ese fichero (sync "$LAYER", abajo), no
+# todo lo sucio de las demás máquinas.
 ov_down
 
 mount -o loop "$LAYER" "$layer_mnt"
 rm -rf "$layer_mnt/work"
 umount "$layer_mnt"
-sync
 
 # El encogido seguro (copiar, encoger la copia, adoptarla solo si sale
 # sana de e2fsck) vive en lib-ext4-shrink.sh, compartido con
 # 70-build-minimal-image.sh y 71-build-glibc-base.sh.
 ext4_shrink_safe "$LAYER"
 
-echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales)"
+# Durable antes de publicarla: sin esto, un corte tras el mv deja con el
+# nombre definitivo una capa cuyo contenido aún no estaba en el disco.
+chmod 644 "$LAYER"
+sync "$LAYER"
+mv -f "$LAYER" "$FINAL"
+sync "$OUT" 2>/dev/null || true
+
+echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$FINAL" | cut -f1) reales)"
