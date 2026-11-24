@@ -176,6 +176,48 @@ func TestReplicaCountsIncluyeEmbedYChispa(t *testing.T) {
 	}
 }
 
+// Un repuesto (etiqueta kling.spare) no es una réplica en marcha: /metrics
+// lo cuenta aparte para no inflar las réplicas que sirven.
+func TestReplicaCountsRepuestosAparte(t *testing.T) {
+	d := &fakeDaemon{machines: map[string]*api.Machine{}}
+	client := d.serve(t)
+	for id, spare := range map[string]bool{"r1": false, "r2": true, "r3": true} {
+		lb := map[string]string{api.LabelService: "von-smol", LabelGateway: "default"}
+		if spare {
+			lb[labelSpare] = "true"
+		}
+		d.machines[id] = &api.Machine{ID: id, State: api.StateRunning, From: "von-smol", Labels: lb}
+		d.order = append(d.order, id)
+	}
+	cfg := &Config{Models: map[string]*ModelConfig{"smol": {Kind: KindVON, Snapshot: "von-smol"}}}
+	g, err := New(Options{Client: client, Config: cfg, EvalDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.replicaCounts(context.Background())["smol"]; got.running != 1 || got.spare != 2 {
+		t.Fatalf("counts %+v, want running 1 and spare 2", got)
+	}
+	var b strings.Builder
+	g.met.write(&b, chispaStats{}, nil, g.replicaCounts(context.Background()), learnSnap{})
+	if !strings.Contains(b.String(), `kling_ai_von_replicas{model="smol",state="running"} 1`) ||
+		!strings.Contains(b.String(), `kling_ai_von_replicas{model="smol",state="spare"} 2`) {
+		t.Fatalf("metrics:\n%s", grepLines(b.String(), "von_replicas"))
+	}
+}
+
+// secrets[].file es relativo al ai.json, como auth.file y ca_file: se hace
+// absoluto antes de validar (validateSecrets lo exige absoluto).
+func TestSecretsFileRelativoAlRegistro(t *testing.T) {
+	c := &Config{Models: map[string]*ModelConfig{
+		"m": {Kind: KindHTTP, Snapshot: "s", Contract: ContractChispaDecide,
+			Secrets: []SecretConfig{{Name: "a", File: "clave"}, {Name: "b", File: "/abs/clave"}}},
+	}}
+	c.resolveAuthFiles("/etc/kling")
+	if got := c.Models["m"].Secrets; got[0].File != "/etc/kling/clave" || got[1].File != "/abs/clave" {
+		t.Fatalf("secrets files: %+v", got)
+	}
+}
+
 // TestLimitesLogprobs: top_logprobs (y logprobs entero de completions) y
 // prompt_logprobs de vLLM se topan: por encima del tope, o negativos (en vLLM,
 // -1 es «todo el vocabulario»), 400 sin llegar al backend. logprobs booleano
