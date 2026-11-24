@@ -2,13 +2,18 @@
 """Resumen del banco de IA (scripts/96-von-bench.sh, esquema von-bench/2).
 
     python3 -I ia.py res/ia-*.json          resumen legible y los criterios de P1, P2 y P3
-    python3 -I ia.py --validar f.json...    sale con 1 si falta alguna clave
+    python3 -I ia.py --validar f.json...    sale con 1 si falta alguna clave o la corrida no vale
+    python3 -I ia.py --historico f.json...  resultados de antes de la ronda 9 (sin corrida.json)
     python3 -I ia.py --self-test            se comprueba a sí mismo con un JSON inventado
 
-Los criterios son los de analisis/ronda8-ia/plan.md §4. Solo biblioteca estándar.
+Los criterios son los de analisis/ronda8-ia/plan.md §4. Desde la ronda 9 (C9-12, C9-14) también rechaza
+(sale con 1 y lo dice con RECHAZO) una corrida cuyas muestras «calientes» leyeron disco o que no dejó en
+su carpeta el corrida.json de remoto/ia.sh con el journal del daemon, el desglose del commit y el
+service.log de cada dorado. Solo biblioteca estándar.
 """
 import json
 import math
+import os
 import sys
 
 ESQUEMA = "von-bench/2"
@@ -57,6 +62,129 @@ def faltan(doc):
                 for i, p in enumerate(pts):
                     out += ["memoria.%s[%d].%s" % (var, i, c) for c in PUNTO if c not in p]
     return out
+
+
+CALIENTES = ("restaurar_caliente", "descongelar_caliente")
+
+
+def rechazos(doc):
+    """Motivos para no dar por buena la medida de un JSON del banco (vacía = vale).
+
+    C9-14: una muestra «caliente» que leyó del disco es una muestra fría con otra etiqueta (la mitad de
+    las de la ronda 8 leían 1 GiB). El banco las aparta a primera.calientes_con_disco y repite; si aun
+    así alguna llega a la lista caliente, o no queda ninguna, la corrida no vale. El umbral es 0 bytes
+    salvo que el banco declare otro (UMBRAL_CALIENTE_BYTES, primera.umbral_caliente_bytes).
+    """
+    out = []
+    pr = doc.get("primera")
+    if not isinstance(pr, dict) or omitida(pr):
+        return out
+    umbral = pr.get("umbral_caliente_bytes") or 0
+    apartadas = pr.get("calientes_con_disco") or {}
+    for k in CALIENTES:
+        v = pr.get(k)
+        if omitida(v) or not isinstance(v, list):
+            continue
+        leidas = [m.get("disco_leido_bytes") for m in v if isinstance(m, dict)]
+        malas = [b for b in leidas if isinstance(b, (int, float)) and b > umbral]
+        if malas:
+            out.append("primera.%s: %d de %d muestras «calientes» leyeron disco (máx %d bytes, umbral %d)" % (
+                k, len(malas), len(v), max(malas), umbral))
+        if not v and apartadas.get(k):
+            out.append("primera.%s: ninguna muestra caliente de verdad (%d apartadas por leer disco)" % (k, len(apartadas[k])))
+    return out
+
+
+ESQUEMA_CORRIDA = "ia-corrida/1"
+
+
+def _fichero(base, rel):
+    """Ruta de rel (relativa a la carpeta de resultados) si existe y no está vacía."""
+    if not rel:
+        return None
+    p = rel if rel.startswith("/") else os.path.join(base, rel)
+    try:
+        with open(p, "rb") as fh:
+            return p if fh.read(1) else None
+    except OSError:
+        return None
+
+
+def rechazos_corrida(cor, base):
+    """Motivos para no dar por buena una corrida de remoto/ia.sh (C9-12): sin el journal del daemon no se
+    puede desglosar un commit lento, y sin el service.log del invitado no se puede atribuir un dorado que
+    no carga (Q8). cor es el corrida.json que deja ia.sh en la carpeta de resultados base."""
+    if not isinstance(cor, dict):
+        return ["sin corrida.json en %s: la corrida no guardó el journal del daemon ni los dorados" % base]
+    out = []
+    if cor.get("esquema") != ESQUEMA_CORRIDA:
+        out.append("corrida.json: esquema %r, quería %r" % (cor.get("esquema"), ESQUEMA_CORRIDA))
+    j = cor.get("journal") or {}
+    if omitida(j) or "omitido" in j:
+        out.append("sin journal del daemon: %s" % (j.get("omitido") or j.get("omitida")))
+    elif not _fichero(base, j.get("fichero")):
+        out.append("el journal del daemon (%s) no está o está vacío" % j.get("fichero"))
+    for d in cor.get("dorados") or []:
+        if d.get("preexistente"):
+            continue
+        n = d.get("dorado")
+        if d.get("rc") == 0 and not d.get("commit"):
+            out.append("dorado %s: sin desglose del commit en el journal" % n)
+        if not _fichero(base, d.get("service_log")):
+            if d.get("rc") != 0:
+                out.append("dorado %s fallido (rc %s) sin service.log del invitado" % (n, d.get("rc")))
+            elif not d.get("service_log_motivo"):
+                out.append("dorado %s: sin service.log del invitado y sin motivo" % n)
+        if d.get("rc") != 0 and not _fichero(base, d.get("meminfo")):
+            out.append("dorado %s fallido sin /proc/meminfo del invitado" % n)
+    return out
+
+
+def resumen_corrida(cor, base):
+    out = []
+    w = out.append
+    if not isinstance(cor, dict):
+        return out
+    h = cor.get("host") or {}
+    dsc = h.get("disco") or {}
+    w("== corrida %s → %s  (%s; disco %s %s en %s%s)" % (
+        cor.get("inicio"), cor.get("fin"), h.get("uname"), dsc.get("dispositivo"), dsc.get("fs"), dsc.get("raiz"),
+        ", %s" % dsc.get("tipo") if dsc.get("tipo") else ""))
+    j = cor.get("journal") or {}
+    w("   journal: %s" % (j.get("fichero") and "%s (%s líneas)" % (j.get("fichero"), j.get("lineas")) or j.get("omitido")))
+    for d in cor.get("dorados") or []:
+        if d.get("preexistente"):
+            w("   dorado %s: ya existía (no se fabricó)" % d.get("dorado"))
+            continue
+        c = d.get("commit") or {}
+        des = ", ".join("%s %s" % (k, v) for k, v in c.items() if k != "total")
+        w("   dorado %s: rc %s, fabricar %s; commit %s (total %s)" % (
+            d.get("dorado"), d.get("rc"), fmt(d.get("fabricar_ms")), des or "sin desglose", fmt(c.get("total"))))
+        w("     pico invitado %s MiB, pico VMM %s MiB; disco leído %s MiB, escrito %s MiB; service.log %s" % (
+            d.get("pico_invitado_mib"), d.get("pico_vmm_mib"), _mib((d.get("disco") or {}).get("leidos_bytes")),
+            _mib((d.get("disco") or {}).get("escritos_bytes")), d.get("service_log") or d.get("service_log_motivo")))
+        if d.get("reinicios_servicio"):
+            w("     ¡el servicio se relanzó %s veces durante la carga!" % d["reinicios_servicio"])
+    for f in cor.get("fases") or []:
+        tot = f.get("total") or {}
+        w("   fase %-22s %6s s  disco leído %s MiB, escrito %s MiB" % (
+            f.get("fase"), f.get("segundos"), _mib(tot.get("leidos_bytes")), _mib(tot.get("escritos_bytes"))))
+    for s in cor.get("spikes") or []:
+        res = None
+        p = _fichero(base, s.get("resultado"))
+        if p:
+            try:
+                with open(p) as fh:
+                    res = json.load(fh)
+            except (OSError, ValueError):
+                res = None
+        w("   spike %s: rc %s; %s" % (s.get("spike"), s.get("rc"),
+          (res or {}).get("recomendacion") or "sin resultado.json"))
+    return out
+
+
+def _mib(b):
+    return None if not isinstance(b, (int, float)) else int(b) >> 20
 
 
 def pct(xs, p):
@@ -233,15 +361,27 @@ def resumen(doc, out):
         w("» " + v)
 
 
+def leer_corrida(base):
+    try:
+        with open(os.path.join(base, "corrida.json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def principal(argv):
     if argv[:1] == ["--self-test"]:
         return autoprueba()
-    validar = argv[:1] == ["--validar"]
-    fs = argv[1:] if validar else argv
+    validar = "--validar" in argv
+    # --historico: resultados de antes de la ronda 9 (sin corrida.json): se resumen sin rechazarlos.
+    historico = "--historico" in argv
+    fs = [a for a in argv if a not in ("--validar", "--historico")]
     if not fs:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     rc = 0
+    rech = []
+    bases = []
     for f in fs:
         try:
             with open(f) as fh:
@@ -250,7 +390,11 @@ def principal(argv):
             print("%s: %s" % (f, e), file=sys.stderr)
             rc = 1
             continue
+        b = os.path.dirname(os.path.abspath(f))
+        if b not in bases:
+            bases.append(b)
         mal = faltan(doc)
+        rech += ["%s: %s" % (os.path.basename(f), r) for r in rechazos(doc)]
         if validar:
             if mal:
                 print("%s: faltan %s" % (f, ", ".join(mal)), file=sys.stderr)
@@ -263,6 +407,16 @@ def principal(argv):
         if mal:
             out.append("AVISO: faltan claves: %s" % ", ".join(mal))
         print("\n".join(out) + "\n")
+    for b in bases:
+        cor = leer_corrida(b)
+        if not validar and cor:
+            print("\n".join(resumen_corrida(cor, b)) + "\n")
+        if not historico:
+            rech += rechazos_corrida(cor, b)
+    for r in rech:
+        print("RECHAZO: %s" % r, file=sys.stderr)
+    if rech:
+        rc = 1
     return rc
 
 
@@ -321,7 +475,6 @@ def autoprueba():
     assert any("descongelar_caliente" in x for x in rechazos(vacia)), rechazos(vacia)
 
     # C9-12: sin journal del daemon (o sin desglose / service.log de un dorado) no hay corrida.
-    import os
     import tempfile
     with tempfile.TemporaryDirectory() as base:
         assert any("corrida.json" in x for x in rechazos_corrida(None, base)), "sin corrida.json"
