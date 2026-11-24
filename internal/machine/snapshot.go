@@ -769,7 +769,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// copia entero el primer thaw de una copia congelada en diferencial
 	// (cow_memoria.go). No el de un fork: su dorado es temporal.
 	if !deFork {
-		m.espejarMemoriaDorado(name)
+		m.espejarMemoriaDorado(name, mc.Labels)
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
