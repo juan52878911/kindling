@@ -248,6 +248,12 @@ func (m *Manager) anclarDorado(name, mem string) error {
 		m.anclados = map[string]anclaje{}
 	}
 	m.anclados[name] = a
+	m.mu.Lock()
+	if m.bytesAnclados == nil {
+		m.bytesAnclados = map[string]int64{}
+	}
+	m.bytesAnclados[name] = a.bytes()
+	m.mu.Unlock()
 	log.Printf("snapshot %s: %d MiB of its memory pinned in RAM", name, a.bytes()>>20)
 	return nil
 }
@@ -258,6 +264,9 @@ func (m *Manager) soltarAnclado(name string) {
 	m.ancladosMu.Lock()
 	a, ok := m.anclados[name]
 	delete(m.anclados, name)
+	m.mu.Lock()
+	delete(m.bytesAnclados, name)
+	m.mu.Unlock()
 	m.ancladosMu.Unlock()
 	if ok {
 		a.soltar()
@@ -270,6 +279,9 @@ func (m *Manager) soltarAnclados() {
 	m.ancladosMu.Lock()
 	todos := m.anclados
 	m.anclados = nil
+	m.mu.Lock()
+	m.bytesAnclados = nil
+	m.mu.Unlock()
 	m.ancladosMu.Unlock()
 	for _, a := range todos {
 		a.soltar()

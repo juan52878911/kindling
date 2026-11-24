@@ -590,6 +590,10 @@ type Manager struct {
 	// no puede ir bajo m.mu.
 	ancladosMu sync.Mutex
 	anclados   map[string]anclaje
+	// bytesAnclados son los bytes anclados de cada dorado, bajo m.mu (no
+	// ancladosMu: hotMemFilesMiBLocked los lee con m.mu tomado, y anclar
+	// toma ancladosMu antes que m.mu).
+	bytesAnclados map[string]int64
 	// ttlEnCurso: hay una ronda de expireTTL en segundo plano.
 	ttlEnCurso atomic.Bool
 	// pruebasPasoVigilante, en los tests, se llama antes de cada paso de la

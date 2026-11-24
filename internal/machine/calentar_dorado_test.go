@@ -218,3 +218,46 @@ func TestAnclarFicheroLinux(t *testing.T) {
 		t.Errorf("anclado y no está en caché: %d bytes", bytesEnCache(p))
 	}
 }
+
+// Un dorado anclado con instancias vivas no se cuenta dos veces en la
+// admisión: sus páginas ancladas ya salieron de MemAvailable (no son
+// desalojables), así que la caché caliente que se descuenta de MemAvailable
+// no puede volver a incluirlas. Al soltarlo vuelven a contar como caliente.
+func TestAncladoConInstanciasNoCuentaDosVeces(t *testing.T) {
+	m := annotTestManager(t)
+	doradoParaCalentar(t, m, "modelo", 8)
+	var soltado atomic.Bool
+	antes, antesAvail := anclarFichero, availableMiB
+	t.Cleanup(func() { anclarFichero, availableMiB = antes, antesAvail })
+	availableMiB = func() int { return 1 << 20 }
+	anclarFichero = func(path string) (anclaje, error) {
+		return anclajeFalso{n: allocatedBytes(path), soltado: &soltado}, nil
+	}
+	m.mu.Lock()
+	m.byID["a1a1000000000001"] = &api.Machine{ID: "a1a1000000000001", From: "modelo", State: api.StateRunning}
+	caliente := m.hotMemFilesMiBLocked()
+	m.mu.Unlock()
+	if caliente < 7 {
+		t.Fatalf("sin anclar, una viva sobre el dorado cuenta ~8 MiB calientes, fue %d", caliente)
+	}
+	si := true
+	if _, err := m.CalentarDorado(context.Background(), "modelo", api.WarmSnapshotRequest{Pin: &si}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	anclado := m.hotMemFilesMiBLocked()
+	m.mu.Unlock()
+	if anclado != 0 {
+		t.Errorf("anclado y con una viva, la caché caliente cuenta %d MiB; las páginas ancladas ya no están en MemAvailable", anclado)
+	}
+	no := false
+	if _, err := m.CalentarDorado(context.Background(), "modelo", api.WarmSnapshotRequest{Pin: &no}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	suelto := m.hotMemFilesMiBLocked()
+	m.mu.Unlock()
+	if suelto != caliente {
+		t.Errorf("tras soltarlo, caliente %d MiB; quería %d", suelto, caliente)
+	}
+}
