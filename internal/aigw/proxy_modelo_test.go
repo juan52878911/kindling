@@ -146,11 +146,26 @@ type grabador struct {
 	paths  []string
 	status int
 	body   []byte
+	// modelos, si no está vacío, es el id que lista GET /v1/models (la sonda
+	// de carga de un upstream con upstream_model). Esa ruta no se graba.
+	modelos string
 }
 
 func newGrabador(t *testing.T, status int, body string) *grabador {
 	gr := &grabador{status: status, body: []byte(body)}
 	gr.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			gr.mu.Lock()
+			m := gr.modelos
+			gr.mu.Unlock()
+			if m == "" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"`+m+`"}]}`)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gr.mu.Lock()
 		gr.bodies = append(gr.bodies, b)
@@ -308,6 +323,9 @@ func TestTenantsModelo403(t *testing.T) {
 // n mayor (R8-04a).
 func TestProxyOpenAIUpstreamYLimites(t *testing.T) {
 	gr := newGrabador(t, 200, `{"choices":[]}`)
+	gr.mu.Lock()
+	gr.modelos = "Qwen/Qwen3-4B"
+	gr.mu.Unlock()
 	up := &Backend{Name: "qwen3-gpu", Upstream: gr.srv.URL, Contract: ContractOpenAI,
 		Routes:        []Route{{"POST", "/v1/chat/completions"}, {"POST", "/v1/completions"}},
 		UpstreamModel: "Qwen/Qwen3-4B", Limits: Limits{MaxTokens: 100, N: 1}, MaxInflight: 4}
