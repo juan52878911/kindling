@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -270,6 +271,54 @@ func TestCapaLLMCortadaNoDejaFichero(t *testing.T) {
 			t.Fatalf("un build cortado dejó %v", left)
 		}
 	})
+}
+
+// La salida del servicio llega a la consola del invitado (la que lee el
+// fabricante para ver un bucle de reinicios sin exec) y sigue en
+// /var/log/service.log, con la línea `service exited with …` intacta.
+func TestServicioSaleALaConsola(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sin sh")
+	}
+	dir := t.TempDir()
+	svc := filepath.Join(dir, "svc.sh")
+	os.WriteFile(svc, []byte("#!/bin/sh\necho hola-del-servidor\nexit 3\n"), 0o755)
+	log := filepath.Join(dir, "service.log")
+	var linea string
+	for _, l := range strings.Split(entrypointBase(svc), "\n") {
+		if strings.Contains(l, "while :") {
+			linea = l
+		}
+	}
+	if linea == "" {
+		t.Fatal("el entrypoint no arranca el servicio")
+	}
+	cmd := exec.Command("sh", "-c", strings.ReplaceAll(linea, "/var/log/service.log", log)+"\nsleep 1.5\n")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Un fichero y no un pipe: el bucle en segundo plano lo sigue teniendo
+	// abierto, y Wait esperaría a que lo cerrase.
+	cf, err := os.Create(filepath.Join(dir, "consola"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = cf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Wait()
+	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	cf.Close()
+	time.Sleep(100 * time.Millisecond)
+	consola, _ := os.ReadFile(filepath.Join(dir, "consola"))
+	fichero, _ := os.ReadFile(log)
+	for _, w := range []string{"hola-del-servidor", "service exited with 3, restarting in 1s"} {
+		if !strings.Contains(string(consola), w) {
+			t.Errorf("la consola no tiene %q: %q", w, consola)
+		}
+		if !strings.Contains(string(fichero), w) {
+			t.Errorf("service.log no tiene %q: %q", w, fichero)
+		}
+	}
 }
 
 // Lo que se clonaría con FICLONERANGE tiene que ser exactamente el modelo:
