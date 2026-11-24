@@ -84,3 +84,35 @@ func TestVolcadoTemporalDeCommitSeBarre(t *testing.T) {
 		t.Fatalf("Stop se llevó el directorio: %v", err)
 	}
 }
+
+// Un commit cortado por un reinicio, con el VMM aún volcando: reconcile le
+// espera lo mismo que el commit le daba. El de un dorado, plazoVolcadoDorado;
+// el temporal de un fork, plazoVolcado. Una marca sin tipo (las de antes) es
+// la de un dorado: esperar de más a un VMM que contesta «ocupado» no cuesta.
+func TestPlazoDelCommitCortadoSegunLaMarca(t *testing.T) {
+	const mib = 8192
+	casos := []struct {
+		nombre string
+		marcar func(dir string) error
+		quiere time.Duration
+	}{
+		{"dorado", func(dir string) error { return marcarCommitEnCurso(dir, "dorado", 4321, false) }, plazoVolcadoDorado(mib)},
+		{"fork", func(dir string) error { return marcarCommitEnCurso(dir, "tmp-fork", 4321, true) }, plazoVolcado(mib)},
+		{"fork sin PID", func(dir string) error { return marcarCommitEnCurso(dir, "tmp-fork", 0, true) }, plazoVolcado(mib)},
+		{"marca vieja", func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, marcaCommit), []byte("dorado\n4321\n"), 0o600)
+		}, plazoVolcadoDorado(mib)},
+	}
+	for _, c := range casos {
+		dir := t.TempDir()
+		if err := c.marcar(dir); err != nil {
+			t.Fatal(err)
+		}
+		if got := plazoCommitCortado(dir, mib); got != c.quiere {
+			t.Errorf("%s: plazo %v, quería %v", c.nombre, got, c.quiere)
+		}
+		if hay, pid := marcaCommitDe(dir); !hay || (c.nombre != "fork sin PID" && pid != 4321) || (c.nombre == "fork sin PID" && pid != 0) {
+			t.Errorf("%s: marcaCommitDe = %v, %d", c.nombre, hay, pid)
+		}
+	}
+}
