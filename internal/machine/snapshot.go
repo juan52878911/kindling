@@ -774,14 +774,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
-	if len(avisosCommit) > 0 {
-		// En una copia: el snap puede ser el de la caché de metas, y los
-		// avisos son de esta respuesta, no del dorado.
-		out := *snap
-		out.Warnings = avisosCommit
-		return &out, nil
-	}
-	return snap, nil
+	// En una copia: el snap puede ser el de la caché de metas, y los avisos y
+	// el desglose (C9-12) son de esta respuesta, no del dorado.
+	out := *snap
+	out.Warnings = avisosCommit
+	out.Timings = t.desglose()
+	return &out, nil
 }
 
 // Snapshots lista los snapshots dorados y cuántas instancias vivas tiene cada uno.
