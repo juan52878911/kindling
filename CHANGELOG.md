@@ -8,6 +8,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Round 9 (load and models):
+  - Commit of a golden in one pass over the memory, with a per-phase breakdown (`timings`) in the response; the model layer is read in one burst ahead of the guest.
+  - `POST /snapshots/{name}/warm` prewarms a golden's memory into the page cache and, with `pin`, pins it in RAM (Linux); AI gateway blocks take `pin`.
+  - Dump and load deadlines grow with the model's size, and `kling ai model add`/`deploy` show load progress; `-stall` gives up on a load that stopped moving.
+  - The `llm` layer is built in Go on a glibc base made without debootstrap (`KLING_LLM_BASE=debootstrap` brings the old path back); GGUF downloads resume by ranges and the cache is sealed, and `keep_cache` (`-keep-cache`) keeps the GGUF after baking.
+  - AI gateway: `spare` replicas restored and warmed ahead of traffic; per-replica `secrets` (MMDS or a credential through the proxy); `replica_auth`; per-tenant `alias`; `upstream` backends with a load probe, `health.grace` and `ca_file`.
+  - `kling machine credential` and `kling template credential` take `-upstream` for HTTP credentials: the proxy dials that server instead of the domain.
 - AI gateway: `kind http` models, any HTTP server as a golden snapshot (`port`, `contract`, `routes`, `health`) or a fixed `upstream` URL with a circuit breaker and a bounded queue; per-model `auth` (credential file added by the gateway), `limits` (`max_tokens`, `n`) and `tenants`; `/v1/m/{model}/…` for `chispa-decide` and `raw` backends; tenants reload with the registry; `-drain`, `-proxy-timeout` and `-max-body` on `kling ai serve`; `packaging/kling-ai.service`.
 - `kling ai model deploy` makes a versioned golden snapshot of any HTTP server image and writes its `kind http` block; `kling ai model roll` serves another version and drains the old replicas.
 
@@ -67,6 +74,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Round 9 behaviour changes:
+  - `-wait` on model builds and deploys defaults to a deadline that grows with the model's size instead of a fixed one.
+  - The credential store moves to version 4 once a credential uses `upstream`; an older kling refuses it instead of misreading it.
+  - Link-local and cloud metadata destinations are refused for HTTP credentials too, not only for database ones.
+  - `ai.json` files that no longer load: a `chispa-decide` block with 0 or 2+ tenants when the registry has tenants (unless `shared`), and an `upstream` in a forbidden range.
+  - On macOS, `replica_auth: network` replicas log a warning (any local process can reach their forward).
+  - The builder's GGUF cache is deleted after baking unless `keep_cache` is set.
+  - `kling ai model add -replace -rebuild` deletes the model's golden before rebuilding.
 - AI gateway behaviour changes:
   - `kling_ai_proxy_requests_total`'s `code` label is now a status class (`2xx`, `3xx`, `4xx`, `5xx`).
   - `POST /v1/embeddings` is now a public route: the OpenAI API to `embed` and `openai-embeddings` models.
