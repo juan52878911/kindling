@@ -127,7 +127,46 @@ func TestAliasMetricasDelModeloConcreto(t *testing.T) {
 	}
 }
 
-const dosInquilinos = `,"tenants":[{"name":"acme","token":"0123456789abcdef"},{"name":"globex","token":"fedcba9876543210"}]`
+// BenchmarkAliasResuelve mide el sobrecoste de llegar por el alias frente al
+// nombre concreto, con 8 inquilinos bajo el mismo alias y el token del
+// último (el peor caso de la búsqueda lineal entre los bloques del alias).
+func BenchmarkAliasResuelve(b *testing.B) {
+	srv := sumidero(b)
+	var tenants []TenantConfig
+	var bs []*Backend
+	for i := 0; i < 8; i++ {
+		n := string(rune('a' + i))
+		tenants = append(tenants, TenantConfig{Name: "t" + n, Token: "token-del-inquilino-" + n})
+		bs = append(bs, bloqueInquilino("chispa-t"+n, "t"+n))
+	}
+	g, err := New(Options{
+		Config:   &Config{Models: map[string]*ModelConfig{"smol": {Kind: KindVON, Snapshot: "von-smol"}}, Tenants: tenants},
+		Replicas: &puertoReplicas{addr: strings.TrimPrefix(srv.URL, "http://")},
+		EvalDir:  b.TempDir(),
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	conBackends(g, bs...)
+	h := g.Handler(tokPrincipal)
+	cuerpo := []byte(`{"state":{},"questions":[]}`)
+	for _, c := range []struct{ nombre, ruta string }{
+		{"nombre", "/v1/m/chispa-th/v1/decide"},
+		{"alias", "/v1/m/chispa/v1/decide"},
+	} {
+		b.Run(c.nombre, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				rec := peticion(h, "POST", c.ruta, "token-del-inquilino-h", cuerpo, nil)
+				if rec.Code != 200 {
+					b.Fatalf("%s: %d %s", c.ruta, rec.Code, rec.Body)
+				}
+			}
+		})
+	}
+}
+
+const dosInquilinos =`,"tenants":[{"name":"acme","token":"0123456789abcdef"},{"name":"globex","token":"fedcba9876543210"}]`
 
 // TestChispaDecideExigeInquilino: con inquilinos declarados, un chispa-decide
 // con dorado sirve a exactamente uno (sus bancos van en el dorado), salvo
