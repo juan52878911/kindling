@@ -206,6 +206,45 @@ func TestCommitDigestDeMemoriaIgualQueHoy(t *testing.T) {
 	}
 }
 
+// La respuesta de Commit lleva el desglose del commit (C9-12): lo mismo que
+// el registro, para que `kling ai model add` lo imprima sin leer el journal.
+// El meta en disco no: es de esa llamada, no del dorado.
+func TestCommitDevuelveTimings(t *testing.T) {
+	puedePerforar(t)
+	m := newTestManager(t)
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
+	id := "c9aa170000000002"
+	falso, _ := plantillaParaCommit(t, m, id)
+	dir := m.snapDir("dorado")
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			volcadoFalso(m, id, dir)
+		}
+	})
+	snap, err := m.Commit(context.Background(), id, "dorado", false)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	ct := snap.Timings
+	if ct == nil {
+		t.Fatal("la respuesta de Commit no trae timings")
+	}
+	if ct.HolesMS != 0 {
+		t.Errorf("holes_ms = %d: con el pase único va entero en digest_ms", ct.HolesMS)
+	}
+	suma := ct.SqueezeMS + ct.OverlayMS + ct.DumpMS + ct.SyncMS + ct.DigestMS
+	if ct.TotalMS < suma || ct.TotalMS <= 0 && suma > 0 {
+		t.Errorf("total_ms %d menor que la suma de las fases %d: %+v", ct.TotalMS, suma, *ct)
+	}
+	got, err := m.loadSnapshot("dorado")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Timings != nil {
+		t.Errorf("meta.json guardó los timings de la llamada: %+v", *got.Timings)
+	}
+}
+
 // BenchmarkPerforarYDigest mide lo que el commit hace tras el volcado con la
 // memoria: hoy dos pases (fallocate --dig-holes y digest.Tree), y el pase
 // único. En macOS no se perfora (los dos caminos son digest.Tree), así que la
