@@ -64,8 +64,10 @@ entrypoint() {
     # El servicio arranca ANTES que el agente y en segundo plano: el agente es
     # PID 1 (recoge huérfanos, monta volúmenes, sirve exec) y el servicio queda
     # como su hijo. El bucle lo relanza si muere, que un servidor caído en una
-    # réplica restaurada no tiene a nadie más que lo levante.
-    echo "( while :; do $(sq "$SERVICE"); echo \"service exited with \$?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &"
+    # réplica restaurada no tiene a nadie más que lo levante. Su salida va a
+    # /var/log/service.log y, por tee, a la consola del invitado (la salida
+    # del entrypoint), donde el fabricante ve un bucle de reinicios sin exec.
+    echo "( while :; do $(sq "$SERVICE"); echo \"service exited with \$?, restarting in 1s\"; sleep 1; done ) </dev/null 2>&1 | tee -a /var/log/service.log &"
   fi
   echo 'exec /usr/local/bin/kling-guest -listen :8080'
 }

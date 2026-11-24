@@ -77,9 +77,11 @@ func entrypointBase(service string) string {
 	b.WriteString("export HOME=/root\n")
 	if service != "" {
 		// El mismo bucle que el script, línea `service exited with …` incluida
-		// (dorado.ServiceExitedMark la cuenta).
+		// (dorado.ServiceExitedMark la cuenta). La salida va al fichero y a la
+		// consola del invitado (la salida del entrypoint), donde el fabricante
+		// la lee sin exec.
 		b.WriteString("( while :; do " + shQuote(service) +
-			"; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &\n")
+			"; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null 2>&1 | tee -a /var/log/service.log &\n")
 	}
 	b.WriteString("exec /usr/local/bin/kling-guest -listen :8080\n")
 	return b.String()
