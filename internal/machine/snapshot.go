@@ -1291,6 +1291,9 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 	m.mu.Lock()
 	delete(m.integridad, name)
 	m.mu.Unlock()
+	// Y su anclado en RAM, si lo tenía (C9-10): también al reemplazarlo, que
+	// el mapeo es del fichero que se va.
+	m.soltarAnclado(name)
 	// Sus credenciales se van con ella (al borrar, no al reemplazar: un
 	// commit -replace las conserva). El almacén va sellado solo con el nombre,
 	// así que si se quedara, la siguiente plantilla con ese nombre las heredaría.
@@ -1548,6 +1551,13 @@ func (m *Manager) runFromUna(ctx context.Context, req api.RunRequest, ai *arranq
 			ai.danado = true
 		}
 		return nil, err
+	}
+	// Con el dorado frío (tras reiniciar, o desalojado), que la lectura del
+	// mem.file corra ya, a la vez que el VMM, y no a golpe de fallo de página
+	// en la primera petición (C9-10). Solo con Firecracker: en macOS el
+	// cuello es otro.
+	if backendVMM == BackendFirecracker {
+		m.precargarDoradoSiFrio(filepath.Join(m.snapDir(req.From), "mem.file"))
 	}
 	// KERNEL (K2): solo se avisa. Ver avisoKernel.
 	if aviso := m.avisoKernel(snap.KernelSHA256, fmt.Sprintf("snapshot %q", req.From)); aviso != "" {

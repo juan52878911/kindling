@@ -585,6 +585,11 @@ type Manager struct {
 	// trabajo vivo leyendo o escribiendo lo que cambia el siguiente.
 	sueltas  sync.WaitGroup
 	cerrando atomic.Bool
+	// anclados son los mem.file de dorados anclados en RAM, por nombre
+	// (calentar_dorado.go). Su propio cerrojo: anclar lee el fichero entero y
+	// no puede ir bajo m.mu.
+	ancladosMu sync.Mutex
+	anclados   map[string]anclaje
 	// ttlEnCurso: hay una ronda de expireTTL en segundo plano.
 	ttlEnCurso atomic.Bool
 	// pruebasPasoVigilante, en los tests, se llama antes de cada paso de la
@@ -1522,6 +1527,8 @@ func (m *Manager) Close() {
 		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
 		m.cerrarFondoRed()
+		// Los dorados anclados en RAM (C9-10) duran lo que el daemon.
+		m.soltarAnclados()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
 		// escritura del estado ya se cerró, esa transición se pierde y el
