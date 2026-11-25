@@ -9,11 +9,29 @@ La especificación que sigue el shim es la pública de E2B, copiada en
 `ext/sandbox/internal/e2b/spec/` (plano de control `openapi.yml`; envd: `envd.yaml` y los
 `.proto` de `process` y `filesystem`).
 
-> **Estado.** Verificado con un test de protocolo que reproduce, byte a byte, las peticiones
-> que la especificación describe para create → `Process/Start` → files write/read → kill, contra
-> un gateway simulado. **No se ha probado con el SDK real** (la máquina de desarrollo no tiene
-> red): la forma exacta de las peticiones del SDK (cabeceras, formato JSON de Connect) sale de
-> la especificación y del protocolo Connect, no de ejecutar el SDK.
+> **Estado.** Probado con los SDK oficiales de E2B **`e2b==2.64.0` (Python, `Sandbox`
+> síncrono) y `e2b@2.64.0` (JS/TS)**, en CI (`TestContratoE2B`, job `e2b` de
+> `.github/workflows/sdks.yml`; scripts en [`scripts/e2b-sdk-real/`](../scripts/e2b-sdk-real/README.md)).
+> El SDK habla con el shim y el shim con el gateway real, delante de un daemon falso que ejecuta
+> las órdenes y los ficheros en la máquina del test: **sin microVM**. Pasan con los dos SDK:
+>
+> - `Sandbox.create` (con `metadata`, `envs` y `timeout`), `Sandbox.list` por metadata,
+>   `get_info`, `is_running`, `set_timeout`, `Sandbox.connect`, `update_network` (dominios en
+>   `allow_out` y abrir), `pause` + `Sandbox.connect` (reanuda) y `kill`.
+> - `commands.run`: `stdout`/`on_stdout`, exit ≠ 0 como `CommandExitException`/`CommandExitError`
+>   con su `stderr`, `envs` y `cwd`; `background=True` con `wait`, `commands.list` + `kill`, y
+>   `disconnect` + `commands.connect(pid)`.
+> - `files`: `write` y `read` (texto y bytes), `write_files` / `write([...])` con varios ficheros,
+>   `exists`, `get_info`, `make_dir`, `rename`, `list(depth=2)` y `remove`.
+> - `send_stdin`, `watch_dir` y `pty.create` fallan enseguida con `SandboxException` /
+>   `SandboxError` (no se cuelgan).
+> - Con Python, los mismos pasos de envd en modo `E2B_DEBUG=true` (`-envd-listen
+>   127.0.0.1:49983 -debug-sandbox`).
+>
+> **Sin probar con el SDK:** el modo con dominio y TLS (`https://49983-<id>.<dominio>`; el
+> enrutado por host solo lo cubren los tests de Go), `AsyncSandbox` de Python, otras versiones
+> del SDK y una microVM real detrás del gateway. Lo que la tabla marca como **501** sigue sin
+> funcionar (stdin en vivo, PTY, watchers, builds de plantillas, snapshots/fork, métricas y logs).
 
 ## Arranque
 
@@ -113,7 +131,7 @@ se rechazan.
 
 | Operación E2B | Estado | Traducción / motivo |
 |---|---|---|
-| `POST /sandboxes`, `POST /v2/sandboxes` | Soportada | `POST /v1/sandboxes`: `templateID`→`template`, `timeout`→`ttl_seconds`, `metadata`→`labels`, `allow_internet_access:false`→`egress:none`. Se ignoran `autoPause`, `network`, `envVars`, `volumeMounts`, `mcp`, `secure`. |
+| `POST /sandboxes`, `POST /v2/sandboxes` | Soportada | `POST /v1/sandboxes`: `templateID`→`template`, `timeout`→`ttl_seconds`, `metadata`→`labels`, `envVars`→`env` (la sesión `default`: la ven los comandos sin sesión), `allow_internet_access:false`→`egress:none`. Se ignoran `autoPause`, `network`, `volumeMounts`, `mcp`, `secure`. |
 | `GET /sandboxes`, `GET /v2/sandboxes` | Soportada | `GET /v1/sandboxes`, con el filtro `metadata`. Sin paginación: devuelve todo. |
 | `GET /sandboxes/{id}` | Soportada | `GET /v1/sandboxes/{id}`. `diskSizeMB` es 0. |
 | `DELETE /sandboxes/{id}` | Soportada | `DELETE /v1/sandboxes/{id}`. |
@@ -145,7 +163,7 @@ se rechazan.
 | `…/MakeDir`, `…/Remove`, `…/Move` | Soportada | `mkdir -p`, `rm -rf`, `mv` por exec. `MakeDir` sobre un directorio existente da `already_exists`; `Remove` de `/` se rechaza. |
 | `…/WatchDir`, `CreateWatcher`, `GetWatcherEvents`, `RemoveWatcher` | **501** | El gateway no tiene notificaciones de ficheros. |
 | `GET /files?path=` | Soportada | `GET /v1/sandboxes/{id}/files`. Las rutas relativas cuelgan de `-home`. |
-| `POST /files?path=` | Soportada | `PUT …/files?mkdir=1`; acepta `multipart/form-data` (campo `file`) y `application/octet-stream`. Tope de 64 MiB del gateway. Se ignoran `X-Metadata-*`, `username` y las firmas. |
+| `POST /files?path=` | Soportada | `PUT …/files?mkdir=1`; acepta `multipart/form-data` (campo `file`; sin `path`, cada parte va a la ruta de su `filename`, que es lo que manda `write_files`) y `application/octet-stream`. Tope de 64 MiB del gateway. Se ignoran `X-Metadata-*`, `username` y las firmas. |
 | `POST /files/compose` | **501** | Sin equivalente en el gateway. |
 | `GET /envs`, `POST /init`, `/health` | Soportada | Respuestas vacías. |
 

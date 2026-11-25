@@ -249,7 +249,7 @@ func TestFlujoSDK(t *testing.T) {
 
 	// 1. create: POST /sandboxes como el SDK.
 	resp := b.peticion(t, "POST", "/sandboxes", "", api, strings.NewReader(
-		`{"templateID":"base","timeout":300,"metadata":{"app":"t"},"secure":true,"allow_internet_access":false}`))
+		`{"templateID":"base","timeout":300,"metadata":{"app":"t"},"envVars":{"A":"1"},"secure":true,"allow_internet_access":false}`))
 	cuerpo := leer(t, resp)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create: %d %s", resp.StatusCode, cuerpo)
@@ -263,7 +263,7 @@ func TestFlujoSDK(t *testing.T) {
 	}
 	crear := b.gw.execs[0]["_crear"].(map[string]any)
 	if crear["template"] != "base" || crear["ttl_seconds"] != float64(300) || crear["egress"] != "none" ||
-		crear["labels"].(map[string]any)["app"] != "t" {
+		crear["labels"].(map[string]any)["app"] != "t" || fmt.Sprint(crear["env"]) != "map[A:1]" {
 		t.Fatalf("petición al gateway: %v", crear)
 	}
 
@@ -725,6 +725,34 @@ func TestPausaReanudaRed(t *testing.T) {
 	for _, c := range []string{`{"allowOut":["8.8.8.8"]}`, `{"denyOut":["10.0.0.0/8"]}`, `{"rules":{"a.com":[{}]}}`} {
 		if st, got := pedir("PUT", "/sandboxes/onrhqmi/network", c); st != 501 || !strings.Contains(string(got), `"code":501`) {
 			t.Errorf("network %s: %d %s", c, st, got)
+		}
+	}
+}
+
+// TestWriteFilesVariasRutas: write_files del SDK manda varias partes sin
+// ?path=, con la ruta absoluta de cada fichero como filename. Cada uno va a su
+// ruta, no a Home con el último elemento (lo que da multipart.Part.FileName).
+func TestWriteFilesVariasRutas(t *testing.T) {
+	b := nuevoBanco(t)
+	var mp bytes.Buffer
+	mw := multipart.NewWriter(&mp)
+	for ruta, datos := range map[string]string{"/tmp/x/a.txt": "a", "/srv/b.bin": "\x00\x01", "rel/c.txt": "c"} {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, ruta))
+		pw, _ := mw.CreatePart(h)
+		pw.Write([]byte(datos))
+	}
+	mw.Close()
+	resp := b.peticion(t, "POST", "/files", "", map[string]string{"X-API-Key": clave,
+		"E2b-Sandbox-Id": "onrhqmi", "Content-Type": mw.FormDataContentType()}, &mp)
+	if cuerpo := leer(t, resp); resp.StatusCode != 200 || strings.Count(string(cuerpo), `"path"`) != 3 {
+		t.Fatalf("write_files: %d %s", resp.StatusCode, cuerpo)
+	}
+	b.gw.mu.Lock()
+	defer b.gw.mu.Unlock()
+	for ruta, datos := range map[string]string{"/tmp/x/a.txt": "a", "/srv/b.bin": "\x00\x01", "/home/user/rel/c.txt": "c"} {
+		if string(b.gw.archivos[ruta]) != datos {
+			t.Errorf("%s: el gateway recibió %q (archivos: %v)", ruta, b.gw.archivos[ruta], b.gw.archivos)
 		}
 	}
 }

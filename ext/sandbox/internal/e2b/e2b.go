@@ -461,6 +461,7 @@ func (s *Servidor) crear(w http.ResponseWriter, r *http.Request) {
 		TemplateID string            `json:"templateID"`
 		Timeout    int               `json:"timeout"`
 		Metadata   map[string]string `json:"metadata"`
+		EnvVars    map[string]string `json:"envVars"`
 		Internet   *bool             `json:"allow_internet_access"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
@@ -477,6 +478,11 @@ func (s *Servidor) crear(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(p.Metadata) > 0 {
 		req["labels"] = p.Metadata
+	}
+	// Las envs de Sandbox.create van al env del gateway: la sesión "default",
+	// que ven los comandos y procesos de fondo sin sesión, como en E2B.
+	if len(p.EnvVars) > 0 {
+		req["env"] = p.EnvVars
 	}
 	if p.Internet != nil && !*p.Internet {
 		req["egress"] = "none"
