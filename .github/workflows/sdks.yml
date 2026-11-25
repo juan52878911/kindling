@@ -2,7 +2,9 @@
 # falsos y comprueban que cada operación de ext/sandbox/api/openapi.yaml tiene método en el
 # SDK. El recorrido de los dos SDK contra el frontal real lo hace TestContratoSDKs, dentro
 # del job de ext/sandbox de ci.yml. El job osb corre el SDK real de OpenSandbox (versión fijada)
-# contra `kling sbx osb` delante del frontal real (TestContratoOSB, docs/opensandbox.md).
+# contra `kling sbx osb` delante del frontal real (TestContratoOSB, docs/opensandbox.md); el job
+# e2b, los SDK reales de E2B (Python, JS y e2b-code-interpreter, versiones fijadas) contra
+# `kling sbx e2b` (TestContratoE2B, docs/e2b.md).
 name: sdks
 
 on:
@@ -14,6 +16,8 @@ on:
       - 'ext/sandbox/internal/osb/**'
       - 'ext/sandbox/internal/frontal/**'
       - 'scripts/osb-sdk-real/**'
+      - 'ext/sandbox/internal/e2b/**'
+      - 'scripts/e2b-sdk-real/**'
       - '.github/workflows/sdks.yml'
   pull_request:
     paths:
@@ -22,6 +26,8 @@ on:
       - 'ext/sandbox/internal/osb/**'
       - 'ext/sandbox/internal/frontal/**'
       - 'scripts/osb-sdk-real/**'
+      - 'ext/sandbox/internal/e2b/**'
+      - 'scripts/e2b-sdk-real/**'
       - '.github/workflows/sdks.yml'
   workflow_dispatch:
 
@@ -85,3 +91,35 @@ jobs:
           KLING_OSB_PYTHON: ${{ runner.temp }}/osb/bin/python
           KLING_OSB_REQUIRED: '1'
         run: go test -race -count=1 -run 'TestContratoOSB' -v ./internal/frontal/
+
+  e2b:
+    name: e2b sdk
+    runs-on: ubuntu-latest
+    env:
+      # Las versiones de los SDK de E2B que fija docs/e2b.md; subirlas es un cambio de compatibilidad.
+      E2B_SDK_VERSION: '2.64.0'
+      E2B_CI_VERSION: '2.11.10'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: SDK de E2B
+        run: |
+          python3 -m venv "$RUNNER_TEMP/e2b"
+          "$RUNNER_TEMP/e2b/bin/pip" install "e2b==${E2B_SDK_VERSION}" "e2b-code-interpreter==${E2B_CI_VERSION}"
+          mkdir -p "$RUNNER_TEMP/e2b-js"
+          npm install --prefix "$RUNNER_TEMP/e2b-js" --no-save --no-package-lock "e2b@${E2B_SDK_VERSION}"
+      - name: TestContratoE2B
+        working-directory: ext/sandbox
+        env:
+          KLING_E2B_PYTHON: ${{ runner.temp }}/e2b/bin/python
+          KLING_E2B_NODE: ${{ runner.temp }}/e2b-js
+          KLING_E2B_REQUIRED: '1'
+        run: go test -race -count=1 -run 'TestContratoE2B' -v ./internal/frontal/

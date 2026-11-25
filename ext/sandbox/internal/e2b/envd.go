@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -49,6 +50,11 @@ func (s *Servidor) olvidar(sandbox string) {
 	for k := range s.etiquetas {
 		if strings.HasPrefix(k, sandbox+"\x00") {
 			delete(s.etiquetas, k)
+		}
+	}
+	for k := range s.contextos {
+		if strings.HasPrefix(k, sandbox+"\x00") {
+			delete(s.contextos, k)
 		}
 	}
 }
@@ -664,6 +670,18 @@ func (s *Servidor) subir(ctx context.Context, id, ruta string, cuerpo io.Reader)
 	return map[string]any{"path": ruta, "name": path.Base(ruta), "type": "file"}, nil
 }
 
+// nombreParte es el filename de una parte multipart TAL CUAL: write_files del
+// SDK manda varias partes sin ?path= y con la ruta absoluta como filename.
+// multipart.Part.FileName no sirve: se queda con el último elemento de la ruta
+// (filepath.Base), y el fichero acabaría colgando de Home.
+func nombreParte(p *multipart.Part) string {
+	_, ps, err := mime.ParseMediaType(p.Header.Get("Content-Disposition"))
+	if err != nil {
+		return ""
+	}
+	return ps["filename"]
+}
+
 func (s *Servidor) fileEscribir(w http.ResponseWriter, r *http.Request, id string) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<20+1<<20)
 	q := r.URL.Query().Get("path")
@@ -690,7 +708,7 @@ func (s *Servidor) fileEscribir(w http.ResponseWriter, r *http.Request, id strin
 			}
 			ruta := q
 			if ruta == "" {
-				ruta = parte.FileName()
+				ruta = nombreParte(parte)
 			} else if len(out) > 0 {
 				errE2B(w, http.StatusBadRequest, "several files with a single path")
 				return

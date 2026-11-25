@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -162,6 +163,36 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Write(b)
 		}
+	case p == "/v1/sandboxes/sbx1/code/contexts" && r.Method == "POST":
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		g.execs = append(g.execs, map[string]any{"_contexto": req})
+		j(201, map[string]any{"id": "c1", "language": req["language"], "pid": 7, "cwd": req["cwd"]})
+	case p == "/v1/sandboxes/sbx1/code/contexts" && r.Method == "GET":
+		j(200, []any{map[string]any{"id": "c1", "language": "python", "pid": 7}})
+	case p == "/v1/sandboxes/sbx1/code/contexts/c1" && r.Method == "DELETE":
+		g.acciones = append(g.acciones, "borrar c1")
+		w.WriteHeader(204)
+	case p == "/v1/sandboxes/sbx1/code/contexts/c1/execution" && r.Method == "DELETE":
+		g.acciones = append(g.acciones, "interrumpir c1")
+		w.WriteHeader(204)
+	case p == "/v1/sandboxes/sbx1/code" && r.Method == "POST":
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		g.execs = append(g.execs, map[string]any{"_codigo": req})
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		if req["code"] == "bloquea" { // hasta que el shim corte
+			fmt.Fprint(w, `{"type":"stdout","text":"empiezo\n"}`+"\n")
+			w.(http.Flusher).Flush()
+			g.mu.Unlock()
+			<-r.Context().Done()
+			g.mu.Lock()
+			return
+		}
+		fmt.Fprint(w, `{"type":"stdout","text":"hola\n"}`+"\n")
+		fmt.Fprint(w, `{"type":"result","text":"42","results":{"text/plain":"42","text/html":"<b>42</b>","application/json":"{\"a\":1}","image/x-raro":"z"},"execution_count":3}`+"\n")
+		fmt.Fprint(w, `{"type":"error","ename":"ValueError","evalue":"mal","traceback":["linea 1","ValueError: mal"]}`+"\n")
+		fmt.Fprint(w, `{"type":"done","ok":false,"duration_ms":5,"execution_count":3}`+"\n")
 	default:
 		j(404, map[string]any{"message": "no route " + r.Method + " " + p})
 	}
@@ -249,7 +280,7 @@ func TestFlujoSDK(t *testing.T) {
 
 	// 1. create: POST /sandboxes como el SDK.
 	resp := b.peticion(t, "POST", "/sandboxes", "", api, strings.NewReader(
-		`{"templateID":"base","timeout":300,"metadata":{"app":"t"},"secure":true,"allow_internet_access":false}`))
+		`{"templateID":"base","timeout":300,"metadata":{"app":"t"},"envVars":{"A":"1"},"secure":true,"allow_internet_access":false}`))
 	cuerpo := leer(t, resp)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create: %d %s", resp.StatusCode, cuerpo)
@@ -263,7 +294,7 @@ func TestFlujoSDK(t *testing.T) {
 	}
 	crear := b.gw.execs[0]["_crear"].(map[string]any)
 	if crear["template"] != "base" || crear["ttl_seconds"] != float64(300) || crear["egress"] != "none" ||
-		crear["labels"].(map[string]any)["app"] != "t" {
+		crear["labels"].(map[string]any)["app"] != "t" || fmt.Sprint(crear["env"]) != "map[A:1]" {
 		t.Fatalf("petición al gateway: %v", crear)
 	}
 
@@ -726,5 +757,154 @@ func TestPausaReanudaRed(t *testing.T) {
 		if st, got := pedir("PUT", "/sandboxes/onrhqmi/network", c); st != 501 || !strings.Contains(string(got), `"code":501`) {
 			t.Errorf("network %s: %d %s", c, st, got)
 		}
+	}
+}
+
+// TestWriteFilesVariasRutas: write_files del SDK manda varias partes sin
+// ?path=, con la ruta absoluta de cada fichero como filename. Cada uno va a su
+// ruta, no a Home con el último elemento (lo que da multipart.Part.FileName).
+func TestWriteFilesVariasRutas(t *testing.T) {
+	b := nuevoBanco(t)
+	var mp bytes.Buffer
+	mw := multipart.NewWriter(&mp)
+	for ruta, datos := range map[string]string{"/tmp/x/a.txt": "a", "/srv/b.bin": "\x00\x01", "rel/c.txt": "c"} {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, ruta))
+		pw, _ := mw.CreatePart(h)
+		pw.Write([]byte(datos))
+	}
+	mw.Close()
+	resp := b.peticion(t, "POST", "/files", "", map[string]string{"X-API-Key": clave,
+		"E2b-Sandbox-Id": "onrhqmi", "Content-Type": mw.FormDataContentType()}, &mp)
+	if cuerpo := leer(t, resp); resp.StatusCode != 200 || strings.Count(string(cuerpo), `"path"`) != 3 {
+		t.Fatalf("write_files: %d %s", resp.StatusCode, cuerpo)
+	}
+	b.gw.mu.Lock()
+	defer b.gw.mu.Unlock()
+	for ruta, datos := range map[string]string{"/tmp/x/a.txt": "a", "/srv/b.bin": "\x00\x01", "/home/user/rel/c.txt": "c"} {
+		if string(b.gw.archivos[ruta]) != datos {
+			t.Errorf("%s: el gateway recibió %q (archivos: %v)", ruta, b.gw.archivos[ruta], b.gw.archivos)
+		}
+	}
+}
+
+// TestCodigoInterprete: el servidor de e2b-code-interpreter (puerto 49999)
+// sobre /code del gateway. /contexts solo lleva el token de tráfico (así lo
+// manda el SDK); /execute sin context_id usa un contexto por defecto que se
+// reutiliza, y el NDJSON del gateway sale con la forma de E2B.
+func TestCodigoInterprete(t *testing.T) {
+	b := nuevoBanco(t)
+	resp := b.peticion(t, "POST", "/sandboxes", "", map[string]string{"X-API-Key": clave, "Content-Type": "application/json"},
+		strings.NewReader(`{"templateID":"base"}`))
+	var sb struct{ EnvdAccessToken, TrafficAccessToken string }
+	json.Unmarshal(leer(t, resp), &sb)
+	if sb.TrafficAccessToken == "" || sb.TrafficAccessToken == sb.EnvdAccessToken {
+		t.Fatalf("trafficAccessToken: %+v", sb)
+	}
+	trafico := map[string]string{"E2B-Traffic-Access-Token": sb.TrafficAccessToken, "E2b-Sandbox-Id": "onrhqmi",
+		"E2b-Sandbox-Port": "49999", "Content-Type": "application/json"}
+	pedir := func(metodo, ruta string, cab map[string]string, cuerpo string) (int, string) {
+		t.Helper()
+		var r io.Reader
+		if cuerpo != "" {
+			r = strings.NewReader(cuerpo)
+		}
+		resp := b.peticion(t, metodo, ruta, "", cab, r)
+		return resp.StatusCode, string(leer(t, resp))
+	}
+
+	// Sin token, o con el de otro sandbox, no.
+	if st, _ := pedir("GET", "/contexts", map[string]string{"E2b-Sandbox-Id": "onrhqmi"}, ""); st != 401 {
+		t.Fatalf("contexts sin token: %d", st)
+	}
+	if st, _ := pedir("GET", "/contexts", map[string]string{"E2b-Sandbox-Id": "onrhqmi",
+		"E2B-Traffic-Access-Token": (&Servidor{Clave: clave}).tokenTrafico("sbx2")}, ""); st != 401 {
+		t.Fatalf("contexts con el token de otro sandbox: %d", st)
+	}
+	// Por host, como en el modo con dominio.
+	resp = b.peticion(t, "GET", "/contexts", "49999-onrhqmi.e2b.test", map[string]string{"E2B-Traffic-Access-Token": sb.TrafficAccessToken}, nil)
+	if got := leer(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("contexts por host: %d %s", resp.StatusCode, got)
+	}
+	st, got := pedir("POST", "/contexts", trafico, `{"language":"python","cwd":"w"}`)
+	if st != 200 || got != `{"cwd":"/home/user/w","id":"c1","language":"python"}`+"\n" {
+		t.Fatalf("crear contexto: %d %s", st, got)
+	}
+	if st, got := pedir("GET", "/contexts", trafico, ""); st != 200 || got != `[{"cwd":"/home/user","id":"c1","language":"python"}]`+"\n" {
+		t.Fatalf("listar contextos: %d %s", st, got)
+	}
+
+	exec := map[string]string{"X-Access-Token": sb.EnvdAccessToken, "E2b-Sandbox-Id": "onrhqmi", "Content-Type": "application/json"}
+	for i := 0; i < 2; i++ {
+		st, got := pedir("POST", "/execute", exec, `{"code":"x","context_id":null,"language":null,"env_vars":null}`)
+		var lineas []map[string]any
+		for _, l := range strings.Split(strings.TrimSpace(got), "\n") {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(l), &m); err != nil {
+				t.Fatalf("línea %q: %v", l, err)
+			}
+			delete(m, "timestamp")
+			lineas = append(lineas, m)
+		}
+		want := `[map[text:hola
+ type:stdout] map[extra:map[image/x-raro:z] html:<b>42</b> is_main_result:true json:map[a:1] text:42 type:result] map[name:ValueError traceback:linea 1
+ValueError: mal type:error value:mal] map[execution_count:3 type:number_of_executions]]`
+		if st != 200 || fmt.Sprint(lineas) != want {
+			t.Fatalf("execute %d: %d\n%v", i, st, lineas)
+		}
+	}
+	b.gw.mu.Lock()
+	var contextos, codigos []string
+	for _, e := range b.gw.execs {
+		if c, ok := e["_contexto"]; ok {
+			contextos = append(contextos, fmt.Sprint(c))
+		}
+		if c, ok := e["_codigo"]; ok {
+			codigos = append(codigos, fmt.Sprint(c))
+		}
+	}
+	b.gw.mu.Unlock()
+	// El explícito y UNO por defecto (el segundo execute lo reutiliza).
+	if fmt.Sprint(contextos) != "[map[cwd:/home/user/w language:python] map[language:python]]" ||
+		len(codigos) != 2 || codigos[0] != "map[code:x context_id:c1 timeout_seconds:600]" {
+		t.Fatalf("al gateway: contextos %v, código %v", contextos, codigos)
+	}
+
+	if st, got := pedir("POST", "/execute", exec, `{"code":"x","env_vars":{"A":"1"}}`); st != 501 || !strings.Contains(got, "env_vars") {
+		t.Fatalf("env_vars: %d %s", st, got)
+	}
+	if st, _ := pedir("POST", "/contexts/c1/restart", trafico, ""); st != 501 {
+		t.Fatalf("restart: %d", st)
+	}
+	if st, _ := pedir("DELETE", "/contexts/c1", trafico, ""); st != 204 {
+		t.Fatalf("borrar contexto: %d", st)
+	}
+
+	// El cliente corta (run_code con timeout): el shim interrumpe la ejecución.
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "POST", b.shim.URL+"/execute", strings.NewReader(`{"code":"bloquea","context_id":"c1"}`))
+	for k, v := range exec {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, err := bufio.NewReader(resp.Body).ReadString('\n'); err != nil || !strings.Contains(l, "empiezo") {
+		t.Fatalf("primera línea: %q %v", l, err)
+	}
+	cancel()
+	resp.Body.Close()
+	for i := 0; ; i++ {
+		b.gw.mu.Lock()
+		a := fmt.Sprint(b.gw.acciones)
+		b.gw.mu.Unlock()
+		if strings.Contains(a, "interrumpir c1") {
+			break
+		}
+		if i > 200 {
+			t.Fatalf("no se interrumpió: %s", a)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
