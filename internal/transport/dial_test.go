@@ -208,7 +208,13 @@ func TestSSHControlPathRechazaDirectorioCompartido(t *testing.T) {
 // solo lectura...), dialSSH tiene que seguir funcionando: cae al modo de
 // siempre en vez de fallar la conexion entera por no poder multiplexarla.
 func TestSSHMultiplexArgsSinDirectorioCaeAlModoDeSiempre(t *testing.T) {
-	conBases(t, "", "/nonexistent/ro")
+	// Bajo un fichero normal, y no en /nonexistent: root sí puede crear
+	// /nonexistent, y entonces el directorio se prepara y el test no prueba nada.
+	fichero := filepath.Join(dirCorto(t), "f")
+	if err := os.WriteFile(fichero, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conBases(t, "", filepath.Join(fichero, "ro"))
 
 	args := sshMultiplexArgs("juan@lab")
 	joined := strings.Join(args, " ")

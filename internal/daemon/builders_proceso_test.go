@@ -29,7 +29,18 @@ func nietoVivo(t *testing.T, pidf string) bool {
 		t.Fatal(err)
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	return pid > 0 && syscall.Kill(pid, 0) == nil
+	if pid <= 0 || syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	// Un zombi también responde a kill(pid, 0): muerto, pero sin recoger.
+	// Pasa donde el PID 1 no recoge a los huérfanos (un contenedor sin
+	// init), y el nieto, huérfano tras salir sh, se queda así.
+	if st, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+		if i := bytes.LastIndexByte(st, ')'); i >= 0 && i+2 < len(st) && st[i+2] == 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 // R4: un constructor que acaba bien pero deja un nieto con su salida no deja
