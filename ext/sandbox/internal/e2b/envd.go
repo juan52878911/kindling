@@ -52,6 +52,11 @@ func (s *Servidor) olvidar(sandbox string) {
 			delete(s.etiquetas, k)
 		}
 	}
+	for k := range s.contextos {
+		if strings.HasPrefix(k, sandbox+"\x00") {
+			delete(s.contextos, k)
+		}
+	}
 }
 
 // unario lee el cuerpo JSON de una llamada unaria; devuelve false (y responde)

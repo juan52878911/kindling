@@ -3,8 +3,8 @@
 # SDK. El recorrido de los dos SDK contra el frontal real lo hace TestContratoSDKs, dentro
 # del job de ext/sandbox de ci.yml. El job osb corre el SDK real de OpenSandbox (versión fijada)
 # contra `kling sbx osb` delante del frontal real (TestContratoOSB, docs/opensandbox.md); el job
-# e2b, los SDK reales de E2B (Python y JS, versión fijada) contra `kling sbx e2b` (TestContratoE2B,
-# docs/e2b.md).
+# e2b, los SDK reales de E2B (Python, JS y e2b-code-interpreter, versiones fijadas) contra
+# `kling sbx e2b` (TestContratoE2B, docs/e2b.md).
 name: sdks
 
 on:
@@ -96,8 +96,9 @@ jobs:
     name: e2b sdk
     runs-on: ubuntu-latest
     env:
-      # La versión de los SDK de E2B que fija docs/e2b.md; subirla es un cambio de compatibilidad.
+      # Las versiones de los SDK de E2B que fija docs/e2b.md; subirlas es un cambio de compatibilidad.
       E2B_SDK_VERSION: '2.64.0'
+      E2B_CI_VERSION: '2.11.10'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -112,7 +113,7 @@ jobs:
       - name: SDK de E2B
         run: |
           python3 -m venv "$RUNNER_TEMP/e2b"
-          "$RUNNER_TEMP/e2b/bin/pip" install "e2b==${E2B_SDK_VERSION}"
+          "$RUNNER_TEMP/e2b/bin/pip" install "e2b==${E2B_SDK_VERSION}" "e2b-code-interpreter==${E2B_CI_VERSION}"
           mkdir -p "$RUNNER_TEMP/e2b-js"
           npm install --prefix "$RUNNER_TEMP/e2b-js" --no-save --no-package-lock "e2b@${E2B_SDK_VERSION}"
       - name: TestContratoE2B

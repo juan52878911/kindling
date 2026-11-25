@@ -2,12 +2,18 @@
 # PyPI `e2b`, la versión que fija E2B_VERSION). Uso:
 #
 #   python e2b_real.py <url del shim> <E2B_API_KEY> <directorio> [plantilla]
+#   python e2b_real.py --domain <dominio> <E2B_API_KEY> <directorio> [plantilla]
 #   python e2b_real.py --debug <directorio>
 #
-# Apunta el SDK al shim con E2B_API_URL y E2B_SANDBOX_URL (el modo de pruebas
-# locales de docs/e2b.md: control y envd por el mismo listener, el sandbox por
-# cabeceras). <directorio> es donde se escriben los ficheros de prueba dentro del
-# sandbox (en el test de frontal, un temporal de la máquina; en el lab, /tmp).
+# Con una URL apunta el SDK al shim con E2B_API_URL y E2B_SANDBOX_URL (el modo de
+# pruebas locales de docs/e2b.md: control y envd por el mismo listener, el
+# sandbox por cabeceras). Con --domain usa solo E2B_DOMAIN, como en producción:
+# https://api.<dominio> y https://<puerto>-<id>.<dominio>, que necesitan DNS
+# comodín y un certificado en el que confíe el SDK (SSL_CERT_FILE). Si
+# E2B_REAL_PROXY está puesto, todas las peticiones van por ese proxy HTTP (el
+# test de Go lo usa en lugar del DNS). <directorio> es donde se escriben los
+# ficheros de prueba dentro del sandbox (en el test de frontal, un temporal de
+# la máquina; en el lab, /tmp).
 #
 # Con --debug usa E2B_DEBUG=true: el SDK no llama al plano de control y habla
 # con envd en http://localhost:49983 (`kling sbx e2b -envd-listen
@@ -20,16 +26,24 @@ import traceback
 
 E2B_VERSION = "2.64.0"
 
-debug = sys.argv[1] == "--debug"
+modo = {"--debug": "debug", "--domain": "dominio"}.get(sys.argv[1], "url")
+debug = modo == "debug"
 for k in ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DEBUG", "E2B_DOMAIN"):
     os.environ.pop(k, None)
 if debug:
     base, plantilla = sys.argv[2].rstrip("/"), "base"
     os.environ.update({"E2B_DEBUG": "true", "E2B_API_KEY": "sin-uso-en-debug"})
+elif modo == "dominio":
+    dominio, clave, base = sys.argv[2], sys.argv[3], sys.argv[4].rstrip("/")
+    plantilla = sys.argv[5] if len(sys.argv) > 5 else "base"
+    os.environ.update({"E2B_DOMAIN": dominio, "E2B_API_KEY": clave})
 else:
     url, clave, base = sys.argv[1], sys.argv[2], sys.argv[3].rstrip("/")
     plantilla = sys.argv[4] if len(sys.argv) > 4 else "base"
     os.environ.update({"E2B_API_URL": url, "E2B_SANDBOX_URL": url, "E2B_API_KEY": clave})
+# Opciones de conexión de las llamadas de clase (create, list, connect); el
+# sandbox las hereda para envd.
+OPTS = {"proxy": os.environ["E2B_REAL_PROXY"]} if os.environ.get("E2B_REAL_PROXY") else {}
 
 try:
     from importlib.metadata import version as _v
@@ -67,7 +81,7 @@ sb = None
 
 def crear():
     global sb
-    sb = Sandbox.create(plantilla, timeout=300, metadata={"suite": "e2b-real"}, envs={"DE_CREATE": "si"})
+    sb = Sandbox.create(plantilla, timeout=300, metadata={"suite": "e2b-real"}, envs={"DE_CREATE": "si"}, **OPTS)
     esperar(sb.sandbox_id and "/" not in sb.sandbox_id, "id: %r" % sb.sandbox_id)
     return sb.sandbox_id
 
@@ -170,7 +184,7 @@ def fondo_connect():
 
 
 def listar():
-    p = Sandbox.list(query=SandboxQuery(metadata={"suite": "e2b-real"}))
+    p = Sandbox.list(query=SandboxQuery(metadata={"suite": "e2b-real"}), **OPTS)
     ids = [i.sandbox_id for i in p.next_items()]
     esperar(ids == [sb.sandbox_id], "list %r" % ids)
     return ids
@@ -188,7 +202,7 @@ def timeout():
 
 
 def conectar():
-    otro = Sandbox.connect(sb.sandbox_id)
+    otro = Sandbox.connect(sb.sandbox_id, **OPTS)
     r = otro.commands.run("echo por-connect")
     esperar(r.stdout == "por-connect\n", "salida %r" % r.stdout)
     return r.stdout
@@ -205,7 +219,7 @@ def pausar():
 
 
 def reanudar():
-    otro = Sandbox.connect(sb.sandbox_id)
+    otro = Sandbox.connect(sb.sandbox_id, **OPTS)
     esperar(otro.get_info().state.value == "running", "no quedó running")
     return otro.commands.run("echo tras-pausa").stdout
 
@@ -263,7 +277,7 @@ for p in pasos:
     print("\t".join(p))
 ok = sum(1 for p in pasos if p[1] == "OK")
 if ok == len(pasos) and pasos:
-    print("E2B OK %d/%d (e2b %s%s)" % (ok, len(pasos), version, ", E2B_DEBUG" if debug else ""))
+    print("E2B OK %d/%d (e2b %s%s)" % (ok, len(pasos), version, {"debug": ", E2B_DEBUG", "dominio": ", E2B_DOMAIN"}.get(modo, "")))
     sys.exit(0)
 print("E2B FALLA %d/%d" % (ok, len(pasos)))
 sys.exit(1)

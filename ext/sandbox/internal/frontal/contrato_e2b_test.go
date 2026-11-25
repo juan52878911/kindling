@@ -2,8 +2,17 @@ package frontal
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +37,9 @@ import (
 // VersionE2B es la versión del SDK de E2B para Python que fija docs/e2b.md (y
 // scripts/e2b-sdk-real/e2b_real.py); subirla es un cambio de compatibilidad.
 const VersionE2B = "2.64.0"
+
+// VersionE2BCodeInterpreter es la de e2b-code-interpreter (scripts/e2b-sdk-real/e2b_ci.py).
+const VersionE2BCodeInterpreter = "2.11.10"
 
 // procE2B es un proceso de fondo del daemon falso de ponerE2B: guarda su
 // salida por trozos (stdout y stderr) para servir output con offset y follow.
@@ -283,7 +295,7 @@ func saltarE2B(t *testing.T, f string, a ...any) {
 func sdkE2B(t *testing.T, sdk string) []string {
 	t.Helper()
 	switch sdk {
-	case "python":
+	case "python", "code-interpreter":
 		py := os.Getenv("KLING_E2B_PYTHON")
 		if py == "" {
 			py = "python3"
@@ -291,6 +303,12 @@ func sdkE2B(t *testing.T, sdk string) []string {
 		bin, err := exec.LookPath(py)
 		if err != nil {
 			saltarE2B(t, "no %s in this runner", py)
+		}
+		if sdk == "code-interpreter" {
+			if err := exec.Command(bin, "-c", "import e2b_code_interpreter").Run(); err != nil {
+				saltarE2B(t, "%s has no e2b-code-interpreter package (pip install e2b-code-interpreter==%s, or set KLING_E2B_PYTHON)", py, VersionE2BCodeInterpreter)
+			}
+			return []string{bin, "e2b_ci.py"}
 		}
 		if err := exec.Command(bin, "-c", "import e2b").Run(); err != nil {
 			saltarE2B(t, "%s has no e2b package (pip install e2b==%s, or set KLING_E2B_PYTHON)", py, VersionE2B)
@@ -314,6 +332,66 @@ func sdkE2B(t *testing.T, sdk string) []string {
 
 // claveE2B es la API key de E2B que aceptan los shims de TestContratoE2B.
 const claveE2B = "clave-e2b-de-prueba-0123"
+
+// dominioE2B es el E2B_DOMAIN de los subtest con dominio.
+const dominioE2B = "e2b.test"
+
+// certE2B hace una CA y un certificado de *.dominioE2B firmado por ella, y deja
+// la CA en un PEM para el SSL_CERT_FILE del SDK.
+func certE2B(t *testing.T) (tls.Certificate, string) {
+	t.Helper()
+	claveCA, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	plantillaCA := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "kindling e2b test CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true,
+		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true}
+	derCA, err := x509.CreateCertificate(rand.Reader, plantillaCA, plantillaCA, &claveCA.PublicKey, claveCA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, _ := x509.ParseCertificate(derCA)
+	claveHoja, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	hoja := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "*." + dominioE2B},
+		DNSNames: []string{"*." + dominioE2B}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	derHoja, err := x509.CreateCertificate(rand.Reader, hoja, ca, &claveHoja.PublicKey, claveCA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemCA := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(pemCA, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derCA}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{derHoja}, PrivateKey: claveHoja}, pemCA
+}
+
+// proxyE2B es un proxy HTTP CONNECT que manda todo *.dominioE2B:443 a destino:
+// hace de DNS comodín para el SDK, que sigue hablando TLS con el nombre real.
+func proxyE2B(t *testing.T, destino string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, puerto, _ := net.SplitHostPort(r.Host)
+		if r.Method != http.MethodConnect || puerto != "443" || !strings.HasSuffix(host, "."+dominioE2B) {
+			http.Error(w, "only CONNECT to *."+dominioE2B+":443", http.StatusForbidden)
+			return
+		}
+		dst, err := net.Dial("tcp", destino)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		c, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			dst.Close()
+			return
+		}
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		go func() { _, _ = io.Copy(dst, c); dst.Close() }()
+		_, _ = io.Copy(c, dst)
+		c.Close()
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
 
 // bancoE2B monta el frontal real delante del daemon falso y devuelve su URL y
 // un shim de E2B sobre él (sin listener: cada subtest lo sirve donde quiere).
@@ -351,12 +429,15 @@ func bancoE2B(t *testing.T) (gw string, shim *e2b.Servidor, logs func() string) 
 	return srv.URL, shim, func() string { mu.Lock(); defer mu.Unlock(); return b.String() }
 }
 
-// correrE2B corre un script de scripts/e2b-sdk-real y exige "E2B OK".
-func correrE2B(t *testing.T, logs func() string, cmd ...string) {
+// correrE2B corre un script de scripts/e2b-sdk-real y exige "E2B OK". env se
+// añade al entorno del test.
+func correrE2B(t *testing.T, logs func() string, env []string, cmd ...string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, cmd[0], cmd[1:]...).CombinedOutput()
+	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	c.Env = append(os.Environ(), env...)
+	out, err := c.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "E2B OK") {
 		t.Fatalf("SDK de E2B: %v\n%s\nshim:\n%s", err, out, logs())
 	}
@@ -368,18 +449,38 @@ func correrE2B(t *testing.T, logs func() string, cmd ...string) {
 // REAL, con su daemon falso que ejecuta las órdenes, los procesos de fondo y
 // los ficheros en esta máquina: crear, commands.run (salida, exit, env y cwd,
 // fondo, kill, connect), ficheros, listar, info, timeout, red, pausa, connect y
-// kill. El subtest python-debug repite los pasos de envd con E2B_DEBUG=true
-// (envd en localhost:49983, sin plano de control). Sin VM.
+// kill; y el intérprete de e2b-code-interpreter. Los subtest *-domain repiten
+// los de Python con solo E2B_DOMAIN (HTTPS a api.<dominio> y a
+// <puerto>-<id>.<dominio>, con un certificado propio y un proxy CONNECT en lugar
+// del DNS comodín); python-debug, los pasos de envd con E2B_DEBUG=true (envd en
+// localhost:49983, sin plano de control). Sin VM.
 func TestContratoE2B(t *testing.T) {
 	_, este, _, _ := runtime.Caller(0)
 	scripts := filepath.Join(filepath.Dir(este), "..", "..", "..", "..", "scripts", "e2b-sdk-real")
-	for _, sdk := range []string{"python", "js"} {
+	for _, sdk := range []string{"python", "js", "code-interpreter"} {
 		t.Run(sdk, func(t *testing.T) {
 			arg := sdkE2B(t, sdk)
 			_, shim, logs := bancoE2B(t)
 			srv := httptest.NewServer(shim)
 			t.Cleanup(srv.Close)
-			correrE2B(t, logs, arg[0], filepath.Join(scripts, arg[1]), srv.URL, claveE2B, t.TempDir(), "base")
+			correrE2B(t, logs, nil, arg[0], filepath.Join(scripts, arg[1]), srv.URL, claveE2B, t.TempDir(), "base")
+		})
+	}
+	for _, sdk := range []string{"python", "code-interpreter"} {
+		t.Run(sdk+"-domain", func(t *testing.T) {
+			arg := sdkE2B(t, sdk)
+			_, shim, logs := bancoE2B(t)
+			shim.Dominio = dominioE2B
+			cert, ca := certE2B(t)
+			srv := httptest.NewUnstartedServer(shim)
+			srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+			srv.StartTLS()
+			t.Cleanup(srv.Close)
+			proxy := proxyE2B(t, srv.Listener.Addr().String())
+			// SSL_CERT_FILE: la CA del certificado; los proxies del entorno, fuera.
+			env := []string{"SSL_CERT_FILE=" + ca, "E2B_REAL_PROXY=" + proxy, "HTTPS_PROXY=", "HTTP_PROXY=",
+				"https_proxy=", "http_proxy=", "ALL_PROXY=", "all_proxy=", "NO_PROXY=", "no_proxy="}
+			correrE2B(t, logs, env, arg[0], filepath.Join(scripts, arg[1]), "--domain", dominioE2B, claveE2B, t.TempDir(), "base")
 		})
 	}
 	t.Run("python-debug", func(t *testing.T) {
@@ -407,6 +508,6 @@ func TestContratoE2B(t *testing.T) {
 		srv.Listener = ln
 		srv.Start()
 		t.Cleanup(srv.Close)
-		correrE2B(t, logs, arg[0], filepath.Join(scripts, arg[1]), "--debug", t.TempDir())
+		correrE2B(t, logs, nil, arg[0], filepath.Join(scripts, arg[1]), "--debug", t.TempDir())
 	})
 }

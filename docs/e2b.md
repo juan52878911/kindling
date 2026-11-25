@@ -2,18 +2,19 @@
 
 `kling sbx e2b` escucha en un puerto y traduce el protocolo de [E2B](https://e2b.dev)
 a la API `/v1` del gateway de sandboxes ([sandbox-api.md](sandbox-api.md)). Un SDK de E2B
-(Python o JS) puede así crear sandboxes, ejecutar comandos y mover ficheros contra kindling
-cambiando solo variables de entorno.
+(Python o JS, y `e2b-code-interpreter`) puede así crear sandboxes, ejecutar comandos y código
+y mover ficheros contra kindling cambiando solo variables de entorno.
 
 La especificación que sigue el shim es la pública de E2B, copiada en
 `ext/sandbox/internal/e2b/spec/` (plano de control `openapi.yml`; envd: `envd.yaml` y los
 `.proto` de `process` y `filesystem`).
 
 > **Estado.** Probado con los SDK oficiales de E2B **`e2b==2.64.0` (Python, `Sandbox`
-> síncrono) y `e2b@2.64.0` (JS/TS)**, en CI (`TestContratoE2B`, job `e2b` de
-> `.github/workflows/sdks.yml`; scripts en [`scripts/e2b-sdk-real/`](../scripts/e2b-sdk-real/README.md)).
-> El SDK habla con el shim y el shim con el gateway real, delante de un daemon falso que ejecuta
-> las órdenes y los ficheros en la máquina del test: **sin microVM**. Pasan con los dos SDK:
+> síncrono), `e2b@2.64.0` (JS/TS) y `e2b-code-interpreter==2.11.10` (Python)**, en CI
+> (`TestContratoE2B`, job `e2b` de `.github/workflows/sdks.yml`; scripts en
+> [`scripts/e2b-sdk-real/`](../scripts/e2b-sdk-real/README.md)). El SDK habla con el shim y el
+> shim con el gateway real, delante de un daemon falso que ejecuta las órdenes, el código y los
+> ficheros en la máquina del test: **sin microVM**. Pasan:
 >
 > - `Sandbox.create` (con `metadata`, `envs` y `timeout`), `Sandbox.list` por metadata,
 >   `get_info`, `is_running`, `set_timeout`, `Sandbox.connect`, `update_network` (dominios en
@@ -25,13 +26,22 @@ La especificación que sigue el shim es la pública de E2B, copiada en
 >   `exists`, `get_info`, `make_dir`, `rename`, `list(depth=2)` y `remove`.
 > - `send_stdin`, `watch_dir` y `pty.create` fallan enseguida con `SandboxException` /
 >   `SandboxError` (no se cuelgan).
-> - Con Python, los mismos pasos de envd en modo `E2B_DEBUG=true` (`-envd-listen
->   127.0.0.1:49983 -debug-sandbox`).
+> - `e2b_code_interpreter.Sandbox.run_code` (ver «Intérprete de código»): `text` del resultado,
+>   estado entre llamadas, `logs` y `on_stdout`, `error` con traceback, resultado `html`,
+>   `language="bash"`, y `create_code_context(cwd=)` / `list_code_contexts` /
+>   `remove_code_context`.
 >
-> **Sin probar con el SDK:** el modo con dominio y TLS (`https://49983-<id>.<dominio>`; el
-> enrutado por host solo lo cubren los tests de Go), `AsyncSandbox` de Python, otras versiones
-> del SDK y una microVM real detrás del gateway. Lo que la tabla marca como **501** sigue sin
-> funcionar (stdin en vivo, PTY, watchers, builds de plantillas, snapshots/fork, métricas y logs).
+> Por modo de conexión: con **`E2B_DOMAIN`** (HTTPS a `api.<dominio>` y a
+> `<puerto>-<id>.<dominio>`, certificado verificado con `SSL_CERT_FILE`; en el test un proxy
+> CONNECT hace de DNS comodín) pasan todos los pasos de `e2b` y de `e2b-code-interpreter` en
+> Python. Con **`E2B_API_URL` + `E2B_SANDBOX_URL`** pasan todos con los tres SDK. Con
+> **`E2B_DEBUG=true`**, los pasos de envd de `e2b` en Python.
+>
+> **Sin probar con el SDK:** el modo con dominio desde JS (`NODE_EXTRA_CA_CERTS`), `AsyncSandbox`
+> de Python, el intérprete desde JS y en modo debug, otras versiones de los SDK y una microVM
+> real detrás del gateway. Lo que la tabla marca como **501** sigue sin funcionar (stdin en vivo,
+> PTY, watchers, builds de plantillas, snapshots/fork, métricas y logs; en el intérprete,
+> `envs` por ejecución y reiniciar contextos), y el intérprete no devuelve gráficos (`chart`).
 
 ## Arranque
 
@@ -69,11 +79,30 @@ así que sobrevive a reinicios. Cabe en la etiqueta `<puerto>-<id>` (≤ 63) si 
 mide ≤ 35 bytes; con ids más largos el host DNS no sirve, pero la cabecera `E2b-Sandbox-Id` y las
 rutas siguen funcionando. Un id crudo con `/` se rechaza.
 
-El shim enruta envd por el host `<puerto>-<sandboxID>.<dominio>` o, si no, por la cabecera
-`E2b-Sandbox-Id`; en los dos casos exige `X-Access-Token` (el `envdAccessToken` de create).
+El shim enruta envd y el intérprete por el host `<puerto>-<sandboxID>.<dominio>` o, si no, por
+la cabecera `E2b-Sandbox-Id`; envd exige `X-Access-Token` (el `envdAccessToken` de create) y el
+intérprete, ese o `E2B-Traffic-Access-Token` (el `trafficAccessToken`, también por sandbox).
 
-**Pruebas locales (sin DNS ni TLS).** Con `E2B_API_URL` y `E2B_SANDBOX_URL` el SDK manda todo,
-control y envd, al mismo listener, identificando el sandbox solo por cabeceras:
+**Configuración estable: dominio + TLS.** Es la que usa el SDK sin variables obsoletas:
+solo `E2B_DOMAIN` y `E2B_API_KEY`. El SDK va a `https://api.<dominio>` (plano de control) y a
+`https://<puerto>-<id>.<dominio>` (envd en 49983, intérprete en 49999), siempre al puerto 443.
+Necesita un DNS comodín `*.<dominio>` hacia la máquina del shim y un certificado de
+`*.<dominio>` en el que confíe el cliente:
+
+```sh
+kling sbx e2b -listen :443 -domain e2b.example.test -tls-cert wildcard.pem -tls-key wildcard.key
+export E2B_API_KEY=<token del inquilino>
+export E2B_DOMAIN=e2b.example.test        # *.e2b.example.test → la máquina del shim
+# Certificado de una CA propia: SSL_CERT_FILE=ca.pem (Python), NODE_EXTRA_CA_CERTS=ca.pem (JS)
+```
+
+Así lo prueba CI con el SDK de Python (`e2b` y `e2b-code-interpreter`). Un `<dominio>` de los
+de E2B (`e2b.app`, `e2b.dev`…) no sirve: el SDK los trata aparte.
+
+**Atajo de desarrollo: sin DNS ni TLS.** Con `E2B_API_URL` y `E2B_SANDBOX_URL` el SDK manda
+todo, control, envd e intérprete, al mismo listener, identificando el sandbox y el puerto por
+cabeceras. El SDK marca las dos variables como obsoletas («se quitarán en la próxima versión
+mayor»), así que sirve para probar en local, no como configuración estable:
 
 ```sh
 kling sbx e2b -listen 127.0.0.1:3000
@@ -81,18 +110,10 @@ export E2B_API_KEY=<token del inquilino>
 export E2B_API_URL=http://127.0.0.1:3000 E2B_SANDBOX_URL=http://127.0.0.1:3000
 ```
 
-**En serio (dominio + TLS).** Necesita DNS comodín hacia el shim y TLS que el cliente acepte.
-
-```sh
-export E2B_API_KEY=<token del inquilino>
-export E2B_DOMAIN=e2b.example.test        # *.e2b.example.test → la máquina del shim
-export E2B_API_URL=https://api.e2b.example.test
-# Certificado propio: SSL_CERT_FILE=ca.pem (Python), NODE_EXTRA_CA_CERTS=ca.pem (JS)
-```
-
-**Modo debug (`E2B_DEBUG=true`).** Con él el SDK no llama al plano de control: usa el id fijo
-`debug_sandbox_id`, no manda `X-Access-Token` y habla con `http://localhost:49983`. Se soporta
-con una bandera explícita, sobre un sandbox del gateway que ya existe:
+**Modo debug (`E2B_DEBUG=true`), también de desarrollo.** Con él el SDK no llama al plano de
+control: usa el id fijo `debug_sandbox_id`, no manda `X-Access-Token` y habla con
+`http://localhost:49983`. Se soporta con una bandera explícita, sobre un sandbox del gateway que
+ya existe (el intérprete iría a `localhost:49999`, que el shim no escucha en este modo):
 
 ```sh
 kling sbx e2b -listen 127.0.0.1:3000 -envd-listen 127.0.0.1:49983 -debug-sandbox h1/m-1
@@ -169,6 +190,26 @@ se rechazan.
 
 Todo lo no listado responde `404`; lo listado como **501** devuelve el error de E2B
 (`{"code":501,"message":…}`) en el plano de control o un error Connect `unimplemented` en las RPC.
+
+### Intérprete de código (puerto 49999)
+
+Lo que llama `e2b_code_interpreter.Sandbox` (y lo que usan smolagents, CrewAI, Agno y
+compañía a través de `run_code`), sobre el intérprete del gateway (`/v1/sandboxes/{id}/code`,
+[sandbox-api.md](sandbox-api.md#intérprete-de-código)). La plantilla necesita `python3` (y
+`bash`/`node` para esos lenguajes); `Sandbox.create()` sin plantilla pide `code-interpreter-v1`,
+así que o se llama así una plantilla del gateway o se pasa la que se quiera.
+
+| Operación | Estado | Traducción / motivo |
+|---|---|---|
+| `POST /execute` | Soportada (texto) | `POST …/code` con `timeout_seconds: 600` (el máximo del gateway; en E2B el plazo lo pone el cliente). Sin `context_id`, un contexto **persistente** por sandbox y lenguaje, como en E2B: las variables siguen entre llamadas. `language`: `python` (por defecto), `js`/`javascript`, `bash`; los demás (`r`, `java`, `ts`…) los rechaza el gateway. Salida NDJSON de E2B: `stdout`/`stderr`, `result` (`text`, `html`, `png`, `jpeg`, `svg`, `markdown`, `latex`, `json`, `pdf`, `javascript` según los tipos MIME que dé el gateway; otros, en `extra`), `error` (`name`, `value`, `traceback`) y `number_of_executions`. |
+| `POST /execute` con `env_vars` | **501** | El intérprete del gateway no admite entorno por ejecución; las `envs` de `Sandbox.create` sí las ve. |
+| Gráficos (`result.chart`) | No | El gateway no extrae los datos de las figuras: una figura de matplotlib llega como `png`, sin `chart`. |
+| `POST /contexts`, `GET /contexts`, `DELETE /contexts/{id}` | Soportada | `…/code/contexts` del gateway (`cwd` relativo cuelga de `-home`). Topes del gateway: 8 contextos por sandbox. |
+| `POST /contexts/{id}/restart` | **501** | El gateway no reinicia un contexto conservando el id: bórralo y crea otro. |
+
+Si el cliente corta la conexión a mitad (el `timeout` de `run_code`, o cancelar), el shim
+interrumpe la ejecución (`DELETE …/code/contexts/{cid}/execution`, SIGINT): el contexto sigue
+vivo, como en E2B. Esto lo cubre un test de Go, no el SDK.
 
 ## Límites conocidos
 

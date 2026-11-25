@@ -62,6 +62,9 @@ type Servidor struct {
 	// etiquetas guarda la etiqueta (tag) de E2B de cada proceso de fondo, por
 	// sandbox+"\x00"+tag: el núcleo no conoce etiquetas.
 	etiquetas map[string]int
+	// contextos es el contexto de código por defecto de cada sandbox y
+	// lenguaje (sandbox+"\x00"+lenguaje → id del gateway).
+	contextos map[string]string
 }
 
 // reID es el id que el shim expone a E2B: base32 en minúsculas, seguro en una
@@ -143,6 +146,7 @@ func (s *Servidor) iniciar() {
 	}
 	s.procs = map[uint32]*proceso{}
 	s.etiquetas = map[string]int{}
+	s.contextos = map[string]string{}
 	m := http.NewServeMux()
 	// Plano de control.
 	m.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +184,14 @@ func (s *Servidor) iniciar() {
 	m.HandleFunc("POST /files", s.envd(s.fileEscribir))
 	m.HandleFunc("GET /envs", s.envd(func(w http.ResponseWriter, r *http.Request, id string) { escribirJSON(w, 200, map[string]string{}) }))
 	m.HandleFunc("POST /init", s.envd(func(w http.ResponseWriter, r *http.Request, id string) { w.WriteHeader(http.StatusNoContent) }))
+	// Intérprete de código (e2b-code-interpreter, puerto 49999).
+	m.HandleFunc("POST /execute", s.codigo(s.codigoEjecutar))
+	m.HandleFunc("POST /contexts", s.codigo(s.ctxCrear))
+	m.HandleFunc("GET /contexts", s.codigo(s.ctxListar))
+	m.HandleFunc("DELETE /contexts/{cid}", s.codigo(s.ctxBorrar))
+	m.HandleFunc("POST /contexts/{cid}/restart", s.codigo(func(w http.ResponseWriter, r *http.Request, id string) {
+		errE2B(w, http.StatusNotImplemented, "restarting a code context is not supported by the kindling gateway: remove it and create another")
+	}))
 	m.HandleFunc("/", s.resto)
 	s.mux = m
 }
@@ -499,7 +511,7 @@ func (s *Servidor) sandboxCreado(g gwSandbox) map[string]any {
 	m := map[string]any{
 		"templateID": g.Template, "sandboxID": hosts.IDaDNS(g.ID), "clientID": "kindling",
 		"envdVersion": EnvdVersion, "envdAccessToken": s.tokenEnvd(g.ID),
-		"trafficAccessToken": nil, "domain": nil,
+		"trafficAccessToken": s.tokenTrafico(g.ID), "domain": nil,
 	}
 	if s.Dominio != "" {
 		m["domain"] = s.Dominio
