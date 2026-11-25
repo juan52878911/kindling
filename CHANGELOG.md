@@ -29,6 +29,7 @@ The first stable release: the 1.x promise of `docs/compatibilidad.md` starts her
 - `kling egress set` changes egress live; `kling ls`/`cp` handle directories; `api.DialTCP` tunnels to guest ports.
 - kling-sandbox gateway: persistent tenants and keys, processes, `/code`, volumes, batch create, pause/resume, port ingress, web console, OTLP and audit log.
 - kling-sandbox: E2B-compatible (`kling sbx e2b`) and OpenSandbox-compatible (`kling sbx osb`) APIs, an MCP server, a `SandboxPool` CRD and a Helm chart.
+- `kling sbx e2b` serves `e2b-code-interpreter` (`/execute`, `/contexts`) over the gateway's `/code`; CI runs the official `e2b` 2.64.0 (Python, JavaScript) and `e2b-code-interpreter` 2.11.10 SDKs through the shim, also with `E2B_DOMAIN` over HTTPS.
 - Python and TypeScript SDKs for the gateway's OpenAPI 3.1 spec (`sdks/`, Apache-2.0), a sandbox quickstart and examples.
 - SigV4 credentials (`-type sigv4`) for S3, R2 and GCS through the credential proxy, also on macOS.
 - `/metrics`: creation phase and resync histograms; `scripts/bench` and `docs/benchmarks.md` compare with OpenSandbox.
@@ -65,6 +66,7 @@ The first stable release: the 1.x promise of `docs/compatibilidad.md` starts her
 - Copy-on-write store: project ids no longer leak, a failed `quotactl` is retried, concurrent clones no longer serialize.
 - `kling egress set` back to `allowlist` after `none` keeps DNS; shared folders no longer serve stale entries or hang on FIFOs.
 - kling-sandbox gateway: port ingress against a real daemon, endpoint revocation, the E2B shim without bash, the warm pool's TTL.
+- E2B shim: `write_files` writes each file at its full path (it dropped the directory), and `Sandbox.create(envs=…)` reaches the sandbox's commands.
 - MCP gateway and kling-bridge: scale-out bursts, dead machines and sessions, requests a server sends mid-call.
 - kling-hv: vsock stalls, interrupt line updates, snapshot leftovers; past its VM cap it answers 507.
 - Pre-release versions compare as semver; the kindling-operator image builds again (1.0.0-rc.2 shipped without it).

@@ -25,8 +25,11 @@ frozen. Existing OpenSandbox SDK code points at it by changing the URL and the k
   after you change `domain` and `api_key`. 41 of the spec's 90 operations are implemented;
   the rest (credential vault, snapshots, template builds, diagnostics, isolated sessions)
   answer `501` with the reason ([the list](docs/opensandbox.md)). CI drives the shim with the
-  real `opensandbox==1.2.1` Python SDK. E2B SDKs via `kling sbx e2b` (see
-  [docs/e2b.md](docs/e2b.md) for what is verified).
+  real `opensandbox==1.2.1` Python SDK. `kling sbx e2b` does the same for E2B: CI runs
+  the official `e2b` 2.64.0 SDKs (Python and JavaScript) and `e2b-code-interpreter` 2.11.10
+  through it, covering lifecycle, commands, files and `run_code`, against the real gateway on
+  a simulated host. PTY, live stdin, file watchers, snapshots and template builds are not
+  supported ([docs/e2b.md](docs/e2b.md)).
 - **A hypervisor per sandbox, not a shared kernel.** Each sandbox is a Firecracker microVM
   (on a Mac, Apple's Virtualization or Hypervisor framework) with its own kernel; the guest is
   assumed hostile ([`SECURITY.md`](SECURITY.md)). Tenants share the host and the daemon: a
@@ -120,7 +123,7 @@ sb.kill()
 OpenSandbox starts containers from an image; kindling starts microVMs from a template, so the
 shim maps one to the other (`-image-map python:3.12=python`, repeatable, or
 `-default-template`). Also: the TypeScript SDK ([`sdks/typescript`](sdks/typescript/README.md)),
-E2B SDKs via `kling sbx e2b` (see [docs/e2b.md](docs/e2b.md) for what is verified), and
+E2B SDKs and `e2b-code-interpreter` via `kling sbx e2b` ([docs/e2b.md](docs/e2b.md)), and
 `kling sbx mcp`, an MCP server (stdio) that gives an agent the sandboxes as tools.
 
 Next: the [quickstart](docs/quickstart-sandbox.md) explains each step, the

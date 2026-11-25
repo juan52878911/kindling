@@ -18,13 +18,12 @@ Be careful with this one. This repository's development machine has no network, 
 - the **variable names** (`SANDBOX_DOMAIN`, `SANDBOX_API_KEY`) and the **path** of the example
   inside the OpenSandbox repository (`examples/code-interpreter/main.py`) are written from
   memory of that project and have to be checked against its README before you rely on them;
-- the OpenSandbox SDK creates its sandbox through OpenSandbox's lifecycle API. The gateway's
-  `/v1/sandboxes` is similar in spirit but is not promised to be wire-compatible; what the
-  gateway does promise is the execd routes above, which its contract tests cover with its own
-  SDKs. Whether the unmodified OpenSandbox SDK completes `create` against it has **not** been
-  tried. If it does not, the part that matters, `/code`, can be called directly (see
-  [`../data-analysis`](../data-analysis/README.md)), and the E2B SDKs do work through
-  `kling sbx e2b` ([`docs/e2b.md`](../../../docs/e2b.md)).
+- the OpenSandbox SDK creates its sandbox through OpenSandbox's lifecycle API, which the
+  gateway's `/v1` does not speak directly. Run it through `kling sbx osb`, which serves that
+  API in front of the gateway and is driven in CI by the real `opensandbox==1.2.1` Python SDK
+  ([`docs/opensandbox.md`](../../../docs/opensandbox.md)). `/code` can also be called directly
+  (see [`../data-analysis`](../data-analysis/README.md)), and the E2B SDKs, including
+  `e2b-code-interpreter`, go through `kling sbx e2b` ([`docs/e2b.md`](../../../docs/e2b.md)).
 
 When someone runs it with the real SDK, the result (works, or the first call that fails)
 belongs in this README.

@@ -83,7 +83,7 @@ python3 -c 'from kindling_sandbox import Sandbox; sb = Sandbox.create(template="
 ```
 
 The package is not on PyPI yet, so it is installed from the checkout. Standard library only,
-Python 3.9 or later. More in [`sdks/python/README.md`](../sdks/python/README.md).
+Python 3.10 or later. More in [`sdks/python/README.md`](../sdks/python/README.md).
 
 ## 6. With the TypeScript SDK
 
@@ -112,19 +112,22 @@ kling sbx e2b -listen 127.0.0.1:3000 &
 E2B_API_KEY=$KLING_SANDBOX_TOKEN E2B_API_URL=http://127.0.0.1:3000 E2B_SANDBOX_URL=http://127.0.0.1:3000 python3 -c 'from e2b import Sandbox; sb = Sandbox.create("python"); print(sb.commands.run("python3 -c \"print(6*7)\"").stdout, end=""); sb.kill()'
 ```
 
-What the shim supports and what answers `501` (pause, fork and templates are managed with
-`kling sbx`, not through E2B): [`e2b.md`](e2b.md).
+`E2B_API_URL`/`E2B_SANDBOX_URL` are the quickest way on one machine, but the E2B SDK marks
+them deprecated; the durable setup is `E2B_DOMAIN` with wildcard DNS and TLS. `pause` and
+`Sandbox.connect` (which resumes) work through the shim, and so does `e2b-code-interpreter`'s
+`run_code`; fork and templates are managed with `kling sbx`. What answers `501`, and which SDK
+versions CI runs: [`e2b.md`](e2b.md).
 
 <!-- quickstart:end -->
 
 ## Coming from OpenSandbox
 
-The gateway's `/v1` API follows OpenSandbox's execd for the code interpreter: `/code` and
-`/code/contexts`, with Python, bash and JavaScript. The shim in this repository speaks **E2B**,
-not OpenSandbox's lifecycle API, so the OpenSandbox SDK's `Sandbox.create` is not what the
-shim translates. [`examples/sandbox/osb-code-interpreter`](../examples/sandbox/osb-code-interpreter/README.md)
-runs OpenSandbox's code-interpreter example against the gateway and says exactly what has and
-has not been verified. For the measured differences read [`benchmarks.md`](benchmarks.md),
+`kling sbx osb` serves OpenSandbox 1.2.1's lifecycle API and execd in front of the gateway, so
+the unmodified OpenSandbox SDKs create sandboxes, run commands and code, and move files after
+you change `domain` and `api_key`; CI runs the real `opensandbox==1.2.1` Python SDK through it.
+OpenSandbox starts containers from an image and kindling starts microVMs from a template, so map
+one to the other with `-image-map` or `-default-template`. Setup, and the operations that answer
+`501`: [`opensandbox.md`](opensandbox.md). For the measured differences read [`benchmarks.md`](benchmarks.md),
 including where OpenSandbox is ahead.
 
 ## What to try in the fifth minute
