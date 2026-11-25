@@ -31,6 +31,8 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `kling-chispa-linux-<arch>` | invitado de Chispa serverless | linux |
 | `kling-vz-darwin-arm64` | backend nativo de macOS (Virtualization.framework), firmado con su entitlement | darwin/arm64 |
 | `kling-hv-darwin-arm64` | backend de macOS 15.2+ sobre Hypervisor.framework (`daemon.vmm: auto` lo elige), firmado con su entitlement | darwin/arm64 |
+| `kling-credproxy-darwin-arm64` | proxy de credenciales de macOS, un proceso por máquina junto a `kling-vz`/`kling-hv` | darwin/arm64 |
+| `kling-unpack-<os>-<arch>` | ayudante de Rust que descomprime capas OCI ([`imagenes.md`](imagenes.md)); opcional | linux (estático), darwin/arm64 |
 | `kling-mcp-<os>-<arch>` | extensión MCP: `mcp`, `add`, `connect`, `gateway`… | las cuatro |
 | `kling-bridge-<os>-<arch>` | puente stdio↔HTTP; *companion* de `mcp` | las cuatro |
 | `kling-sandbox-<os>-<arch>` | extensión de sandboxes multiinquilino (gateway, plantillas, fondo precalentado) | las cuatro |
@@ -46,6 +48,7 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `vmlinux-<versión>-kindling-<arch>-android` | kernel Android del prototipo (`prototypes/android/kernel`), con su `.sha256`, `.config` y `.buildinfo` | linux |
 | `SHA256SUMS` | **un** fichero con el sha256 de todo lo anterior | — |
 | `SHA256SUMS.minisig` | su firma ed25519 (minisign); obligatoria desde v1.0.0 ([`firmas.md`](firmas.md)) | — |
+| `SHA256SUMS.sshsig` | segunda firma, con `ssh-keygen`; solo si el environment `release` tiene `KLING_RELEASE_SSH_KEY` | — |
 
 Además, la imagen del operador se publica en
 `ghcr.io/juan52878911/kindling-operator:<tag>` y `:latest` (la ruta no cambia:
@@ -281,8 +284,8 @@ SemVer con prefijo `v`. La versión es una para todo el repo: una extensión
 oficial lleva la del núcleo con el que salió. Qué cuenta como MAJOR, MINOR y
 PATCH, qué superficies entran en la promesa de 1.x, la política de deprecación
 y la ventana de versiones que se mezclan, en
-[`compatibilidad.md`](compatibilidad.md). Seguimos en **0.x** hasta cumplir su
-lista «Antes de 1.0».
+[`compatibilidad.md`](compatibilidad.md); lo que aún falta, en su
+[«Pendiente»](compatibilidad.md#pendiente).
 
 Cómo funciona `kling upgrade` y qué hace con cada formato en disco, en
 [`actualizar.md`](actualizar.md). Un cambio que

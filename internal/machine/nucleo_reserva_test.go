@@ -48,16 +48,27 @@ func TestR6ReservaNoHaceUnStatPorMaquina(t *testing.T) {
 	viejo := statMemFile
 	statMemFile = func(p string) (os.FileInfo, error) { n.Add(1); return viejo(p) }
 	t.Cleanup(func() { statMemFile = viejo })
-	t0 := time.Now()
+	// El mejor de tres rondas, en los dos lados: una ronda sola, con -race y
+	// el resto de paquetes corriendo a la vez, pasaba del margen por ruido.
 	const vueltas = 200
-	for i := 0; i < vueltas; i++ {
-		rel, err := m.reserveMemory(256, "dorado")
-		if err != nil {
-			t.Fatal(err)
+	mejor := func(m *Manager) time.Duration {
+		var menor time.Duration
+		for r := 0; r < 3; r++ {
+			t0 := time.Now()
+			for i := 0; i < vueltas; i++ {
+				rel, err := m.reserveMemory(256, "dorado")
+				if err != nil {
+					t.Fatal(err)
+				}
+				rel()
+			}
+			if d := time.Since(t0) / vueltas; r == 0 || d < menor {
+				menor = d
+			}
 		}
-		rel()
+		return menor
 	}
-	porAlta := time.Since(t0) / vueltas
+	porAlta := mejor(m)
 	// Lo que importa: tras la primera reserva, ninguna vuelve a mirar el disco
 	// por cada máquina viva.
 	n.Store(0)
@@ -70,13 +81,7 @@ func TestR6ReservaNoHaceUnStatPorMaquina(t *testing.T) {
 		t.Fatalf("una reserva con 500 vivas hizo %d stats (uno por máquina)", got)
 	}
 	t.Logf("500 vivas: %s por reserva (stats contados: %d)", porAlta, n.Load())
-	m2 := poblarR6(t, 5)
-	t0 = time.Now()
-	for i := 0; i < vueltas; i++ {
-		rel, _ := m2.reserveMemory(256, "dorado")
-		rel()
-	}
-	base := time.Since(t0) / vueltas
+	base := mejor(poblarR6(t, 5))
 	if porAlta > base+600*time.Microsecond {
 		t.Fatalf("la reserva cuesta %s con 500 máquinas vivas y %s con 5: crece con N bajo el cerrojo global", porAlta, base)
 	}
