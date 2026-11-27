@@ -263,6 +263,47 @@ del banco.
 - Congelar por ociosidad despierta solo la máquina a la que se conecta (la
   app y redis siguen congeladas hasta que alguien las llame).
 
+### Con la release v0.20.1 (M4, kling-hv y kling-vz, 2026-11-04)
+
+Lo mismo con lo publicado en v0.20.1: el CLI y el daemon de la release, y el
+`vmlinux-arm64` y el `kling-guest` de sus assets (comprobados contra
+`SHA256SUMS`). Un daemon privado por VMM, con su raíz vacía; las sondas, como
+arriba, por los puertos que publica el daemon tras `compose up -d`, con `down`
+entre medias. El Mac tenía otra carga (carga media 3,5–7): las de `-fresh` con
+n=3 no dan para más que el orden de magnitud. p50 / p90.
+
+| | hv antes (2026-10-28) | **hv v0.20.1** | **vz v0.20.1** |
+|---|---|---|---|
+| redis sola, `up -d` repetido (n=10) | | **0,09 s** / 0,19 | 0,28 s / 0,41 |
+| postgres sola, hasta el arranque de sesión (n=10) | | **0,08 s** / 0,20 | 0,31 s / 0,36 |
+| compose de 3: `cache` contesta `PONG` (n=20) | 0,21 s / 0,23 | 0,19 s / 0,23 | 0,78 s / 0,89 |
+| compose de 3: `db` contesta al arranque de sesión (n=20) | 0,25 s / 0,32 | 0,27 s / 0,37 | 0,84 s / 0,99 |
+| compose de 3: `app` sirve una petición que habla con los dos (n=20) | 0,25 s / 0,31 | 0,27 s / 0,37 | 0,84 s / 0,99 |
+| proyecto congelado → primera sesión de postgres (n=10) | 50 ms / 61 | 54 ms / 69 | 263 ms / 322 |
+| compose de 3 con `-fresh` (n=3) | 2,0–2,5 s (vz) | 3,0 s (2,8–6,5) | 3,5 s (3,4–4,1) |
+| postgres sola con `-fresh` (n=3) | | 6,9 s | 7,4 s |
+| redis sola con `-fresh` (n=3) | | 1,4 s | 1,8 s |
+
+- Con plantilla, hv sigue donde estaba el 2026-10-28: las diferencias caben
+  en el ruido. Frente a la primera tabla de esta página (vz, 2026-10-27, el
+  compose de 3 en 1,11–1,32 s y Docker Desktop en 1,2 s), el día a día está
+  entre 4 y 5 veces más rápido con hv y algo más rápido con vz.
+- Con vz, todo lo que restaura cuesta entre 3 y 5 veces lo de hv: el compose,
+  0,84 s frente a 0,27 s; despertar, 263 ms frente a 54 ms.
+- En frío no mejora: `-fresh` (reimportar de la caché de capas y rehacer las
+  plantillas) da 3,0–3,5 s frente a los 2,0–2,5 s de antes, y una postgres
+  sola sin plantilla, 7 s. No es exactamente el «en frío» de la primera
+  tabla, que no rehacía la plantilla.
+- La primera vez, con la descarga incluida (vz, n=1), redis tardó 3,1 s y
+  postgres 11,1 s.
+- En las dos raíces, el primer `compose up` del proyecto de 3, el que bajó
+  `node:22-alpine`, dejó la app sin servir un 200 en 90 s, aunque redis y
+  postgres contestaban. Los `up` siguientes, y uno con otro `-p` (reimportar
+  sin descargar), sirvieron en seguida. Pasó 2 veces de 2 y no está explicado.
+- Un daemon que ya decía 0.20.1 tras `kling upgrade` seguía con el `vmlinux`
+  de octubre en `images/` de su raíz. Para medir una release, comprueba el
+  kernel contra el `SHA256SUMS` de esa release.
+
 Los tiempos de kindling incluyen el CLI (`kling run`/`compose up` es un proceso
 nuevo cada vez) y la sonda. En el arranque en frío, ~0,7 s de los 1,4 s de la
 app son la primera conexión del host al agente por el reenvío de `kling-vz`,
