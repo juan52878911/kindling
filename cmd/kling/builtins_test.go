@@ -228,3 +228,20 @@ func TestChispaMemEjemploEsEntero(t *testing.T) {
 		}
 	}
 }
+
+// La ayuda de `kling ai model` lista todo lo que entiende su dispatcher
+// (models.go), también deploy y roll.
+func TestAIModelAyudaTieneDeployYRoll(t *testing.T) {
+	for _, c := range builtinExtensions()[0].Manifest.Commands {
+		if c.Name != "model" {
+			continue
+		}
+		for _, s := range []string{"ls", "add", "ask", "embed", "rm", "deploy", "roll"} {
+			if !contains(c.Subcommands, s) {
+				t.Errorf("ai model: %q missing from Subcommands", s)
+			}
+		}
+		return
+	}
+	t.Fatal("no ai model command")
+}

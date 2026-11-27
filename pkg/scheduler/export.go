@@ -146,7 +146,7 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if e, ok := g.services[service]; ok {
-		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(g.port()), time.Since(e.lastUse)
+		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(g.puertoDe(e)), time.Since(e.lastUse)
 		for _, rt := range g.routes {
 			if rt.service == service {
 				st.Sessions++

@@ -1,12 +1,22 @@
 package aigw
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // Si Chispa está seguro contesta él y VON ni se entera; si duda, contesta VON y
@@ -399,5 +409,374 @@ func TestParseLabel(t *testing.T) {
 	}
 	if s := truncUTF8("añb", 2); s != "a" {
 		t.Errorf("truncUTF8 = %q", s)
+	}
+}
+
+// ---- ciclo de vida (Z4 de la ronda 8)
+
+// escribirRegistro escribe un ai.json 0600 con un modelo VON (smol) más los
+// modelos e inquilinos que se den.
+func escribirRegistro(t *testing.T, p string, modelos map[string]any, tenants []TenantConfig) {
+	t.Helper()
+	ms := map[string]any{"smol": map[string]any{"kind": "von", "snapshot": "von-smol"}}
+	for k, v := range modelos {
+		ms[k] = v
+	}
+	doc := map[string]any{"models": ms, "tasks": map[string]any{}}
+	if len(tenants) > 0 {
+		doc["tenants"] = tenants
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Quitar un inquilino de ai.json y recargar da 401 a su token sin reiniciar;
+// uno añadido entra; y el token principal sigue valiendo (R8-02).
+func TestReloadRevocaInquilino(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ai.json")
+	escribirRegistro(t, p, nil, []TenantConfig{{Name: "acme", Token: "tenant-acme-0123456789"}})
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := g.Handler("main-token-0123456789")
+	if rec := do(t, h, "GET", "/v1/models", "tenant-acme-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("acme before reload: %d", rec.Code)
+	}
+	escribirRegistro(t, p, nil, []TenantConfig{{Name: "beta", Token: "tenant-beta-0123456789"}})
+	if _, err := g.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "tenant-acme-0123456789", nil); rec.Code != 401 {
+		t.Fatalf("acme after being removed and reloaded: %d, want 401", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "tenant-beta-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("beta after being added and reloaded: %d, want 200", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "main-token-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("main token after reload: %d", rec.Code)
+	}
+}
+
+// Un ai.json con tokens de inquilino legible por otros no se carga en un
+// reload, igual que al arrancar (kling ai serve): se queda el registro de antes.
+func TestReloadRechazaInquilinosLegibles(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ai.json")
+	escribirRegistro(t, p, nil, []TenantConfig{{Name: "acme", Token: "tenant-acme-0123456789"}})
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := g.Handler("main-token-0123456789")
+	escribirRegistro(t, p, nil, []TenantConfig{{Name: "beta", Token: "tenant-beta-0123456789"}})
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reload(); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("reload of a world-readable registry with tenant tokens: %v", err)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "tenant-acme-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("acme after a refused reload: %d, want 200 (old registry kept)", rec.Code)
+	}
+}
+
+// Los ganchos del planificador salen de Backends y se recalculan en Reload:
+// puerto, en vuelo por réplica, política de ociosidad y sonda cambian sin
+// reiniciar. kind http porque port no vale para el atajo von. Un dorado que no es de ningún backend da los ceros (lo de hoy).
+func TestHooksSeRecalculanEnReload(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ai.json")
+	escribirRegistro(t, p, map[string]any{"smol": map[string]any{"kind": "http", "contract": "openai", "snapshot": "von-smol",
+		"port": 8090, "max_inflight": 4, "idle": "pause", "health": map[string]any{"path": "/healthz", "timeout": "2s"}}}, nil)
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	s := g.sched
+	if s.PortFor == nil || s.MaxInflightFor == nil || s.IdleFor == nil || s.ReadyFor == nil || s.OnForget == nil {
+		t.Fatal("scheduler hooks not wired")
+	}
+	if got := s.PortFor("von-smol"); got != 8090 {
+		t.Fatalf("PortFor = %d, want 8090", got)
+	}
+	if got := s.MaxInflightFor("von-smol"); got != 4 {
+		t.Fatalf("MaxInflightFor = %d, want 4", got)
+	}
+	if got := s.IdleFor("von-smol"); got != scheduler.IdlePause {
+		t.Fatalf("IdleFor = %q, want pause", got)
+	}
+	if pr := s.ReadyFor("von-smol"); pr == nil || pr.Path != "/healthz" || pr.Timeout != 2*time.Second {
+		t.Fatalf("ReadyFor = %+v", pr)
+	}
+
+	escribirRegistro(t, p, map[string]any{"smol": map[string]any{"kind": "http", "contract": "openai", "snapshot": "von-smol", "port": 9000}}, nil)
+	if _, err := g.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.PortFor("von-smol"); got != 9000 {
+		t.Fatalf("PortFor after reload = %d, want 9000", got)
+	}
+	if got := s.MaxInflightFor("von-smol"); got != 0 {
+		t.Fatalf("MaxInflightFor after reload = %d, want 0 (the gateway's)", got)
+	}
+	if got := s.IdleFor("von-smol"); got != scheduler.IdleRemove {
+		t.Fatalf("IdleFor after reload = %q, want remove", got)
+	}
+	if pr := s.ReadyFor("von-smol"); pr == nil || pr.Path != "/health" {
+		t.Fatalf("ReadyFor without health = %+v, want the contract's /health", pr)
+	}
+	if s.PortFor("otro") != 0 || s.MaxInflightFor("otro") != 0 || s.IdleFor("otro") != scheduler.IdleDefault || s.ReadyFor("otro") != nil {
+		t.Fatal("a snapshot of no backend must get the zero values")
+	}
+}
+
+// daemonCiclo es un daemon falso con lo justo para Start y Close: info,
+// listado, congelar y borrar, apuntando qué se hizo con cada máquina.
+type daemonCiclo struct {
+	mu       sync.Mutex
+	machines []*api.Machine
+	frozen   []string
+	removed  []string
+}
+
+func (d *daemonCiclo) serve(t *testing.T) *api.Client {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "aigw") // corto: un socket Unix de macOS no pasa de 104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	send := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(v) }
+	mux.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) { send(w, api.Info{}) })
+	mux.HandleFunc("GET /machines", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		out := []*api.Machine{}
+		for _, m := range d.machines {
+			c := *m
+			out = append(out, &c)
+		}
+		send(w, out)
+	})
+	find := func(ref string) *api.Machine {
+		for _, m := range d.machines {
+			if m.ID == ref {
+				return m
+			}
+		}
+		return nil
+	}
+	mux.HandleFunc("POST /machines/{ref}/freeze", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		m := find(r.PathValue("ref"))
+		if m == nil {
+			http.Error(w, `{"error":"no such machine"}`, 404)
+			return
+		}
+		m.State = api.StateWarm
+		d.frozen = append(d.frozen, m.ID)
+		c := *m
+		send(w, &c)
+	})
+	mux.HandleFunc("DELETE /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		ref := r.PathValue("ref")
+		for i, m := range d.machines {
+			if m.ID == ref {
+				d.machines = append(d.machines[:i], d.machines[i+1:]...)
+				d.removed = append(d.removed, ref)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		http.Error(w, `{"error":"no such machine"}`, 404)
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { srv.Close() })
+	return api.NewClient(sock)
+}
+
+func (d *daemonCiclo) hecho() (frozen, removed []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	frozen, removed = append([]string(nil), d.frozen...), append([]string(nil), d.removed...)
+	sort.Strings(frozen)
+	sort.Strings(removed)
+	return frozen, removed
+}
+
+func maquina(id, from, gw string, st api.State) *api.Machine {
+	m := &api.Machine{ID: id, Name: "gw-" + id, State: st, From: from, Labels: map[string]string{}}
+	if from != "" {
+		m.Labels[api.LabelService] = from
+	}
+	if gw != "" {
+		m.Labels[LabelGateway] = gw
+	}
+	return m
+}
+
+// Al arrancar se borran las réplicas con la etiqueta de ESTE gateway cuyo
+// dorado ya no es de ningún modelo del registro (R8-06b), en cualquier estado;
+// las de un modelo vigente siguen como hoy (la que corre se congela). Nada de
+// otro gateway, de un humano o sin dorado conocido se toca.
+func TestBarridoReplicasDeModeloRetirado(t *testing.T) {
+	d := &daemonCiclo{machines: []*api.Machine{
+		maquina("vieja-fria", "von-retirado", "default", api.StateWarm),
+		maquina("vieja-viva", "von-retirado", "default", api.StateRunning),
+		maquina("vigente", "von-smol", "default", api.StateRunning),
+		maquina("otro-gw", "von-retirado", "otro", api.StateWarm),
+		maquina("humano", "von-retirado", "", api.StateWarm),
+		maquina("sin-dorado", "", "default", api.StateWarm),
+	}}
+	client := d.serve(t)
+	cfg := &Config{Models: map[string]*ModelConfig{"smol": {Kind: KindVON, Snapshot: "von-smol", Idle: IdleFreeze}}, Tasks: map[string]*TaskConfig{}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	g, err := New(Options{Client: client, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.setConfig(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.Start(ctx)
+	frozen, removed := d.hecho()
+	if strings.Join(removed, ",") != "vieja-fria,vieja-viva" {
+		t.Fatalf("removed %v, want the two replicas of the retired model", removed)
+	}
+	if strings.Join(frozen, ",") != "vigente" {
+		t.Fatalf("frozen %v, want only the running replica of a registered model", frozen)
+	}
+}
+
+// Al cerrar, una réplica de un modelo con idle remove se borra en vez de
+// congelarse; la de un modelo freeze se congela como hoy.
+func TestCierreBorraReplicasRemove(t *testing.T) {
+	d := &daemonCiclo{machines: []*api.Machine{
+		maquina("quitar", "von-smol", "default", api.StateRunning),
+		maquina("congelar", "von-big", "default", api.StateRunning),
+	}}
+	client := d.serve(t)
+	cfg := &Config{Models: map[string]*ModelConfig{
+		"smol": {Kind: KindVON, Snapshot: "von-smol", Idle: IdleRemove},
+		"big":  {Kind: KindVON, Snapshot: "von-big", Idle: IdleFreeze},
+	}, Tasks: map[string]*TaskConfig{}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	g, err := New(Options{Client: client, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.setConfig(cfg)
+	g.Close(context.Background())
+	frozen, removed := d.hecho()
+	if strings.Join(removed, ",") != "quitar" || strings.Join(frozen, ",") != "congelar" {
+		t.Fatalf("removed %v frozen %v, want remove=quitar freeze=congelar", removed, frozen)
+	}
+}
+
+// Al cerrar no se congela debajo de una petición que sigue en vuelo dentro de
+// una réplica (una escalada, una auditoría): esa réplica se salta y la recoge
+// el siguiente arranque (R8-03).
+func TestCierreSaltaReplicasEnVuelo(t *testing.T) {
+	fl := newFakeLlama(t)
+	fl.entered, fl.block = make(chan struct{}, 1), make(chan struct{})
+	soltar := sync.OnceFunc(func() { close(fl.block) })
+	t.Cleanup(soltar) // un fallo no deja el llama falso bloqueado al cerrarlo
+	d := &fakeDaemon{llama: strings.TrimPrefix(fl.srv.URL, "http://"), machines: map[string]*api.Machine{}}
+	client := d.serve(t)
+	cfg := &Config{
+		Models: map[string]*ModelConfig{
+			"commits": {Kind: KindChispa, Path: trainedModel(t)},
+			// freeze: el test mira que Close no congele bajo una petición
+			// en vuelo (con el defecto remove, no la borraría tampoco).
+			"smol": {Kind: KindVON, Snapshot: "von-smol", Idle: IdleFreeze},
+		},
+		Tasks: map[string]*TaskConfig{"kind": {Chispa: "commits", EscalateTo: "smol", EscalateForce: true,
+			Thresholds: map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}}},
+	}
+	g, err := New(Options{Client: client, Config: cfg, Idle: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := g.Handler("")
+	done := make(chan int, 1)
+	go func() {
+		done <- do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash"}).Code
+	}()
+	<-fl.entered
+	g.Close(context.Background())
+	if _, _, freezes, _ := d.counts(); freezes != 0 {
+		t.Fatalf("Close froze %d replica(s) with a request in flight", freezes)
+	}
+	soltar()
+	if c := <-done; c != 200 {
+		t.Fatalf("request in flight during Close: %d", c)
+	}
+	g.Close(context.Background())
+	if _, _, freezes, running := d.counts(); freezes != 1 || running != 0 {
+		t.Fatalf("Close once idle: freezes=%d running=%d, want 1 and 0", freezes, running)
+	}
+}
+
+// Un gateway arrancado en el socket sin token sigue atendiendo sin token a su
+// dueño después de que un reload traiga inquilinos: el registro nuevo no le
+// cierra el socket. Un inquilino sigue entrando solo con su token, y un token
+// que no es de nadie es un 401. En TCP (-no-auth) no hay excepción.
+func TestSocketSinTokenSobreviveAInquilinos(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ai.json")
+	escribirRegistro(t, p, nil, nil)
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := g.ServeHandler("", false)
+	if rec := do(t, h, "GET", "/v1/models", "", nil); rec.Code != 200 {
+		t.Fatalf("owner before reload: %d", rec.Code)
+	}
+	escribirRegistro(t, p, nil, []TenantConfig{{Name: "acme", Token: "tenant-acme-0123456789"}})
+	if _, err := g.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "", nil); rec.Code != 200 {
+		t.Fatalf("socket owner without a token after tenants arrived: %d, want 200", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/metrics", "", nil); rec.Code != 200 {
+		t.Fatalf("socket owner on an admin route: %d, want 200", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/metrics", "tenant-acme-0123456789", nil); rec.Code != 403 {
+		t.Fatalf("tenant on an admin route: %d, want 403", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "tenant-acme-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("tenant with its token: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "nadie-0123456789abcdef", nil); rec.Code != 401 {
+		t.Fatalf("unknown token on the socket: %d, want 401", rec.Code)
+	}
+	tcp := g.ServeHandler("", true)
+	if rec := do(t, tcp, "GET", "/v1/models", "", nil); rec.Code != 401 {
+		t.Fatalf("TCP without a token once tenants exist: %d, want 401", rec.Code)
 	}
 }

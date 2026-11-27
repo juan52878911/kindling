@@ -27,13 +27,17 @@ import (
 
 func cmdModels(args []string) error {
 	if len(args) == 0 {
-		return errUso("usage: kling ai model <ls|add|ask|embed|rm> [...]")
+		return errUso("usage: kling ai model <ls|add|deploy|roll|ask|embed|rm> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
 		return modelsList(args[1:])
 	case "add":
 		return modelsAdd(args[1:])
+	case "deploy":
+		return modelsDeploy(args[1:])
+	case "roll":
+		return modelsRoll(args[1:])
 	case "ask":
 		return modelsAsk(args[1:])
 	case "embed":
@@ -41,7 +45,7 @@ func cmdModels(args []string) error {
 	case "rm", "remove":
 		return modelsRm(args[1:])
 	default:
-		return errUsoDe("ai model", fmt.Errorf("unknown subcommand %q: use ls, add, ask, embed or rm", args[0]))
+		return errUsoDe("ai model", fmt.Errorf("unknown subcommand %q: use ls, add, deploy, roll, ask, embed or rm", args[0]))
 	}
 }
 

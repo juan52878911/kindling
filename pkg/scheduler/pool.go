@@ -305,7 +305,10 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 		return nil, err
 	}
 
-	if err := p.gw.esperarListo(ctx, mc, readyTimeout); err != nil {
+	// El puerto del servicio (PortFor), el mismo que tendrá la instancia
+	// cuando se entregue.
+	port := p.gw.portFor(service)
+	if err := p.gw.esperarListoEn(ctx, mc, port, readyTimeout); err != nil {
 		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
 		return nil, err
 	}
@@ -314,7 +317,7 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 	var sid string
 	switch {
 	case p.gw.PrepareAddr != nil:
-		sid, err = p.gw.PrepareAddr(ctx, mc.Addr(p.gw.port()))
+		sid, err = p.gw.PrepareAddr(ctx, mc.Addr(port))
 	case p.gw.Prepare != nil:
 		sid, err = p.gw.Prepare(ctx, mc.IP)
 	}

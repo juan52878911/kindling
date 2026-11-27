@@ -1,0 +1,33 @@
+[Unit]
+Description=kling ai - AI gateway (models and tasks on kindling microVMs)
+Documentation=https://github.com/juan52878911/kindling
+# Las réplicas de los modelos las pone el daemon: se arranca después y se para
+# antes que él, así el apagado aún puede congelar o borrar las réplicas propias.
+After=network.target kling.service
+Wants=kling.service
+
+[Service]
+Type=simple
+# Dónde escucha y con qué registro cambia de host a host: van en
+# /etc/default/kling-ai (el "-" lo hace opcional), no aquí. Por ejemplo:
+#   KLING_AI_ARGS=-listen 127.0.0.1:8080 -config /etc/kling/ai.json -token-file /etc/kling/ai.token
+# Sin -listen escucha en el socket ai.sock junto a la configuración de kling
+# del usuario que lo corre. Para correrlo con un usuario sin privilegios que
+# pueda abrir el socket del daemon: `systemctl edit kling-ai` con User=.
+EnvironmentFile=-/etc/default/kling-ai
+ExecStart=/usr/local/bin/kling ai serve $KLING_AI_ARGS
+# SIGHUP relee ai.json sin cortar nada: modelos, tareas e inquilinos (un token
+# quitado deja de valer en la siguiente petición).
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+# Apagado: SIGTERM deja terminar lo que está en vuelo hasta -drain (30 s por
+# defecto) y luego duerme las réplicas propias (hasta 15 s más). Si subes
+# -drain, sube esto con él: TimeoutStopSec >= drain + 15 s, o systemd mata el
+# proceso con generaciones a medias.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

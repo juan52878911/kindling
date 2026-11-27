@@ -6,7 +6,7 @@ set -euo pipefail
 KB=${KB:-/opt/kbench}
 BASE=/srv/kt-bench; UNIT=kt-bench; RUN=/run/$UNIT; SOCK=$RUN/kling.sock; ROOT=$BASE/root; LIB=$BASE/lib
 BINS=$KB/bins
-command -v firecracker >/dev/null && firecracker --version | head -1
+command -v firecracker >/dev/null && { v=$(firecracker --version 2>&1); sed -n 1p <<<"$v"; }
 id kindling-build >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build
 id kindling >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin -G kvm kindling
 mkdir -p "$BASE/bin" "$LIB" "$ROOT/images" "$RUN" "$BASE/shares"
@@ -15,8 +15,17 @@ printf '{"daemon":{"share_roots":["%s"]}}\n' "$BASE/shares" > "$BASE/config.json
 install -m755 "$BINS/kling" "$BASE/bin/kling"
 install -m755 "$BINS/kling-guest" "$LIB/kling-guest"
 install -m755 "$BINS/81-base-image.sh" "$BINS/lib-ext4-shrink.sh" "$LIB/"
+# Lo mismo que deja `make deploy` para los dorados de IA: la base glibc de llama-server (llm), el init
+# mínimo y el agente de Chispa en microVM. Opcionales para las fases que no son de IA.
+for f in 71-build-glibc-base.sh minimal-init.sh kling-chispa kling-unpack; do
+  [ ! -f "$BINS/$f" ] || install -m755 "$BINS/$f" "$LIB/$f"
+done
 install -d -m755 "$BASE/builders"
-printf '#!/bin/sh\nexec %s builder base "$@"\n' "$BASE/bin/kling" > "$BASE/builders/base"; chmod 755 "$BASE/builders/base"
+# Los constructores que usa el banco: base (imágenes), llm (dorados VON de `kling ai model add`)
+# y chispa (`kling ai chispa deploy`). Son el mismo kling con otro subcomando.
+for b in base llm chispa; do
+  printf '#!/bin/sh\nexec %s builder %s "$@"\n' "$BASE/bin/kling" "$b" > "$BASE/builders/$b"; chmod 755 "$BASE/builders/$b"
+done
 for f in vmlinux min.ext4; do [ -f "$ROOT/images/$f" ] || cp /var/lib/kindling/images/$f "$ROOT/images/"; done
 # Barrido: se reenvían al servicio las KLING_* presentes en el entorno.
 EXTRA=()
@@ -27,4 +36,7 @@ systemctl is-active --quiet $UNIT || systemd-run --unit "$UNIT" --collect -p Kil
   -E "KLING_LIB_DIR=$LIB" -E "KLING_BUILDERS_DIR=$BASE/builders" -E "KLING_SOCKET_USER=root" -E "KLING_MIN_FREE_DISK_MIB=1024" \
   "${EXTRA[@]}" "$BASE/bin/kling" daemon -root "$ROOT" -socket "$SOCK" >/dev/null
 for _ in $(seq 1 60); do KLING_HOST=unix://$SOCK KLING_CONFIG=$BASE/config.json "$BASE/bin/kling" ps >/dev/null 2>&1 && break; sleep 0.5; done
-KLING_HOST=unix://$SOCK KLING_CONFIG=$BASE/config.json "$BASE/bin/kling" status -v 2>&1 | head -12
+# Toda la salida primero y luego las 12 líneas: con `| head -12` y pipefail, kling se llevaba un
+# SIGPIPE al cerrar head y el guion salía con error justo después de un arranque bueno.
+estado=$(KLING_HOST=unix://$SOCK KLING_CONFIG=$BASE/config.json "$BASE/bin/kling" status -v 2>&1)
+sed -n '1,12p' <<<"$estado"

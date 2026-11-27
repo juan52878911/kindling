@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // El token se genera 0600, se relee igual y un fichero legible por otros se
@@ -64,5 +70,85 @@ func TestAISocket0600(t *testing.T) {
 	ln2.Close()
 	if _, err := listenUnix0600(filepath.Join(dir, strings.Repeat("a", 120))); err == nil {
 		t.Fatal("overlong socket path accepted")
+	}
+}
+
+// reinicioConPeticiones arranca un servidor con servirHastaApagar, mete n
+// peticiones que tardan dur cada una, pide el apagado con todas en vuelo y,
+// cuando servirHastaApagar vuelve, cierra el servidor como lo haría la salida
+// del proceso. Devuelve cuántas de esas peticiones NO acabaron en 200.
+func reinicioConPeticiones(tb testing.TB, n int, dur, drain time.Duration) int {
+	tb.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var dentro sync.WaitGroup
+	dentro.Add(n)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dentro.Done()
+		time.Sleep(dur)
+		_, _ = w.Write([]byte("ok"))
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vuelta := make(chan error, 1)
+	go func() { vuelta <- servirHastaApagar(ctx, srv, ln, drain) }()
+
+	cl := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 10 * time.Second}
+	var fallos atomic.Int64
+	var hechas sync.WaitGroup
+	for range n {
+		hechas.Add(1)
+		go func() {
+			defer hechas.Done()
+			resp, err := cl.Get("http://" + ln.Addr().String() + "/")
+			if err != nil {
+				fallos.Add(1)
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				fallos.Add(1)
+			}
+		}()
+	}
+	dentro.Wait()
+	cancel()
+	if err := <-vuelta; err != nil {
+		tb.Fatal(err)
+	}
+	_ = srv.Close() // la salida del proceso: lo que quede en vuelo se corta
+	hechas.Wait()
+	return int(fallos.Load())
+}
+
+// BenchmarkReiniciosErrores mide los errores que ve un cliente con peticiones
+// en vuelo durante reinicios del servicio (R8-03). Con -benchtime=20x son 20
+// reinicios; el objetivo es 0 err/restart.
+func BenchmarkReiniciosErrores(b *testing.B) {
+	total := 0
+	for range b.N {
+		total += reinicioConPeticiones(b, 4, 50*time.Millisecond, 30*time.Second)
+	}
+	b.ReportMetric(float64(total)/float64(b.N), "err/restart")
+}
+
+// Un SIGTERM con una generación en curso la deja terminar: servirHastaApagar
+// no vuelve (y el proceso no sale) hasta que Shutdown haya drenado lo que
+// estaba en vuelo (R8-03).
+func TestApagadoEsperaPeticionEnVuelo(t *testing.T) {
+	if n := reinicioConPeticiones(t, 1, 200*time.Millisecond, 5*time.Second); n != 0 {
+		t.Fatalf("%d request(s) in flight failed on shutdown, want 0", n)
+	}
+}
+
+// Pasado el plazo de drenado, servirHastaApagar vuelve igual: un cliente
+// colgado no retiene el apagado más que -drain.
+func TestApagadoRespetaElPlazo(t *testing.T) {
+	t0 := time.Now()
+	reinicioConPeticiones(t, 1, 3*time.Second, 100*time.Millisecond)
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("shutdown took %s with a 100ms drain", d)
 	}
 }

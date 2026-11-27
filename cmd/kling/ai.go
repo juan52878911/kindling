@@ -100,6 +100,9 @@ func aiServe(args []string) error {
 	pausedFor := fs.Duration("paused-for", 0, "how long a paused replica waits before it is frozen (0 = 10 × -idle)")
 	chispaMem := fs.Int("chispa-mem", 256, "MiB of Chispa models kept loaded (LRU)")
 	vonTimeout := fs.Duration("von-timeout", 60*time.Second, "deadline of an escalation to VON")
+	proxyTimeout := fs.Duration("proxy-timeout", 5*time.Minute, "deadline of a request proxied to a model (OpenAI routes)")
+	maxBody := fs.Int64("max-body", 1<<20, "bytes of a request body")
+	drain := fs.Duration("drain", 30*time.Second, "on SIGTERM, how long requests in flight get to finish before they are cut")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -151,6 +154,7 @@ func aiServe(args []string) error {
 		Idle: *idle, MaxReplicas: *maxReplicas, MaxInflight: *maxInflight, KeepWarm: *keepwarm,
 		PausedMiB: *pausedMiB, PausedFor: *pausedFor,
 		ChispaBudget: int64(*chispaMem) << 20, VONTimeout: *vonTimeout,
+		ProxyTimeout: *proxyTimeout, MaxBody: *maxBody,
 		PopularityFile: aiDefault("ai-popularity-" + *id + ".json"),
 	})
 	if err != nil {
@@ -196,12 +200,6 @@ func aiServe(args []string) error {
 			}
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
-	}()
 
 	auth := "no token (socket 0600)"
 	switch {
@@ -218,15 +216,45 @@ func aiServe(args []string) error {
 	for _, n := range aigw.CascadeNotes(g.Cascades()) {
 		fmt.Println("  " + n)
 	}
-	err = srv.Serve(ln)
-	// Al salir no queda ninguna réplica corriendo: se congelan todas.
-	cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	err = servirHastaApagar(ctx, srv, ln, *drain)
+	// Ya sin peticiones HTTP: lo propio se duerme (o se borra, con idle
+	// remove), saltando lo que siga en vuelo por dentro. El plazo cabe con
+	// -drain en el TimeoutStopSec=45 de packaging/kling-ai.service.
+	cctx, cancel := context.WithTimeout(context.Background(), cierrePlazo)
 	defer cancel()
 	g.Close(cctx)
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
 	return err
+}
+
+// cierrePlazo acota g.Close al salir: dormir o borrar las réplicas propias.
+// Lo que no dé tiempo lo recoge el siguiente arranque (Start).
+const cierrePlazo = 15 * time.Second
+
+// servirHastaApagar sirve ln hasta que ctx acaba y entonces apaga srv con un
+// plazo de drain. Al volver, quien llama sale del proceso: lo que siga en
+// vuelo se corta.
+//
+// Serve devuelve ErrServerClosed en cuanto EMPIEZA Shutdown, no cuando acaba:
+// volver ahí cortaba las generaciones en curso y las congelaba debajo (R8-03).
+// Por eso se espera a que Shutdown termine (todo drenado) o venza drain; en
+// ese caso se cierra lo que quede y se avisa.
+func servirHastaApagar(ctx context.Context, srv *http.Server, ln net.Listener, drain time.Duration) error {
+	apagado := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), drain)
+		defer cancel()
+		apagado <- srv.Shutdown(sctx)
+	}()
+	err := srv.Serve(ln)
+	if !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	if err := <-apagado; err != nil {
+		log.Printf("shutdown: requests still in flight after -drain %s (%v): cutting them", drain, err)
+		_ = srv.Close()
+	}
+	return nil
 }
 
 // listenUnix0600 escucha en un socket Unix que solo el usuario puede abrir. El

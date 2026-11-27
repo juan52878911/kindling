@@ -84,6 +84,14 @@ SSH funciona igual. `-model`/`-slots` se validan (`chispa.Load`/`slots.Load`)
 antes de escribirse en la imagen: un fichero corrupto no llega a congelarse en
 un dorado inservible.
 
+El dorado lo hace el fabricante genérico de dorados (`internal/dorado`), el
+mismo de `kling ai model add` y `kling ai model deploy`, con el puerto, la sonda
+(`/healthz`) y el calentamiento de `kling-chispa` fijos. Como en ellos, el
+dorado **graba `cpu_pct` = 100 por vCPU** y las réplicas lo heredan: antes
+heredaba el 50 % por defecto del daemon (pensado para herramientas MCP), que
+dejaba a la réplica a media velocidad. Un dorado hecho con una versión anterior
+conserva su 50 % hasta que se vuelva a desplegar.
+
 Dentro de la imagen, `kling-chispa` (`cmd/kling-chispa`) es el invitado entero: un
 binario estático (~10 MB, sin cgo, `CGO_ENABLED=0`) que carga el `.chispa` al
 arrancar y sirve:
@@ -124,7 +132,13 @@ como anotación del dorado; una respuesta que no encaja con ese registro es un
 ```
 
 `backend` solo se aplica a `kind: "chispa"` (von y embed siempre son una
-réplica). Sin `backend`, o con `"inprocess"`, es el `path` de siempre. Con
+réplica). Una réplica de Chispa se **congela** al quedar ociosa (`idle:
+freeze`, su defecto: 128 MiB y un thaw de ~2 ms), mientras que `von` y `embed`
+se borran (`remove`); se puede cambiar con `"idle"` en el modelo (ver
+[ai-gateway.md](ai-gateway.md#modelos-http-kind-http)). El Chispa de capas nuevo
+(chispa-server, `/v1/decide` con `{state, questions}`) no es este modelo: va
+como `kind http` con contrato `chispa-decide` (ver [Alojar la Chispa
+nueva](ai-gateway.md#alojar-la-chispa-nueva-chispa-server-y-otros-modelos)). Sin `backend`, o con `"inprocess"`, es el `path` de siempre. Con
 `"microvm"` hace falta `snapshot` (y ningún `path`); el gateway la despierta,
 la congela y la escala igual que a un modelo VON —réplicas por concurrencia,
 TTL de red de seguridad, todo lo de [ai-gateway.md](ai-gateway.md#cómo-está-hecho)—.

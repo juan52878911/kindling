@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/dorado"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -272,6 +273,10 @@ func Labels(ref, service string, extra map[string]string) map[string]string {
 // la calienta, la congela como dorado y la borra. Es lo que hace `kling ai model
 // add` tras construir la imagen, y lo que hará un gateway que (re)cree
 // dorados: por ejemplo tras reiniciar el host, que invalida los snapshots.
+//
+// El algoritmo es el del fabricante genérico (internal/dorado); aquí solo va
+// lo propio de llama-server: la espera que distingue «cargando» de «roto» y un
+// calentamiento que mira la respuesta (los prefijos cuentan sus tokens).
 func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenResult, error) {
 	logf := o.Log
 	if logf == nil {
@@ -280,43 +285,34 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	if o.Wait == 0 {
 		o.Wait = 5 * time.Minute
 	}
-	if o.CPUPct == 0 {
-		o.CPUPct = 100 * max(o.VCPUs, 1)
-	}
-	// La plantilla lleva nombre propio y aleatorio: dos `models add` a la vez
-	// del mismo modelo no deben pisarse la máquina.
-	name := fmt.Sprintf("%s-golden-%s", o.Snapshot, strconv.FormatInt(time.Now().UnixNano()%1_000_000, 36))
 	labels := Labels(o.Ref, o.Snapshot, o.Labels)
 	delete(labels, LabelPrefixes)
 	if h := PrefixesHash(o.Prefixes); h != "" {
 		labels[LabelPrefixes] = h
 	}
-	mc, err := c.Run(ctx, api.RunRequest{
-		Name: name, Image: o.Image, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
-		CPUPct:    o.CPUPct,
-		Egress:    "none",
-		Labels:    labels,
-		AllowExec: o.AllowExec,
+	res := &GoldenResult{}
+	g, err := dorado.Make(ctx, c, dorado.Options{
+		Image: o.Image, Snapshot: o.Snapshot, Port: Port,
+		VCPUs: o.VCPUs, MemMiB: o.MemMiB, CPUPct: o.CPUPct,
+		Labels: labels, AllowExec: o.AllowExec, Replace: o.Replace,
+		Wait: o.Wait, Log: logf,
+		Ready: func(ctx context.Context, ref string, timeout time.Duration) error {
+			return WaitReady(ctx, c, ref, timeout)
+		},
+		AfterWarmup: func(ctx context.Context, ref string) error {
+			return warmLlama(ctx, c, ref, o, res, logf)
+		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("booting %s: %w", o.Image, err)
+		return nil, err
 	}
-	res := &GoldenResult{BootMS: mc.BootMS}
-	// Pase lo que pase, la plantilla no se queda: lo que vale es el dorado.
-	defer func() {
-		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		_ = c.Remove(rc, mc.ID)
-	}()
-	logf("booted %s in %d ms; loading the model...", mc.Name, mc.BootMS)
+	res.Snapshot, res.BootMS, res.LoadTime = g.Snapshot, g.BootMS, g.LoadTime
+	return res, nil
+}
 
-	t0 := time.Now()
-	if err := WaitReady(ctx, c, mc.ID, o.Wait); err != nil {
-		return nil, fmt.Errorf("%w\nsee the server log with:  kling exec %s -- tail -50 /var/log/service.log", err, mc.Name)
-	}
-	res.LoadTime = time.Since(t0)
-	logf("model loaded in %s; warming up...", res.LoadTime.Round(time.Millisecond))
-
+// warmLlama calienta un llama-server recién cargado y deja evaluados los
+// prefijos de las tareas.
+func warmLlama(ctx context.Context, c *api.Client, ref string, o GoldenOptions, res *GoldenResult, logf func(string, ...any)) error {
 	// La primera respuesta puede tardar más que el plazo de cabeceras del
 	// proxy del daemon (5 min): en el laboratorio anidado, un 1,5B o un 3B
 	// trae sus pesos a base de fallos de página de ~1 ms. llama-server sigue
@@ -324,17 +320,18 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	// Wait: el reintento espera en su cola y sale en cuanto la primera acaba.
 	warmHasta := time.Now().Add(o.Wait)
 	var w *ChatResponse
+	var err error
 	for {
-		if w, err = warm(ctx, c, mc.ID, o.Kind); err == nil {
+		if w, err = warm(ctx, c, ref, o.Kind); err == nil {
 			break
 		}
 		if ctx.Err() != nil || time.Now().After(warmHasta) {
-			return nil, fmt.Errorf("warm-up: %w", err)
+			return fmt.Errorf("warm-up: %w", err)
 		}
 		logf("warm-up not answered yet (%v); retrying", err)
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
 	}
@@ -348,30 +345,16 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	// system prompt pasa de 4,7 s a 0,4 s en Qwen2.5-1.5B.
 	cero := 0.0
 	for i, p := range o.Prefixes {
-		r, _, err := Chat(ctx, c, mc.ID, ChatRequest{Messages: p.Messages(), MaxTokens: 1, Temperature: &cero})
+		r, _, err := Chat(ctx, c, ref, ChatRequest{Messages: p.Messages(), MaxTokens: 1, Temperature: &cero})
 		if err != nil {
-			return nil, fmt.Errorf("prefix %d: %w", i+1, err)
+			return fmt.Errorf("prefix %d: %w", i+1, err)
 		}
 		res.PrefixTokens = append(res.PrefixTokens, r.Usage.PromptTokens)
 		if r.Timings != nil {
 			logf("prefix %d of %d: %d tokens evaluated in %.0f ms", i+1, len(o.Prefixes), r.Timings.PromptN, r.Timings.PromptMS)
 		}
 	}
-
-	// Devolver al host lo reclamable (memoria libre y caché de páginas limpia)
-	// ANTES de congelar: el globo deja esas páginas a cero, el commit las
-	// convierte en huecos del mem.file y el dorado ocupa solo lo que el modelo
-	// usa de verdad. Si la máquina no tiene globo, se congela igual.
-	if sq, err := c.Squeeze(ctx, mc.ID); err == nil {
-		logf("returned %d MiB of free memory to the host before freezing", sq.ReclaimedMiB)
-	}
-
-	snap, err := c.Commit(ctx, mc.ID, o.Snapshot, o.Replace)
-	if err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	res.Snapshot = snap
-	return res, nil
+	return nil
 }
 
 func recortar(s string) string {

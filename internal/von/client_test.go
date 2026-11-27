@@ -3,6 +3,7 @@ package von
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -18,18 +19,21 @@ import (
 // daemonFalso es un daemon de mentira por un socket Unix: lo justo del API
 // (run, guest, commit, rm) para probar el flujo del dorado sin microVMs.
 type daemonFalso struct {
-	mu          sync.Mutex
-	cargando    int // respuestas 503 de /health antes del 200
-	chats       []ChatRequest
-	run         api.RunRequest
-	commit      api.CommitRequest
-	borradas    []string
-	peticiones  []string
+	mu         sync.Mutex
+	cargando   int // respuestas 503 de /health antes del 200
+	chats      []ChatRequest
+	run        api.RunRequest
+	commit     api.CommitRequest
+	borradas   []string
+	peticiones []string
+	// llamadas es la secuencia entera de llamadas al daemon, en orden, para
+	// comparar flujos (TestVonMakeGoldenUsaDorado).
+	llamadas    []string
 	warmFalla   bool // el /v1/chat/completions del calentamiento responde 500
 	commitFalla bool // el /commit responde 500
 }
 
-func (d *daemonFalso) servir(t *testing.T) *api.Client {
+func (d *daemonFalso) servir(t testing.TB) *api.Client {
 	t.Helper()
 	// Ruta corta: en macOS un socket Unix no admite más de 104 bytes, y el
 	// TempDir de los tests se pasa.
@@ -60,6 +64,11 @@ func (d *daemonFalso) servir(t *testing.T) *api.Client {
 			return
 		}
 		d.peticiones = append(d.peticiones, g.Method+" "+g.Path)
+		if g.ProbeOnly {
+			d.llamadas = append(d.llamadas, fmt.Sprintf("guest probe :%d", g.Port))
+		} else {
+			d.llamadas = append(d.llamadas, fmt.Sprintf("guest %s %s :%d", g.Method, g.Path, g.Port))
+		}
 		var out api.GuestResponse
 		switch {
 		case g.ProbeOnly:
@@ -104,7 +113,15 @@ func (d *daemonFalso) servir(t *testing.T) *api.Client {
 		d.borradas = append(d.borradas, r.PathValue("ref"))
 		w.WriteHeader(http.StatusNoContent)
 	})
-	srv := &http.Server{Handler: mux}
+	apunta := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/guest") {
+			d.mu.Lock()
+			d.llamadas = append(d.llamadas, r.Method+" "+r.URL.Path)
+			d.mu.Unlock()
+		}
+		mux.ServeHTTP(w, r)
+	})
+	srv := &http.Server{Handler: apunta}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { srv.Close() })
 	return api.NewClient(sock)
@@ -300,4 +317,82 @@ func TestPrefixesHash(t *testing.T) {
 	if PrefixesHash(nil) != "" || PrefixesHash(a) == PrefixesHash(a[:1]) {
 		t.Fatal("conjuntos distintos, hashes distintos; ninguno, vacío")
 	}
+}
+
+// TestVonMakeGoldenUsaDorado fija las llamadas que MakeGolden hace al daemon
+// (las de antes de pasar por internal/dorado): pasar al fabricante genérico no
+// puede añadir, quitar ni reordenar ninguna, ni cambiar lo que se graba.
+func TestVonMakeGoldenUsaDorado(t *testing.T) {
+	d := &daemonFalso{cargando: 1}
+	c := d.servir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := MakeGolden(ctx, c, GoldenOptions{
+		Image: "von-smol", Snapshot: "von-smol", Ref: "smollm2-360m-instruct:q8_0",
+		VCPUs: 2, MemMiB: 768, Wait: 5 * time.Second, Replace: true,
+		Prefixes: []Prefix{{System: "You triage tickets."}},
+		Labels:   map[string]string{"extra": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	quiero := []string{
+		"POST /machines",
+		"guest probe :8000",
+		"guest GET /health :8000",
+		"guest GET /health :8000",
+		"guest POST /v1/chat/completions :8000",
+		"guest POST /v1/chat/completions :8000",
+		"POST /machines/m1/squeeze",
+		"POST /machines/m1/commit",
+		"DELETE /machines/m1",
+	}
+	if strings.Join(d.llamadas, "\n") != strings.Join(quiero, "\n") {
+		t.Fatalf("llamadas:\n%s\nquería:\n%s", strings.Join(d.llamadas, "\n"), strings.Join(quiero, "\n"))
+	}
+	r := d.run
+	if r.Image != "von-smol" || r.VCPUs != 2 || r.MemMiB != 768 || r.CPUPct != 200 || r.Egress != "none" ||
+		r.AllowExec || len(r.Env) != 0 || len(r.Shares) != 0 {
+		t.Fatalf("run: %+v", r)
+	}
+	want := map[string]string{
+		LabelModel: "smollm2-360m-instruct:q8_0", api.LabelPorts: "8000", api.LabelService: "von-smol",
+		LabelPrefixes: PrefixesHash([]Prefix{{System: "You triage tickets."}}), "extra": "1",
+	}
+	if len(r.Labels) != len(want) {
+		t.Fatalf("etiquetas: %v", r.Labels)
+	}
+	for k, v := range want {
+		if r.Labels[k] != v {
+			t.Fatalf("etiqueta %s = %q, quería %q (%v)", k, r.Labels[k], v, r.Labels)
+		}
+	}
+	if d.commit.Name != "von-smol" || !d.commit.Replace {
+		t.Fatalf("commit: %+v", d.commit)
+	}
+}
+
+// BenchmarkVonMakeGolden mide el flujo del dorado contra el daemon de mentira:
+// lo que cuesta el código de kindling alrededor de las llamadas (el arranque y
+// la carga reales no están). calls/op son las llamadas al daemon.
+func BenchmarkVonMakeGolden(b *testing.B) {
+	d := &daemonFalso{}
+	c := d.servir(b)
+	ctx := context.Background()
+	o := GoldenOptions{
+		Image: "von-smol", Snapshot: "von-smol", Ref: "smollm2-360m-instruct:q8_0",
+		VCPUs: 2, MemMiB: 768, Wait: 5 * time.Second, Prefixes: []Prefix{{System: "s"}},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := MakeGolden(ctx, c, o); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	d.mu.Lock()
+	b.ReportMetric(float64(len(d.llamadas))/float64(b.N), "calls/op")
+	d.mu.Unlock()
 }

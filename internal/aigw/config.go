@@ -54,11 +54,15 @@ type Config struct {
 	// Tenants son tokens con nombre y cuota (reparto justo, no seguridad; ver
 	// pkg/scheduler/quota.go). Con tokens aquí, el fichero debe ser 0600.
 	Tenants []TenantConfig `json:"tenants,omitempty"`
+
+	// backends son los modelos expandidos a Backend (backend.go), calculados
+	// por Validate cuando el registro es válido; nil = sin validar.
+	backends map[string]*Backend
 }
 
 // ModelConfig es un modelo con nombre.
 type ModelConfig struct {
-	Kind string `json:"kind"` // chispa | von
+	Kind string `json:"kind"` // chispa | von | embed | http (KindHTTP, ronda 8)
 	// Path es el .chispa (kind chispa, backend inprocess). Relativo = relativo al
 	// fichero de config.
 	Path string `json:"path,omitempty"`
@@ -74,6 +78,34 @@ type ModelConfig struct {
 	// MaxReplicas acota las réplicas de este modelo (0 = la del gateway).
 	// Solo aplica a von, embed y chispa con backend microvm.
 	MaxReplicas int `json:"max_replicas,omitempty"`
+
+	// Campos de la ronda 8 (backend.go): el bloque de un backend HTTP. Semilla:
+	// se leen del JSON pero nada los usa todavía. Z1 los valida y los expande a
+	// Backend; Z5 los escribe con `kling ai model deploy`. Ver Backend para el
+	// significado de cada uno; aquí van tal como se escriben en ai.json.
+
+	// Upstream es una URL http/https fija; excluyente con Snapshot.
+	Upstream string `json:"upstream,omitempty"`
+	// Port es el puerto del servidor en la réplica; 0 = DefaultBackendPort.
+	Port int `json:"port,omitempty"`
+	// Contract es una de las constantes Contract*; vacío = la del kind.
+	Contract string `json:"contract,omitempty"`
+	// Routes son "MÉTODO /ruta"; vacío = las del contrato.
+	Routes []string `json:"routes,omitempty"`
+	// Health es la sonda; nil = el dial TCP de hoy.
+	Health *HealthConfig `json:"health,omitempty"`
+	// MaxInflight por réplica; 0 = el -max-inflight del gateway.
+	MaxInflight int `json:"max_inflight,omitempty"`
+	// Idle es una de las constantes Idle*; vacío = el defecto del kind (§1.4).
+	Idle string `json:"idle,omitempty"`
+	// UpstreamModel se escribe en "model" al reenviar; vacío = no se reescribe.
+	UpstreamModel string `json:"upstream_model,omitempty"`
+	// Auth es la credencial que añade el gateway; nil = ninguna.
+	Auth *Auth `json:"auth,omitempty"`
+	// Limits son topes del contrato openai; nil = sin tope.
+	Limits *Limits `json:"limits,omitempty"`
+	// Tenants que pueden usar el modelo; vacío = todos.
+	Tenants []string `json:"tenants,omitempty"`
 }
 
 // Backends de un modelo chispa.
@@ -199,7 +231,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	defer f.Close()
-	c, err := ParseConfig(f)
+	c, err := parseConfig(f, filepath.Dir(path))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -230,8 +262,15 @@ func LoadConfig(path string) (*Config, error) {
 	return c, nil
 }
 
-// ParseConfig lee y valida un registro de r (como mucho 1 MiB).
+// ParseConfig lee y valida un registro de r (como mucho 1 MiB). Sin fichero
+// del que colgar rutas relativas, un auth.file tiene que ser absoluto.
 func ParseConfig(r io.Reader) (*Config, error) {
+	return parseConfig(r, "")
+}
+
+// parseConfig es ParseConfig con dir, el directorio del ai.json: auth.file se
+// resuelve contra él ANTES de validar, porque Validate comprueba el fichero.
+func parseConfig(r io.Reader, dir string) (*Config, error) {
 	b, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
 	if err != nil {
 		return nil, err
@@ -245,11 +284,14 @@ func ParseConfig(r io.Reader) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, err
 	}
+	c.resolveAuthFiles(dir)
 	return &c, c.Validate()
 }
 
-// Validate comprueba nombres, referencias y rangos.
+// Validate comprueba nombres, referencias y rangos y, si todo vale, calcula los
+// backends expandidos que devuelve Backend.
 func (c *Config) Validate() error {
+	c.backends = nil
 	if c.Models == nil {
 		c.Models = map[string]*ModelConfig{}
 	}
@@ -260,6 +302,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("at most %d models and %d tasks", maxModels, maxTasks)
 	}
 	var errs []error
+	tenants := map[string]bool{}
+	for _, tn := range c.Tenants {
+		tenants[tn.Name] = true
+	}
 	for _, n := range sortedKeys(c.Models) {
 		m := c.Models[n]
 		if !nameRE.MatchString(n) {
@@ -290,11 +336,17 @@ func (c *Config) Validate() error {
 			if m.Backend != "" {
 				errs = append(errs, fmt.Errorf("model %q: backend only applies to kind chispa (a %s model is always a replica)", n, m.Kind))
 			}
+		case KindHTTP:
+			// path y backend, snapshot/upstream y el resto: validateBackend.
 		default:
-			errs = append(errs, fmt.Errorf("model %q: kind must be chispa, von or embed, not %q", n, m.Kind))
+			errs = append(errs, fmt.Errorf("model %q: kind must be chispa, von, embed or http, not %q", n, m.Kind))
 		}
 		if m.MaxReplicas < 0 || m.MaxReplicas > 64 {
 			errs = append(errs, fmt.Errorf("model %q: max_replicas must be 0..64", n))
+		}
+		switch m.Kind {
+		case KindChispa, KindVON, KindEmbed, KindHTTP:
+			errs = append(errs, validateBackend(n, m, tenants)...)
 		}
 	}
 	for _, n := range sortedKeys(c.Tasks) {
@@ -412,7 +464,17 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("tenant %d: needs a valid name (not \"default\") and a token of at least 16 characters", i))
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	bs := map[string]*Backend{}
+	for n, m := range c.Models {
+		if b := expandBackend(n, m); b != nil {
+			bs[n] = b
+		}
+	}
+	c.backends = bs
+	return nil
 }
 
 // vonModel busca un modelo VON por su nombre en el registro o por el de su
@@ -430,9 +492,11 @@ func (c *Config) vonModel(name string) (string, *ModelConfig) {
 }
 
 // isReplica dice si m es un modelo servido por una réplica (una microVM que
-// pkg/scheduler despierta y congela) y no dentro de este proceso.
+// pkg/scheduler despierta y congela) y no dentro de este proceso. Un kind http
+// lo es si tiene dorado; con upstream, kindling no arranca nada.
 func (m *ModelConfig) isReplica() bool {
-	return m.Kind == KindVON || m.Kind == KindEmbed || (m.Kind == KindChispa && m.Backend == BackendMicroVM)
+	return m.Kind == KindVON || m.Kind == KindEmbed || (m.Kind == KindChispa && m.Backend == BackendMicroVM) ||
+		(m.Kind == KindHTTP && m.Snapshot != "")
 }
 
 // replicaModel es vonModel para todo lo que se sirve con réplicas (VON,
@@ -451,9 +515,9 @@ func (c *Config) replicaModel(name string) (string, *ModelConfig) {
 }
 
 // NeedsDaemon dice si el registro tiene algún modelo que despierte el daemon:
-// VON, embed o Chispa con backend microvm. Un registro solo con Chispa en proceso
-// no necesita daemon ni KVM/vz para nada: Chispa vive dentro de este mismo
-// proceso.
+// VON, embed, Chispa con backend microvm o un http con dorado. Un registro solo
+// con Chispa en proceso y upstreams no necesita daemon ni KVM/vz para nada:
+// Chispa vive dentro de este mismo proceso y un upstream no lo arranca kindling.
 func (c *Config) NeedsDaemon() bool {
 	for _, m := range c.Models {
 		if m.isReplica() {

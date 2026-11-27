@@ -71,7 +71,7 @@ var aiCommands = []plugin.Command{
                                                    version
 `},
 	{Name: "model", Group: "MODELS (VON: small LLMs with an OpenAI-compatible API on port 8000)", Summary: "small LLMs as templates: add, ask, embed",
-		Subcommands: []string{"ls", "add", "ask", "embed", "rm"}, MachineArgs: []string{"ask", "embed"}, Usage: `  ai model ls [-q] [-json]                         VON catalog and the models on this
+		Subcommands: []string{"ls", "add", "deploy", "roll", "ask", "embed", "rm"}, MachineArgs: []string{"ask", "embed"}, Usage: `  ai model ls [-q] [-json]                         VON catalog and the models on this
                                                    daemon
   ai model add <name> -model ID [-quant Q]         builds the image (llama.cpp + GGUF)
       [-ctx N] [-cpus N] [-mem 2G] [-replace]      and a template with the model
@@ -80,6 +80,15 @@ var aiCommands = []plugin.Command{
       [-prefix system.txt]... [-cache-ram 512M]    only the image (to copy it to
                                                    macOS); -prefix: task prompts
                                                    evaluated in the template
+  ai model deploy <name> -image I -contract C      any HTTP server as a model: a
+      [-port P] [-health /path] [-warmup f.jsonl]  versioned golden snapshot and
+      [-cpus N] [-mem M] [-cpu-pct N]              its kind http block in ai.json;
+      [-idle remove|pause|freeze] [-route R]...    -contract: openai, openai-
+      [-e K=V]...                                  embeddings, chispa-decide or
+                                                   raw
+  ai model roll <name> [-to n] [-drain 30s]        serves another version of the
+      [-no-reload]                                 golden and drains the old
+                                                   replicas
   ai model ask <ref> [-max-tokens N] <prompt...>   asks a replica, prints answer and
                                                    tok/s
   ai model embed <ref> <text...>                   embedding vector from an encoder

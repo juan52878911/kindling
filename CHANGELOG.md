@@ -8,6 +8,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- AI gateway: `kind http` models, any HTTP server as a golden snapshot (`port`, `contract`, `routes`, `health`) or a fixed `upstream` URL with a circuit breaker and a bounded queue; per-model `auth` (credential file added by the gateway), `limits` (`max_tokens`, `n`) and `tenants`; `/v1/m/{model}/…` for `chispa-decide` and `raw` backends; tenants reload with the registry; `-drain`, `-proxy-timeout` and `-max-body` on `kling ai serve`; `packaging/kling-ai.service`.
+- `kling ai model deploy` makes a versioned golden snapshot of any HTTP server image and writes its `kind http` block; `kling ai model roll` serves another version and drains the old replicas.
+
 - `kling up -install` on Linux downloads the pinned firecracker and jailer (sha256 checked), creates the kindling users, writes the unit and starts it (`-dry-run` shows the steps); `install.sh` installs into `/usr/local/bin` as root and prints the exact `sudo` command otherwise; a test ties the README's pinned version to a release.
 - `kling sbx osb`: OpenSandbox 1.2.1-compatible API (lifecycle and execd) over the sandbox gateway, so the official OSB SDKs work by changing domain and key (the Python SDK passes 15/15 steps; 41 of 90 operations implemented, the rest a documented 501); the E2B shim now pauses, resumes and updates network instead of returning 501.
 - Sandbox quickstart (`docs/quickstart-sandbox.md`, `scripts/quickstart-sandbox.sh`), five runnable examples in `examples/sandbox/`, a manual `sdks-release.yml` workflow (OIDC, nothing published until configured) and a complete `docs/README.md` index; the TypeScript SDK runs on Node >= 18 again.
@@ -64,6 +67,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- AI gateway behaviour changes:
+  - `kling_ai_proxy_requests_total`'s `code` label is now a status class (`2xx`, `3xx`, `4xx`, `5xx`).
+  - `POST /v1/embeddings` is now a public route: the OpenAI API to `embed` and `openai-embeddings` models.
+  - 502 and 503 answers no longer carry internal error details; those go to the gateway's log.
+  - `von` and `embed` models default to `idle: remove`: idle replicas, and those left at shutdown, are removed instead of frozen. `"idle": "freeze"` restores the old behaviour.
+  - `von` and `embed` replicas are probed over HTTP on `/health` after a restore instead of a TCP dial.
+  - A tenant token removed from `ai.json` stops working after a reload.
+- Chispa golden snapshots (`kling ai chispa deploy`) record `cpu_pct` = 100 per vCPU instead of inheriting the daemon's 50 %.
 - kling-hv: `F_FULLFSYNC` is capped per disk at 32/s (bursts of 32); above that a FLUSH settles with `F_BARRIERFSYNC` and the missing full sync follows, so a power cut can lose ~31 ms of FLUSHes but never their order (`docs/backend-hv.md`).
 - Releases ship `kling-unpack` (Linux static, darwin arm64) and `install.sh` puts it in the daemon's `lib/` (`docs/imagenes.md`).
 - Daemon: the system caller's role is resolved once per connection, so a group change applies from the caller's next connection (`docs/authz.md`).
@@ -72,7 +83,6 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox gateway: a sandbox is resolved by id instead of listing the host, and key last-use is dumped outside the store lock.
 - Python SDK reuses one connection per thread and one TLS context per client; the Go client keeps connections alive for long calls over the unix socket; the guest exec stream has an absolute deadline and `Client.Exec` enforces the output cap.
 - Machines: pool refills yield the launch gate to waiting requests, the restore gate is taken after the VMM is spawned, an image-snapshot copy resyncs and starts over one guest connection, and the state.json snapshot is taken by the writer; kling-hv keeps only offered virtio features on negotiation and restore.
-
 - The network slot pool grows with burst demand up to `KLING_NET_POOL_MAX` (default 64), refills 4 at a time when idle and shrinks 2 slots per 15 s when quiet.
 - Cold boot: guests whose agent announces "net" get eth0 and lo configured by the agent over netlink (`kling.net=`) instead of the kernel's `ip=` (about 24 ms less on hv); older agents keep `ip=`.
 
