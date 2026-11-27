@@ -85,6 +85,12 @@ proveedor. Tres medidas, de menos a más estricta:
   todos sus inquilinos: el SNI casa. El aviso de la CLI sigue haciendo falta; con SNI,
   en cambio, `-allow juan.github.io` sí queda en ese sitio.
 - **El túnel por DNS** de un dominio permitido no cambia (SECURITY.md).
+- **Un destino privado** (un servicio de la VPC, el gateway de IA del host) no se abre
+  con este modo ni con una excepción por IP y puerto: el SNI no dice nada de a dónde se
+  marca. Para eso está la credencial HTTP con `-upstream` (SECURITY.md, punto 7): el
+  invitado habla con un nombre reservado, el proxy marca la dirección que fijó el
+  operador, con los vetos de siempre (metadatos, red de kindling, rango de reenvíos) y
+  solo para las peticiones de `-allow-request`.
 
 ## Coste y pruebas
 

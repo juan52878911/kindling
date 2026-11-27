@@ -88,11 +88,20 @@ func newGuestPool(idle, cabeceras time.Duration) *guestPool {
 // transport devuelve el transporte de addr, creándolo si no existe. El
 // invitado no es de fiar: conectar tiene plazo corto y las cabeceras tope; el
 // cuerpo lo acota quien lee.
-func (p *guestPool) transport(addr string) *http.Transport {
+//
+// cabeceras es el tope de espera a las cabeceras de esa réplica: el
+// limits.timeout de su modelo si es mayor que el del pool, 0 para el del pool.
+// Una dirección es de una réplica, de un solo modelo; si el tope cambia (un
+// reload con otro limits.timeout) el transporte se rehace.
+func (p *guestPool) transport(addr string, cabeceras time.Duration) *http.Transport {
+	cabeceras = max(cabeceras, p.headerTimeout)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if t := p.byAddr[addr]; t != nil {
-		return t
+		if t.ResponseHeaderTimeout == cabeceras {
+			return t
+		}
+		t.CloseIdleConnections()
 	}
 	t := &http.Transport{
 		DialContext:            (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
@@ -102,7 +111,7 @@ func (p *guestPool) transport(addr string) *http.Transport {
 		MaxIdleConns:           guestConnsPerReplica,
 		MaxIdleConnsPerHost:    guestConnsPerReplica,
 		IdleConnTimeout:        p.idleTimeout,
-		ResponseHeaderTimeout:  p.headerTimeout,
+		ResponseHeaderTimeout:  cabeceras,
 	}
 	p.byAddr[addr] = t
 	return t
@@ -139,13 +148,14 @@ func (p *guestPool) size() int {
 	return len(p.byAddr)
 }
 
-// do manda req por el transporte de addr y dice si la conexión era
-// reutilizada: solo esas pueden estar muertas por un congelar/despertar.
-func (p *guestPool) do(addr string, req *http.Request) (*http.Response, bool, error) {
+// do manda req por el transporte de addr (con cabeceras, ver transport) y dice
+// si la conexión era reutilizada: solo esas pueden estar muertas por un
+// congelar/despertar.
+func (p *guestPool) do(addr string, cabeceras time.Duration, req *http.Request) (*http.Response, bool, error) {
 	var reused bool
 	trace := &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { reused = i.Reused }}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	resp, err := p.transport(addr).RoundTrip(req)
+	resp, err := p.transport(addr, cabeceras).RoundTrip(req)
 	return resp, reused, err
 }
 

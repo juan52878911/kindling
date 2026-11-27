@@ -152,6 +152,9 @@ func modelRoll(ctx context.Context, c *api.Client, reload func(context.Context) 
 		return res, nil
 	}
 
+	// Antes de que el gateway lo sirva: la primera réplica del dorado nuevo
+	// no tiene que leerlo del disco (C9-10).
+	precalentar(ctx, c, target.Name)
 	block["snapshot"], _ = json.Marshal(target.Name)
 	// El puerto lo dice el dorado (kling.ports, el que deja pasar el proxy):
 	// una versión nueva puede escuchar en otro.

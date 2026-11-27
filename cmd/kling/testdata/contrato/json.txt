@@ -494,6 +494,13 @@ kling save -force -json m1 tpl:  signature string
 kling save -force -json m1 tpl:  sin_agente bool
 kling save -force -json m1 tpl:  snap_sha256 string
 kling save -force -json m1 tpl:  stale string
+kling save -force -json m1 tpl:  timings.digest_ms number
+kling save -force -json m1 tpl:  timings.dump_ms number
+kling save -force -json m1 tpl:  timings.holes_ms number
+kling save -force -json m1 tpl:  timings.overlay_ms number
+kling save -force -json m1 tpl:  timings.squeeze_ms number
+kling save -force -json m1 tpl:  timings.sync_ms number
+kling save -force -json m1 tpl:  timings.total_ms number
 kling save -force -json m1 tpl:  vcpus number
 kling save -force -json m1 tpl:  vmm string
 kling save -force -json m1 tpl:  volume string
@@ -553,6 +560,13 @@ kling template ls -json:  [].signature string
 kling template ls -json:  [].sin_agente bool
 kling template ls -json:  [].snap_sha256 string
 kling template ls -json:  [].stale string
+kling template ls -json:  [].timings.digest_ms number
+kling template ls -json:  [].timings.dump_ms number
+kling template ls -json:  [].timings.holes_ms number
+kling template ls -json:  [].timings.overlay_ms number
+kling template ls -json:  [].timings.squeeze_ms number
+kling template ls -json:  [].timings.sync_ms number
+kling template ls -json:  [].timings.total_ms number
 kling template ls -json:  [].vcpus number
 kling template ls -json:  [].vmm string
 kling template ls -json:  [].volume string

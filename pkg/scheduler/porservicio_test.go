@@ -28,6 +28,8 @@ type daemonServicio struct {
 	orden    []string
 	llamadas []string
 	n        int
+	// pedidas son los cuerpos de POST /machines, en orden.
+	pedidas []api.RunRequest
 }
 
 func nuevoDaemonServicio() *daemonServicio {
@@ -67,10 +69,11 @@ func (d *daemonServicio) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/machines":
 		var req api.RunRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.pedidas = append(d.pedidas, req)
 		d.n++
 		id := "r" + strconv.Itoa(d.n)
 		mc := &api.Machine{ID: id, Name: id, State: api.StateRunning, IP: "127.0.0.1",
-			From: req.From, Labels: req.Labels, MemMiB: 128}
+			From: req.From, Labels: req.Labels, MemMiB: 128, OnTTL: req.OnTTL}
 		d.maquinas[id] = mc
 		d.orden = append(d.orden, id)
 		c := *mc
@@ -121,6 +124,13 @@ func (d *daemonServicio) contar(prefijo string) int {
 		}
 	}
 	return n
+}
+
+// pedidasCopia devuelve los cuerpos de POST /machines vistos hasta ahora.
+func (d *daemonServicio) pedidasCopia() []api.RunRequest {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]api.RunRequest(nil), d.pedidas...)
 }
 
 // existe dice si el daemon sigue teniendo la máquina id.

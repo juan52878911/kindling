@@ -96,7 +96,7 @@ func TestReconcileRevierteUnCommitCortado(t *testing.T) {
 	m := newTestManager(t)
 	id := "a7a7000000000003"
 	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
-	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +127,7 @@ func TestReconcileNoReadoptaUnCommitCortadoSiFallaElDisco(t *testing.T) {
 	id := "a7a7000000000005"
 	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
 	falso.fallar(http.MethodPatch, "/drives/overlay", 400, "no")
-	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,7 +158,7 @@ func TestReconcileRevierteUnCommitCortadoDeUnaPausada(t *testing.T) {
 	m := newTestManager(t)
 	id := "a7a7000000000004"
 	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StatePaused)
-	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	m.reconcile()
@@ -187,7 +187,7 @@ func TestMarcaDeCommitNoMataAlVMMDeUnArranquePosterior(t *testing.T) {
 	m.mu.RLock()
 	pidCommit := m.byID[id].PID
 	m.mu.RUnlock()
-	if err := marcarCommitEnCurso(m.dir(id), "dorado", pidCommit); err != nil {
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", pidCommit, false); err != nil {
 		t.Fatal(err)
 	}
 	falso0 := nuevoFcFalso(t)
@@ -227,7 +227,7 @@ func TestMarcaDeCommitSinPIDSigueValiendo(t *testing.T) {
 	if hay, pid := marcaCommitDe(dir); !hay || pid != 0 {
 		t.Fatalf("marca vieja: hay %v, pid %d; quería hay sin PID", hay, pid)
 	}
-	if err := marcarCommitEnCurso(dir, "dorado", 4321); err != nil {
+	if err := marcarCommitEnCurso(dir, "dorado", 4321, false); err != nil {
 		t.Fatal(err)
 	}
 	if hay, pid := marcaCommitDe(dir); !hay || pid != 4321 {
@@ -243,7 +243,7 @@ func TestStartYThawRetiranLaMarcaDeCommit(t *testing.T) {
 	fallidaConVolcado(t, m, mc)
 	marca := filepath.Join(m.dir(mc.ID), marcaCommit)
 
-	if err := marcarCommitEnCurso(m.dir(mc.ID), "dorado", 0); err != nil {
+	if err := marcarCommitEnCurso(m.dir(mc.ID), "dorado", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	viva := vivaDe(t, m, mc.ID)
@@ -254,7 +254,7 @@ func TestStartYThawRetiranLaMarcaDeCommit(t *testing.T) {
 		t.Fatal("el thaw de una failed dejó la marca de commit")
 	}
 
-	if err := marcarCommitEnCurso(m.dir(mc.ID), "dorado", 0); err != nil {
+	if err := marcarCommitEnCurso(m.dir(mc.ID), "dorado", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	// Sin VMM que lanzar: el arranque falla, pero después de matar al viejo.

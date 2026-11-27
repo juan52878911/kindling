@@ -119,16 +119,22 @@ comprobar_sha256() {
     echo "sha256 de $(basename "$1") no coincide: $got, se esperaba $2" >&2; exit 1; }
 }
 
+mkdir -p "$ROOT/images"
+# Se construye en un temporal junto al destino y se renombra al final: un
+# fallo a mitad no deja una base a medias con el nombre definitivo (y una
+# base que ya existe no se toca hasta entonces).
+FINAL="$ROOT/images/$NAME.ext4"
+DEST="$ROOT/images/.$NAME.ext4.tmp"
+
 mnt="$(mktemp -d)"
 cleanup() {
   umount "$mnt/proc" 2>/dev/null || true
   umount "$mnt" 2>/dev/null || true
   rmdir "$mnt" 2>/dev/null || true
+  rm -f "$DEST" "$DEST.shrink"
 }
 trap cleanup EXIT
 
-mkdir -p "$ROOT/images"
-DEST="$ROOT/images/$NAME.ext4"
 rm -f "$DEST"
 truncate -s "$SIZE" "$DEST"
 ext4_mkfs_sin_resize_inode "$DEST"
@@ -247,8 +253,14 @@ CUR=$(stat -c%s "$DEST")
 truncate -s $((CUR + 32 * 1024 * 1024)) "$DEST"
 resize2fs "$DEST" >/dev/null 2>&1 || true
 
+# Durable antes de publicarla, y solo entonces con su nombre.
+chmod 644 "$DEST"
+sync "$DEST"
+mv -f "$DEST" "$FINAL"
+sync "$ROOT/images" 2>/dev/null || true
+
 echo
 echo "imagen '$NAME' lista:"
-echo "  lógico: $(du -h --apparent-size "$DEST" | cut -f1)   real: $(du -h "$DEST" | cut -f1)"
+echo "  lógico: $(du -h --apparent-size "$FINAL" | cut -f1)   real: $(du -h "$FINAL" | cut -f1)"
 [ "$CHROME" = si ] && echo "  navegador: chrome-headless-shell $(cat "$ROOT/images/.chrome-version" 2>/dev/null || echo "$VER")"
 echo "  úsala con:  BASE_IMAGE=$NAME ./80-mcp-image.sh <servicio>"

@@ -927,6 +927,24 @@ en silencio); si no, va por el camino en frío. En particular, con `defaults.cpu
 configurado en el CLI (`cpu_pct_default`) y una plantilla sin techo de CPU propio, la
 creación va en frío en vez de reclamar una copia con otro techo.
 
+**Precalentar y anclar un dorado.** `POST /snapshots/{name}/warm` con
+`{"wait": bool, "pin": bool}` (los dos opcionales; cuerpo vacío vale) trae el `mem.file`
+del dorado a la caché de página del host con varios lectores. Sin `wait` vuelve enseguida
+(`started: true` si quedó una lectura en segundo plano); con `wait`, cuando está entero.
+Responde `{"bytes", "cached_bytes", "started", "pinned"}`: lo asignado del fichero y lo
+que había en caché al contestar. Repetirlo con el dorado ya caliente no lee nada. `pin:
+true` lo ancla en RAM (mapeo compartido de solo lectura con `mlock`: las mismas páginas
+que mapean las réplicas), y `pin: false` lo suelta; el anclado dura hasta soltarlo, borrar
+o reemplazar el dorado o parar el daemon. Es memoria que el host no puede reclamar: solo
+administradores (`403` a un inquilino aunque el dorado sea suyo), pasa por la admisión
+de memoria (`507` si no cabe) y solo en Linux (`501` en macOS). `run -from` de un dorado
+frío lanza además la misma lectura en paralelo con el VMM (Linux).
+
+**Desglose del commit.** La respuesta de `POST /machines/{ref}/commit` lleva `timings`
+(`squeeze_ms`, `overlay_ms`, `dump_ms`, `sync_ms`, `digest_ms`, `total_ms`): lo mismo que
+el daemon escribe en su registro. Desde la ronda 9 el perforado y el hash del volcado son
+un solo pase y van en `digest_ms` (`holes_ms` queda a 0). No se guarda en el `meta.json`.
+
 **Impulso de arranque (Linux).** Mientras arranca (en frío, `run -from` o
 `thaw`), la máquina corre con todas sus vCPU enteras (sin pasar de los núcleos
 del host) y vuelve a su `cpu_pct` cuando pasa la sonda de listo de su imagen,
@@ -1099,6 +1117,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `PUT /snapshots/{name}/credentials` | 200 | `413`/`400` cuerpo (256 KiB); `snapshotStatus` |
 | `GET /snapshots/{name}/pool` | 200 | `snapshotStatus` |
 | `PUT /snapshots/{name}/pool` | 200 | `413`/`400` cuerpo; `snapshotStatus` (`400` tamaño fuera de rango) |
+| `POST /snapshots/{name}/warm` | 200 | `413`/`400` cuerpo; `snapshotStatus`; `403` `pin` sin ser administrador; `501` `pin` donde no se puede anclar (macOS); `507` `pin` sin memoria (admisión) |
 | `DELETE /snapshots/{name}` | 204 | `snapshotStatus` |
 | `GET /store/{ns}` | 200 | `storeStatus` |
 | `GET /store/{ns}/{key}` | 200 | `404`; `storeStatus` |

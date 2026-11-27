@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -476,5 +480,278 @@ func TestPGUpstreamCancel(t *testing.T) {
 	}
 	if !hecha {
 		t.Errorf("registros: %+v", recs)
+	}
+}
+
+// --- Credenciales HTTP con upstream fijado por el operador ---
+//
+// La réplica habla HTTP con un nombre reservado que su resolver desvía al
+// proxy; el proxy cambia el marcador por el token y marca la dirección que
+// fijó el operador (el gateway de IA en el loopback del host, o un servicio
+// de la VPC por TLS verificado), nunca el dominio.
+
+const (
+	httpUpDominio = "l3.kindling.internal"
+	httpUpClave   = "tok_inquilino_0123456789abcdef"
+	httpUpMarca   = "kling-cred-0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b"
+	httpUpRegla   = "POST /v1/chat/completions"
+)
+
+func credHTTPUp(up string) Credential {
+	return Credential{Env: "L3_TOKEN", Domain: httpUpDominio, Placeholder: httpUpMarca, Secret: httpUpClave,
+		Upstream: up, Allow: []string{httpUpRegla}}
+}
+
+// transporteProhibido es la salida hacia dominios públicos de los tests de
+// upstream: con la dirección fijada no debe usarse nunca.
+type transporteProhibido struct{ t *testing.T }
+
+func (tp transporteProhibido) RoundTrip(r *http.Request) (*http.Response, error) {
+	tp.t.Errorf("se usó la salida a dominios públicos para %s", r.URL.Host)
+	return nil, errors.New("public egress used")
+}
+
+// proxyHTTPUp sirve un proxy con creds y registro de auditoría; ajustar, si
+// no es nil, toca el proxy antes de fijar las credenciales.
+func proxyHTTPUp(t *testing.T, creds []Credential, ajustar func(*Proxy)) (*Proxy, *httptest.Server, string) {
+	t.Helper()
+	audit := filepath.Join(t.TempDir(), "credaudit.jsonl")
+	p := New(Options{Transport: transporteProhibido{t}, AuditPath: audit})
+	if ajustar != nil {
+		ajustar(p)
+	}
+	if _, err := p.SetCredentials(creds); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+	return p, srv, audit
+}
+
+func pedirHTTPUp(t *testing.T, srv *httptest.Server, method, ruta string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest(method, srv.URL+ruta, strings.NewReader(`{"model":"m"}`))
+	req.Host = httpUpDominio
+	req.Header.Set("Authorization", "Bearer "+httpUpMarca)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+// La petición permitida sale a la dirección fijada con la clave, verificando
+// el certificado contra TLSServerName y con el Host de la credencial; la
+// respuesta que la devuelve en eco llega con el marcador; una ruta que Allow
+// no cubre no sale; el registro dice a dónde fue. Sin TLSServerName el mismo
+// servidor no vale: su certificado no es del dominio de la credencial, y que
+// valga para la IP del upstream no cuenta.
+func TestCredencialHTTPUpstream(t *testing.T) {
+	var hits atomic.Int32
+	var vistoAuth, vistoHost atomic.Value
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		vistoAuth.Store(r.Header.Get("Authorization"))
+		vistoHost.Store(r.Host)
+		fmt.Fprintf(w, `{"eco":%q}`, r.Header.Get("Authorization"))
+	}))
+	defer up.Close()
+	ca := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: up.Certificate().Raw}))
+	dir := up.Listener.Addr().String()
+
+	c := credHTTPUp(dir)
+	c.TLSServerName, c.CAPEM = "example.com", ca
+	p, srv, audit := proxyHTTPUp(t, []Credential{c}, nil)
+
+	code, cuerpo := pedirHTTPUp(t, srv, "POST", "/v1/chat/completions")
+	if code != http.StatusOK {
+		t.Fatalf("POST permitido: %d %s", code, cuerpo)
+	}
+	if got, _ := vistoAuth.Load().(string); got != "Bearer "+httpUpClave {
+		t.Fatalf("el upstream recibió Authorization %q", got)
+	}
+	if got, _ := vistoHost.Load().(string); got != httpUpDominio {
+		t.Errorf("el upstream recibió Host %q, want %q", got, httpUpDominio)
+	}
+	if strings.Contains(cuerpo, httpUpClave) || !strings.Contains(cuerpo, httpUpMarca) {
+		t.Fatalf("el eco no se redactó: %s", cuerpo)
+	}
+	if code, _ := pedirHTTPUp(t, srv, "GET", "/v1/models"); code != http.StatusForbidden || hits.Load() != 1 {
+		t.Fatalf("ruta fuera de Allow: %d, %d peticiones al upstream", code, hits.Load())
+	}
+	recs, crudo := leerRegistro(t, p, audit)
+	if len(recs) != 2 || recs[0].Upstream != dir || recs[0].Status != http.StatusOK || recs[1].Reason != ReasonNotAllowed {
+		t.Fatalf("registro %+v", recs)
+	}
+	if strings.Contains(crudo, httpUpClave) || strings.Contains(crudo, httpUpMarca) {
+		t.Fatal("el registro lleva la clave o el marcador")
+	}
+
+	// Verificación contra el dominio de la credencial: el certificado de
+	// httptest vale para example.com y 127.0.0.1, no para l3.kindling.internal.
+	sin := credHTTPUp(dir)
+	sin.CAPEM = ca
+	_, srv2, _ := proxyHTTPUp(t, []Credential{sin}, nil)
+	antes := hits.Load()
+	if code, cuerpo := pedirHTTPUp(t, srv2, "POST", "/v1/chat/completions"); code != http.StatusBadGateway || hits.Load() != antes {
+		t.Fatalf("sin TLSServerName: %d %s (el upstream vio %d peticiones más)", code, cuerpo, hits.Load()-antes)
+	}
+
+	// Sin la CA propia, las raíces del sistema no conocen el certificado.
+	sinCA := credHTTPUp(dir)
+	sinCA.TLSServerName = "example.com"
+	_, srv3, _ := proxyHTTPUp(t, []Credential{sinCA}, nil)
+	if code, _ := pedirHTTPUp(t, srv3, "POST", "/v1/chat/completions"); code != http.StatusBadGateway || hits.Load() != antes {
+		t.Fatalf("sin CA: %d", code)
+	}
+}
+
+// Con upstream, Allow es obligatorio: el proxy es un oráculo de la clave y,
+// hacia un servicio del host o de la VPC, lo único que acota qué se hace con
+// ella es la lista de peticiones. Vale para la validación del proxy y para la
+// del manager (ValidarTipo, con lo que llega de la API).
+func TestCredencialHTTPUpstreamSinAllowRechaza(t *testing.T) {
+	c := credHTTPUp("127.0.0.1:8080")
+	c.Allow = nil
+	if err := ValidarCredenciales([]Credential{c}); err == nil || !strings.Contains(err.Error(), "allow-request") {
+		t.Fatalf("sin Allow: %v", err)
+	}
+	if err := ValidarTipo(&c); err == nil {
+		t.Fatal("ValidarTipo aceptó un upstream HTTP sin Allow")
+	}
+	if _, err := New(Options{}).SetCredentials([]Credential{c}); err == nil {
+		t.Fatal("SetCredentials aceptó un upstream HTTP sin Allow")
+	}
+	// Los campos del upstream sin upstream no significan nada en HTTP.
+	for nombre, mod := range map[string]func(*Credential){
+		"tls sin upstream":    func(c *Credential) { c.UpstreamTLS = "verify-full" },
+		"nombre sin upstream": func(c *Credential) { c.TLSServerName = "gw.lan" },
+		"CA sin upstream":     func(c *Credential) { c.CAPEM = "x" },
+		"máquina":             func(c *Credential) { c.UpstreamMachine = "abcdef0123" },
+		"puerto":              func(c *Credential) { c.Port = 8080 },
+	} {
+		c := credHTTPUp("")
+		mod(&c)
+		if err := ValidarCredenciales([]Credential{c}); err == nil {
+			t.Errorf("%s: aceptada", nombre)
+		}
+	}
+	// Dos credenciales del mismo dominio van al mismo sitio: el destino es
+	// del dominio, no de cada clave.
+	a := credHTTPUp("127.0.0.1:8080")
+	b := Credential{Env: "ORG", Domain: httpUpDominio, Placeholder: testPlace2, Secret: testSecret2, Allow: []string{httpUpRegla}}
+	if err := ValidarCredenciales([]Credential{a, b}); err == nil {
+		t.Error("un dominio con y sin upstream: aceptado")
+	}
+	b.Upstream = "127.0.0.1:8081"
+	if err := ValidarCredenciales([]Credential{a, b}); err == nil {
+		t.Error("un dominio con dos upstreams: aceptado")
+	}
+	b.Upstream = "127.0.0.1:8080"
+	if err := ValidarCredenciales([]Credential{a, b}); err != nil {
+		t.Errorf("un dominio, mismo upstream: %v", err)
+	}
+	// Bien formada, se normaliza como la de Postgres.
+	ok := []Credential{credHTTPUp("LocalHost:8080")}
+	ok[0].UpstreamTLS = "VERIFY-FULL"
+	if err := ValidarCredenciales(ok); err != nil || ok[0].Upstream != "localhost:8080" || ok[0].UpstreamTLS != "" {
+		t.Fatalf("normalizada a %q %q: %v", ok[0].Upstream, ok[0].UpstreamTLS, err)
+	}
+}
+
+// Los mismos vetos que un upstream de Postgres: metadatos y link-local, la red
+// interna de kindling y el rango de reenvíos del loopback, al validar y al
+// marcar (un nombre que resuelve ahí no se marca).
+func TestUpstreamHTTPVetados(t *testing.T) {
+	for _, up := range []string{
+		"169.254.169.254:80", "[::ffff:169.254.169.254]:80", "[fd00:ec2::254]:80", "[fe80::1]:80",
+		"172.16.0.1:8080", "172.30.0.1:8080", "0.0.0.0:8080", "224.0.0.1:80", "255.255.255.255:80",
+		fmt.Sprintf("127.0.0.1:%d", ForwardPortMin), fmt.Sprintf("localhost:%d", ForwardPortMax),
+		fmt.Sprintf("[::1]:%d", ForwardPortMin+1),
+	} {
+		c := credHTTPUp(up)
+		if err := ValidarCredenciales([]Credential{c}); err == nil {
+			t.Errorf("%s: aceptado", up)
+		}
+	}
+
+	respuestas := map[string][]netip.Addr{
+		"metadatos.lan": {netip.MustParseAddr("169.254.169.254")},
+		"mixto.lan":     {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("169.254.169.254")},
+		"interno.lan":   {netip.MustParseAddr("172.30.0.2")},
+		"bucle.lan":     {netip.MustParseAddr("127.0.0.1")},
+	}
+	for _, up := range []string{"metadatos.lan:80", "mixto.lan:80", "interno.lan:8080", fmt.Sprintf("bucle.lan:%d", ForwardPortMin)} {
+		var resueltos atomic.Int32
+		p, srv, audit := proxyHTTPUp(t, []Credential{credHTTPUp(up)}, func(p *Proxy) {
+			p.lookupUp = func(_ context.Context, host string) ([]netip.Addr, error) {
+				resueltos.Add(1)
+				if ips, ok := respuestas[host]; ok {
+					return ips, nil
+				}
+				return nil, errors.New("no such host")
+			}
+		})
+		code, cuerpo := pedirHTTPUp(t, srv, "POST", "/v1/chat/completions")
+		if code != http.StatusBadGateway || resueltos.Load() == 0 {
+			t.Errorf("%s: %d %s (resoluciones %d)", up, code, cuerpo, resueltos.Load())
+		}
+		if strings.Contains(cuerpo, httpUpClave) {
+			t.Errorf("%s: el error lleva la clave", up)
+		}
+		if recs, _ := leerRegistro(t, p, audit); len(recs) != 1 || recs[0].Reason != ReasonUpstreamError {
+			t.Errorf("%s: registro %+v", up, recs)
+		}
+	}
+}
+
+// upstream_tls disable solo hacia el loopback del host (el gateway, que corre
+// en la misma máquina): hacia la LAN o la VPC la clave cruzaría la red en
+// claro, y aquí no hay SCRAM que la proteja. Un nombre tampoco vale: no se
+// sabe al validar a dónde resolverá.
+func TestUpstreamHTTPSinTLSSoloLoopback(t *testing.T) {
+	for _, up := range []string{"10.0.0.5:8080", "192.168.1.10:80", "gw.lan:8080", "host.docker.internal:8080", "[fd12::5]:80"} {
+		c := credHTTPUp(up)
+		c.UpstreamTLS = UpstreamTLSDisable
+		if err := ValidarCredenciales([]Credential{c}); err == nil || !strings.Contains(err.Error(), "loopback") {
+			t.Errorf("disable hacia %s: %v", up, err)
+		}
+	}
+	for nombre, mod := range map[string]func(*Credential){
+		"con nombre TLS": func(c *Credential) { c.TLSServerName = "gw.lan" },
+		"con CA":         func(c *Credential) { c.CAPEM = "x" },
+	} {
+		c := credHTTPUp("127.0.0.1:8080")
+		c.UpstreamTLS = UpstreamTLSDisable
+		mod(&c)
+		if err := ValidarCredenciales([]Credential{c}); err == nil {
+			t.Errorf("disable %s: aceptado", nombre)
+		}
+	}
+	for _, up := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080", "127.0.0.2:8080"} {
+		c := []Credential{credHTTPUp(up)}
+		c[0].UpstreamTLS = "Disable"
+		if err := ValidarCredenciales(c); err != nil || c[0].UpstreamTLS != UpstreamTLSDisable {
+			t.Errorf("disable hacia %s: %v (%q)", up, err, c[0].UpstreamTLS)
+		}
+	}
+
+	// Y funciona: el gateway en claro en el loopback recibe la clave.
+	var vista atomic.Value
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vista.Store(r.Header.Get("Authorization"))
+		io.WriteString(w, "ok")
+	}))
+	defer gw.Close()
+	c := credHTTPUp(gw.Listener.Addr().String())
+	c.UpstreamTLS = UpstreamTLSDisable
+	_, srv, _ := proxyHTTPUp(t, []Credential{c}, nil)
+	if code, cuerpo := pedirHTTPUp(t, srv, "POST", "/v1/chat/completions"); code != http.StatusOK || cuerpo != "ok" {
+		t.Fatalf("hacia el gateway en claro: %d %s", code, cuerpo)
+	}
+	if got, _ := vista.Load().(string); got != "Bearer "+httpUpClave {
+		t.Fatalf("el gateway recibió %q", got)
 	}
 }

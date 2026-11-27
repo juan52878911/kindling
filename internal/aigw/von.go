@@ -128,7 +128,7 @@ func (g *Gateway) aReplica(ctx context.Context, name, snap string, port int, s *
 			g.guests.closeIdle(rep.Addr)
 		}
 		t0 := time.Now()
-		resp, reused, err := g.guests.do(rep.Addr, req)
+		resp, reused, err := g.guests.do(rep.Addr, g.cabecerasDe(snap), req)
 		if err == nil {
 			if rep.Wake != nil {
 				g.primeraPeticion(snap, rep.Wake, time.Since(t0))
@@ -151,6 +151,18 @@ func (g *Gateway) aReplica(ctx context.Context, name, snap string, port int, s *
 		}
 		return nil, nil, err
 	}
+}
+
+// cabecerasDe es el tope de espera a las cabeceras de una réplica del dorado
+// snap: el limits.timeout de su backend (un chat sin stream manda las
+// cabeceras al acabar), o 0 para el del pool (-proxy-timeout).
+func (g *Gateway) cabecerasDe(snap string) time.Duration {
+	if b := g.backendDe(snap); b != nil && b.Limits.Timeout != "" {
+		if d, err := time.ParseDuration(b.Limits.Timeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // wakeError es no haber conseguido réplica (no cabe, no hay dorado...): el

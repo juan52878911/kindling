@@ -211,12 +211,47 @@ var magiaAlmacen = []byte("KLCS")
 // versionAlmacenSigV4, la de un almacén de máquina con alguna credencial
 // sigv4; versionAlmacenPlantillaSigV4, la de uno de plantilla con alguna, y
 // versionAlmacenMax la más nueva que este binario sabe abrir.
+//
+// versionAlmacenHTTPUpstream (v4) es la de un almacén, de máquina o de
+// plantilla, con alguna credencial HTTP con upstream fijado (ronda 9). Un
+// kling anterior no la entiende: con suerte la rechaza al validar, y si no,
+// mandaría la clave al dominio y no a la dirección fijada. Con la v4 se niega
+// a abrirlo; las copias .vN.bak de versiones anteriores no la llevan.
 const (
 	versionAlmacen               = 1
 	versionAlmacenSigV4          = 2
 	versionAlmacenPlantillaSigV4 = 3
-	versionAlmacenMax            = versionAlmacenPlantillaSigV4
+	versionAlmacenHTTPUpstream   = 4
+	versionAlmacenMax            = versionAlmacenHTTPUpstream
 )
+
+// httpConUpstream dice si una credencial (por su tipo y su upstream) es HTTP
+// con upstream fijado: la que pide versionAlmacenHTTPUpstream.
+func httpConUpstream(kind, upstream string) bool {
+	return upstream != "" && (kind == "" || kind == credproxy.KindHTTP)
+}
+
+// versionCredencial es la versión mínima del almacén de máquina que describe c.
+func versionCredencial(c credproxy.Credential) int {
+	switch {
+	case httpConUpstream(c.Kind, c.Upstream):
+		return versionAlmacenHTTPUpstream
+	case c.Kind == credproxy.KindSigV4:
+		return versionAlmacenSigV4
+	}
+	return versionAlmacen
+}
+
+// versionSpec es la versión mínima del almacén de plantilla que describe s.
+func versionSpec(s api.CredentialSpec) int {
+	switch {
+	case httpConUpstream(s.Type, s.Upstream):
+		return versionAlmacenHTTPUpstream
+	case s.Type == credproxy.KindSigV4:
+		return versionAlmacenPlantillaSigV4
+	}
+	return versionAlmacen
+}
 
 // cabeceraAlmacen es lo que va delante del nonce en la versión ver.
 func cabeceraAlmacen(ver int) []byte {
@@ -227,21 +262,18 @@ func cabeceraAlmacen(ver int) []byte {
 // es un juego de credenciales de máquina con alguna, la de plantilla con
 // sigv4 si es el de una plantilla con alguna, versionAlmacen si no.
 func versionParaSellar(v any) int {
+	ver := versionAlmacen
 	switch creds := v.(type) {
 	case []credproxy.Credential:
 		for _, c := range creds {
-			if c.Kind == credproxy.KindSigV4 {
-				return versionAlmacenSigV4
-			}
+			ver = max(ver, versionCredencial(c))
 		}
 	case []api.CredentialSpec:
 		for _, s := range creds {
-			if s.Type == credproxy.KindSigV4 {
-				return versionAlmacenPlantillaSigV4
-			}
+			ver = max(ver, versionSpec(s))
 		}
 	}
-	return versionAlmacen
+	return ver
 }
 
 // versionSellada dice qué versión declara un almacén: la de su cabecera, o 0
@@ -334,25 +366,21 @@ func (m *Manager) refrescarRespaldos(ruta string, v any, aad string) error {
 // representableEn es lo de v que cabe en un almacén de versión ver: sin las
 // credenciales que piden una versión mayor (versionParaSellar).
 func representableEn(v any, ver int) any {
+	// La v0 (sin cabecera) representa lo mismo que la v1.
+	ver = max(ver, versionAlmacen)
 	switch creds := v.(type) {
 	case []credproxy.Credential:
-		if ver >= versionAlmacenSigV4 {
-			return creds
-		}
 		out := []credproxy.Credential{}
 		for _, c := range creds {
-			if c.Kind != credproxy.KindSigV4 {
+			if versionCredencial(c) <= ver {
 				out = append(out, c)
 			}
 		}
 		return out
 	case []api.CredentialSpec:
-		if ver >= versionAlmacenPlantillaSigV4 {
-			return creds
-		}
 		out := []api.CredentialSpec{}
 		for _, s := range creds {
-			if s.Type != credproxy.KindSigV4 {
+			if versionSpec(s) <= ver {
 				out = append(out, s)
 			}
 		}
@@ -1026,6 +1054,11 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 	// Postgres y MySQL juntos: MySQL en el 3306 y ninguna Postgres ahí (lo
 	// comprobaría el proxy al arrancar cada instancia; mejor decirlo ya).
 	if err := credproxy.ValidarPuertosDB(credencialesDeSpecs(todas)); err != nil {
+		return nil, comoPeticion(err)
+	}
+	// Y un dominio con un solo destino HTTP: una variable nueva con otro
+	// upstream (o sin él) que una que ya estaba no lo cambia a medias.
+	if err := credproxy.ValidarDestinosHTTP(credencialesDeSpecs(todas)); err != nil {
 		return nil, comoPeticion(err)
 	}
 	if err := m.guardarAlmacen(m.credSnapPath(name), todas, "snapshot:"+name); err != nil {

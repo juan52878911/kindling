@@ -260,7 +260,9 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 		// El mem.file de un dorado es INMUTABLE desde que se congela: cachear su
 		// tamaño asignado evita un stat por snapshot en cada Run/runFrom/Resize,
 		// bajo el candado global (M-12). Ver allocatedBytesCachedLocked.
-		total += m.allocatedBytesCachedLocked(filepath.Join(m.snapDir(snap), "mem.file"), snap)
+		// Lo anclado (C9-10) no: sus páginas no son desalojables y ya salieron
+		// de MemAvailable; descontarlas otra vez lo contaba dos veces.
+		total += max(0, m.allocatedBytesCachedLocked(filepath.Join(m.snapDir(snap), "mem.file"), snap)-m.bytesAnclados[snap])
 	}
 	for _, mc := range m.byID {
 		if mc.State != api.StateRunning && mc.State != api.StatePaused {

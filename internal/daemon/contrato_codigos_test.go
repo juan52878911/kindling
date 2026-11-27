@@ -93,6 +93,7 @@ var casosCodigos = []casoCodigo{
 	{"PUT", "/snapshots/nada/credentials", `{"credentials":[]}`},
 	{"GET", "/snapshots/nada/pool", ""},
 	{"PUT", "/snapshots/nada/pool", `{"size":1}`},
+	{"POST", "/snapshots/nada/warm", `{}`},
 	{"DELETE", "/snapshots/nada/annotations/k", ""},
 	{"GET", "/store/ns", ""},
 	{"GET", "/store/ns/nada", ""},

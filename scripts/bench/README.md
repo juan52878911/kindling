@@ -56,6 +56,20 @@ corrida), `kvm_serie` (delta de `pf_fixed`/`exits` de KVM por creación en serie
 ocioso `E5_OCIOSA_S`=60 s; `E5_N`=5 muestras). `fases.py --self-test` comprueba la tabla de fases de una tanda de 50.
 `bench.py --self-test` lo comprueba con un gateway falso, sin KVM ni root.
 
+## Fase ia (modelos de IA) y su comprobación
+
+`ec2.sh ia` corre `remoto/ia.sh medir`: dorados de `IA_MODELOS`, P1/P2/P3 con `96-von-bench.sh` y, con
+`IA_PRUEBAS=s-huge s-volcado s-pmem`, los spikes de `prototypes/r9-*`. Desde la ronda 9 la corrida deja en
+`res/` el journal del daemon, por dorado `dorado-<n>/` (salida del fabricante, `service.log` y consola del
+invitado, `meminfo.jsonl` y `vmm.jsonl` con los picos) y `corrida.json` (desglose del commit, bytes de
+`/proc/diskstats` por fase, spikes). `ia.py` **rechaza** (RECHAZO, sale con 1) una corrida sin journal, con
+un dorado sin desglose o fallido sin `service.log`, con una muestra «caliente» que leyó disco o con un
+secreto en el `mem.file`; `--historico` resume resultados de antes de la ronda 9. Filas nuevas: «con
+repuesto» (`spare: 1`, y su PSS), «tras arrancar el gateway» (inmediata, precalentado, `pin`), «secreto
+MMDS» (gancho tras restaurar) y, en P3, la variante `l3` (L3 por credencial con `upstream` a un vLLM de
+mentira; necesita `P3_L3_CONFIG`). Disco: `EC2_DISCO_MIBS`/`EC2_DISCO_IOPS` (gp3 rápido) o `EC2_NVME=1`.
+Tope de la cuenta: 16 vCPU (`EC2_MAX_VCPU`), nada de `.metal`. Detalle en `docs/carga-modelos.md`.
+
 ## Barrido
 
 `PARALELO="2 4 8 16"` (`KLING_MAX_PARALLEL_BOOT`), `JAILER="0 1"`, `CUOTAS_LISTA="- 200:50"`

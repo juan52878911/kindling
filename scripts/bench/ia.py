@@ -2,13 +2,18 @@
 """Resumen del banco de IA (scripts/96-von-bench.sh, esquema von-bench/2).
 
     python3 -I ia.py res/ia-*.json          resumen legible y los criterios de P1, P2 y P3
-    python3 -I ia.py --validar f.json...    sale con 1 si falta alguna clave
+    python3 -I ia.py --validar f.json...    sale con 1 si falta alguna clave o la corrida no vale
+    python3 -I ia.py --historico f.json...  resultados de antes de la ronda 9 (sin corrida.json)
     python3 -I ia.py --self-test            se comprueba a sí mismo con un JSON inventado
 
-Los criterios son los de analisis/ronda8-ia/plan.md §4. Solo biblioteca estándar.
+Los criterios son los de analisis/ronda8-ia/plan.md §4. Desde la ronda 9 (C9-12, C9-14) también rechaza
+(sale con 1 y lo dice con RECHAZO) una corrida cuyas muestras «calientes» leyeron disco o que no dejó en
+su carpeta el corrida.json de remoto/ia.sh con el journal del daemon, el desglose del commit y el
+service.log de cada dorado. Solo biblioteca estándar.
 """
 import json
 import math
+import os
 import sys
 
 ESQUEMA = "von-bench/2"
@@ -23,6 +28,8 @@ CLAVES = {
     "tps": ["prompt_tok_s", "generacion_tok_s"],
     "memoria": ["restauradas", "descongeladas", "remove"],
     "ociosa": ["descongelar_ms", "restaurar_ms", "gateway"],
+    "arranque": ["inmediata", "espera", "anclado"],
+    "secreto": ["sin", "con"],
     "semillas": ["iguales"],
     "carga": ["ruta", "gateway", "directo"],
 }
@@ -57,6 +64,148 @@ def faltan(doc):
                 for i, p in enumerate(pts):
                     out += ["memoria.%s[%d].%s" % (var, i, c) for c in PUNTO if c not in p]
     return out
+
+
+# Las muestras «calientes» a las que se exige no leer disco. Solo restaurar: descongelar una réplica
+# congelada lee su propio volcado, que es solo suyo y que nadie trajo antes a la caché (en la ronda 9 las
+# 30 de cada modelo leían disco aun calentadas); el resumen enseña cuánto.
+CALIENTES = ("restaurar_caliente",)
+
+
+def rechazos(doc):
+    """Motivos para no dar por buena la medida de un JSON del banco (vacía = vale).
+
+    C9-14: una restauración «caliente» que leyó del disco es una muestra fría con otra etiqueta (la
+    mitad de las de la ronda 8 leían 1 GiB). El banco las aparta a primera.calientes_con_disco y repite;
+    si aun así alguna llega a la lista caliente, o no queda ninguna, la corrida no vale. El umbral es 0
+    bytes salvo que el banco declare otro (UMBRAL_CALIENTE_BYTES, primera.umbral_caliente_bytes).
+    Descongelar no entra (ver CALIENTES).
+    """
+    out = []
+    pr = doc.get("primera")
+    if not isinstance(pr, dict) or omitida(pr):
+        return out
+    umbral = pr.get("umbral_caliente_bytes") or 0
+    apartadas = pr.get("calientes_con_disco") or {}
+    for k in CALIENTES:
+        v = pr.get(k)
+        if omitida(v) or not isinstance(v, list):
+            continue
+        leidas = [m.get("disco_leido_bytes") for m in v if isinstance(m, dict)]
+        malas = [b for b in leidas if isinstance(b, (int, float)) and b > umbral]
+        if malas:
+            out.append("primera.%s: %d de %d muestras «calientes» leyeron disco (máx %d bytes, umbral %d)" % (
+                k, len(malas), len(v), max(malas), umbral))
+        if not v and apartadas.get(k):
+            out.append("primera.%s: ninguna muestra caliente de verdad (%d apartadas por leer disco)" % (k, len(apartadas[k])))
+    return out + fugas(doc)
+
+
+def fugas(doc):
+    """Un secreto que aparece donde no debe invalida la corrida y es un fallo de seguridad (Z4, Z6)."""
+    out = []
+    s = doc.get("secreto")
+    if isinstance(s, dict) and not omitida(s):
+        if s.get("valor_en_mem_file"):
+            out.append("secreto: ¡el valor del secreto MMDS está en el mem.file del dorado!")
+        if s.get("valor_en_log_gateway"):
+            out.append("secreto: ¡el valor del secreto MMDS está en el log del gateway!")
+    l3 = (doc.get("p3") or {}).get("l3") if isinstance(doc.get("p3"), dict) else None
+    if isinstance(l3, dict) and l3.get("clave_en_mem_file"):
+        out.append("p3.l3: ¡la clave de L3 está en el mem.file del dorado!")
+    return out
+
+
+ESQUEMA_CORRIDA = "ia-corrida/1"
+
+
+def _fichero(base, rel):
+    """Ruta de rel (relativa a la carpeta de resultados) si existe y no está vacía."""
+    if not rel:
+        return None
+    p = rel if rel.startswith("/") else os.path.join(base, rel)
+    try:
+        with open(p, "rb") as fh:
+            return p if fh.read(1) else None
+    except OSError:
+        return None
+
+
+def rechazos_corrida(cor, base):
+    """Motivos para no dar por buena una corrida de remoto/ia.sh (C9-12): sin el journal del daemon no se
+    puede desglosar un commit lento, y sin el service.log del invitado no se puede atribuir un dorado que
+    no carga (Q8). cor es el corrida.json que deja ia.sh en la carpeta de resultados base."""
+    if not isinstance(cor, dict):
+        return ["sin corrida.json en %s: la corrida no guardó el journal del daemon ni los dorados" % base]
+    out = []
+    if cor.get("esquema") != ESQUEMA_CORRIDA:
+        out.append("corrida.json: esquema %r, quería %r" % (cor.get("esquema"), ESQUEMA_CORRIDA))
+    j = cor.get("journal") or {}
+    if omitida(j) or "omitido" in j:
+        out.append("sin journal del daemon: %s" % (j.get("omitido") or j.get("omitida")))
+    elif not _fichero(base, j.get("fichero")):
+        out.append("el journal del daemon (%s) no está o está vacío" % j.get("fichero"))
+    for d in cor.get("dorados") or []:
+        if d.get("preexistente"):
+            continue
+        n = d.get("dorado")
+        if d.get("rc") == 0 and not d.get("commit"):
+            out.append("dorado %s: sin desglose del commit en el journal" % n)
+        if not _fichero(base, d.get("service_log")):
+            if d.get("rc") != 0:
+                out.append("dorado %s fallido (rc %s) sin service.log del invitado" % (n, d.get("rc")))
+            elif not d.get("service_log_motivo"):
+                out.append("dorado %s: sin service.log del invitado y sin motivo" % n)
+        if d.get("rc") != 0 and not _fichero(base, d.get("meminfo")):
+            out.append("dorado %s fallido sin /proc/meminfo del invitado" % n)
+    return out
+
+
+def resumen_corrida(cor, base):
+    out = []
+    w = out.append
+    if not isinstance(cor, dict):
+        return out
+    h = cor.get("host") or {}
+    dsc = h.get("disco") or {}
+    w("== corrida %s → %s  (%s; disco %s %s en %s%s)" % (
+        cor.get("inicio"), cor.get("fin"), h.get("uname"), dsc.get("dispositivo"), dsc.get("fs"), dsc.get("raiz"),
+        ", %s" % dsc.get("tipo") if dsc.get("tipo") else ""))
+    j = cor.get("journal") or {}
+    w("   journal: %s" % (j.get("fichero") and "%s (%s líneas)" % (j.get("fichero"), j.get("lineas")) or j.get("omitido")))
+    for d in cor.get("dorados") or []:
+        if d.get("preexistente"):
+            w("   dorado %s: ya existía (no se fabricó)" % d.get("dorado"))
+            continue
+        c = d.get("commit") or {}
+        des = ", ".join("%s %s" % (k, v) for k, v in c.items() if k != "total")
+        w("   dorado %s: rc %s, fabricar %s; commit %s (total %s)" % (
+            d.get("dorado"), d.get("rc"), fmt(d.get("fabricar_ms")), des or "sin desglose", fmt(c.get("total"))))
+        w("     pico invitado %s MiB, pico VMM %s MiB; disco leído %s MiB, escrito %s MiB; service.log %s" % (
+            d.get("pico_invitado_mib"), d.get("pico_vmm_mib"), _mib((d.get("disco") or {}).get("leidos_bytes")),
+            _mib((d.get("disco") or {}).get("escritos_bytes")), d.get("service_log") or d.get("service_log_motivo")))
+        if d.get("reinicios_servicio"):
+            w("     ¡el servicio se relanzó %s veces durante la carga!" % d["reinicios_servicio"])
+    for f in cor.get("fases") or []:
+        tot = f.get("total") or {}
+        w("   fase %-22s %6s s  disco leído %s MiB, escrito %s MiB" % (
+            f.get("fase"), f.get("segundos"), _mib(tot.get("leidos_bytes")), _mib(tot.get("escritos_bytes"))))
+    for s in cor.get("spikes") or []:
+        res = None
+        p = _fichero(base, s.get("resultado"))
+        if p:
+            try:
+                with open(p) as fh:
+                    res = json.load(fh)
+            except (OSError, ValueError):
+                res = None
+        w("   spike %s: rc %s; %s" % (s.get("spike"), s.get("rc"),
+          (res or {}).get("recomendacion") or "sin resultado.json"))
+    return out
+
+
+def _mib(b):
+    return None if not isinstance(b, (int, float)) else int(b) >> 20
 
 
 def pct(xs, p):
@@ -122,16 +271,25 @@ def resumen(doc, out):
     pr = doc.get("primera")
     if isinstance(pr, dict) and not omitida(pr):
         w("primera respuesta (P1):")
+        apartadas = pr.get("calientes_con_disco") or {}
         for k, et in (("restaurar_caliente", "restaurar, caché caliente"), ("restaurar_fria", "restaurar, tras drop_caches"),
                       ("descongelar_caliente", "descongelar, caché caliente"), ("descongelar_fria", "descongelar, tras drop_caches")):
             v = pr.get(k)
             if omitida(v):
                 w("  %-30s omitida: %s" % (et, v["omitida"]))
                 continue
+            if k not in CALIENTES and not v and apartadas.get(k):
+                # Un banco anterior apartaba también las descongeladas que leían disco (siempre leen).
+                v = apartadas[k]
             maj = [f.get("majflt") for f in muestras(v, "fallos") if isinstance(f, dict)]
-            w("  %-30s %s   petición %s   resync %s   majflt p50 %s" % (
+            w("  %-30s %s   petición %s   resync %s   majflt p50 %s   disco p50 %s" % (
                 et, est(muestras(v, "total_ms")), fmt(pct(muestras(v, "peticion_ms"), 50)),
-                fmt(pct(muestras(v, "resync_ms"), 50)), fmt(pct(maj, 50), "")))
+                fmt(pct(muestras(v, "resync_ms"), 50)), fmt(pct(maj, 50), ""),
+                fmt(_mib(pct(muestras(v, "disco_leido_bytes"), 50)), " MiB")))
+        n_ap = sum(len(v) for k, v in apartadas.items() if k in CALIENTES and isinstance(v, list))
+        if n_ap:
+            w("  (%d muestras calientes apartadas por leer disco y repetidas; calentado por: %s)" % (
+                n_ap, ", ".join(pr.get("calentado_por") or []) or "nada"))
         cal = pct(muestras(pr.get("restaurar_caliente"), "total_ms"), 50)
         if cal is not None:
             if cal <= 1000:
@@ -196,11 +354,53 @@ def resumen(doc, out):
         g = oc.get("gateway")
         if isinstance(g, dict) and not omitida(g):
             w("  por el gateway: idle freeze %s; idle remove %s" % (est(muestras(g.get("idle_freeze"), "ms")), est(muestras(g.get("idle_remove"), "ms"))))
+            rp = g.get("idle_remove_repuesto")
+            if isinstance(rp, list):
+                w("  por el gateway: idle remove con spare 1 %s" % est(muestras(rp, "ms")))
+                ps = g.get("repuesto_pss")
+                if isinstance(ps, dict) and not omitida(ps):
+                    w("  el repuesto añade %s MiB de PSS" % ps.get("extra_mib"))
+                r50, p50 = pct(muestras(g.get("idle_remove"), "ms"), 50), pct(muestras(rp, "ms"), 50)
+                if r50 is not None and p50 is not None:
+                    veredictos.append("P2: con repuesto %s frente a %s sin él → %s" % (
+                        fmt(p50), fmt(r50), "≤ 150 ms, vale (C9-08)" if p50 <= 150 else "> 150 ms (¿falta Z4?)"))
+            elif omitida(rp):
+                w("  por el gateway: idle remove con spare 1 omitida: %s" % rp["omitida"])
             estados = sorted({(d.get("dormidas") or {}).get("estado") for d in g.get("idle_remove") or [] if isinstance(d, dict)} - {None})
             if estados and estados != ["borradas"]:
                 w("  AVISO: con idle: remove el segador dejó las réplicas %s (¿falta integrar Z3/Z4?)" % ", ".join(estados))
         elif omitida(g):
             w("  por el gateway: omitida: %s" % g["omitida"])
+
+    a = doc.get("arranque")
+    if isinstance(a, dict) and not omitida(a):
+        w("gateway recién arrancado, caché fría → primera respuesta (espera %s s):" % a.get("espera_s"))
+        for k in ("inmediata", "espera", "anclado"):
+            v = a.get(k)
+            dr = pct(muestras(v, "disco_leido_bytes"), 50)
+            w("  %-10s %s   disco leído p50 %s MiB" % (k, est(muestras(v, "ms")), _mib(dr)))
+        e50 = pct(muestras(a.get("espera"), "ms"), 50)
+        if e50 is not None:
+            veredictos.append("P1: tras arrancar el gateway y esperar, primera respuesta p50 %s → %s" % (
+                fmt(e50), "≤ 1,2 s, precalentar vale (C9-10)" if e50 <= 1200 else "> 1,2 s (¿falta Z1/Z4?)"))
+
+    sc = doc.get("secreto")
+    if isinstance(sc, dict) and not omitida(sc):
+        w("secreto por MMDS tras restaurar (idle remove): sin %s; con %s; gancho p50 %s" % (
+            est(muestras(sc.get("sin"), "ms")), est(muestras(sc.get("con"), "ms")), fmt(sc.get("gancho_ms_p50"))))
+        w("  valor en el mem.file del dorado: %s; en el log del gateway: %s" % (
+            sc.get("valor_en_mem_file"), sc.get("valor_en_log_gateway")))
+        g = sc.get("gancho_ms_p50")
+        if g is not None:
+            veredictos.append("P1 (Z4): el gancho tras restaurar con un secreto MMDS cuesta %s p50 → %s" % (
+                fmt(g), "≤ 20 ms, vale" if g <= 20 else "> 20 ms"))
+    elif omitida(sc) and not sc["omitida"].startswith("no pedida"):
+        w("secreto por MMDS: omitida: %s" % sc["omitida"])
+    l3 = (doc.get("p3") or {}).get("l3") if isinstance(doc.get("p3"), dict) else None
+    if isinstance(l3, dict):
+        v = l3.get("vllm_falso") or {}
+        w("L3 por credencial (P3): el vLLM recibió %s peticiones (%s con la clave, %s sin ella); clave en el mem.file: %s" % (
+            v.get("peticiones"), v.get("con_clave"), v.get("sin_clave"), l3.get("clave_en_mem_file")))
 
     s = doc.get("semillas")
     if isinstance(s, dict) and not omitida(s):
@@ -233,15 +433,27 @@ def resumen(doc, out):
         w("» " + v)
 
 
+def leer_corrida(base):
+    try:
+        with open(os.path.join(base, "corrida.json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def principal(argv):
     if argv[:1] == ["--self-test"]:
         return autoprueba()
-    validar = argv[:1] == ["--validar"]
-    fs = argv[1:] if validar else argv
+    validar = "--validar" in argv
+    # --historico: resultados de antes de la ronda 9 (sin corrida.json): se resumen sin rechazarlos.
+    historico = "--historico" in argv
+    fs = [a for a in argv if a not in ("--validar", "--historico")]
     if not fs:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     rc = 0
+    rech = []
+    bases = []
     for f in fs:
         try:
             with open(f) as fh:
@@ -250,7 +462,11 @@ def principal(argv):
             print("%s: %s" % (f, e), file=sys.stderr)
             rc = 1
             continue
+        b = os.path.dirname(os.path.abspath(f))
+        if b not in bases:
+            bases.append(b)
         mal = faltan(doc)
+        rech += ["%s: %s" % (os.path.basename(f), r) for r in rechazos(doc)]
         if validar:
             if mal:
                 print("%s: faltan %s" % (f, ", ".join(mal)), file=sys.stderr)
@@ -263,6 +479,16 @@ def principal(argv):
         if mal:
             out.append("AVISO: faltan claves: %s" % ", ".join(mal))
         print("\n".join(out) + "\n")
+    for b in bases:
+        cor = leer_corrida(b)
+        if not validar and cor:
+            print("\n".join(resumen_corrida(cor, b)) + "\n")
+        if not historico:
+            rech += rechazos_corrida(cor, b)
+    for r in rech:
+        print("RECHAZO: %s" % r, file=sys.stderr)
+    if rech:
+        rc = 1
     return rc
 
 
@@ -286,6 +512,10 @@ def autoprueba():
                     "remove": [pt(1, 2100), pt(2, 2140)]},
         "ociosa": {"descongelar_ms": [400, 410], "restaurar_ms": [420, 430],
                    "gateway": {"idle_freeze": [{"ms": 400}], "idle_remove": [{"ms": 440, "dormidas": {"estado": "borradas"}}]}},
+        "arranque": {"espera_s": 20, "inmediata": [{"ms": 7400, "disco_leido_bytes": 1085689856}],
+                     "espera": [{"ms": 1000, "disco_leido_bytes": 0}], "anclado": [{"ms": 950, "disco_leido_bytes": 0}]},
+        "secreto": {"sin": [{"ms": 995}], "con": [{"ms": 1010}], "gancho_ms_p50": 15,
+                    "valor_en_mem_file": False, "valor_en_log_gateway": False},
         "semillas": {"iguales": False},
         "carga": {"ruta": "/v1/m/von-q8/v1/chat/completions",
                   "gateway": {"puntos": [{"clientes": 1, "rps": 10, "p50_ms": 50.5, "p99_ms": 60, "errores": 0},
@@ -303,8 +533,77 @@ def autoprueba():
     resumen(doc, out)
     txt = "\n".join(out)
     for want in ("V1 CONFIRMADA", "remove se queda por defecto", "≤ 1 s → la instancia anidada vale",
-                 "> 5 s → abrir T2-1", "0.50 ms p50 → ≤ 1 ms, vale", "0 errores con 16 clientes → vale"):
+                 "> 5 s → abrir T2-1", "0.50 ms p50 → ≤ 1 ms, vale", "0 errores con 16 clientes → vale",
+                 "precalentar vale", "15 ms p50 → ≤ 20 ms, vale"):
         assert want in txt, (want, txt)
+
+    # C9-14: una muestra «caliente» que leyó del disco es fría; la corrida se rechaza.
+    assert rechazos(doc) == [], rechazos(doc)
+    fria = json.loads(json.dumps(doc))
+    fria["primera"]["restaurar_caliente"][1]["disco_leido_bytes"] = 1085689856
+    r = rechazos(fria)
+    assert len(r) == 1 and "restaurar_caliente" in r[0] and "1085689856" in r[0], r
+    tolerada = json.loads(json.dumps(fria))
+    tolerada["primera"]["umbral_caliente_bytes"] = 2 << 30
+    assert rechazos(tolerada) == [], rechazos(tolerada)
+    vacia = json.loads(json.dumps(doc))
+    vacia["primera"]["restaurar_caliente"] = []
+    vacia["primera"]["calientes_con_disco"] = {"restaurar_caliente": [sm(7900)]}
+    assert any("restaurar_caliente" in x for x in rechazos(vacia)), rechazos(vacia)
+    # Descongelar en caliente siempre lee: el volcado de una réplica congelada es solo suyo, nadie
+    # lo trajo antes a la caché. Ni sus lecturas ni (en corridas viejas) que el banco las apartara
+    # rechazan la corrida, y el resumen las enseña con su disco.
+    desc = json.loads(json.dumps(doc))
+    desc["primera"]["descongelar_caliente"][0]["disco_leido_bytes"] = 1011 << 20
+    assert rechazos(desc) == [], rechazos(desc)
+    out = []
+    resumen(desc, out)
+    lin = [x for x in out if "descongelar, caché caliente" in x]
+    assert lin and "disco p50 1011 MiB" in lin[0], out
+    vieja = json.loads(json.dumps(doc))
+    vieja["primera"]["descongelar_caliente"] = []
+    vieja["primera"]["calientes_con_disco"] = {"descongelar_caliente": [dict(sm(1200), disco_leido_bytes=900 << 20)] * 3}
+    assert rechazos(vieja) == [], rechazos(vieja)
+    out = []
+    resumen(vieja, out)
+    lin = [x for x in out if "descongelar, caché caliente" in x]
+    assert lin and "p50 1200 ms" in lin[0] and "(n=3)" in lin[0] and "disco p50 900 MiB" in lin[0], out
+
+    fuga = json.loads(json.dumps(doc))
+    fuga["secreto"]["valor_en_mem_file"] = True
+    assert any("mem.file" in x for x in rechazos(fuga)), rechazos(fuga)
+
+    # C9-12: sin journal del daemon (o sin desglose / service.log de un dorado) no hay corrida.
+    import tempfile
+    with tempfile.TemporaryDirectory() as base:
+        assert any("corrida.json" in x for x in rechazos_corrida(None, base)), "sin corrida.json"
+        with open(os.path.join(base, "journal-kt-bench.log"), "w") as fh:
+            fh.write("nov 23 10:00:00 kling[1]: commit von-q4-golden-x -> von-q4: overlay 80 ms (total 900 ms)\n")
+        os.mkdir(os.path.join(base, "dorado-von-q4"))
+        for nom in ("service.log", "meminfo.jsonl"):
+            with open(os.path.join(base, "dorado-von-q4", nom), "w") as fh:
+                fh.write("x\n")
+        cor = {"esquema": ESQUEMA_CORRIDA, "journal": {"unidad": "kt-bench", "fichero": "journal-kt-bench.log"},
+               "dorados": [{"dorado": "von-q4", "rc": 0, "fabricar_ms": 40000, "commit": {"overlay": 80, "total": 900},
+                            "service_log": "dorado-von-q4/service.log", "meminfo": "dorado-von-q4/meminfo.jsonl"},
+                           {"dorado": "von-q8", "rc": 1, "fabricar_ms": 300000, "commit": None,
+                            "service_log": "dorado-von-q4/service.log", "meminfo": "dorado-von-q4/meminfo.jsonl"}]}
+        assert rechazos_corrida(cor, base) == [], rechazos_corrida(cor, base)
+        sinj = json.loads(json.dumps(cor))
+        sinj["journal"] = {"omitido": "sin systemd"}
+        assert any("journal" in x for x in rechazos_corrida(sinj, base)), rechazos_corrida(sinj, base)
+        os.remove(os.path.join(base, "journal-kt-bench.log"))
+        assert any("journal" in x for x in rechazos_corrida(cor, base)), "journal borrado"
+        with open(os.path.join(base, "journal-kt-bench.log"), "w") as fh:
+            fh.write("x\n")
+        sind = json.loads(json.dumps(cor))
+        sind["dorados"][0]["commit"] = None
+        assert any("desglose" in x and "von-q4" in x for x in rechazos_corrida(sind, base)), rechazos_corrida(sind, base)
+        sins = json.loads(json.dumps(cor))
+        sins["dorados"][1]["service_log"] = None
+        assert any("service.log" in x and "von-q8" in x for x in rechazos_corrida(sins, base)), rechazos_corrida(sins, base)
+        txt = "\n".join(resumen_corrida(cor, base))
+        assert "von-q4" in txt and "overlay 80" in txt, txt
     print("ia.py: autoprueba OK")
     return 0
 

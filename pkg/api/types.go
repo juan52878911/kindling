@@ -999,6 +999,11 @@ type Snapshot struct {
 	// al restaurar hay que reenganchar exactamente estos, en este orden.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
+	// Timings es el desglose del commit que hizo este dorado. Semilla de la
+	// ronda 9 (C9-12): solo viene en la respuesta de Commit (Z1), nunca en los
+	// listados ni en meta.json.
+	Timings *CommitTimings `json:"timings,omitempty"`
+
 	// Los tres campos siguientes son de los snapshots de una sola unidad, de
 	// antes de que una microVM pudiera llevar varios. Se conservan para poder
 	// leerlos: un snapshot ya congelado no se puede reescribir, y romperlos
@@ -1838,12 +1843,18 @@ type CredentialSpec struct {
 	// servidor; sin él, Database es obligatoria.
 	AnyDatabase bool   `json:"any_database,omitempty"`
 	CAPEM       string `json:"ca_pem,omitempty"`
-	// Upstream, UpstreamTLS y TLSServerName (Postgres y MySQL) fijan a dónde
+	// Upstream, UpstreamTLS y TLSServerName (Postgres, MySQL y HTTP) fijan a dónde
 	// marca el proxy en vez de Domain:Port ("host:puerto"; loopback y LAN
 	// permitidos, metadatos y la red interna de kindling nunca), si el TLS
 	// hacia él se verifica ("" o "verify-full") o se apaga ("disable": solo
 	// con Upstream y SCRAM-SHA-256), y contra qué nombre se verifica el
 	// certificado (Domain por defecto). Ver docs/postgres.md.
+	//
+	// En HTTP (type "" o "http") Upstream fija a dónde marca el proxy en vez
+	// de https://Domain, con los mismos vetos; exige Allow, "disable" solo
+	// hacia el loopback del host (IP o localhost), y ca_pem y
+	// tls_server_name solo valen con él. Todas las HTTP de un dominio van al
+	// mismo upstream. Ver SECURITY.md, punto 7.
 	Upstream      string `json:"upstream,omitempty"`
 	UpstreamTLS   string `json:"upstream_tls,omitempty"`
 	TLSServerName string `json:"tls_server_name,omitempty"`

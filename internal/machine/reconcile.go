@@ -632,13 +632,38 @@ const errCommitCortado = "the daemon restarted in the middle of a commit, with t
 // marcarCommitEnCurso deja la marca en dir, en disco antes de seguir, con el
 // PID del VMM que tiene el disco reapuntado (0 si no se sabe). Con el PID,
 // reconcile solo hace caso a la marca si el VMM vivo es ese: una marca que
-// sobrevivió a su VMM no tumba al siguiente (A3).
-func marcarCommitEnCurso(dir, nombre string, pid int) error {
+// sobrevivió a su VMM no tumba al siguiente (A3). deFork la marca como el
+// temporal de un fork, que tiene el plazo de volcado corto (plazoCommitCortado).
+func marcarCommitEnCurso(dir, nombre string, pid int, deFork bool) error {
 	contenido := nombre + "\n"
 	if pid > 0 {
 		contenido += strconv.Itoa(pid) + "\n"
 	}
+	if deFork {
+		contenido += lineaMarcaFork + "\n"
+	}
 	return escribirMarca(filepath.Join(dir, marcaCommit), []byte(contenido), 0o600)
+}
+
+// lineaMarcaFork es la línea que marca el commit cortado como el de un fork.
+const lineaMarcaFork = "fork"
+
+// plazoCommitCortado es lo que reconcile espera a un VMM que contesta
+// «ocupado» con el volcado de un commit cortado: lo mismo que el commit le
+// daba (snapshot.go). El de un dorado, plazoVolcadoDorado (C9-19); el
+// temporal de un fork, plazoVolcado. Una marca sin tipo (las de antes) o
+// ilegible cuenta como de dorado: esperar de más a quien contesta no cuesta.
+func plazoCommitCortado(dir string, memMiB int) time.Duration {
+	raw, err := os.ReadFile(filepath.Join(dir, marcaCommit))
+	if err == nil {
+		lineas := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		for _, l := range lineas[1:] {
+			if strings.TrimSpace(l) == lineaMarcaFork {
+				return plazoVolcado(memMiB)
+			}
+		}
+	}
+	return plazoVolcadoDorado(memMiB)
 }
 
 // marcaCommitDe dice si dir tiene marca de commit y de qué VMM es. pid 0:
@@ -842,10 +867,11 @@ func (m *Manager) revertirCommitCortado(id, dir string, pid int, estado string, 
 	switch {
 	case err != nil && vmmContestaOcupado(err):
 		// Un VMM que CONTESTA «ocupado» sigue volcando la memoria (una
-		// plantilla grande): se le espera lo que un volcado (R29), no los
-		// plazoEstadoVMM de una consulta.
-		log.Printf("reconcile: %s: its VMM is still busy with the dump of a cut commit; waiting up to %s", shortID(id), plazoVolcado(memMiB))
-		fin := inicio.Add(plazoVolcado(memMiB))
+		// plantilla grande): se le espera lo que el commit le daba al volcado
+		// (R29, C9-19), no los plazoEstadoVMM de una consulta.
+		plazo := plazoCommitCortado(dir, memMiB)
+		log.Printf("reconcile: %s: its VMM is still busy with the dump of a cut commit; waiting up to %s", shortID(id), plazo)
+		fin := inicio.Add(plazo)
 		for err != nil && vmmContestaOcupado(err) && time.Until(fin) > 500*time.Millisecond {
 			time.Sleep(500 * time.Millisecond)
 			err = intentar(min(plazoEstadoVMM, time.Until(fin)))

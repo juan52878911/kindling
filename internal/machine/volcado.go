@@ -366,3 +366,15 @@ func leerSello(dir string) sello {
 func plazoVolcado(memMiB int) time.Duration {
 	return max(30*time.Second, 10*time.Second+time.Duration(memMiB)*20*time.Second/1024)
 }
+
+// plazoVolcadoDorado es plazoVolcado para el commit de un dorado (C9-19): 60 s
+// más 50 s por GiB, ~20 MiB/s. Al volcado de un dorado se llega tras pagar la
+// carga entera (un modelo de varios GiB, minutos), y un volumen degradado o
+// compartido por debajo de los ~50 MiB/s de plazoVolcado lo tiraba por plazo
+// con la carga ya hecha. Un VMM colgado de verdad se detecta más tarde, pero
+// el commit no retiene a nadie más mientras tanto: la plantilla está pausada
+// y es suya. Un congelado (Freeze) y el temporal de un fork siguen con
+// plazoVolcado: ahí sí espera quien lo pidió.
+func plazoVolcadoDorado(memMiB int) time.Duration {
+	return max(plazoVolcado(memMiB), 60*time.Second+time.Duration(memMiB)*50*time.Second/1024)
+}

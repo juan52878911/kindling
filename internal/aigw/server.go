@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -81,7 +82,27 @@ func (g *Gateway) rutas() http.Handler {
 	mux.HandleFunc("POST /v1/admin/retrain", g.admin(g.handleRetrain))
 	mux.HandleFunc("POST /v1/admin/promote", g.admin(g.handlePromote))
 	mux.HandleFunc("POST /v1/admin/rollback", g.admin(g.handleRollback))
+	g.alServir()
 	return g.limits(mux)
+}
+
+// alServir es lo que toca al empezar a servir un registro (al montar el
+// handler): avisar en el log de la frontera de las réplicas y lanzar la sonda
+// de carga de los upstreams. Devuelve los avisos.
+func (g *Gateway) alServir() []string {
+	notas := g.avisosAlServir()
+	for _, n := range notas {
+		log.Print("warning: " + n)
+	}
+	return notas
+}
+
+// avisosAlServir es alServir sin el log: Reload (SIGHUP y /v1/admin/reload)
+// devuelve los avisos a quien recarga, que los imprime él.
+func (g *Gateway) avisosAlServir() []string {
+	notas := g.config().BackendNotes(runtime.GOOS)
+	g.prepararUpstreams()
+	return notas
 }
 
 // limits es lo que vale para todas las rutas: cuerpo acotado, ninguna ruta de
@@ -367,6 +388,8 @@ func (g *Gateway) handleReload(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	// "cascades" es la lista de avisos que imprime `kling ai reload`; Reload
+	// ya trae los de alServir.
 	writeJSON(w, map[string]any{"reloaded": true, "cascades": notes})
 }
 
@@ -413,6 +436,12 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 			continue
 		}
 		c := out[name]
+		if m.Labels[scheduler.LabelSpare] != "" {
+			// Un repuesto no sirve tráfico todavía: aparte, no como réplica.
+			c.spare++
+			out[name] = c
+			continue
+		}
 		switch m.State {
 		case api.StateRunning:
 			c.running++
@@ -512,7 +541,7 @@ func (g *Gateway) proxyOpenAI(w http.ResponseWriter, r *http.Request, contract s
 
 	id := idPeticion(r)
 	w.Header().Set("X-Request-Id", id)
-	ctx, cancel := context.WithTimeout(r.Context(), g.opts.ProxyTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), g.plazoDe(b))
 	defer cancel()
 	s := &salida{method: http.MethodPost, path: r.URL.Path, bytes: out, hdr: cabecerasSalida(r, id)}
 	s.hdr.Set("Content-Type", "application/json")
@@ -524,6 +553,18 @@ func (g *Gateway) proxyOpenAI(w http.ResponseWriter, r *http.Request, contract s
 	defer soltar()
 	defer resp.Body.Close()
 	g.devolver(w, resp, b.Name, stream)
+}
+
+// plazoDe es el plazo de una petición a b: su limits.timeout (validado al
+// cargar) o el -proxy-timeout del gateway. Con un dorado, también alarga la
+// espera a las cabeceras de la réplica (cabecerasDe).
+func (g *Gateway) plazoDe(b *Backend) time.Duration {
+	if b.Limits.Timeout != "" {
+		if d, err := time.ParseDuration(b.Limits.Timeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return g.opts.ProxyTimeout
 }
 
 // camposTokens son los que acotan cuánto genera una petición: los de OpenAI y
@@ -564,6 +605,31 @@ func aplicarLimites(req map[string]json.RawMessage, l Limits) error {
 		}
 		if !alguno {
 			req["max_tokens"] = tope
+		}
+	}
+	// logprobs: top_logprobs de chat y logprobs entero de completions (en chat
+	// es booleano y pasa); prompt_logprobs es de vLLM. Negativo también es
+	// 400: en vLLM -1 pide el vocabulario entero.
+	topar := func(k string, tope int) error {
+		raw, ok := req[k]
+		if tope <= 0 || !ok || string(raw) == "null" || string(raw) == "true" || string(raw) == "false" {
+			return nil
+		}
+		v, _, err := entero(k)
+		if err != nil {
+			return err
+		}
+		if v < 0 || v > int64(tope) {
+			return fmt.Errorf("%s is limited to 0..%d for this model", k, tope)
+		}
+		return nil
+	}
+	for _, c := range []struct {
+		k    string
+		tope int
+	}{{"top_logprobs", l.TopLogprobs}, {"logprobs", l.TopLogprobs}, {"prompt_logprobs", l.PromptLogprobs}} {
+		if err := topar(c.k, c.tope); err != nil {
+			return err
 		}
 	}
 	if l.N > 0 {

@@ -97,6 +97,38 @@ var openLicenses = map[string]bool{"apache-2.0": true, "mit": true}
 // construyen aceptando su licencia a propósito (Spec.AcceptLicense).
 func (m Model) Open() bool { return openLicenses[m.License] }
 
+// memBase son los MiB que un modelo instruct pide además de sus pesos: la
+// caché KV de DefaultCtx, los búferes de cálculo (el vocabulario de 152k de
+// Qwen los hace grandes), el kernel y el agente del invitado y un margen. Sale
+// del catálogo medido (docs/von.md, Dimensionado): lo que cada modelo de 4
+// bits tiene por encima de sus pesos, entre 382 (SmolLM2 Q4_K_M) y 519 MiB.
+const memBase = 380
+
+// MemDefault es la memoria por defecto de la microVM del modelo (sin la caché
+// de prompts, que se suma aparte): lo medido (MemMiB) o, si es más, la
+// fórmula
+//
+//	pesos + transitorio de carga + memBase, redondeado a 64 MiB
+//
+// El transitorio es la mitad de los pesos en Q8_0: medido en EC2 (x86, ronda
+// 9), llama-server con Qwen2.5-1.5B Q8_0 (1807 MiB de GGUF) tenía 2,8 GB de
+// total-vm y 2,34 GB de anon-rss a mitad de carga, ~1000 MiB por encima de
+// los pesos, y moría por OOM en 2368 MiB; con Q4_K_M (1066 MiB) todo el
+// proceso cabía en 1205 MiB anónimos. En 4 bits es 0 y la fórmula no sube
+// nada de lo medido. Los codificadores (KindEmbed) se quedan en lo medido.
+func (m Model) MemDefault() int {
+	if m.Kind == KindEmbed {
+		return m.MemMiB
+	}
+	pesos := int((m.Size + 1<<20 - 1) >> 20)
+	transitorio := 0
+	if m.Quant == "q8_0" {
+		transitorio = pesos / 2
+	}
+	f := (pesos + transitorio + memBase + 63) / 64 * 64
+	return max(m.MemMiB, f)
+}
+
 // Ref es el nombre completo del modelo en una etiqueta: ID:cuantización.
 func (m Model) Ref() string { return m.ID + ":" + m.Quant }
 

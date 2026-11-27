@@ -37,6 +37,19 @@ func dropCache(path string) {
 		f.Fd(), 0, 0, posixFadvDontNeed, 0, 0)
 }
 
+// Los modos de fallocate(2) para perforar sin cambiar el tamaño.
+const (
+	fallocKeepSize  = 0x01
+	fallocPunchHole = 0x02
+)
+
+// perforarRango devuelve al disco [off, off+n) de f, que lee después como
+// ceros (paseUnico). Es lo que hace `fallocate --dig-holes` con cada tirada
+// de ceros que encuentra.
+var perforarRango = func(f *os.File, off, n int64) error {
+	return syscall.Fallocate(int(f.Fd()), fallocPunchHole|fallocKeepSize, off, n)
+}
+
 // Los whence de lseek para ficheros dispersos (no están en syscall).
 const (
 	seekData = 3

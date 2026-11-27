@@ -212,6 +212,23 @@ func TestLimitOpsLlevaLosDosCubos(t *testing.T) {
 	}
 }
 
+// C9-01: la ráfaga inicial viaja como one_time_burst en el cubo de bytes, y
+// sin ella el limitador es el de siempre (el campo no viaja: kling-hv y
+// kling-vz no tienen que verlo).
+func TestLimitBurstLlevaLaRafaga(t *testing.T) {
+	b, err := json.Marshal(LimitBurst(128<<20, 1<<30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"bandwidth":{"size":134217728,"one_time_burst":1073741824,"refill_time":1000}}`; string(b) != want {
+		t.Fatalf("LimitBurst = %s, quería %s", b, want)
+	}
+	b, _ = json.Marshal(LimitBurst(128<<20, 0))
+	if want := `{"bandwidth":{"size":134217728,"refill_time":1000}}`; string(b) != want {
+		t.Fatalf("LimitBurst sin ráfaga = %s, quería %s", b, want)
+	}
+}
+
 // S10: las estadísticas del globo se leen con tope: un cuerpo enorme es un
 // error, no un búfer del tamaño que diga el VMM en el daemon.
 func TestBalloonStatsCuerpoConTope(t *testing.T) {

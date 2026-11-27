@@ -30,6 +30,11 @@ type daemonModelos struct {
 	// tras cambia el estado de una máquina cuando se la consulta n veces
 	// (simula al gateway congelando una réplica ociosa).
 	congelarTras map[string]int
+	// warmCod es lo que contesta POST /snapshots/{name}/warm (0 = 200; 404
+	// es un daemon anterior, 501 uno que no sabe precalentar);
+	// calentados, los dorados que se pidió precalentar.
+	warmCod    int
+	calentados []string
 }
 
 func (d *daemonModelos) cliente(t *testing.T) *api.Client {
@@ -110,6 +115,31 @@ func (d *daemonModelos) cliente(t *testing.T) *api.Client {
 			}
 		}
 		d.maquinas = quedan
+		w.WriteHeader(http.StatusNoContent)
+	})
+	m.HandleFunc("POST /snapshots/{name}/warm", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.llamadas = append(d.llamadas, "warm "+r.PathValue("name"))
+		if d.warmCod != 0 && d.warmCod != 200 {
+			http.Error(w, `{"error":"no"}`, d.warmCod)
+			return
+		}
+		d.calentados = append(d.calentados, r.PathValue("name"))
+		_ = json.NewEncoder(w).Encode(api.WarmSnapshotResult{Bytes: 1 << 20, Started: true})
+	})
+	m.HandleFunc("DELETE /snapshots/{name}", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		name := r.PathValue("name")
+		d.llamadas = append(d.llamadas, "rm-snapshot "+name)
+		var quedan []*api.Snapshot
+		for _, s := range d.snaps {
+			if s.Name != name {
+				quedan = append(quedan, s)
+			}
+		}
+		d.snaps = quedan
 		w.WriteHeader(http.StatusNoContent)
 	})
 	m.HandleFunc("GET /snapshots", func(w http.ResponseWriter, r *http.Request) {

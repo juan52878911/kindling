@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // sufijoBaseMemoria distingue en bases/<snap> el espejo de la memoria del del
@@ -310,17 +311,27 @@ func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base, diff stri
 	return ""
 }
 
+// espejarTrasCommit dice si el commit de un dorado con estas etiquetas (las
+// de su plantilla) espeja su memoria: no con api.LabelGoldenMirror=off, que
+// pone el fabricante cuando las réplicas no se van a congelar en diferencial
+// (C9-15). El primer thaw en diferencial de un dorado así, si lo hubiera,
+// hace el espejo entonces, como antes de espejar tras el commit.
+func espejarTrasCommit(labels map[string]string) bool {
+	return labels[api.LabelGoldenMirror] != api.GoldenMirrorOff
+}
+
 // espejarMemoriaDorado copia en segundo plano, tras el commit del dorado name,
 // el espejo de su memoria en el almacén (espejarMemoria). Sin esto lo copiaba
 // el PRIMER thaw de una copia congelada en diferencial, con quien la despierta
 // esperando: 10 s medidos con un dorado de Postgres. Solo si las copias se
-// congelan en diferencial y el almacén está en uso; si algo falla, el thaw lo
+// congelan en diferencial, el almacén está en uso y las etiquetas de la
+// plantilla no lo apagan (espejarTrasCommit); si algo falla, el thaw lo
 // sigue haciendo como antes. Si el almacén aún no existe, lo crea (ver
 // espejarMemoria); si no puede, degrada a copy como lo haría el primer run
 // -from. Se cancela al cerrar el Manager: lo que quede a
 // medias es un temporal que barrer recoge al arrancar.
-func (m *Manager) espejarMemoriaDorado(name string) {
-	if m.alm == nil || m.cow.actual() != cowModoStore || !congelarEnDiff() || isClosed(m.quit) {
+func (m *Manager) espejarMemoriaDorado(name string, labels map[string]string) {
+	if !espejarTrasCommit(labels) || m.alm == nil || m.cow.actual() != cowModoStore || !congelarEnDiff() || isClosed(m.quit) {
 		return
 	}
 	src := filepath.Join(m.snapDir(name), "mem.file")

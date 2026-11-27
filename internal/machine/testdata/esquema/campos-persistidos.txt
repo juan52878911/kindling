@@ -2,7 +2,7 @@
 # (internal/machine/campos_persistidos_test.go): léelo antes de tocarlo.
 version state.json 4
 version meta.json 5
-version credentials.enc 3
+version credentials.enc 4
 state.json api.CreatePhases checks_ms float64 ignorable
 state.json api.CreatePhases disk_ms float64 ignorable
 state.json api.CreatePhases finish_ms float64 ignorable
@@ -133,6 +133,13 @@ state.json api.WakePhases tier string
 state.json api.WakePhases total_ms float64
 state.json api.WakePhases vmm *api.VMMPhases ignorable
 state.json api.WakePhases wait_ms float64
+meta.json api.CommitTimings digest_ms int64 ignorable
+meta.json api.CommitTimings dump_ms int64 ignorable
+meta.json api.CommitTimings holes_ms int64 ignorable
+meta.json api.CommitTimings overlay_ms int64 ignorable
+meta.json api.CommitTimings squeeze_ms int64 ignorable
+meta.json api.CommitTimings sync_ms int64 ignorable
+meta.json api.CommitTimings total_ms int64 ignorable
 meta.json api.Snapshot allow_domains []string
 meta.json api.Snapshot allow_exec bool
 meta.json api.Snapshot annotations map[string]json.RawMessage
@@ -169,6 +176,7 @@ meta.json api.Snapshot signature string
 meta.json api.Snapshot sin_agente bool debt
 meta.json api.Snapshot snap_sha256 string
 meta.json api.Snapshot stale string
+meta.json api.Snapshot timings *api.CommitTimings ignorable
 meta.json api.Snapshot vcpus int
 meta.json api.Snapshot vmm string
 meta.json api.Snapshot volume string

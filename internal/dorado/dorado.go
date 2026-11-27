@@ -26,11 +26,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -68,10 +72,15 @@ type Probe struct {
 // Request es una petición del calentamiento: una línea del fichero JSONL de
 // `-warmup`. Body es JSON tal cual; si es una cadena JSON, se manda su texto
 // (para cuerpos que no son JSON).
+//
+// Headers son cabeceras NO secretas (ronda 9, P2): un nombre con pinta de
+// credencial se rechaza, salvo que su valor sea el marcador de la clave de
+// calentamiento desechable (WarmupKeyPlaceholder, con Options.WarmupKey).
 type Request struct {
-	Method string          `json:"method,omitempty"`
-	Path   string          `json:"path"`
-	Body   json.RawMessage `json:"body,omitempty"`
+	Method  string            `json:"method,omitempty"`
+	Path    string            `json:"path"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    json.RawMessage   `json:"body,omitempty"`
 }
 
 // bodyText es el cuerpo que se manda: el texto de una cadena JSON, o el JSON
@@ -125,6 +134,26 @@ type Options struct {
 	AfterWarmup func(ctx context.Context, ref string) error
 	// Log recibe el progreso, línea a línea. Puede ser nil.
 	Log func(format string, args ...any)
+
+	// ModelBytes es el tamaño de los pesos: con Wait == 0 da el plazo
+	// automático (AutoWait) y es el 100 % del progreso. 0 = no se sabe.
+	ModelBytes int64
+	// Stall es cuánto puede pasar la plantilla sin tocar memoria ni gastar
+	// CPU antes de cortar la carga; 0 = DefaultStall, < 0 = nunca. Solo con
+	// un cliente que dé estadísticas (ProcStats).
+	Stall time.Duration
+	// WarmupKey genera una clave de calentamiento desechable para los
+	// WarmupKeyPlaceholder de las cabeceras de Warmup: el invitado solo
+	// recibe su sha256 y su caducidad (EnvWarmupKeySHA256,
+	// EnvWarmupKeyExpires). El backend debe dejar de aceptarla al caducar.
+	WarmupKey bool
+	// Egress es "none" (por defecto) o "allowlist"; AllowDomains, los
+	// dominios de allowlist (sin Egress, implican allowlist). Credentials son
+	// credenciales del proxy (la clave no entra en el invitado: recibe un
+	// marcador) que se dan a la plantilla y al dorado; exigen allowlist.
+	Egress       string
+	AllowDomains []string
+	Credentials  []api.CredentialSpec
 }
 
 // Result es lo que costó cada paso.
@@ -134,10 +163,46 @@ type Result struct {
 	BootMS   int64         // arranque de la microVM (lo dice el daemon)
 	LoadTime time.Duration // de arrancada a sonda buena
 	Warmups  int           // peticiones de calentamiento contestadas
+	// WarmTime es lo que tardó el calentamiento (Warmup y AfterWarmup);
+	// SqueezeTime, el apretón de Make (0 si lo hizo el commit); CommitTime,
+	// el commit. El desglose del commit va en Snapshot.Timings (C9-12).
+	WarmTime    time.Duration
+	SqueezeTime time.Duration
+	CommitTime  time.Duration
 }
+
+// Clave de calentamiento desechable (ronda 9, P2).
+const (
+	// WarmupKeyPlaceholder es el texto que, en el valor de una cabecera del
+	// calentamiento, se cambia por la clave desechable: solo o tras un
+	// esquema ("Bearer {{warmup_key}}").
+	WarmupKeyPlaceholder = "{{warmup_key}}"
+	// EnvWarmupKeySHA256 y EnvWarmupKeyExpires son lo único de la clave que
+	// recibe el invitado: su sha256 en hexadecimal y su caducidad (RFC 3339,
+	// reloj de pared). Como kindling resincroniza el reloj de cada copia al
+	// restaurar, en las réplicas la clave ya caducó.
+	EnvWarmupKeySHA256  = "KLING_WARMUP_KEY_SHA256"
+	EnvWarmupKeyExpires = "KLING_WARMUP_KEY_EXPIRES"
+	// warmupKeyMargin es lo que dura la clave más allá del plazo.
+	warmupKeyMargin = time.Minute
+)
 
 // Plazos por defecto.
 const (
+	// ServiceExitedMark es el principio de la línea que el entrypoint de las
+	// imágenes de kindling escribe en /var/log/service.log cada vez que el
+	// servicio muere y lo relanza (scripts/81-base-image.sh). Semilla de la
+	// ronda 9 (C9-13): es contrato entre el constructor de imágenes (Z2, que
+	// no puede cambiar el texto) y el fabricante (Z3, que cuenta estas líneas
+	// para distinguir "cargando" de "muere en bucle").
+	ServiceExitedMark = "service exited with "
+	// ServiceLogDumpPrefix va delante de cada línea de service.log que el
+	// entrypoint vuelca a la consola del invitado cuando el servicio muere,
+	// justo antes de su línea ServiceExitedMark (la salida del servicio no va
+	// a la consola mientras corre: la consola serie es lenta). Con el prefijo,
+	// una marca copiada en un volcado no cuenta como otra muerte.
+	ServiceLogDumpPrefix = "service.log| "
+
 	DefaultWait         = 5 * time.Minute
 	DefaultProbeTimeout = 5 * time.Second
 	// warmRetry es la pausa entre reintentos de una petición de calentamiento
@@ -162,9 +227,15 @@ var metodos = map[string]bool{
 var pintaDeSecreto = []string{"KEY", "TOKEN", "SECRET", "PASSWORD"}
 
 // EnvSecreto devuelve el primer nombre de env con pinta de credencial, o "".
+//
+// Los dos nombres de la clave de calentamiento (un verificador y una fecha) no
+// cuentan, por nombre exacto.
 func EnvSecreto(env []string) string {
 	for _, kv := range env {
 		name, _, _ := strings.Cut(kv, "=")
+		if name == EnvWarmupKeySHA256 || name == EnvWarmupKeyExpires {
+			continue
+		}
 		up := strings.ToUpper(name)
 		for _, s := range pintaDeSecreto {
 			if strings.Contains(up, s) {
@@ -211,6 +282,155 @@ func (o *Options) validate() error {
 	if n := EnvSecreto(o.Env); n != "" && !o.AllowEnv {
 		return fmt.Errorf("golden: env %s looks like a credential, and the golden snapshot keeps it in the memory of every replica: let the gateway add it (auth in ai.json), or pass -allow-env if it is not one", n)
 	}
+	usaClave := false
+	for _, r := range o.Warmup {
+		for _, v := range r.Headers {
+			usaClave = usaClave || strings.Contains(v, WarmupKeyPlaceholder)
+		}
+	}
+	switch {
+	case usaClave && !o.WarmupKey:
+		return fmt.Errorf("golden: a warm-up header uses %s but there is no warm-up key: pass -warmup-key", WarmupKeyPlaceholder)
+	case o.WarmupKey && !usaClave:
+		return fmt.Errorf("golden: -warmup-key needs a warm-up header with %s (e.g. \"Authorization\": \"Bearer %s\")", WarmupKeyPlaceholder, WarmupKeyPlaceholder)
+	}
+	if o.WarmupKey {
+		for _, kv := range o.Env {
+			if n, _, _ := strings.Cut(kv, "="); n == EnvWarmupKeySHA256 || n == EnvWarmupKeyExpires {
+				return fmt.Errorf("golden: env %s is set by the warm-up key itself", n)
+			}
+		}
+	}
+	return o.validateEgress()
+}
+
+// validateEgress comprueba la red y las credenciales de la plantilla.
+func (o *Options) validateEgress() error {
+	switch o.Egress {
+	case "", "none", "allowlist":
+	default:
+		return fmt.Errorf("golden: egress %q: a golden snapshot goes out with none or allowlist (the domains it needs), never the whole internet", o.Egress)
+	}
+	if len(o.AllowDomains) > 0 && o.Egress == "none" {
+		return errors.New("golden: allowed domains need egress allowlist")
+	}
+	if len(o.Credentials) == 0 {
+		return nil
+	}
+	if o.egress() != "allowlist" {
+		return errors.New("golden: proxy credentials need egress allowlist (-allow)")
+	}
+	envs := map[string]bool{}
+	for i, cr := range o.Credentials {
+		switch {
+		case cr.Domain == "" || cr.Env == "":
+			return fmt.Errorf("golden: credential %d needs a domain and an env variable for its placeholder", i+1)
+		case cr.Secret == "":
+			return fmt.Errorf("golden: credential %s has no secret", cr.Env)
+		case envs[cr.Env]:
+			return fmt.Errorf("golden: two credentials for env %s", cr.Env)
+		}
+		envs[cr.Env] = true
+	}
+	return nil
+}
+
+// egress es el modo de red con el que arranca la plantilla.
+func (o *Options) egress() string {
+	switch {
+	case o.Egress != "":
+		return o.Egress
+	case len(o.AllowDomains) > 0:
+		return "allowlist"
+	}
+	return "none"
+}
+
+// Cabeceras del calentamiento: topes y las que no se dejan poner.
+const (
+	maxWarmupHeaders  = 16
+	maxWarmupHeaderLn = 4 << 10
+)
+
+// cabecerasVetadas son las de salto a salto y las que fijan el encuadre o el
+// destino de la petición: el proxy del daemon las pone. Es la lista de
+// internal/aigw (cabecerasVetadas), que este paquete no puede importar, sin
+// las de credencial, que van aparte, y sin Content-Type y X-Request-Id, que un
+// calentamiento sí puede querer poner.
+var cabecerasVetadas = map[string]bool{
+	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
+	"Keep-Alive": true, "Upgrade": true, "Te": true, "Trailer": true, "Proxy-Connection": true,
+}
+
+// cabecerasCredencial llevan una credencial por nombre; además, cualquiera
+// cuyo nombre contenga una de pintaDeCredencial (el criterio de EnvSecreto,
+// más AUTH).
+var (
+	cabecerasCredencial = map[string]bool{"Authorization": true, "Proxy-Authorization": true, "Cookie": true, "X-Api-Key": true}
+	pintaDeCredencial   = append([]string{"AUTH"}, pintaDeSecreto...)
+)
+
+func esCredencial(canon string) bool {
+	if cabecerasCredencial[canon] {
+		return true
+	}
+	up := strings.ToUpper(canon)
+	for _, s := range pintaDeCredencial {
+		if strings.Contains(up, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// esMarcador dice si v es el marcador de la clave, solo o tras un esquema.
+func esMarcador(v string) bool {
+	if v == WarmupKeyPlaceholder {
+		return true
+	}
+	esq, resto, ok := strings.Cut(v, " ")
+	return ok && resto == WarmupKeyPlaceholder && esToken(esq)
+}
+
+// esToken dice si s es un token HTTP (RFC 9110, §5.6.2).
+func esToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r <= ' ' || r > '~' || strings.ContainsRune(`"(),/:;<=>?@[\]{}`, r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validarCabeceras(h map[string]string) error {
+	if len(h) > maxWarmupHeaders {
+		return fmt.Errorf("%d headers, at most %d", len(h), maxWarmupHeaders)
+	}
+	for n, v := range h {
+		canon := textproto.CanonicalMIMEHeaderKey(n)
+		switch {
+		case !esToken(n):
+			return fmt.Errorf("header name %q is not a valid HTTP token", n)
+		case cabecerasVetadas[canon]:
+			return fmt.Errorf("header %s is set by the proxy (hop-by-hop or framing)", canon)
+		case len(v) > maxWarmupHeaderLn:
+			return fmt.Errorf("header %s: value over %d bytes", canon, maxWarmupHeaderLn)
+		case strings.ContainsAny(v, "\r\n\x00"):
+			return fmt.Errorf("header %s: control characters in its value", canon)
+		case esMarcador(v):
+			// La clave desechable: la única credencial que se admite.
+		case strings.Contains(v, WarmupKeyPlaceholder):
+			return fmt.Errorf("header %s: %s goes alone or after a scheme (\"Bearer %s\")", canon, WarmupKeyPlaceholder, WarmupKeyPlaceholder)
+		case esCredencial(canon):
+			// El valor no se repite: podría ser la clave de verdad.
+			return fmt.Errorf("header %s looks like a credential, and the warm-up leaves it in the golden snapshot's memory: "+
+				"warm up without credentials (behind the gateway the replica need not authenticate), "+
+				"or use a disposable key with -warmup-key and %q as its value", canon, "Bearer "+WarmupKeyPlaceholder)
+		}
+	}
 	return nil
 }
 
@@ -221,7 +441,67 @@ func (r Request) validate() error {
 	if !validPath(r.Path) {
 		return fmt.Errorf("path %q must be an absolute path such as /v1/decide", r.Path)
 	}
-	return nil
+	return validarCabeceras(r.Headers)
+}
+
+// Lo que Make usa del daemon solo si el cliente lo tiene (*api.Client sí),
+// por aserción de tipo: un Client mínimo sigue valiendo.
+type (
+	infoer interface {
+		Info(ctx context.Context) (*api.Info, error)
+	}
+	credencialesCliente interface {
+		SetCredentials(ctx context.Context, ref string, r api.CredentialsRequest) (*api.Machine, error)
+		Stop(ctx context.Context, ref string) (*api.Machine, error)
+		Start(ctx context.Context, ref string, env []string) (*api.Machine, error)
+		SetSnapshotCredentials(ctx context.Context, name string, r api.CredentialsRequest) (*api.Snapshot, error)
+	}
+)
+
+// commitAprieta dice si el commit del daemon ya devuelve al host la memoria
+// libre antes de volcar (C9-03): Firecracker lo hace (apretarAntesDeVolcar);
+// los backends de macOS no. Sin /info, o sin saberlo, no: se aprieta aquí,
+// como siempre.
+func commitAprieta(ctx context.Context, c Client) bool {
+	ic, ok := c.(infoer)
+	if !ok {
+		return false
+	}
+	ictx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	info, err := ic.Info(ictx)
+	return err == nil && info.Backend == "firecracker"
+}
+
+// claveDesechable genera la clave de calentamiento: 32 bytes aleatorios en
+// hexadecimal. Solo vive en memoria del fabricante.
+func claveDesechable() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// FormatTimings es el desglose del commit para el log: «squeeze 1.2s, dump
+// 9s, …». Vacío si el daemon no lo da.
+func FormatTimings(t *api.CommitTimings) string {
+	if t == nil {
+		return ""
+	}
+	var out []string
+	for _, p := range []struct {
+		n  string
+		ms int64
+	}{
+		{"squeeze", t.SqueezeMS}, {"overlay", t.OverlayMS}, {"dump", t.DumpMS},
+		{"holes", t.HolesMS}, {"sync", t.SyncMS}, {"digest", t.DigestMS},
+	} {
+		if p.ms > 0 {
+			out = append(out, p.n+" "+(time.Duration(p.ms)*time.Millisecond).String())
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // Make arranca una microVM de la imagen, espera a que el servidor conteste la
@@ -231,16 +511,41 @@ func Make(ctx context.Context, c Client, o Options) (*Result, error) {
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
+	creds, conCreds := c.(credencialesCliente)
+	if len(o.Credentials) > 0 && !conCreds {
+		return nil, errors.New("golden: this client cannot hand credentials to the template")
+	}
 	logf := o.Log
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	if o.Wait <= 0 {
-		o.Wait = DefaultWait
+		o.Wait = AutoWait(o.ModelBytes)
 	}
 	if o.CPUPct == 0 {
 		o.CPUPct = 100 * max(o.VCPUs, 1)
 	}
+	// La clave desechable: K no se escribe, ni se imprime, ni se registra; el
+	// invitado recibe su verificador y su caducidad, y limpiar la quita de
+	// todo lo que vuelve (errores con eco, logs del servidor).
+	env := o.Env
+	limpiar := func(s string) string { return s }
+	clave := ""
+	if o.WarmupKey {
+		k, err := claveDesechable()
+		if err != nil {
+			return nil, fmt.Errorf("golden: warm-up key: %w", err)
+		}
+		clave = k
+		sum := sha256.Sum256([]byte(k))
+		env = append(append([]string(nil), o.Env...),
+			EnvWarmupKeySHA256+"="+hex.EncodeToString(sum[:]),
+			EnvWarmupKeyExpires+"="+time.Now().Add(o.Wait+warmupKeyMargin).UTC().Format(time.RFC3339))
+		limpiar = func(s string) string { return strings.ReplaceAll(s, k, "[warm-up key]") }
+		logf("warm-up key: the server gets only its sha256 and its expiry (%s); it must reject the key after it, as the key may stay in the golden's memory",
+			EnvWarmupKeyExpires)
+	}
+	aprietaElCommit := commitAprieta(ctx, c)
 	// La plantilla lleva nombre propio y aleatorio: dos despliegues a la vez
 	// del mismo modelo no deben pisarse la máquina.
 	name := fmt.Sprintf("%s-golden-%s", o.Snapshot, strconv.FormatInt(time.Now().UnixNano()%1_000_000, 36))
@@ -250,11 +555,12 @@ func Make(ctx context.Context, c Client, o Options) (*Result, error) {
 	})
 	mc, err := c.Run(ctx, api.RunRequest{
 		Name: name, Image: o.Image, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
-		CPUPct:    o.CPUPct,
-		Egress:    "none",
-		Labels:    labels,
-		Env:       o.Env,
-		AllowExec: o.AllowExec,
+		CPUPct:       o.CPUPct,
+		Egress:       o.egress(),
+		AllowDomains: o.AllowDomains,
+		Labels:       labels,
+		Env:          env,
+		AllowExec:    o.AllowExec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("booting %s: %w", o.Image, err)
@@ -266,7 +572,35 @@ func Make(ctx context.Context, c Client, o Options) (*Result, error) {
 		defer cancel()
 		_ = c.Remove(rc, mc.ID)
 	}()
+	if len(o.Credentials) > 0 {
+		// Las credenciales del proxy solo se dan a una máquina viva, y el
+		// servicio lee su entorno al arrancar: se le dan y se rearranca la
+		// plantilla, para que arranque con los marcadores en su entorno.
+		if _, err := creds.SetCredentials(ctx, mc.ID, api.CredentialsRequest{Credentials: o.Credentials}); err != nil {
+			return nil, fmt.Errorf("handing the template its credentials: %w", err)
+		}
+		if _, err := creds.Stop(ctx, mc.ID); err != nil {
+			return nil, fmt.Errorf("restarting the template with its credentials: %w", err)
+		}
+		if _, err := creds.Start(ctx, mc.ID, env); err != nil {
+			return nil, fmt.Errorf("restarting the template with its credentials: %w", err)
+		}
+		logf("template restarted with %d proxy credential(s): the keys stay on the host", len(o.Credentials))
+	}
 	logf("booted %s in %d ms; waiting for the server...", mc.Name, mc.BootMS)
+
+	// El vigilante mira las dos fases (listo y calentamiento) y las corta, con
+	// su causa, si la plantilla se estanca o el servidor muere en bucle.
+	wctx, wcancel := context.WithCancelCause(ctx)
+	defer wcancel(nil)
+	fase, parar := vigilar(wctx, wcancel, c, mc.ID, &o, limpiar)
+	defer parar()
+	causa := func(err error) error {
+		if cs := context.Cause(wctx); ctx.Err() == nil && (errors.Is(cs, ErrStalled) || errors.Is(cs, ErrRestarting)) {
+			return cs
+		}
+		return err
+	}
 
 	t0 := time.Now()
 	ready := o.Ready
@@ -275,40 +609,66 @@ func Make(ctx context.Context, c Client, o Options) (*Result, error) {
 			return waitHealthy(ctx, c, ref, o.Port, o.Health, timeout)
 		}
 	}
-	if err := ready(ctx, mc.ID, o.Wait); err != nil {
+	if err := ready(wctx, mc.ID, o.Wait); err != nil {
+		if cs := causa(err); cs != err {
+			return nil, cs
+		}
 		return nil, fmt.Errorf("%w\nsee the server log with:  kling exec %s -- tail -50 /var/log/service.log", err, mc.Name)
 	}
 	res.LoadTime = time.Since(t0)
 	logf("server ready in %s", res.LoadTime.Round(time.Millisecond))
 
+	fase("warming up")
+	t1 := time.Now()
 	if len(o.Warmup) > 0 {
 		hasta := time.Now().Add(o.Wait)
 		for i, r := range o.Warmup {
-			if err := warmOne(ctx, c, mc.ID, o.Port, r, hasta, logf); err != nil {
-				return nil, fmt.Errorf("warm-up %d of %d (%s %s): %w", i+1, len(o.Warmup), r.Method, r.Path, err)
+			if err := warmOne(wctx, c, mc.ID, o.Port, r, clave, limpiar, hasta, logf); err != nil {
+				return nil, causa(fmt.Errorf("warm-up %d of %d (%s %s): %w", i+1, len(o.Warmup), r.Method, r.Path, err))
 			}
 			res.Warmups++
 		}
 		logf("%d warm-up request(s) answered 2xx", res.Warmups)
 	}
 	if o.AfterWarmup != nil {
-		if err := o.AfterWarmup(ctx, mc.ID); err != nil {
-			return nil, err
+		if err := o.AfterWarmup(wctx, mc.ID); err != nil {
+			return nil, causa(err)
 		}
 	}
+	res.WarmTime = time.Since(t1)
+	parar()
 
 	// Devolver al host lo reclamable (memoria libre y caché de páginas limpia)
 	// ANTES de congelar: el globo deja esas páginas a cero, el commit las
 	// convierte en huecos del mem.file y el dorado ocupa solo lo que el modelo
-	// usa de verdad. Si la máquina no tiene globo, se congela igual.
-	if sq, err := c.Squeeze(ctx, mc.ID); err == nil {
-		logf("returned %d MiB of free memory to the host before freezing", sq.ReclaimedMiB)
+	// usa de verdad. Si la máquina no tiene globo, se congela igual. Con
+	// Firecracker lo hace el propio commit, y hacerlo aquí era repetirlo.
+	if !aprietaElCommit {
+		t2 := time.Now()
+		if sq, err := c.Squeeze(ctx, mc.ID); err == nil {
+			res.SqueezeTime = time.Since(t2)
+			logf("returned %d MiB of free memory to the host before freezing (%s)", sq.ReclaimedMiB, res.SqueezeTime.Round(time.Millisecond))
+		}
 	}
+	t3 := time.Now()
 	snap, err := c.Commit(ctx, mc.ID, o.Snapshot, o.Replace)
 	if err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	res.CommitTime = time.Since(t3)
+	if d := FormatTimings(snap.Timings); d != "" {
+		logf("committed in %s (%s)", res.CommitTime.Round(time.Millisecond), d)
+	} else {
+		logf("committed in %s", res.CommitTime.Round(time.Millisecond))
+	}
 	res.Snapshot = snap
+	if len(o.Credentials) > 0 {
+		// Las réplicas reciben las credenciales de la plantilla en su proxy
+		// al restaurar. Sin ellas, el dorado no serviría: se dice, no se calla.
+		if _, err := creds.SetSnapshotCredentials(ctx, snap.Name, api.CredentialsRequest{Credentials: o.Credentials}); err != nil {
+			return nil, fmt.Errorf("golden %s made, but handing it its credentials failed: %w (retry with kling template credential %s)", snap.Name, err, snap.Name)
+		}
+	}
 	return res, nil
 }
 
@@ -359,14 +719,31 @@ func waitHealthy(ctx context.Context, c Client, ref string, port int, h Probe, t
 // el dorado en el acto; un error de transporte (el proxy del daemon se cansó
 // mientras el servidor sigue con la primera petición, que trae los pesos a base
 // de fallos de página) se reintenta hasta el plazo.
-func warmOne(ctx context.Context, c Client, ref string, port int, r Request, hasta time.Time, logf func(string, ...any)) error {
+//
+// clave es la clave desechable que sustituye a WarmupKeyPlaceholder ("" =
+// ninguna) y limpiar la quita de lo que vuelve: un backend que repite lo que
+// recibe en su error no la saca por aquí.
+func warmOne(ctx context.Context, c Client, ref string, port int, r Request, clave string, limpiar func(string) string, hasta time.Time, logf func(string, ...any)) error {
+	var h map[string]string
+	if len(r.Headers) > 0 {
+		h = make(map[string]string, len(r.Headers))
+		for k, v := range r.Headers {
+			if clave != "" {
+				v = strings.ReplaceAll(v, WarmupKeyPlaceholder, clave)
+			}
+			h[k] = v
+		}
+	}
 	for {
-		resp, err := c.Guest(ctx, ref, api.GuestRequest{Port: port, Path: r.Path, Method: r.Method, Body: r.bodyText()})
+		resp, err := c.Guest(ctx, ref, api.GuestRequest{Port: port, Path: r.Path, Method: r.Method, Headers: h, Body: r.bodyText()})
 		if err == nil {
 			if resp.Status < 200 || resp.Status > 299 {
-				return fmt.Errorf("answered %d: %s", resp.Status, recortar(resp.Body))
+				return fmt.Errorf("answered %d: %s", resp.Status, recortar(limpiar(resp.Body)))
 			}
 			return nil
+		}
+		if clave != "" && strings.Contains(err.Error(), clave) {
+			err = errors.New(limpiar(err.Error()))
 		}
 		if ctx.Err() != nil || time.Now().After(hasta) {
 			return err

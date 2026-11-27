@@ -585,6 +585,15 @@ type Manager struct {
 	// trabajo vivo leyendo o escribiendo lo que cambia el siguiente.
 	sueltas  sync.WaitGroup
 	cerrando atomic.Bool
+	// anclados son los mem.file de dorados anclados en RAM, por nombre
+	// (calentar_dorado.go). Su propio cerrojo: anclar lee el fichero entero y
+	// no puede ir bajo m.mu.
+	ancladosMu sync.Mutex
+	anclados   map[string]anclaje
+	// bytesAnclados son los bytes anclados de cada dorado, bajo m.mu (no
+	// ancladosMu: hotMemFilesMiBLocked los lee con m.mu tomado, y anclar
+	// toma ancladosMu antes que m.mu).
+	bytesAnclados map[string]int64
 	// ttlEnCurso: hay una ronda de expireTTL en segundo plano.
 	ttlEnCurso atomic.Bool
 	// pruebasPasoVigilante, en los tests, se llama antes de cada paso de la
@@ -1522,6 +1531,8 @@ func (m *Manager) Close() {
 		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
 		m.cerrarFondoRed()
+		// Los dorados anclados en RAM (C9-10) duran lo que el daemon.
+		m.soltarAnclados()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
 		// escritura del estado ya se cerró, esa transición se pierde y el
@@ -1587,6 +1598,26 @@ func (m *Manager) List() []*api.Machine {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// limiteDisco es el limitador de un disco de la microVM: diskBytesPerSec.
+func limiteDisco() *fc.RateLimiter { return fc.Limit(diskBytesPerSec) }
+
+// limiteCapa es el de la capa del servicio (C9-01): el mismo caudal
+// sostenido, más una ráfaga del tamaño de la capa. Una capa de modelo son los
+// pesos, que el servidor lee enteros al arrancar: con el cubo de 128 MiB/s,
+// 1 GiB eran 7,7 s medidos de un «server ready» que el disco del host sirve
+// en 2-3. Va solo en el arranque en frío, que es el único que hace SetDrive
+// (una restauración hereda del volcado el cubo con la ráfaga ya gastada en la
+// carga), y solo en la capa, que es de solo lectura: lo que gana una VM
+// hostil es leer una vez su propia capa sin tope, no saturar el disco de
+// forma sostenida. Sin poder leer su tamaño, el limitador de siempre.
+func limiteCapa(path string) *fc.RateLimiter {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return limiteDisco()
+	}
+	return fc.LimitBurst(diskBytesPerSec, fi.Size())
 }
 
 // allocatedBytes devuelve los bytes realmente ocupados por un fichero, que con
@@ -2644,7 +2675,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if layer != "" {
 		if err := c.SetDrive(ctx, fc.Drive{
 			DriveID: layerDriveID, PathOnHost: layer, IsRootDevice: false, IsReadOnly: true,
-			RateLimiter: fc.Limit(diskBytesPerSec),
+			RateLimiter: limiteCapa(layer),
 		}); err != nil {
 			return pid, err
 		}

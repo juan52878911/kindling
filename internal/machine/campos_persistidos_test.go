@@ -176,7 +176,17 @@ var clasesCampos = map[string]claseCampo{
 	"meta.json api.Snapshot base_digest":  {efecto: true, version: 4, porque: "covered by the v2 signature an older kling would compute without it"},
 	"meta.json api.Snapshot con_agente":   {efecto: true, version: 5, porque: "covered by the v3 signature; an older kling would deliver a copy whose agent did not answer"},
 	// El modo de sincronización de un volumen (api.VolumeAttachment.Sync).
-	"meta.json api.VolumeAttachment sync": {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
+	// El desglose del commit (C9-12) solo va en la respuesta: Commit lo pone en
+	// una copia del snap tras escribir meta.json.
+	"meta.json api.Snapshot timings":         {porque: "never written to meta.json: Commit sets it on a copy, for the response only"},
+	"meta.json api.CommitTimings digest_ms":  {porque: "only inside timings (see above)"},
+	"meta.json api.CommitTimings dump_ms":    {porque: "only inside timings (see above)"},
+	"meta.json api.CommitTimings holes_ms":   {porque: "only inside timings (see above)"},
+	"meta.json api.CommitTimings overlay_ms": {porque: "only inside timings (see above)"},
+	"meta.json api.CommitTimings squeeze_ms": {porque: "only inside timings (see above)"},
+	"meta.json api.CommitTimings sync_ms":    {porque: "only inside timings (see above)"},
+	"meta.json api.CommitTimings total_ms":   {porque: "only inside timings (see above)"},
+	"meta.json api.VolumeAttachment sync":    {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
 	"state.json api.VolumeAttachment sync": {porque: "an older kling and its kling-hv have no sync modes at all; " +
 		"losing it on a round trip falls back to full, the durable default"},
 	// credentials.enc: ver versionAlmacenSigV4 (credenciales.go).

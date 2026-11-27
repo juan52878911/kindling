@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -547,6 +549,16 @@ type daemonCiclo struct {
 	machines []*api.Machine
 	frozen   []string
 	removed  []string
+
+	// Ronda 9: credenciales atadas (dorado y máquinas), MMDS, ganchos y
+	// precalentado de dorados.
+	snapCreds   []string
+	machCreds   []string
+	mmds        map[string]string
+	hooksFallan string // si no está vacío, POST /hooks contesta failed con este detalle
+	warms       []string
+	warmCode    int // != 0: POST /snapshots/{name}/warm contesta este código
+	n           int // llamadas recibidas
 }
 
 func (d *daemonCiclo) serve(t *testing.T) *api.Client {
@@ -563,6 +575,60 @@ func (d *daemonCiclo) serve(t *testing.T) *api.Client {
 	}
 	mux := http.NewServeMux()
 	send := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(v) }
+	mux.HandleFunc("PUT /snapshots/{name}/credentials", func(w http.ResponseWriter, r *http.Request) {
+		var req api.CredentialsRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.mu.Lock()
+		d.snapCreds = append(d.snapCreds, credencialesTexto(r.PathValue("name"), req.Credentials)...)
+		d.mu.Unlock()
+		send(w, &api.Snapshot{Name: r.PathValue("name")})
+	})
+	mux.HandleFunc("POST /snapshots/{name}/warm", func(w http.ResponseWriter, r *http.Request) {
+		var req api.WarmSnapshotRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.mu.Lock()
+		code := d.warmCode
+		pin := "-"
+		if req.Pin != nil {
+			pin = fmt.Sprint(*req.Pin)
+		}
+		d.warms = append(d.warms, r.PathValue("name")+" pin="+pin)
+		d.mu.Unlock()
+		if code != 0 {
+			http.Error(w, `{"error":"no"}`, code)
+			return
+		}
+		send(w, &api.WarmSnapshotResult{Started: true, Pinned: req.Pin != nil && *req.Pin})
+	})
+	mux.HandleFunc("POST /machines/{ref}/credentials", func(w http.ResponseWriter, r *http.Request) {
+		var req api.CredentialsRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		d.mu.Lock()
+		d.machCreds = append(d.machCreds, credencialesTexto(r.PathValue("ref"), req.Credentials)...)
+		d.mu.Unlock()
+		send(w, &api.Machine{ID: r.PathValue("ref")})
+	})
+	mux.HandleFunc("POST /machines/{ref}/mmds", func(w http.ResponseWriter, r *http.Request) {
+		var v any
+		_ = json.NewDecoder(r.Body).Decode(&v)
+		d.mu.Lock()
+		if d.mmds == nil {
+			d.mmds = map[string]string{}
+		}
+		d.mmds[r.PathValue("ref")] = mmdsJSON(v)
+		d.mu.Unlock()
+		send(w, &api.Machine{ID: r.PathValue("ref"), HasSecrets: true})
+	})
+	mux.HandleFunc("POST /machines/{ref}/hooks", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		falla := d.hooksFallan
+		d.mu.Unlock()
+		if falla != "" {
+			send(w, &api.ReadyResult{ID: r.PathValue("ref"), Ready: api.ReadyFailed, Detail: falla})
+			return
+		}
+		send(w, &api.ReadyResult{ID: r.PathValue("ref"), Ready: api.ReadyYes})
+	})
 	mux.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) { send(w, api.Info{}) })
 	mux.HandleFunc("GET /machines", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
@@ -609,10 +675,46 @@ func (d *daemonCiclo) serve(t *testing.T) *api.Client {
 		}
 		http.Error(w, `{"error":"no such machine"}`, 404)
 	})
-	srv := &http.Server{Handler: mux}
+	contar := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		d.n++
+		d.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	})
+	srv := &http.Server{Handler: contar}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { srv.Close() })
 	return api.NewClient(sock)
+}
+
+// credenciales devuelve lo atado al dorado y a las máquinas, en orden.
+func (d *daemonCiclo) credenciales() (snap, maq []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.snapCreds...), append([]string(nil), d.machCreds...)
+}
+
+// mmdsDe es el último documento MMDS puesto en la máquina id.
+func (d *daemonCiclo) mmdsDe(id string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.mmds[id]
+}
+
+// llamadas cuenta las peticiones que recibió el daemon.
+func (d *daemonCiclo) llamadas() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.n
+}
+
+// calentados son los POST /warm vistos ("dorado pin=true|false|-").
+func (d *daemonCiclo) calentados() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := append([]string(nil), d.warms...)
+	sort.Strings(out)
+	return out
 }
 
 func (d *daemonCiclo) hecho() (frozen, removed []string) {
@@ -778,5 +880,103 @@ func TestSocketSinTokenSobreviveAInquilinos(t *testing.T) {
 	tcp := g.ServeHandler("", true)
 	if rec := do(t, tcp, "GET", "/v1/models", "", nil); rec.Code != 401 {
 		t.Fatalf("TCP without a token once tenants exist: %d, want 401", rec.Code)
+	}
+}
+
+// C9-10: al arrancar, el gateway pide al daemon que traiga a la caché el
+// dorado de cada modelo con réplicas, y que ancle los que llevan pin. Un
+// Reload que quita pin lo suelta.
+func TestGatewayPrecalientaAlArrancar(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ai.json")
+	escribirRegistro(t, p, map[string]any{
+		"grande": map[string]any{"kind": "von", "snapshot": "von-grande", "pin": true},
+	}, nil)
+	d := &daemonCiclo{}
+	g := gwConDaemon(t, d, p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.Start(ctx)
+	quiero := "von-grande pin=true,von-smol pin=-"
+	limite := time.Now().Add(3 * time.Second)
+	for strings.Join(d.calentados(), ",") != quiero {
+		if time.Now().After(limite) {
+			t.Fatalf("precalentados %v; quería %s", d.calentados(), quiero)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	escribirRegistro(t, p, nil, nil)
+	if _, err := g.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	limite = time.Now().Add(3 * time.Second)
+	for !strings.Contains(strings.Join(d.calentados(), ","), "von-grande pin=false") {
+		if time.Now().After(limite) {
+			t.Fatalf("tras quitar pin no se soltó el anclado: %v", d.calentados())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Un daemon que no sabe precalentar (ruta inexistente o 501) no rompe nada:
+// el gateway arranca y recarga como hoy.
+func TestGatewayToleraDaemonSinWarm(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusNotImplemented} {
+		p := filepath.Join(t.TempDir(), "ai.json")
+		escribirRegistro(t, p, map[string]any{"grande": map[string]any{"kind": "von", "snapshot": "von-grande", "pin": true}}, nil)
+		d := &daemonCiclo{warmCode: code, machines: []*api.Machine{maquina("vieja", "von-retirado", "default", api.StateWarm)}}
+		g := gwConDaemon(t, d, p)
+		ctx, cancel := context.WithCancel(context.Background())
+		g.Start(ctx)
+		if _, removed := d.hecho(); strings.Join(removed, ",") != "vieja" {
+			t.Errorf("%d: el arranque no siguió con lo de hoy (borradas %v)", code, removed)
+		}
+		if _, err := g.Reload(); err != nil {
+			t.Errorf("%d: reload: %v", code, err)
+		}
+		cancel()
+	}
+}
+
+// Un reload (SIGHUP o /v1/admin/reload, los dos pasan por Reload) hace lo
+// mismo que arrancar a servir: avisa de las notas de los backends y lanza la
+// sonda de carga de los upstreams nuevos. Antes solo lo hacía el handler de
+// /v1/admin/reload, y un SIGHUP dejaba el upstream sin sondear hasta la
+// primera petición.
+func TestReloadSondeaUpstreamsYDevuelveSusNotas(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ai.json")
+	if err := os.WriteFile(filepath.Join(dir, "vllm.key"), []byte("k-0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sondas := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sondas <- r.URL.Path:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	escribirRegistro(t, p, nil, nil)
+	g, err := New(Options{ConfigPath: p, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	escribirRegistro(t, p, map[string]any{
+		"gpu":   map[string]any{"kind": "http", "contract": "openai", "upstream": srv.URL},
+		"claro": map[string]any{"kind": "http", "contract": "openai", "upstream": "http://198.51.100.7:8000", "auth": map[string]any{"header": "Authorization", "scheme": "Bearer", "file": "vllm.key"}},
+	}, nil)
+	notas, err := g.Reload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(notas, "\n"), "in clear") {
+		t.Errorf("las notas del reload no avisan del upstream http:// con credencial: %q", notas)
+	}
+	select {
+	case <-sondas:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tras el reload no se sondeó el upstream nuevo")
 	}
 }

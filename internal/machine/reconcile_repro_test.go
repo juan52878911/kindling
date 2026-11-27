@@ -134,7 +134,7 @@ func TestReconcileCommitCortadoConVolumenesLosDevuelve(t *testing.T) {
 		m.mu.Lock()
 		m.byID[id].Volumes = []api.VolumeAttachment{{}}
 		m.mu.Unlock()
-		if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+		if err := marcarCommitEnCurso(m.dir(id), "dorado", 0, false); err != nil {
 			t.Fatal(err)
 		}
 		var llamadas atomic.Int32

@@ -976,3 +976,37 @@ func TestSetCredentialsSigV4(t *testing.T) {
 		t.Errorf("la instancia recibió %+v", c)
 	}
 }
+
+// Una credencial HTTP con upstream en una plantilla: sin -allow-request se
+// rechaza, se normaliza como llega a la instancia, y el juego fusionado no
+// puede dejar un mismo dominio con dos destinos (el de una variable nueva y
+// el de una que ya estaba).
+func TestCredencialHTTPUpstreamDePlantilla(t *testing.T) {
+	m := newTestManager(t)
+	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "allowlist"})
+	l3 := api.CredentialSpec{Domain: "L3.Kindling.Internal", Env: "L3_TOKEN", Secret: credSecreto,
+		Upstream: "LocalHost:8080", UpstreamTLS: "Disable"}
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{l3}, false); err == nil || !strings.Contains(err.Error(), "allow-request") {
+		t.Fatalf("sin -allow-request: %v", err)
+	}
+	l3.Allow = []string{"POST /v1/chat/completions"}
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{l3}, false); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := m.cargarCredencialesPlantilla("svc")
+	if err != nil || len(specs) != 1 || specs[0].Upstream != "localhost:8080" || specs[0].UpstreamTLS != credproxy.UpstreamTLSDisable {
+		t.Fatalf("plantilla: %+v, %v", specs, err)
+	}
+	otra := api.CredentialSpec{Domain: "l3.kindling.internal", Env: "L3_ORG", Secret: credSecreto2,
+		Allow: []string{"POST /v1/chat/completions"}}
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{otra}, false); err == nil {
+		t.Fatal("el mismo dominio con y sin upstream en una plantilla: aceptado")
+	}
+	if specs, _ := m.cargarCredencialesPlantilla("svc"); len(specs) != 1 {
+		t.Fatalf("el rechazo tocó el almacén: %+v", specs)
+	}
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{{Domain: "l3.kindling.internal", Env: "L3_X", Secret: credSecreto2,
+		Upstream: "169.254.169.254:80", Allow: []string{"GET /"}}}, false); err == nil {
+		t.Fatal("un upstream HTTP a los metadatos: aceptado")
+	}
+}

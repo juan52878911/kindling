@@ -180,7 +180,13 @@ func Entrypoint(m Marca, env []string, service string) string {
 		e.WriteString(". " + EnvPath + "\n")
 	}
 	if service != "" {
-		fmt.Fprintf(&e, "( while :; do %s; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &\n", SQ(service))
+		// La salida va solo a /var/log/service.log, como en 81-base-image.sh:
+		// la consola serie es lenta y con tee frenaba al servidor. Cuando muere,
+		// la línea «service exited with» (dorado.ServiceExitedMark) va al log
+		// y las últimas 31 líneas de este a /dev/console: las 30 del servidor
+		// con el prefijo dorado.ServiceLogDumpPrefix y la marca sin él, que el
+		// fabricante cuenta sin exec.
+		fmt.Fprintf(&e, "( while :; do %s >>/var/log/service.log 2>&1; echo \"service exited with $?, restarting in 1s\" >>/var/log/service.log; tail -n 31 /var/log/service.log | sed '$!s/^/service.log| /' >/dev/console 2>&1; sleep 1; done ) </dev/null >/dev/null 2>&1 &\n", SQ(service))
 	}
 	e.WriteString("exec /usr/local/bin/kling-guest -listen :8080\n")
 	return e.String()

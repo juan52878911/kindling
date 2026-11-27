@@ -208,13 +208,27 @@ type RateLimiter struct {
 }
 
 type TokenBucket struct {
-	Size       int64 `json:"size"`        // tokens por intervalo
-	RefillTime int64 `json:"refill_time"` // ms para rellenar
+	Size int64 `json:"size"` // tokens por intervalo
+	// OneTimeBurst son tokens de más que se gastan una vez y no se rellenan
+	// (C9-01). Cero no viaja: kling-hv y kling-vz no lo ven.
+	OneTimeBurst int64 `json:"one_time_burst,omitempty"`
+	RefillTime   int64 `json:"refill_time"` // ms para rellenar
 }
 
 // Limit construye un limitador de caudal en bytes por segundo.
 func Limit(bytesPerSec int64) *RateLimiter {
 	return &RateLimiter{Bandwidth: &TokenBucket{Size: bytesPerSec, RefillTime: 1000}}
+}
+
+// LimitBurst es Limit con una ráfaga inicial de burst bytes: el caudal
+// sostenido es el mismo, pero los primeros burst bytes no esperan al cubo.
+// Firecracker la gasta una vez por VMM y no la rellena.
+func LimitBurst(bytesPerSec, burst int64) *RateLimiter {
+	l := Limit(bytesPerSec)
+	if burst > 0 {
+		l.Bandwidth.OneTimeBurst = burst
+	}
+	return l
 }
 
 // LimitOps es Limit con además un tope de operaciones por segundo (en una

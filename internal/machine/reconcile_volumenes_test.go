@@ -45,7 +45,7 @@ func TestReconcileVolumenesSoloParaElCommitRevertido(t *testing.T) {
 			m.byID[id].VolumeWait = c.volumeWait
 			m.mu.Unlock()
 			if c.marca {
-				if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
+				if err := marcarCommitEnCurso(m.dir(id), "dorado", 0, false); err != nil {
 					t.Fatal(err)
 				}
 			}

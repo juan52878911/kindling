@@ -2,14 +2,17 @@ package aigw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // R8-05: un cuerpo JSON null decodifica sin error a un mapa nil; con un único
@@ -170,6 +173,150 @@ func TestReplicaCountsIncluyeEmbedYChispa(t *testing.T) {
 	for _, n := range []string{"smol", "e5", "c"} {
 		if got[n].running != 1 {
 			t.Errorf("%s: %+v (all: %+v)", n, got[n], got)
+		}
+	}
+}
+
+// Un repuesto (etiqueta kling.spare) no es una réplica en marcha: /metrics
+// lo cuenta aparte para no inflar las réplicas que sirven.
+func TestReplicaCountsRepuestosAparte(t *testing.T) {
+	d := &fakeDaemon{machines: map[string]*api.Machine{}}
+	client := d.serve(t)
+	for id, spare := range map[string]bool{"r1": false, "r2": true, "r3": true} {
+		lb := map[string]string{api.LabelService: "von-smol", LabelGateway: "default"}
+		if spare {
+			lb[scheduler.LabelSpare] = "true"
+		}
+		d.machines[id] = &api.Machine{ID: id, State: api.StateRunning, From: "von-smol", Labels: lb}
+		d.order = append(d.order, id)
+	}
+	cfg := &Config{Models: map[string]*ModelConfig{"smol": {Kind: KindVON, Snapshot: "von-smol"}}}
+	g, err := New(Options{Client: client, Config: cfg, EvalDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.replicaCounts(context.Background())["smol"]; got.running != 1 || got.spare != 2 {
+		t.Fatalf("counts %+v, want running 1 and spare 2", got)
+	}
+	var b strings.Builder
+	g.met.write(&b, chispaStats{}, nil, g.replicaCounts(context.Background()), learnSnap{})
+	if !strings.Contains(b.String(), `kling_ai_von_replicas{model="smol",state="running"} 1`) ||
+		!strings.Contains(b.String(), `kling_ai_von_replicas{model="smol",state="spare"} 2`) {
+		t.Fatalf("metrics:\n%s", grepLines(b.String(), "von_replicas"))
+	}
+}
+
+// secrets[].file es relativo al ai.json, como auth.file y ca_file: se hace
+// absoluto antes de validar (validateSecrets lo exige absoluto).
+func TestSecretsFileRelativoAlRegistro(t *testing.T) {
+	c := &Config{Models: map[string]*ModelConfig{
+		"m": {Kind: KindHTTP, Snapshot: "s", Contract: ContractChispaDecide,
+			Secrets: []SecretConfig{{Name: "a", File: "clave"}, {Name: "b", File: "/abs/clave"}}},
+	}}
+	c.resolveAuthFiles("/etc/kling")
+	if got := c.Models["m"].Secrets; got[0].File != "/etc/kling/clave" || got[1].File != "/abs/clave" {
+		t.Fatalf("secrets files: %+v", got)
+	}
+}
+
+// TestLimitesLogprobs: top_logprobs (y logprobs entero de completions) y
+// prompt_logprobs de vLLM se topan: por encima del tope, o negativos (en vLLM,
+// -1 es «todo el vocabulario»), 400 sin llegar al backend. logprobs booleano
+// de chat pasa.
+func TestLimitesLogprobs(t *testing.T) {
+	l := Limits{TopLogprobs: 5, PromptLogprobs: 2}
+	malas := []string{
+		`{"top_logprobs":6}`, `{"top_logprobs":-1}`, `{"logprobs":6}`, `{"prompt_logprobs":3}`,
+		`{"prompt_logprobs":-1}`, `{"top_logprobs":"x"}`,
+	}
+	for _, m := range malas {
+		var req map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(m), &req); err != nil {
+			t.Fatal(err)
+		}
+		if err := aplicarLimites(req, l); err == nil {
+			t.Errorf("accepted %s", m)
+		}
+	}
+	for _, m := range []string{
+		`{"top_logprobs":5,"logprobs":true}`, `{"logprobs":5,"prompt_logprobs":2}`, `{"logprobs":false}`,
+		`{"prompt_logprobs":null}`, `{}`,
+	} {
+		var req map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(m), &req); err != nil {
+			t.Fatal(err)
+		}
+		if err := aplicarLimites(req, l); err != nil {
+			t.Errorf("rejected %s: %v", m, err)
+		}
+	}
+	// Sin tope, nada se mira (lo de hoy).
+	var req map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"top_logprobs":100,"prompt_logprobs":-1}`), &req)
+	if err := aplicarLimites(req, Limits{}); err != nil {
+		t.Errorf("without limits: %v", err)
+	}
+	// Y por el proxy: 400 y el backend no lo ve.
+	gr := newGrabador(t, 200, `{"choices":[]}`)
+	up := &Backend{Name: "qwen3-gpu", Upstream: gr.srv.URL, Contract: ContractOpenAI,
+		Routes: []Route{{"POST", "/v1/chat/completions"}}, Limits: l}
+	_, h, _ := pasarela(t, gr.srv, up)
+	if rec := peticion(h, "POST", "/v1/chat/completions", tokPrincipal, []byte(`{"model":"qwen3-gpu","prompt_logprobs":20}`), nil); rec.Code != 400 {
+		t.Fatalf("over prompt_logprobs: %d", rec.Code)
+	}
+	if gr.n() != 0 {
+		t.Fatal("rejected request reached the backend")
+	}
+	for _, m := range []string{
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","limits":{"top_logprobs":-1}}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","limits":{"prompt_logprobs":100000}}`,
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","limits":{"top_logprobs":5}}`,
+	} {
+		if _, err := cargaBloque(m, ""); err == nil {
+			t.Errorf("accepted %s", m)
+		}
+	}
+	if _, err := cargaBloque(`{"kind":"http","upstream":"http://h:1","contract":"openai","limits":{"top_logprobs":20,"prompt_logprobs":5}}`, ""); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestLimiteTimeout: limits.timeout es el plazo de una petición a ese modelo
+// en lugar del -proxy-timeout del gateway, en cualquier contrato.
+func TestLimiteTimeout(t *testing.T) {
+	lento := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer lento.Close()
+	b := decideBackend()
+	b.Limits.Timeout = "50ms"
+	_, h, _ := pasarela(t, lento, b)
+	t0 := time.Now()
+	rec := peticion(h, "POST", "/v1/m/x/v1/decide", tokPrincipal, []byte(`{}`), nil)
+	if d := time.Since(t0); rec.Code < 500 || d > time.Second {
+		t.Fatalf("limits.timeout 50ms: %d after %v", rec.Code, d)
+	}
+	for _, m := range []string{
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","limits":{"timeout":"pronto"}}`,
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","limits":{"timeout":"0s"}}`,
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","limits":{"timeout":"3h"}}`,
+	} {
+		if _, err := cargaBloque(m, ""); err == nil {
+			t.Errorf("accepted %s", m)
+		}
+	}
+	for _, m := range []string{
+		`{"kind":"http","snapshot":"s","contract":"chispa-decide","limits":{"timeout":"90s"}}`,
+		`{"kind":"http","upstream":"http://h:1","contract":"openai","limits":{"timeout":"10m","max_tokens":5}}`,
+		`{"kind":"von","snapshot":"s","limits":{"timeout":"30s"}}`,
+	} {
+		if _, err := cargaBloque(m, ""); err != nil {
+			t.Errorf("rejected %s: %v", m, err)
 		}
 	}
 }

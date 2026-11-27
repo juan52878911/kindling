@@ -106,6 +106,32 @@ type ModelConfig struct {
 	Limits *Limits `json:"limits,omitempty"`
 	// Tenants que pueden usar el modelo; vacío = todos.
 	Tenants []string `json:"tenants,omitempty"`
+
+	// Campos de la ronda 9 (analisis/ronda9-carga/plan-r9.md). Semilla: se
+	// leen del JSON y se copian a Backend, pero nada los usa ni los valida
+	// todavía. Los valida Z5 (registro y proxy), salvo Secrets, que valida Z4
+	// en validateSecrets. Ver Backend para el contrato de cada uno.
+
+	// Spare son las réplicas de repuesto, restauradas y ya tocadas; 0 = ninguna.
+	Spare int `json:"spare,omitempty"`
+	// Pin ancla el dorado en RAM; false = no.
+	Pin bool `json:"pin,omitempty"`
+	// ReplicaAuth es una de las constantes ReplicaAuth*; vacío = se deduce.
+	ReplicaAuth string `json:"replica_auth,omitempty"`
+	// Secrets son los secretos que el backend necesita; solo kind http con
+	// snapshot.
+	Secrets []SecretConfig `json:"secrets,omitempty"`
+	// Alias es un nombre común a los bloques de varios inquilinos.
+	Alias string `json:"alias,omitempty"`
+	// Shared declara que varios inquilinos comparten a sabiendas un backend
+	// chispa-decide.
+	Shared bool `json:"shared,omitempty"`
+	// LoadWait es el plazo de carga al fabricar el dorado, como texto de
+	// time.ParseDuration; vacío = automático por tamaño.
+	LoadWait string `json:"load_wait,omitempty"`
+	// CAFile es el PEM con el que verificar el TLS de Upstream; relativo al
+	// ai.json.
+	CAFile string `json:"ca_file,omitempty"`
 }
 
 // Backends de un modelo chispa.
@@ -347,6 +373,7 @@ func (c *Config) Validate() error {
 		switch m.Kind {
 		case KindChispa, KindVON, KindEmbed, KindHTTP:
 			errs = append(errs, validateBackend(n, m, tenants)...)
+			errs = append(errs, validateSecrets(n, m)...)
 		}
 	}
 	for _, n := range sortedKeys(c.Tasks) {
@@ -464,6 +491,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("tenant %d: needs a valid name (not \"default\") and a token of at least 16 characters", i))
 		}
 	}
+	errs = append(errs, c.validateAliases(tenants)...)
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

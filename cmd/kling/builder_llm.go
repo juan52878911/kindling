@@ -10,16 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/imagen"
+	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -83,10 +85,8 @@ func builderLLM(dir string) error {
 	lib := envOr("KLING_LIB_DIR", "/usr/local/lib/kindling")
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	script := envOr("KLING_BASE_IMAGE_SCRIPT", filepath.Join(lib, "81-base-image.sh"))
-	for _, p := range []string{agent, script} {
-		if _, err := os.Stat(p); err != nil {
-			return fmt.Errorf("missing %s (installed by `make deploy`)", p)
-		}
+	if _, err := os.Stat(agent); err != nil {
+		return fmt.Errorf("missing %s (installed by `make deploy`)", agent)
 	}
 
 	// 1. La base glibc, si no está. Es de todos los modelos y se hace una vez.
@@ -183,7 +183,30 @@ func builderLLM(dir string) error {
 		return err
 	}
 
-	// 5. La capa, con el motor del constructor base.
+	// 5. La capa. Sin paquetes que instalar (la base propia), en Go: una
+	// escritura del GGUF, del tamaño justo, a un temporal en KLING_OUT_DIR
+	// (builder_llm_capa.go). Con paquetes, el motor del constructor base.
+	out := envOr("KLING_OUT_DIR", filepath.Join(root, "images"))
+	if len(pkgs) == 0 {
+		t0 := time.Now()
+		r, err := construirCapaLLM(capaLLM{Name: req.Name, BaseImg: filepath.Join(root, "images", req.Base+".ext4"),
+			Agent: agent, Rootfs: rootfs, Service: "/etc/von/run.sh", Out: out,
+			T: time.Now().UTC().Truncate(time.Second), Reflink: cached, Modelo: "/models/" + res.File})
+		if err != nil {
+			return err
+		}
+		compartido := ""
+		if r.Compartido > 0 {
+			compartido = fmt.Sprintf(", %d MiB shared with the cache (reflink)", r.Compartido>>20)
+		}
+		fmt.Printf("imagen '%s' lista — capa sobre base '%s' (%d MiB, %d files, in %.1f s%s)\n",
+			req.Name, req.Base, r.Stats.Bytes()>>20, r.Stats.Files, time.Since(t0).Seconds(), compartido)
+		soltarCacheModelo(cached, st.Size(), keepCacheDe(req.Spec), res.URL == "", r.Compartido)
+		return nil
+	}
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("missing %s (installed by `make deploy`)", script)
+	}
 	grow := req.GrowMB
 	if grow == 0 {
 		grow = res.LayerMiB(st.Size())
@@ -197,12 +220,110 @@ func builderLLM(dir string) error {
 	cmd.Env = append(os.Environ(),
 		"NAME="+req.Name, "BASE="+req.Base, fmt.Sprintf("GROW=%d", grow),
 		"PKGS="+strings.Join(pkgs, " "), "AGENT="+agent, "ENV_FILE="+envFile,
-		"ROOTFS_DIR="+rootfs, "SERVICE=/etc/von/run.sh")
-	return cmd.Run()
+		"ROOTFS_DIR="+rootfs, "SERVICE=/etc/von/run.sh", "KLING_OUT_DIR="+out)
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	soltarCacheModelo(cached, st.Size(), keepCacheDe(req.Spec), res.URL == "", 0)
+	return nil
 }
 
-// buildLLMBase construye la base glibc (Debian trixie) con 71-build-glibc-base.sh.
+// baseGlibcEnGo escribe la base glibc en dst; variable para los tests.
+var baseGlibcEnGo = baseGlibcDebian
+
+// baseGlibcDebian arma la base glibc con el constructor debian
+// (internal/imagen): debian:trixie-slim por digest y los .deb de
+// imagen.DebianLock, más von.BasePackages resueltos contra el mismo snapshot
+// de snapshot.debian.org, cada .deb comprobado por sha256 y cacheado en
+// cache/debs. Sustituye al debootstrap de red de 71-build-glibc-base.sh (29 s
+// medidos en EC2, sin caché ni versiones fijadas). Sin root, loop ni chroot.
+func baseGlibcDebian(root, lib, dst string) error {
+	ctx := context.Background()
+	arch := runtime.GOARCH
+	lock, ok := imagen.DebianLock[arch]
+	if !ok {
+		return fmt.Errorf("no pinned Debian base for %s", arch)
+	}
+	oci.SetUnpackHelper(filepath.Join(lib, "kling-unpack"))
+	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
+	t := time.Now().UTC().Truncate(time.Second)
+	logf := func(format string, a ...any) { fmt.Printf(format+"\n", a...) }
+	cache := filepath.Join(root, "cache")
+	d := imagen.Debs{Cache: cache, Snapshot: lock.Snapshot, T: t, Marca: marcaDebian, Logf: logf, Agent: agent}
+	base, err := imagen.PrepareBase(ctx, &oci.Client{Cache: filepath.Join(cache, "oci"), Log: os.Stdout}, lock, arch, lock.Packages, d)
+	if err != nil {
+		return err
+	}
+	pins, err := d.Resolve(ctx, arch, base.Status(), von.BasePackages)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", strings.Join(von.BasePackages, " "), err)
+	}
+	streams, added, err := d.Install(ctx, base.Root, base.Streams, nil, pins)
+	if err != nil {
+		return err
+	}
+	base.Streams, base.Packages = streams, append(base.Packages, added...)
+	if err := d.Ajustar(base.Root, true); err != nil {
+		return err
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "kindling-llm-base-v1\x00%s\x00%d\x00%+v\x00%+v", arch, t.Unix(), lock, pins)
+	var id [32]byte
+	copy(id[:], h.Sum(nil))
+	st, err := base.Write(dst, imagen.UUID("kindling-llm", "base", id), "")
+	if err != nil {
+		return err
+	}
+	logf("base: %d MiB, %d files, packages %s", st.Bytes()>>20, st.Files, strings.Join(base.Packages, " "))
+	return nil
+}
+
+// buildLLMBase construye la base glibc (Debian trixie), una sola vez aunque
+// lleguen varias construcciones de modelos a la vez: en fila con un cerrojo de
+// fichero, y la que entra después ve que ya está. Se escribe a un temporal y
+// se renombra durable: un corte no deja una base a medias con su nombre.
+// KLING_LLM_BASE=debootstrap vuelve al script de antes (71-build-glibc-base.sh).
 func buildLLMBase(root, lib, name string) error {
+	if os.Getenv("KLING_LLM_BASE") == "debootstrap" {
+		return buildLLMBaseScript(root, lib, name)
+	}
+	images := filepath.Join(root, "images")
+	if err := os.MkdirAll(images, 0o755); err != nil {
+		return err
+	}
+	lf, err := os.OpenFile(filepath.Join(images, "."+name+".base.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	final := filepath.Join(images, name+".ext4")
+	if _, err := os.Stat(final); err == nil {
+		return nil // la hizo otra construcción mientras se esperaba
+	}
+	fmt.Printf("building base image %q (Debian trixie, pinned; first model only)...\n", name)
+	t0 := time.Now()
+	tmp := filepath.Join(images, "."+name+".ext4.tmp")
+	defer os.Remove(tmp)
+	if err := baseGlibcEnGo(root, lib, tmp); err != nil {
+		return fmt.Errorf("building base %q: %w", name, err)
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	if err := durable.Renombrar(tmp, final); err != nil {
+		return err
+	}
+	fmt.Printf("base image %q ready in %.1f s\n", name, time.Since(t0).Seconds())
+	return nil
+}
+
+// buildLLMBaseScript construye la base glibc con 71-build-glibc-base.sh
+// (debootstrap de red), como antes.
+func buildLLMBaseScript(root, lib, name string) error {
 	script := filepath.Join(lib, "71-build-glibc-base.sh")
 	if _, err := os.Stat(script); err != nil {
 		return fmt.Errorf("base image %q is missing and %s is not installed (make deploy installs it)", name, script)
@@ -224,113 +345,6 @@ func buildLLMBase(root, lib, name string) error {
 		return fmt.Errorf("building base %q: %w", name, err)
 	}
 	return nil
-}
-
-// stallTimeout es cuánto puede estar una descarga sin recibir ni un byte
-// antes de darla por muerta. No es un timeout total: un GGUF de varios GB en
-// una red lenta puede tardar minutos de forma legítima, y cortarlo por tiempo
-// total rompería esa descarga a mitad. Lo que sí es señal de que el otro lado
-// (HuggingFace, GitHub) se quedó colgado es que pasen 60s sin ni un byte.
-const stallTimeout = 60 * time.Second
-
-// fetchVerified deja en dst el fichero de url con ese sha256. Si dst ya está y
-// cuadra, no descarga nada. Escribe al lado y renombra: un corte a medias no
-// deja en la caché un fichero que parezca bueno.
-func fetchVerified(url, want, dst string) error {
-	return fetchVerifiedTimeout(url, want, dst, stallTimeout)
-}
-
-// fetchVerifiedTimeout es fetchVerified con el detector de estancamiento
-// configurable, para poder probarlo sin esperar 60s de verdad.
-func fetchVerifiedTimeout(url, want, dst string, stall time.Duration) error {
-	if got, err := sha256File(dst); err == nil {
-		if got == want {
-			return nil
-		}
-		os.Remove(dst)
-	}
-	tmp := dst + ".part"
-	defer os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	t0 := time.Now()
-
-	// Cliente con timeouts de conexión, TLS y cabeceras: si el servidor ni
-	// siquiera llega a responder, no nos quedamos esperando indefinidamente
-	// antes de empezar a recibir el cuerpo.
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-
-	// Detector de estancamiento: cada byte que llega reinicia el temporizador;
-	// si se agota, cancela el contexto de la petición y el io.Copy de abajo
-	// termina con error en vez de colgar el builder para siempre.
-	timer := time.AfterFunc(stall, cancel)
-	defer timer.Stop()
-	body := &stallReader{r: resp.Body, timer: timer, d: stall}
-
-	h := sha256.New()
-	nb, err := io.Copy(io.MultiWriter(f, h), body)
-	if err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("downloading %s: stalled, no data for %s", url, stall)
-		}
-		return fmt.Errorf("downloading %s: %w", url, err)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		return fmt.Errorf("sha256 mismatch for %s: got %s, want %s", url, got, want)
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return err
-	}
-	secs := time.Since(t0).Seconds()
-	fmt.Printf("downloaded %s: %d MiB in %.1f s, sha256 verified\n", path.Base(dst), nb>>20, secs)
-	return nil
-}
-
-// stallReader reinicia timer con cada lectura que trae bytes; si no llega
-// ninguna a tiempo, el AfterFunc de timer dispara y corta la descarga.
-type stallReader struct {
-	r     io.Reader
-	timer *time.Timer
-	d     time.Duration
-}
-
-func (s *stallReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 {
-		s.timer.Reset(s.d)
-	}
-	return n, err
 }
 
 func sha256File(p string) (string, error) {

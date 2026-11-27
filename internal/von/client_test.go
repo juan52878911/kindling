@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/dorado"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -31,6 +32,8 @@ type daemonFalso struct {
 	llamadas    []string
 	warmFalla   bool // el /v1/chat/completions del calentamiento responde 500
 	commitFalla bool // el /commit responde 500
+	// esperaSonda es el WaitMS de la sonda de puerto: el plazo de carga.
+	esperaSonda int
 }
 
 func (d *daemonFalso) servir(t testing.TB) *api.Client {
@@ -65,6 +68,7 @@ func (d *daemonFalso) servir(t testing.TB) *api.Client {
 		}
 		d.peticiones = append(d.peticiones, g.Method+" "+g.Path)
 		if g.ProbeOnly {
+			d.esperaSonda = g.WaitMS
 			d.llamadas = append(d.llamadas, fmt.Sprintf("guest probe :%d", g.Port))
 		} else {
 			d.llamadas = append(d.llamadas, fmt.Sprintf("guest %s %s :%d", g.Method, g.Path, g.Port))
@@ -338,7 +342,18 @@ func TestVonMakeGoldenUsaDorado(t *testing.T) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// El vigilante de la carga (internal/dorado, ronda 9) sondea estadísticas
+	// y consola a su ritmo: no cuenta en el orden del flujo.
+	var flujo []string
+	for _, l := range d.llamadas {
+		if l != "GET /procstats" && l != "GET /machines/m1/logs" {
+			flujo = append(flujo, l)
+		}
+	}
 	quiero := []string{
+		// Qué backend tiene el daemon: decide si el commit ya aprieta (C9-03).
+		// Este no contesta /info, así que se aprieta como siempre.
+		"GET /info",
 		"POST /machines",
 		"guest probe :8000",
 		"guest GET /health :8000",
@@ -349,7 +364,7 @@ func TestVonMakeGoldenUsaDorado(t *testing.T) {
 		"POST /machines/m1/commit",
 		"DELETE /machines/m1",
 	}
-	if strings.Join(d.llamadas, "\n") != strings.Join(quiero, "\n") {
+	if strings.Join(flujo, "\n") != strings.Join(quiero, "\n") {
 		t.Fatalf("llamadas:\n%s\nquería:\n%s", strings.Join(d.llamadas, "\n"), strings.Join(quiero, "\n"))
 	}
 	r := d.run
@@ -395,4 +410,24 @@ func BenchmarkVonMakeGolden(b *testing.B) {
 	d.mu.Lock()
 	b.ReportMetric(float64(len(d.llamadas))/float64(b.N), "calls/op")
 	d.mu.Unlock()
+}
+
+// P3: sin Wait, el plazo de carga lo da el tamaño del modelo (AutoWait), no
+// los 5 min fijos de antes, que no bastaban para un Q8 de 1,9 GiB anidado.
+func TestMakeGoldenPlazoPorTamano(t *testing.T) {
+	d := &daemonFalso{}
+	c := d.servir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const bytes = 1900 << 20
+	if _, err := MakeGolden(ctx, c, GoldenOptions{
+		Image: "von-q8", Snapshot: "von-q8", Ref: "x:q8_0", VCPUs: 2, MemMiB: 768, ModelBytes: bytes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if got, quiero := time.Duration(d.esperaSonda)*time.Millisecond, dorado.AutoWait(bytes); got != quiero {
+		t.Fatalf("plazo de la sonda %s, quería el automático %s", got, quiero)
+	}
 }

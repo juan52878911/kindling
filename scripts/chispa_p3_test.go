@@ -107,9 +107,9 @@ jq -n --arg s "$1" --argjson c "$carga" --argjson om "$om" '{esquema:"von-bench/
   host:{uname:"falso", drop_caches:false, secciones:[]},
   frio:{arranque_ms:900, hasta_primera_ms:4000},
   restaurar:{thaw_ms:[10], hasta_primera_ms:[60], peticion_ms:[12]},
-  primera:{restaurar_caliente:[{total_ms:60, peticion_ms:12}], restaurar_fria:$om, descongelar_caliente:[{total_ms:40, peticion_ms:10}], descongelar_fria:$om},
+  primera:{restaurar_caliente:[{total_ms:60, peticion_ms:12, disco_leido_bytes:0}], restaurar_fria:$om, descongelar_caliente:[{total_ms:40, peticion_ms:10, disco_leido_bytes:0}], descongelar_fria:$om, umbral_caliente_bytes:0, calientes_con_disco:{restaurar_caliente:[], descongelar_caliente:[]}},
   tps:$om, memoria:{restauradas:[{replicas:1, pss_total_mib:2000, pss_mib:[2000], rss_total_mib:2100, host:{}}], descongeladas:[], remove:$om},
-  ociosa:$om, semillas:$om, carga:$c}' > "$JSON_OUT"
+  ociosa:$om, arranque:$om, secreto:$om, semillas:$om, carga:$c}' > "$JSON_OUT"
 `
 
 // chispaFalsa arma un checkout de chispa con lo que chispa-p3.sh lee de él.
@@ -301,6 +301,7 @@ func TestChispaP3PrepararYMedir(t *testing.T) {
 	if b := leer(t, filepath.Join(dir, "bloques.log")); !strings.Contains(b, `"auth"`) || !strings.Contains(b, `"max_inflight":4`) {
 		t.Errorf("bloques del gateway del banco sin auth o sin la tanda de max_inflight 4:\n%s", b)
 	}
+	corridaFalsa(t, filepath.Join(dir, "res"), "chispa-p3-v1") // lo que deja remoto/ia.sh alrededor de chispa-p3.sh
 	for _, d := range []string{"chispa-p3-v1", "chispa-p3a-v1"} {
 		f := filepath.Join(dir, "res", "ia-p3-"+d+".json")
 		var j map[string]any
